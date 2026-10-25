@@ -58,13 +58,6 @@ const DAY = [
   ["23:50", "Night watch", "Quiet, unless something breaks."],
 ];
 
-const POINTS = [
-  ["Right away", "An answer in seconds, then progress."],
-  ["Steerable", "Change your mind while it works."],
-  ["Asks first", "Decisions come to you, one tap away."],
-  ["Why", "Every reply shows its reasoning."],
-];
-
 /** The Cora harness: our own agent loop, the flagship. */
 const HARNESS = [
   ["Works until done", "For hours if it takes hours. No “shall I continue?”."],
@@ -242,7 +235,6 @@ export function landing({ account, joined = false, waitlistError = "" }) {
   const ruler = Array.from({ length: 25 }, (_, h) => `<span style="--at:${(h / 24 * 100).toFixed(3)}%"${h % 6 === 0 ? ` data-h="${String(h).padStart(2, "0")}"` : ""}></span>`).join("")
     + DAY.map(([time]) => `<i class="tick" style="--at:${at(time)}%"><b>${time}</b></i>`).join("");
   const day = DAY.map(([time, title, text], index) => `<li class="blip reveal" style="--i:${index}"><time>${time}</time><b>${title}</b><span>${text}</span></li>`).join("");
-  const points = POINTS.map(([title, text]) => `<li><b>${title}</b><span>${text}</span></li>`).join("");
   const form = (id) => waitlistForm(id, { joined, error: waitlistError });
   const body = `
 <main>
@@ -283,42 +275,28 @@ export function landing({ account, joined = false, waitlistError = "" }) {
     </div>
   </section>
 
-  <section class="band harness" id="harness">
-    <div class="split">
-      <div class="section-head reveal"><p class="kicker">04 / The Cora harness</p><h2>Built to finish the job.</h2><p class="lead">Our own agent loop, for any model. Or run your agents on Claude Code or Codex with your subscriptions.</p></div>
-      <ol class="harness-loop reveal" aria-label="The Cora harness">${HARNESS.map(([title, text], index) => `<li style="--i:${index}"><span class="loop-led"></span><b>${title}</b><span>${text}</span></li>`).join("")}</ol>
-    </div>
-  </section>
-
   <section class="band">
-    <div class="section-head reveal"><p class="kicker">05 / The desk</p><h2>Residents, not chatbots.</h2></div>
+    <div class="section-head reveal"><p class="kicker">04 / The desk</p><h2>Residents, not chatbots.</h2></div>
     <div class="strips">${strips}</div>
   </section>
 
   <section class="band day-band">
-    <div class="section-head reveal"><p class="kicker">06 / 24 hours on air</p><h2>A day in the life.</h2></div>
+    <div class="section-head reveal"><p class="kicker">05 / 24 hours on air</p><h2>A day in the life.</h2></div>
     <div class="day">
       <div class="ruler" aria-hidden="true">${ruler}<i class="now" data-now></i></div>
       <ol class="blips">${day}</ol>
     </div>
   </section>
 
-  <section class="band call">
-    <div class="call-copy">
-      <div class="section-head reveal"><p class="kicker">07 / The call-in line</p><h2>It asks before it acts.</h2></div>
-      <ul class="points reveal">${points}</ul>
-    </div>
-    <div class="phone reveal" aria-hidden="true">
-      <div class="phone-screen">
-        <div class="notif"><span class="notif-app">${MARK}CORA</span><span class="notif-time">now</span><b>Iris asks you</b><span>Delete 4.1 GB of backups older than 90 days?</span></div>
-        <div class="bubble"><span class="bubble-tag">? Request</span><p>Delete 4.1 GB of backups older than 90 days?</p><div class="bubble-choices"><span>Yes</span><span>Not yet</span></div></div>
-        <div class="bubble mine"><p>Yes</p></div>
-      </div>
+  <section class="band harness" id="harness">
+    <div class="split">
+      <div class="section-head reveal"><p class="kicker">06 / The Cora harness</p><h2>Built to finish the job.</h2><p class="lead">Our own agent loop, for any model. Or run your agents on Claude Code or Codex with your subscriptions.</p></div>
+      <ol class="harness-loop reveal" aria-label="The Cora harness">${HARNESS.map(([title, text], index) => `<li style="--i:${index}"><span class="loop-led"></span><b>${title}</b><span>${text}</span></li>`).join("")}</ol>
     </div>
   </section>
 
   <section class="band space" id="join">
-    <div class="section-head reveal"><p class="kicker">08 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
+    <div class="section-head reveal"><p class="kicker">07 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
     <p class="frequency reveal"><span class="freq-name" data-names="yourcompany,acme,studio,night-shift,atelier">yourcompany</span><span class="freq-domain">.usecora.space</span></p>
     <div class="space-actions reveal">${form("bottom")}</div>
     <div class="self reveal">
