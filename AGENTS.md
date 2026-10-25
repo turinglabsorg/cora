@@ -21,7 +21,7 @@ Always-on Discord agents with personalities, layered memory, routines and their 
 - `src/web.js` panel API, SSE, password login (HMAC cookie, `X-Cora` header + Origin check on writes), authenticated noVNC proxy at `/box/<agentId>/`.
 - `web/` vanilla JS panel, no build. `box/` the desktop image (Debian, XFCE, Chromium, x11vnc, noVNC).
 - `src/pass.js` passes from usecora.space: Ed25519 key derived from `CORA_CLOUD_SEED`, `signPass`/`verifyPass` (audience = the space's host, one minute, single use). `src/web.js` turns a pass (`/auth/cloud`) or a one-time link made on the host (`/auth/link`, `bin/login-link.mjs`) into the panel session; with `CORA_CLOUD_URL`/`KEY`/`SPACE` set the password login is off.
-- `cloud/` usecora.space: `src/app.js` routes by Host (apex = landing + sign-in, `<space>.<domain>` = proxy to that space's Cora), `src/oauth.js` Google/GitHub with PKCE, `src/store.js` accounts, identities, invites, spaces, requests (`~/.cora-cloud/cloud.db`), `src/views.js` the pages (English only), `web/` their CSS/JS, `cli.js` adds spaces by hand. Tests in `test/cloud.test.js`.
+- `cloud/` usecora.space: `src/app.js` routes by Host (apex = landing + sign-in, `<space>.<domain>` = proxy to that space's Cora), `src/oauth.js` Google/GitHub with PKCE, `src/store.js` accounts, identities, invites, spaces, requests, waitlist (`~/.cora-cloud/cloud.db`), `src/views.js` the pages (English only; the landing has no sign-in links until sign-in opens, `POST /waitlist` takes an email and a company), `web/` their CSS/JS, `cli.js` adds spaces by hand and lists the waitlist. Tests in `test/cloud.test.js`.
 
 ## Rules
 
