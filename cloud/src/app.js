@@ -143,6 +143,19 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
   };
 
   const providers = () => Object.fromEntries(PROVIDERS.map((provider) => [provider, oauth.enabled(provider)]));
+  /** Tells the operator's own space (config.notify) what happened, signed with the cloud's key. */
+  const notify = (fields) => {
+    const space = config.notify ? store.space(config.notify) : null;
+    if (!space) return;
+    fetch(`${space.upstream}/api/cloud/notice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cora": "1" },
+      body: JSON.stringify({ notice: signPass(keys.privateKey, { aud: "notices", ...fields }) }),
+      signal: AbortSignal.timeout(10000),
+    }).then((response) => {
+      if (!response.ok) log({ type: "notify-failed", space: space.slug, status: response.status });
+    }).catch((error) => log({ type: "notify-failed", space: space.slug, error: error.message }));
+  };
   const joins = [];
 
   /** The apex: landing, sign-in, the account page and the way into a space. */
@@ -187,6 +200,7 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       }
       joins.push(now);
       log({ type: "waitlist", company: String(form.company || "").slice(0, 80) });
+      notify({ type: "waitlist", email: String(form.email || "").trim().toLowerCase(), company: String(form.company || "").trim().slice(0, 80) });
       return redirect(res, `/?joined=1${anchor}`);
     }
     if (method === "GET" && path === "/privacy") return html(res, 200, views.privacy(page));

@@ -6,7 +6,7 @@ import { after, before, describe, test } from "node:test";
 import { createCloud } from "../cloud/src/app.js";
 import { CloudStore } from "../cloud/src/store.js";
 import { verifyPass } from "../src/pass.js";
-import { tempHome } from "./helpers.js";
+import { tempHome, waitFor } from "./helpers.js";
 
 const DOMAIN = "usecora.test";
 const SEED = "a test seed that is long enough for the cloud 0123456789";
@@ -17,6 +17,7 @@ let origin;
 let providers;
 let upstream;
 const logs = [];
+const notices = [];
 
 /** Google and GitHub as far as the cloud can tell: they hand out codes for the users the test approves. */
 function fakeProviders() {
@@ -71,6 +72,16 @@ function fakeSpace() {
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.write("data: first\n\n");
       setTimeout(() => res.end("data: second\n\n"), 400);
+      return;
+    }
+    if (req.url === "/api/cloud/notice") {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        notices.push({ headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+      });
       return;
     }
     res.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": ["a=1; Path=/", "b=2; Path=/"] });
@@ -139,7 +150,7 @@ before(async () => {
   origin = `http://${DOMAIN}:${port}`;
   cloud = createCloud({
     config: {
-      domain: DOMAIN, publicOrigin: origin, seed: SEED, insecureCookies: true,
+      domain: DOMAIN, publicOrigin: origin, seed: SEED, insecureCookies: true, notify: "acme",
       clients: { google: { id: "google-id", secret: "google-secret" }, github: { id: "github-id", secret: "github-secret" } },
     },
     store, endpoints: providers.endpoints, log: (event) => logs.push(event),
@@ -255,6 +266,11 @@ describe("usecora.space", () => {
     assert.equal((await join("email=eve%40evil.example", { origin: "https://evil.example" })).status, 403);
     assert.equal((await join("email=bot%40spam.example&website=http%3A%2F%2Fspam")).headers.location, "/?joined=1#waitlist", "a bot gets the same thanks");
     assert.deepEqual(store.waitlist().map((entry) => [entry.email, entry.company]), [["ada@acme.example", "Acme"]]);
+    await waitFor(() => notices.length === 2, { what: "the operator's space told about both joins" });
+    const told = verifyPass(cloud.publicKey, notices[0].body.notice, { audience: "notices" });
+    assert.deepEqual([told.type, told.email, told.company], ["waitlist", "ada@acme.example", "Acme"]);
+    assert.equal(notices[0].headers["x-cora"], "1");
+    assert.equal(notices.length, 2, "bots and refused addresses tell nobody");
     const thanks = await request("/?joined=1");
     assert.match(thanks.body, /You're on the list/);
     assert.doesNotMatch(thanks.body, /name="email"/, "no form once you joined");

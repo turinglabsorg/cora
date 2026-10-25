@@ -11,6 +11,8 @@ const config = {
   publicOrigin: env.CORA_CLOUD_ORIGIN || "",
   seed: env.CORA_CLOUD_SEED || "",
   insecureCookies: env.CORA_CLOUD_INSECURE_COOKIES === "1",
+  // The space that hears about waitlist sign-ups (its Cora needs CORA_CLOUD_KEY).
+  notify: env.CORA_CLOUD_NOTIFY || "",
   clients: {
     google: { id: env.GOOGLE_CLIENT_ID || "", secret: env.GOOGLE_CLIENT_SECRET || "" },
     github: { id: env.GITHUB_CLIENT_ID || "", secret: env.GITHUB_CLIENT_SECRET || "" },

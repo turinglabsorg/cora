@@ -521,6 +521,19 @@ export function createWeb({ config, store, discord, telegram, channels, boxes, l
     throw new HttpError(404, "not found");
   }
 
+  /**
+   * A notice from usecora.space (someone joined the waitlist), signed with the
+   * cloud's key: this installation only needs the public key (CORA_CLOUD_KEY).
+   */
+  async function cloudNotice(req, res) {
+    if (!config.cloudKey) throw new HttpError(404, "not found");
+    const body = await readJson(req, 8192);
+    const fields = verifyPass(config.cloudKey, body.notice, { audience: "notices" });
+    if (!fields || !firstUse(fields)) throw new HttpError(403, "notice refused");
+    await orchestrator.cloudNotice(fields);
+    return send(res, 200, { ok: true });
+  }
+
   /** A pass from usecora.space, or a one-time link made on the host, becomes this panel's usual session. */
   function signInFrom(req, res, url) {
     let ok = false;
@@ -598,6 +611,7 @@ export function createWeb({ config, store, discord, telegram, channels, boxes, l
       }
       if (url.pathname === "/healthz") return send(res, 200, "ok");
       if (url.pathname === "/auth/cloud" || url.pathname === "/auth/link") return signInFrom(req, res, url);
+      if (url.pathname === "/api/cloud/notice" && req.method === "POST") return await cloudNotice(req, res);
       if (url.pathname === "/api/events") return events(req, res);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (url.pathname.startsWith("/box/")) return await proxyBox(req, res);

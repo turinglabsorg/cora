@@ -4,6 +4,8 @@
 set -e
 export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$(dirname "$0")/.."
+# Settings of this installation that are not secret (e.g. CORA_CLOUD_KEY, the public key of usecora.space).
+[ -f "$HOME/.cora/env" ] && . "$HOME/.cora/env"
 NODE="${CORA_NODE:-$(command -v node)}"
 set -- "$NODE" --disable-warning=ExperimentalWarning src/main.js
 for pair in \
@@ -12,6 +14,7 @@ for pair in \
   DISCORD_LISTENER_TOKEN:DISCORD_BOT_TOKEN \
   TELEGRAM_BOT_TOKEN:TELEGRAM_BOT_TOKEN \
   OLLAMA_API_KEY:OLLAMA_API_KEY \
+  ORCAROUTER_API_KEY:ORCAROUTER_API_KEY \
   VAPID_KEY:VAPID_KEY
 do
   name=${pair%%:*}

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const MCP_SCRIPT = fileURLToPath(new URL("./mcp-server.js", import.meta.url));
-const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "OLLAMA_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "VAPID_KEY"];
+const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "VAPID_KEY"];
 const CODEX_DISABLED_FEATURES = [
   "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external", "computer_use",
   "tool_suggest", "view_image", "memories", "sleep_tool", "multi_agent",
@@ -17,9 +17,9 @@ function childEnv() {
   return env;
 }
 
-function run(bin, args, { input, cwd, timeoutMs, onLine }) {
+function run(bin, args, { input, cwd, timeoutMs, onLine, env = {} }) {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(bin, args, { cwd, env: { ...childEnv(), ...env }, stdio: ["pipe", "pipe", "pipe"] });
     const stdout = [];
     const stderr = [];
     let partial = "";
@@ -123,6 +123,62 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
   } finally {
     rmSync(mcpFile, { force: true });
   }
+}
+
+/**
+ * Hermes' config for Cora's runs, in a home of its own: the model through an
+ * OpenAI-style endpoint (a local Ollama by default) and Cora's MCP server,
+ * whose session arrives per run through ${...} placeholders Hermes fills in
+ * from the environment. Runs in parallel share it.
+ */
+export function hermesConfig({ baseUrl, model }) {
+  return [
+    "# Written by Cora: Hermes runs Cora's agents with Cora's tools only.",
+    "model:",
+    "  provider: cora-endpoint",
+    `  base_url: ${JSON.stringify(baseUrl)}`,
+    `  default: ${JSON.stringify(model)}`,
+    "providers:",
+    "  cora-endpoint:",
+    `    api: ${JSON.stringify(baseUrl)}`,
+    `    default_model: ${JSON.stringify(model)}`,
+    "mcp_servers:",
+    "  cora:",
+    `    command: ${JSON.stringify(process.execPath)}`,
+    "    args:",
+    `      - ${JSON.stringify(MCP_SCRIPT)}`,
+    "    env:",
+    "      CORA_BRIDGE_URL: \"${CORA_BRIDGE_URL}\"",
+    "      CORA_BRIDGE_TOKEN: \"${CORA_BRIDGE_TOKEN}\"",
+    "",
+  ].join("\n");
+}
+
+/**
+ * One agent turn on Hermes Agent, one-shot: only Cora's tools (the mcp-cora
+ * toolset: no terminal, files or computer use on the host), no personal rules
+ * or memory of the owner's Hermes, the answer on stdout.
+ */
+export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl }) {
+  mkdirSync(workDir, { recursive: true, mode: 0o700 });
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  const configFile = join(home, "config.yaml");
+  const config = hermesConfig({ baseUrl, model });
+  let current = "";
+  try { current = readFileSync(configFile, "utf8"); } catch {}
+  // Only the default model changes between runs, and -m overrides it: rewrite when anything else differs.
+  const settled = (text) => text.replace(/^\s+default(_model)?:.*$/gm, "");
+  if (settled(current) !== settled(config)) writeFileSync(configFile, config, { mode: 0o600 });
+  const tools = mcp && toolNames.length;
+  const args = ["-z", `${system}\n\n---\n\n${prompt}`, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "mcp-cora" : "clarify"];
+  const env = { HERMES_HOME: home, ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
+  const out = await run(bin, args, { cwd: workDir, timeoutMs, env });
+  if (out.timedOut) throw new Error(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`);
+  const text = out.stdout.trim();
+  if (out.code !== 0 || /^hermes -z: agent failed/m.test(text) || /^hermes -z: agent failed/m.test(out.stderr)) {
+    throw new Error(`hermes: ${(out.stderr || text).trim().slice(-240) || `exit ${out.code}`}`);
+  }
+  return { text };
 }
 
 /** One agent turn on the Codex CLI with the owner's ChatGPT subscription; its own shell and browser tools are off. */

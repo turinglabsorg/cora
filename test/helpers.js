@@ -322,9 +322,21 @@ let stdin = "";
 process.stdin.on("data", (d) => { stdin += d; });
 process.stdin.on("end", async () => {
   let server = null;
+  let hermesConfig = null;
   if (flavor === "claude") {
     const index = argv.indexOf("--mcp-config");
     if (index >= 0) server = JSON.parse(fs.readFileSync(argv[index + 1], "utf8")).mcpServers.cora;
+  } else if (flavor === "hermes") {
+    // Hermes reads config.yaml in HERMES_HOME and fills \${...} from its own environment.
+    hermesConfig = fs.readFileSync(path.join(process.env.HERMES_HOME, "config.yaml"), "utf8");
+    const fill = (value) => value.replace(/\\$\\{(\\w+)\\}/g, (_, key) => process.env[key] || "");
+    const pick = (pattern) => JSON.parse(hermesConfig.match(pattern)[1]);
+    if ((argv[argv.indexOf("-t") + 1] || "").split(",").includes("mcp-cora")) {
+      server = {
+        command: pick(/^    command: (.*)$/m), args: [pick(/^      - (.*)$/m)],
+        env: { CORA_BRIDGE_URL: fill(pick(/CORA_BRIDGE_URL: (.*)$/m)), CORA_BRIDGE_TOKEN: fill(pick(/CORA_BRIDGE_TOKEN: (.*)$/m)) },
+      };
+    }
   } else {
     const value = (key) => { const item = argv.find((arg) => arg.startsWith("mcp_servers.cora." + key + "=")); return item ? item.slice(("mcp_servers.cora." + key + "=").length) : null; };
     if (value("command")) {
@@ -333,7 +345,7 @@ process.stdin.on("end", async () => {
       server = { command: JSON.parse(value("command")), args: JSON.parse(value("args")), env };
     }
   }
-  const record = { flavor, argv, stdin, tools: null, output: null, secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN") };
+  const record = { flavor, argv, stdin, tools: null, output: null, hermesConfig, secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
   if (server && control.tool) {
     const child = spawn(server.command, server.args, { env: { ...process.env, ...server.env }, stdio: ["pipe", "pipe", "inherit"] });
     let buffer = "";
@@ -359,7 +371,9 @@ process.stdin.on("end", async () => {
   fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(record) + "\\n");
   const answer = control.reply + (record.output ? " [" + record.output + "]" : "");
   const line = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
-  if (flavor === "claude") {
+  if (flavor === "hermes") {
+    process.stdout.write(answer + "\\n");
+  } else if (flavor === "claude") {
     line({ type: "system", subtype: "init" });
     line({ type: "assistant", message: { content: [{ type: "thinking", thinking: control.thinking || "" }] } });
     if (control.tool) {
@@ -377,7 +391,7 @@ process.stdin.on("end", async () => {
   }
 });
 `;
-  for (const name of ["claude", "codex"]) {
+  for (const name of ["claude", "codex", "hermes"]) {
     writeFileSync(join(dir, name), source);
     chmodSync(join(dir, name), 0o755);
   }
@@ -386,6 +400,7 @@ process.stdin.on("end", async () => {
   return {
     claude: join(dir, "claude"),
     codex: join(dir, "codex"),
+    hermes: join(dir, "hermes"),
     models,
     set(value) { writeFileSync(control, JSON.stringify(value)); },
     calls() {

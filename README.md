@@ -60,7 +60,9 @@ Each agent picks its model and a reasoning level (automatic, low, medium, high);
 |---|---|---|
 | `claude/` | Claude (Claude Code subscription) | `claude -p --output-format stream-json` with its own tools off (`--tools ""`), `--effort`; Cora's tools over a per-run MCP server |
 | `codex/` | ChatGPT (Codex subscription) | `codex exec --json` read-only, shell/unified-exec/browser/computer-use/subagents disabled, `model_reasoning_effort`; Cora's tools over MCP |
-| `ollama/` | Ollama Cloud | `https://ollama.com` with `CORA_OLLAMA_API_KEY`, `think`; Cora runs the tool loop |
+| `ollama/` | Ollama Cloud | `https://ollama.com` with `CORA_OLLAMA_API_KEY`, `think`; the Cora harness runs the tool loop |
+| `orcarouter/` | OrcaRouter (every model behind one key) | `https://api.orcarouter.ai/v1`, OpenAI chat format, with `CORA_ORCAROUTER_API_KEY`; models from `/v1/models` plus `orcarouter/auto`; the Cora harness runs the tool loop |
+| `hermes/` | Hermes Agent | `hermes -z` one-shot with only Cora's tools (`-t mcp-cora`), `--ignore-rules`, in its own home (`~/.cora/hermes-home`, override `CORA_HERMES_HOME`); models of its endpoint, by default the local Ollama (`CORA_HERMES_BASE_URL`) |
 
 The MCP server (`src/mcp-server.js`) forwards tool calls to a loopback bridge (`src/bridge.js`) with a random port and token per run. Every agent also receives the owner's personal agent instructions (`~/.agents/AGENTS.md`, override with `CORA_OWNER_INSTRUCTIONS`).
 

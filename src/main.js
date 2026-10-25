@@ -40,6 +40,11 @@ export function startCora(overrides = {}) {
   const llm = new LLM({
     ollamaUrl: cfg.ollamaUrl,
     ollamaKey: cfg.ollamaKey,
+    orcaUrl: cfg.orcaUrl,
+    orcaKey: cfg.orcaKey,
+    hermesBin: cfg.hermesBin,
+    hermesHome: cfg.hermesHome,
+    hermesBaseUrl: cfg.hermesBaseUrl,
     claudeBin: cfg.claudeBin,
     codexBin: cfg.codexBin,
     codexModelsFile: cfg.codexModelsFile,

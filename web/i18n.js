@@ -7,6 +7,8 @@ export const EN = {
   "Claude Code non trovato su questa macchina": "Claude Code not found on this machine",
   "Codex non trovato su questa macchina": "Codex not found on this machine",
   "manca CORA_OLLAMA_API_KEY in hush": "CORA_OLLAMA_API_KEY is missing from hush",
+  "manca CORA_ORCAROUTER_API_KEY in hush": "CORA_ORCAROUTER_API_KEY is missing from hush",
+  "Hermes non trovato su questa macchina": "Hermes not found on this machine",
   "Ogni mattina 9:00": "Every morning 9:00",
   "Ogni sera 21:00": "Every evening 21:00",
   "Lun-ven 8:30": "Mon-Fri 8:30",

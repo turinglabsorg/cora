@@ -20,6 +20,8 @@ const DEFAULT_SETTINGS = {
   telegramOwnerIds: [],
   sshKeys: [],
   language: "it",
+  // Where notices from usecora.space (waitlist sign-ups) are posted: a channel with this name.
+  noticeChannel: "waitlist",
 };
 const SSH_PORT_BASE = 2201;
 export const TRANSPORTS = ["discord", "telegram"];
@@ -196,6 +198,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     telegramChatIds: cleanIds(merged.telegramChatIds, /^-?\d{1,20}$/),
     telegramOwnerIds: cleanIds(merged.telegramOwnerIds, /^\d{1,20}$/),
     language: ["it", "en"].includes(merged.language) ? merged.language : "it",
+    noticeChannel: cleanText(merged.noticeChannel, 100).trim().replace(/^#/, ""),
     sshKeys: plainKeys(Array.isArray(merged.sshKeys) ? merged.sshKeys.join("\n") : merged.sshKeys).slice(0, 30),
   };
 }

@@ -526,6 +526,21 @@ export class Orchestrator {
     if (posted && state.budget > 0 && state.generation === generation) this.schedule(state, 2500 + Math.random() * 4000);
   }
 
+  /** A notice from usecora.space, posted as "Cora" in the channel named in settings.noticeChannel. */
+  async cloudNotice(fields) {
+    const english = this.store.settings.language === "en";
+    const who = [fields.email, fields.company ? `(${fields.company})` : ""].filter(Boolean).join(" ");
+    const text = fields.type === "waitlist"
+      ? (english ? `📬 New sign-up on the usecora.space waitlist: **${who}**` : `📬 Nuova iscrizione alla lista d'attesa di usecora.space: **${who}**`)
+      : String(fields.text || "").slice(0, 1500);
+    if (!text) return;
+    const name = String(this.store.settings.noticeChannel || "").replace(/^#/, "").toLowerCase();
+    const channel = name ? this.channels?.list().find((item) => item.kind === "discord" && String(item.name).toLowerCase() === name) : null;
+    this.log({ type: "settings", channelId: channel?.id, text: text.replace(/\*\*/g, "") });
+    if (!channel) return;
+    await this.discord.post(channel.id, { username: "Cora", content: text });
+  }
+
   /**
    * After a restart: the long tasks that the restart cut short are picked up
    * again, in the same place, by the same agents, if they started in the last

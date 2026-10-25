@@ -22,6 +22,7 @@ let cookie = "";
 let replies;
 let cli;
 let home;
+let orca;
 const botTokens = {};
 const hushVault = {};
 
@@ -57,7 +58,35 @@ async function call(path, { method = "GET", body, headers = {}, auth = true } = 
   return { status: response.status, data, headers: response.headers };
 }
 
+/** OrcaRouter as far as Cora can tell: an OpenAI-style router with a model list and chat completions. */
+function fakeRouter() {
+  const state = { requests: [], reply: () => ({ content: "PASS" }) };
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const json = (status, body) => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.headers.authorization !== "Bearer sk-orca-test") return json(401, { error: { message: "bad key" } });
+    if (req.method === "GET" && req.url === "/v1/models") {
+      return json(200, { object: "list", data: [{ id: "openai/gpt-test", object: "model", supported_endpoint_types: ["openai", "anthropic"] }, { id: "anthropic/only-native", supported_endpoint_types: ["anthropic"] }] });
+    }
+    if (req.method === "POST" && req.url === "/v1/chat/completions") {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      state.requests.push(body);
+      const reply = await state.reply(body);
+      const message = { role: "assistant", content: reply.content ?? null };
+      if (reply.tool_calls) message.tool_calls = reply.tool_calls.map((call, index) => ({ id: `call_${state.requests.length}_${index}`, type: "function", function: { name: call.name, arguments: JSON.stringify(call.arguments || {}) } }));
+      return json(200, { id: "chatcmpl-1", object: "chat.completion", choices: [{ index: 0, message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }] });
+    }
+    json(404, {});
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${server.address().port}/v1`, state, close: () => new Promise((done) => server.close(done)) })));
+}
+
 before(async () => {
+  orca = await fakeRouter();
   discord = await fakeDiscord();
   telegram = await fakeTelegram();
   replies = new Map();
@@ -91,6 +120,11 @@ before(async () => {
     telegramPollTimeout: 1,
     ollamaUrl: ollama.url,
     ollamaKey: "test-ollama-key",
+    orcaUrl: orca.url,
+    orcaKey: "sk-orca-test",
+    hermesBin: cli.hermes,
+    hermesHome: join(home, "hermes-home"),
+    hermesBaseUrl: `${ollama.url}/v1`,
     claudeBin: cli.claude,
     codexBin: cli.codex,
     codexModelsFile: cli.models,
@@ -110,6 +144,7 @@ before(async () => {
 });
 
 after(async () => {
+  await orca.close();
   await app.stop();
   await discord.close();
   await telegram.close();
@@ -170,7 +205,7 @@ describe("agents in Discord", () => {
     assert.ok(state.data.models.some((model) => model.id === "claude/claude-opus-5-5"));
     assert.ok(state.data.models.some((model) => model.id === "codex/gpt-6-sol"));
     assert.ok(!state.data.models.some((model) => model.id === "codex/hidden"));
-    assert.deepEqual(state.data.providers, { claude: true, codex: true, ollama: true });
+    assert.deepEqual(state.data.providers, { claude: true, codex: true, ollama: true, orcarouter: true, hermes: true });
   });
 
   test("creates two agents through the API", async () => {
@@ -905,6 +940,58 @@ describe("talking with the agents", () => {
     await quiet();
   });
 
+  test("an agent on OrcaRouter runs on the Cora harness: the router's models, OpenAI-style tools and results, a task to the end", async (t) => {
+    const models = (await call("/api/state")).data.models.map((model) => model.id);
+    assert.ok(models.includes("orcarouter/openai/gpt-test"));
+    assert.ok(models.includes("orcarouter/orcarouter/auto"), "the router can also pick the model");
+    assert.ok(!models.includes("orcarouter/anthropic/only-native"), "only models it serves in the OpenAI format");
+    await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "orcarouter/openai/gpt-test" } });
+    t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
+    orca.state.requests.length = 0;
+    orca.state.reply = (body) => {
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "user" && !String(last.content).startsWith("[Cora]")) return { tool_calls: [{ name: "list_routines", arguments: {} }] };
+      if (last.role === "tool") return { content: "Routine controllate su OrcaRouter: tutto a posto." };
+      return { content: "DONE" };
+    };
+    discord.say({ content: "Olga, controlla le routine" });
+    await waitFor(() => posts("Olga").includes("Routine controllate su OrcaRouter: tutto a posto."), { what: "Olga's answer through OrcaRouter" });
+    const [first, second] = orca.state.requests;
+    assert.equal(first.model, "openai/gpt-test");
+    assert.equal(first.messages[0].role, "system");
+    assert.ok(first.tools.some((tool) => tool.type === "function" && tool.function.name === "list_routines"));
+    const toolCall = second.messages.find((message) => message.role === "assistant" && message.tool_calls);
+    const toolResult = second.messages.find((message) => message.role === "tool");
+    assert.equal(toolResult.tool_call_id, toolCall.tool_calls[0].id, "the result answers its call");
+    assert.equal(typeof toolCall.tool_calls[0].function.arguments, "string");
+    assert.ok(orca.state.requests.length >= 3, "the end was confirmed (DONE)");
+    await quiet();
+    await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } });
+  });
+
+  test("an agent on Hermes gets Cora's tools only, through its own Hermes home, and no secrets", async (t) => {
+    const models = (await call("/api/state")).data.models.map((model) => model.id);
+    assert.ok(models.includes("hermes/test-model"));
+    assert.ok(!models.includes("hermes/embed"), "only models that write");
+    await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/test-model" } });
+    t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
+    const before = cli.calls().length;
+    cli.set({ reply: "Routine controllate con Hermes.", tool: "list_routines" });
+    discord.say({ content: "Olga, controlla le routine con Hermes" });
+    await waitFor(() => posts("Olga").some((text) => text.startsWith("Routine controllate con Hermes.")), { what: "Olga's answer through Hermes" });
+    await quiet();
+    const run = cli.calls().slice(before).find((item) => item.flavor === "hermes");
+    assert.equal(run.argv[run.argv.indexOf("-t") + 1], "mcp-cora", "only Cora's tools: no terminal, files or computer use");
+    assert.ok(run.argv.includes("--ignore-rules"));
+    assert.equal(run.argv[run.argv.indexOf("-m") + 1], "test-model");
+    assert.match(run.argv[run.argv.indexOf("-z") + 1], /^Sei Olga\./, "Cora's system prompt leads the prompt");
+    assert.ok(run.tools.includes("list_routines") && run.tools.includes("say"));
+    assert.match(run.output, /Buongiorno|Nessuna routine/, "the tool really ran through Cora's bridge");
+    assert.match(run.hermesConfig, /CORA_BRIDGE_TOKEN: "\$\{CORA_BRIDGE_TOKEN\}"/, "the session token never lands in the file");
+    assert.deepEqual(run.secretEnv, []);
+    await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } });
+  });
+
   test("an agent without its computer is told to ask the owner instead of passing when someone else wants work done", async () => {
     let system = "";
     replies.set("Olga", (body) => {
@@ -1016,7 +1103,7 @@ describe("hosted on usecora.space", () => {
     const hosted = startCora({
       home: otherHome, host: "127.0.0.1", port: 0, adminPassword: "an old password", sessionKey: "hosted-session-key", insecureCookies: true,
       cloudUrl: "https://usecora.test/", cloudKey: keys.publicKey, cloudSpace: "acme",
-      discordToken: "", discordApi: discord.url, telegramApi: telegram.url, telegramPollTimeout: 1, ollamaUrl: ollama.url, ollamaKey: "k",
+      discordToken: MAIN_TOKEN, discordApi: discord.url, telegramApi: telegram.url, telegramPollTimeout: 1, ollamaUrl: ollama.url, ollamaKey: "k",
       claudeBin: cli.claude, codexBin: cli.codex, codexModelsFile: cli.models, ownerInstructions: join(home, "owner-AGENTS.md"),
       botTokenFor: () => "", storeSecret: async () => {}, docker: docker.path, schedulerTickMs: 3600000, startBoxes: false,
     });
@@ -1046,6 +1133,18 @@ describe("hosted on usecora.space", () => {
     assert.equal((await get(`/auth/cloud?pass=${encodeURIComponent(stale)}`)).headers.get("location"), "/?signin=refused", "an old pass has expired");
     const away = signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_1" });
     assert.equal((await get(`/auth/cloud?pass=${encodeURIComponent(away)}&next=${encodeURIComponent("//evil.example/x")}`)).headers.get("location"), "/", "it never sends you to another site");
+
+    // usecora.space tells this space about a waitlist sign-up; it lands in the notice channel as "Cora".
+    hosted.store.updateSettings({ noticeChannel: "#general" });
+    const notice = signPass(keys.privateKey, { aud: "notices", type: "waitlist", email: "ada@acme.example", company: "Acme" });
+    const post = (body) => fetch(`${at}/api/cloud/notice`, { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    await waitFor(() => hosted.channels.list().some((channel) => channel.name === "general"), { what: "the space's channels" });
+    assert.equal((await post({ notice })).status, 200);
+    const told = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Cora" && /ada@acme\.example \(Acme\)/.test(item.content)), { what: "the notice in #general" });
+    assert.match(told.content, /lista d'attesa di usecora\.space/);
+    assert.equal((await post({ notice })).status, 403, "each notice is posted once");
+    assert.equal((await post({ notice: signPass(keys.privateKey, { aud: "acme.usecora.test", type: "waitlist", email: "x@y.z" }) })).status, 403, "a pass is not a notice");
+    assert.equal((await post({ notice: signPass(passKeys("another cloud's seed 0123456789abcdef").privateKey, { aud: "notices", type: "waitlist", email: "x@y.z" }) })).status, 403);
 
     const token = loginLinkToken("hosted-session-key");
     const link = await get(`/auth/link?token=${encodeURIComponent(token)}`);

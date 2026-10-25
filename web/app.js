@@ -30,13 +30,17 @@ const PROVIDERS = {
   claude: "Claude (abbonamento)",
   codex: "ChatGPT (abbonamento)",
   ollama: "Ollama Cloud",
+  orcarouter: "OrcaRouter",
+  hermes: "Hermes Agent",
 };
 const PROVIDER_HINTS = {
   claude: "Claude Code non trovato su questa macchina",
   codex: "Codex non trovato su questa macchina",
   ollama: "manca CORA_OLLAMA_API_KEY in hush",
+  orcarouter: "manca CORA_ORCAROUTER_API_KEY in hush",
+  hermes: "Hermes non trovato su questa macchina",
 };
-const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", ollama: "Ollama" };
+const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", ollama: "Ollama", orcarouter: "OrcaRouter", hermes: "Hermes" };
 const PRESETS = [
   ["Ogni mattina 9:00", "0 9 * * *"],
   ["Ogni sera 21:00", "0 21 * * *"],
