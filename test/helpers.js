@@ -220,7 +220,9 @@ export async function fakeDiscord() {
         id: id(), type, channel_id: channel, guild_id: guild, content, attachments, embeds: [], mentions,
         author: { id: author, username, global_name: username, bot }, timestamp: new Date(Date.now() + counter).toISOString(),
       };
-      dispatch("MESSAGE_CREATE", message);
+      // Like the real Discord, the message is in the channel's history before the gateway delivers it.
+      state.history.set(channel, [...(state.history.get(channel) || []), message]);
+      if (!this.offline) dispatch("MESSAGE_CREATE", message);
       return message;
     },
     close() {

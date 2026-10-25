@@ -35,8 +35,10 @@ if [ "$BUILD_BOX" = "--build-box" ] || [ "$CURRENT_BOX" != "$BOX_HASH" ]; then
 fi
 PLIST="$HOME/Library/LaunchAgents/org.turinglabs.cora.plist"
 sed -e "s#__CORA_DIR__#$DIR#g" -e "s#__HOME__#$HOME#g" "$DIR/deploy/org.turinglabs.cora.plist" > "$PLIST"
+# bootout returns before the old process is gone: wait for it, then load (retrying) and wait for health.
 launchctl bootout "gui/$(id -u)/org.turinglabs.cora" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
-sleep 4
+for i in $(seq 1 30); do launchctl print "gui/$(id -u)/org.turinglabs.cora" >/dev/null 2>&1 || break; sleep 1; done
+for i in 1 2 3 4 5; do launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break; sleep 2; done
+for i in $(seq 1 30); do curl -fsS http://127.0.0.1:4370/healthz >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS http://127.0.0.1:4370/healthz && echo " <- cora healthz"
 REMOTE

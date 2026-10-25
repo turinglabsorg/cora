@@ -82,7 +82,11 @@ export function startCora(overrides = {}) {
   });
   discord.on("status", (status) => web.broadcast({ type: "discord", state: status.state, error: status.error }));
   discord.on("warning", (text) => activity({ type: "warning", text }));
-  discord.on("ready", () => activity({ type: "discord", text: `connesso come ${discord.user?.username}` }));
+  discord.on("ready", () => {
+    activity({ type: "discord", text: `connesso come ${discord.user?.username}` });
+    // Give the gateway a moment to deliver the servers' channels, then answer what was missed.
+    setTimeout(() => orchestrator.catchUp().catch((error) => activity({ type: "error", text: `recupero messaggi: ${error.message}` })), 3000);
+  });
   telegram.on("message", (message) => {
     orchestrator.onTelegramMessage(message).catch((error) => activity({ type: "error", text: `telegram: ${error.message}` }));
   });

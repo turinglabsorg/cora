@@ -507,6 +507,10 @@ export class Store {
       .run(String(item.id), String(channelId), Number(item.at) || Date.now(), item.authorId || null, String(item.authorName || "?"), String(item.kind || "human"), item.agentId || null, cleanText(item.content, 4000), Object.keys(meta).length ? JSON.stringify(meta) : null);
   }
 
+  hasMessage(id) {
+    return Boolean(this.stmt("SELECT 1 FROM messages WHERE id = ?").get(String(id)));
+  }
+
   /** The last messages of one channel, oldest first. */
   recentMessages(channelId, limit = 50) {
     return this.stmt("SELECT * FROM (SELECT * FROM messages WHERE channel_id = ? ORDER BY at DESC LIMIT ?) ORDER BY at").all(String(channelId), limit).map(messageRow);

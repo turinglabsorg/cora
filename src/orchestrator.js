@@ -9,6 +9,8 @@ const MAX_PARALLEL_AGENTS = 4;
 const HUMAN_DEBOUNCE_MS = 1200;
 // A follow-up without names within this window goes to the agents the human was talking to.
 const FOCUS_MS = 5 * 60 * 1000;
+// After a restart, unanswered human messages this recent are picked up again.
+const CATCH_UP_MS = 15 * 60 * 1000;
 // Someone called an agent and it has said nothing yet: it acknowledges on its own after this long.
 const ACK_AFTER_MS = 15000;
 const ACK_TEXT = { it: "Ricevuto, ci lavoro: ti aggiorno qui.", en: "Got it, working on it: I'll keep you posted here." };
@@ -166,7 +168,8 @@ export class Orchestrator {
     return true;
   }
 
-  async ensureHistory(state) {
+  /** Load the channel's recent messages once; `exclude` keeps out the message being handled, which Discord may already list. */
+  async ensureHistory(state, { exclude = null } = {}) {
     if (state.loaded) return;
     if (isWebRoom(state.id) || isTelegramChannel(state.id)) {
       const existing = state.history;
@@ -179,7 +182,7 @@ export class Orchestrator {
     if (!state.loading) {
       state.loading = this.discord.fetchMessages(state.id, this.store.settings.historySize)
         .then((messages) => {
-          const items = messages.map((raw) => this.toItem(raw));
+          const items = messages.filter((raw) => raw.id !== exclude).map((raw) => this.toItem(raw));
           const existing = state.history;
           state.history = [];
           state.seen = new Set();
@@ -213,10 +216,35 @@ export class Orchestrator {
     if (!raw.content && !raw.attachments?.length && !raw.embeds?.length && !raw.sticker_items?.length) return;
     if (this.discord.isOwnMessage(raw) || this.bots?.isOwnMessage(raw)) return;
     const state = this.state(raw.channel_id);
-    await this.ensureHistory(state);
+    await this.ensureHistory(state, { exclude: raw.id });
     const item = this.toItem(raw);
     if (item.kind === "owner" || item.kind === "human") await this.attachImages(item, raw);
     this.ingest(state, item);
+  }
+
+  /**
+   * Run when the Discord connection comes up: messages written while Cora was
+   * down are archived, and a recent human message nobody answered gets answered.
+   */
+  async catchUp() {
+    if (this.channels.active !== "discord") return;
+    for (const channel of this.channels.list()) {
+      const state = this.state(channel.id);
+      if (state.running || state.nextRoundAt) continue;
+      state.loaded = false;
+      state.loading = null;
+      await this.ensureHistory(state);
+      const missed = state.history.filter((item) => !this.store.hasMessage(item.id));
+      for (const item of missed) this.store.appendArchive(state.id, item);
+      const last = state.history[state.history.length - 1];
+      if (!last || !missed.includes(last) || !["owner", "human"].includes(last.kind) || Date.now() - last.at > CATCH_UP_MS) continue;
+      this.log({ type: "message", channelId: state.id, author: last.authorName, kind: last.kind, text: `(arrivato mentre ero spenta) ${last.content.slice(0, 280)}` });
+      this.address(state, last);
+      state.generation += 1;
+      state.budget = this.store.settings.maxAgentTurns;
+      state.ownerOrigin = last.kind === "owner";
+      this.schedule(state, HUMAN_DEBOUNCE_MS);
+    }
   }
 
   /**
@@ -245,8 +273,11 @@ export class Orchestrator {
       state.budget = this.store.settings.maxAgentTurns;
       state.ownerOrigin = item.kind === "owner";
       this.schedule(state, HUMAN_DEBOUNCE_MS);
-    } else if (item.kind === "bot" && state.budget > 0) {
-      this.schedule(state, 2500);
+    } else if (item.kind === "bot") {
+      // Another bot can call an agent by name; it never gets the owner's tools.
+      const called = this.agentsFor(state.id).some((agent) => mentions(item.content, agent.name));
+      if (called) state.ownerOrigin = false;
+      if (called || state.budget > 0) this.schedule(state, called ? HUMAN_DEBOUNCE_MS : 2500);
     }
   }
 
@@ -371,8 +402,12 @@ export class Orchestrator {
 
   pickCandidates(state, last, agents) {
     const fromHuman = last.kind === "owner" || last.kind === "human";
-    if (!fromHuman && state.budget <= 0) return { forced: [], optional: [] };
     const pool = agents.filter((agent) => agent.id !== last.agentId);
+    if (last.kind === "bot") {
+      const called = pool.filter((agent) => mentions(last.content, agent.name));
+      if (called.length) return { forced: called, optional: [] };
+    }
+    if (!fromHuman && state.budget <= 0) return { forced: [], optional: [] };
     if (fromHuman && roomAgentId(state.id)) return { forced: pool, optional: [] };
     const forced = pool.filter((agent) => mentions(last.content, agent.name) || (fromHuman && last.addressed?.includes(agent.id)));
     if (fromHuman && forced.length) return { forced, optional: [] };

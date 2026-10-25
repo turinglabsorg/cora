@@ -753,6 +753,34 @@ describe("talking with the agents", () => {
     await quiet();
   });
 
+  test("after a restart the first message is answered, messages written while down are picked up, and a bot can call an agent by name", async () => {
+    replies.set("Olga", (body) => ({ content: `Ok: ${lastChatLine(body).split(": ").pop()}` }));
+    replies.set("Pino", () => ({ content: "Pino qui." }));
+    app.orchestrator.states.delete(CHANNEL);
+    discord.say({ content: "Olga, primo messaggio dopo il riavvio" });
+    await waitFor(() => posts("Olga").includes("Ok: Olga, primo messaggio dopo il riavvio"), { what: "the first message after a restart" });
+    await quiet();
+
+    discord.offline = true;
+    discord.say({ content: "Olga, ti scrivo mentre sei spenta" });
+    discord.offline = false;
+    await app.orchestrator.catchUp();
+    await waitFor(() => posts("Olga").includes("Ok: Olga, ti scrivo mentre sei spenta"), { what: "the message written while down" });
+    await quiet();
+    const before = posts("Olga").length;
+    await app.orchestrator.catchUp();
+    await sleep(1500);
+    assert.equal(posts("Olga").length, before, "a message already answered is not answered twice");
+
+    discord.say({ content: "Olga, qui GROG, mi senti?", bot: true, author: "700000000000000009", username: "GROG" });
+    await waitFor(() => posts("Olga").includes("Ok: Olga, qui GROG, mi senti?"), { what: "Olga answering a bot" });
+    await quiet();
+    const pino = posts("Pino").length;
+    discord.say({ content: "messaggio di servizio", bot: true, author: "700000000000000009", username: "GROG" });
+    await sleep(2000);
+    assert.equal(posts("Pino").length, pino, "a bot that names nobody wakes nobody");
+  });
+
   test("the reasoning level reaches Claude Code and Codex", async () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Ugo2", model: "claude/claude-sonnet-5-5", effort: "high", chattiness: 0, tools: false, channelIds: [CHANNEL] } });
     assert.equal(created.data.effort, "high");
