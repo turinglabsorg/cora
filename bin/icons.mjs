@@ -1,5 +1,5 @@
-// Draws Cora's app icons (web/*.png) with no dependencies: an amber C open to the
-// right with the red on-air light in the gap. Run: node bin/icons.mjs
+// Draws Cora's app icons (web/*.png) with no dependencies: an amber sphere in
+// outline (rim and a tilted equator) on charcoal. Run: node bin/icons.mjs
 import { writeFileSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 
@@ -39,39 +39,33 @@ function png(size, pixel) {
 
 const hex = (value) => [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16));
 const BG = hex("#14110e");
-const GLOW = hex("#2c2218");
+const GLOW = hex("#241c14");
 const AMBER = hex("#f2a93b");
-const AMBER_DEEP = hex("#c47f1e");
-const RED = hex("#e5533d");
-const RED_GLOW = hex("#5a2016");
 const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * Math.max(0, Math.min(1, t))));
 
+/** Distance from a point to an axis-aligned ellipse centred in c, first-order (good for thin strokes). */
+function ellipseDistance(x, y, a, b) {
+  const f = (x * x) / (a * a) + (y * y) / (b * b) - 1;
+  const gx = (2 * x) / (a * a);
+  const gy = (2 * y) / (b * b);
+  return Math.abs(f) / Math.max(Math.hypot(gx, gy), 1e-6);
+}
+
 /**
- * Cora's mark in unit coordinates: a thick amber C, open to the right, with
- * the red on-air light sitting in the gap — the agent that leaves the circle.
+ * Cora's mark in unit coordinates: a sphere in outline — the rim and one tilted
+ * equator, its far half fainter so it reads as depth.
  */
 function scene(u, v) {
-  const cx = 0.47;
-  const cy = 0.5;
-  let color = mix(GLOW, BG, Math.hypot(u - 0.5, v - 0.4) * 1.7);
-  const dx = u - cx;
-  const dy = v - cy;
-  const r = Math.hypot(dx, dy);
-  const angle = Math.atan2(dy, dx);
-  const outer = 0.27;
-  const inner = 0.165;
-  const gap = 0.62;
-  const mid = (outer + inner) / 2;
-  const half = (outer - inner) / 2;
-  const capA = [cx + mid * Math.cos(gap), cy + mid * Math.sin(gap)];
-  const capB = [cx + mid * Math.cos(-gap), cy + mid * Math.sin(-gap)];
-  const onRing = r >= inner && r <= outer && Math.abs(angle) >= gap;
-  const onCap = Math.hypot(u - capA[0], v - capA[1]) <= half || Math.hypot(u - capB[0], v - capB[1]) <= half;
-  if (onRing || onCap) color = mix(AMBER, AMBER_DEEP, (v - 0.2) / 0.7);
-  const light = [cx + mid + 0.02, cy];
-  const d = Math.hypot(u - light[0], v - light[1]);
-  if (d <= 0.12 && !(onRing || onCap)) color = mix(RED_GLOW, color, d / 0.12);
-  if (d <= 0.058) color = RED;
+  const x = u - 0.5;
+  const y = v - 0.5;
+  const radius = 0.29;
+  const stroke = 0.0095;
+  const tilt = (-24 * Math.PI) / 180;
+  let color = mix(GLOW, BG, Math.hypot(x, y + 0.1) * 1.9);
+  if (Math.abs(Math.hypot(x, y) - radius) <= stroke) return AMBER;
+  const rx = x * Math.cos(tilt) + y * Math.sin(tilt);
+  const ry = -x * Math.sin(tilt) + y * Math.cos(tilt);
+  if (ellipseDistance(rx, ry, radius, radius * 0.3) <= stroke) color = ry >= 0 ? AMBER : mix(color, AMBER, 0.38);
   return color;
 }
 

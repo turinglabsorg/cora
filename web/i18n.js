@@ -56,7 +56,7 @@ export const EN = {
   "predefinito · {model}": "default · {model}",
   "nessuna chat accesa": "no chat turned on",
   "nessun server acceso": "no server turned on",
-  "rogue agents": "rogue agents",
+  "resident agents": "resident agents",
   "(niente)": "(nothing)",
 
   // requests and feed

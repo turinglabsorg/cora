@@ -1,7 +1,7 @@
 {
   "name": "cora",
   "version": "0.1.0",
-  "description": "Computer-Operated Rogue Agents: always-on AI agents with their own computers, memory, routines and a phone app",
+  "description": "Computer-Operating Resident Agents: always-on AI agents with their own computers, memory, routines and a phone app",
   "type": "module",
   "license": "MIT",
   "engines": {

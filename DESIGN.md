@@ -42,6 +42,12 @@ Scale: 11 / 13 / 15 (base) / 18 / 24 / 40 / 64px.
 - Borders are 1px `--line`; panels add an inner top highlight `inset 0 1px 0 rgba(255,255,255,.04)` and a soft drop shadow, like brushed hardware.
 - Content max width 1280px, 16px side gutter on phones.
 
+## Brand
+
+- **Name:** Cora — Computer-Operating Resident Agents. Wordmark in Big Shoulders Display 800, uppercase.
+- **Mark:** a sphere in outline on charcoal: a thin amber rim and one equator tilted −24°, its far half at 38% opacity for depth. No fill, no glow. Drawn by `bin/icons.mjs` (PNG app icons, supersampled) and `web/favicon.svg`.
+- **Login:** the mark, the wordmark, the tagline, then the password card; nothing animated around it.
+
 ## App shell
 
 The panel behaves like an installed app (web manifest, apple-touch-icon, no pinch or double-tap zoom, 16px inputs on phones so iOS never zooms).

@@ -1,7 +1,7 @@
 {
-  "name": "Cora · Computer-Operated Rogue Agents",
+  "name": "Cora · Computer-Operating Resident Agents",
   "short_name": "Cora",
-  "description": "Rogue agents with their own computers: chat, memory, routines, desktops and reasoning.",
+  "description": "Resident agents with their own computers: chat, memory, routines, desktops and reasoning.",
   "lang": "en",
   "start_url": "/",
   "scope": "/",

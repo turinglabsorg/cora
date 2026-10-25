@@ -1,8 +1,8 @@
 <p align="center"><img src="web/icon-512.png" width="96" alt="Cora"></p>
 
-# Cora — Computer-Operated Rogue Agents
+# Cora — Computer-Operating Resident Agents
 
-Always-on AI agents with their own computers. Each agent has a personality, a layered long-term memory, scheduled routines and a Linux desktop (Docker + noVNC) that both the agent and its owner can use. They live where the owner puts them — a Discord server or Telegram chats, one at a time — and in the panel's own chat rooms, where they talk with the owner and with each other.
+Always-on AI agents that live on their own computers. Each agent has a personality, a layered long-term memory, scheduled routines and a Linux desktop (Docker + noVNC) that both the agent and its owner can use. They live where the owner puts them — a Discord server or Telegram chats, one at a time — and in the panel's own chat rooms, where they talk with the owner and with each other.
 
 A password-protected web panel, installable on the phone as an app (Italian and English), manages personalities, memory, routines and desktops, shows every turn's reasoning, and delivers the agents' requests as push notifications.
 

@@ -385,7 +385,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
   const info = transportInfo();
   app.replaceChildren(h("div", { class: `app${mode ? ` mode-${mode}` : ""}` },
     h("aside", { class: "sidebar" },
-      h("a", { class: "brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "" }), h("span", {}, h("b", {}, "Cora"), h("small", {}, "rogue agents"))),
+      h("a", { class: "brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "" }), h("span", {}, h("b", {}, "Cora"), h("small", {}, "resident agents"))),
       h("a", { class: "onair-card", href: "#/settings" },
         h("span", { class: "panel-ico" }, icon(info.icon)),
         h("span", { class: "grow" }, h("b", {}, info.label), h("small", {}, info.where)),
@@ -1515,7 +1515,6 @@ function renderLogin() {
   } });
   const error = h("p", { class: "login-error", role: "alert" });
   const enter = btn("Entra", { icon: "next", type: "submit", cls: "primary" });
-  const desk = h("div", { class: "login-desk", "aria-hidden": "true" }, [22, 58, 34, 70, 14, 46, 62].map((at, index) => h("i", { vars: { "--at": `${at}%`, "--d": `${index * -0.45}s` } })));
   const form = h("form", { class: "login-card" },
     h("label", { class: "label", for: "password" }, "Password"),
     h("div", { class: "login-field" }, icon("key"), password, reveal),
@@ -1536,10 +1535,9 @@ function renderLogin() {
   });
   app.replaceChildren(h("div", { class: "login" },
     h("div", { class: "login-inner" },
-      desk,
       h("img", { class: "login-icon", src: "/assets/icon-192.png", alt: "" }),
       h("h1", {}, "Cora"),
-      h("p", { class: "login-sub" }, "Computer-Operated Rogue Agents"),
+      h("p", { class: "login-sub" }, "Computer-Operating Resident Agents"),
       form,
       h("p", { class: "login-foot" }, icon("shield"), "Accesso privato"),
       h("div", { class: "login-langs" }, Object.keys(LANGS).map((code) => h("button", { type: "button", class: code === LANG ? "on" : "", onclick: () => setLanguage(code) }, raw(code.toUpperCase())))))));
@@ -1560,7 +1558,7 @@ async function render() {
 }
 
 document.documentElement.lang = LANG;
-document.title = "Cora · Computer-Operated Rogue Agents";
+document.title = "Cora · Computer-Operating Resident Agents";
 
 async function boot() {
   const me = await fetch("/api/me", { credentials: "same-origin" }).then((response) => response.json()).catch(() => ({}));
