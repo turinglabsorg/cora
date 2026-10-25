@@ -1,27 +1,29 @@
 # Cora — Design System
 
-The admin panel is a **radio studio mixing desk**. Each agent is a channel strip on the desk: a fader for how chatty it is, LEDs for its state, a small monitor showing its desktop. Discord is the "ON AIR" lamp. The live activity feed is a teletype strip. Dark, warm, tactile; amber tungsten light on charcoal.
+The admin panel is a **radio studio mixing desk**. Each agent is a channel strip on the desk: a fader for how chatty it is, LEDs for its state, a small monitor showing its desktop. Discord is the "ON AIR" lamp. The live activity feed is a teletype strip. Dark and tactile: one amber light on near-pure black, never brown.
 
 ## Colors (CSS custom properties in `web/styles.css`)
 
 | Token | Value | Use |
 |---|---|---|
-| `--bg` | `#14110e` | page background (warm near-black) |
+| `--bg` | `#050505` | page background (near-pure black) |
 | `--bg-grain` | radial gradients + SVG noise | atmosphere on `body` |
-| `--panel` | `#1d1915` | cards, strips, panels |
-| `--panel-2` | `#26211b` | inputs, nested surfaces, hover |
-| `--line` | `#3a3229` | hairlines, borders |
-| `--line-strong` | `#57493a` | focused borders, dividers on hover |
-| `--text` | `#efe6d8` | primary text (warm paper) |
-| `--muted` | `#a39580` | secondary text, labels |
-| `--faint` | `#6f6455` | placeholders, disabled |
+| `--panel` | `#0f0f0f` | cards, strips, panels |
+| `--panel-2` | `#171717` | inputs, nested surfaces, hover |
+| `--well` | `#000000` | wells: chat log, code, tracks |
+| `--line` | `#232323` | hairlines, borders |
+| `--line-strong` | `#353535` | focused borders, dividers on hover |
+| `--text` | `#f5f5f3` | primary text |
+| `--muted` | `#8f8f8a` | secondary text, labels |
+| `--faint` | `#5c5c58` | placeholders, disabled |
 | `--amber` | `#f2a93b` | primary accent: active tab, fader cap, primary button |
 | `--amber-glow` | `rgba(242,169,59,.35)` | lamp/LED glow, focus ring |
+| `--amber-line` / `--amber-wash` | amber at 38% / 8% | borders and fills of amber things (owner bubbles, requests, answers, switches) |
 | `--red` | `#e5533d` | ON AIR lamp lit, destructive actions, errors |
 | `--green` | `#8cc56a` | LED: desktop running / ok |
 | `--blue` | `#6fa8dc` | tool calls in the feed |
 | `--paper` | `#e9dfcc` | teletype strip background |
-| `--ink` | `#2b241c` | teletype text |
+| `--ink` | `#1d1b18` | teletype text, text on amber buttons |
 
 Each agent also has its own `color` (stored on the agent, default `#e8a33d`), used for its avatar ring and its name in the feed.
 
@@ -29,11 +31,11 @@ Each agent also has its own `color` (stored on the agent, default `#e8a33d`), us
 
 Loaded from Google Fonts.
 
-- **Display — Big Shoulders Display** (700/800): logo, page titles, agent names on strips. Uppercase with `letter-spacing: .04em` for labels on the desk.
-- **Body — Instrument Sans** (400/500/600): forms, paragraphs, buttons.
-- **Mono — Martian Mono** (400/500): cron expressions, ids, timestamps, the teletype feed, small hardware-style labels (`font-size: 10–11px`, uppercase, `letter-spacing: .12em`).
+- **Display — Outfit** (600): logo, page titles, panel titles, agent names on strips. Rounded geometric, sentence case, tight tracking (`-0.02em` small, `-0.04em` large).
+- **Body — Manrope** (400/500/600): forms, paragraphs, buttons.
+- **Mono — DM Mono** (400/500): cron expressions, ids, timestamps, the teletype feed, small hardware-style labels (`font-size: 10–11px`, uppercase, `letter-spacing: .12em`).
 
-Scale: 11 / 13 / 15 (base) / 18 / 24 / 40 / 64px.
+Scale: 11 / 13 / 15 (base) / 17 / 20 / 38 / 44 / 56px.
 
 ## Spacing & shape
 
@@ -44,8 +46,8 @@ Scale: 11 / 13 / 15 (base) / 18 / 24 / 40 / 64px.
 
 ## Brand
 
-- **Name:** Cora — Computer-Operating Resident Agents. Wordmark in Big Shoulders Display 800, uppercase.
-- **Mark:** a sphere in outline on charcoal: a thin amber rim and one equator tilted −24°, its far half at 38% opacity for depth. No fill, no glow. Drawn by `bin/icons.mjs` (PNG app icons, supersampled) and `web/favicon.svg`.
+- **Name:** Cora — Computer-Operating Resident Agents. Wordmark "Cora" in Outfit 600.
+- **Mark:** a sphere in outline on black: a thin amber rim and one equator tilted −24°, its far half at 38% opacity for depth. No fill, no glow. Drawn by `bin/icons.mjs` (PNG app icons, supersampled) and `web/favicon.svg`.
 - **Login:** the mark, the wordmark, the tagline, then the password card; nothing animated around it.
 
 ## App shell

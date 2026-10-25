@@ -1,5 +1,5 @@
 // Draws Cora's app icons (web/*.png) with no dependencies: an amber sphere in
-// outline (rim and a tilted equator) on charcoal. Run: node bin/icons.mjs
+// outline (rim and a tilted equator) on black. Run: node bin/icons.mjs
 import { writeFileSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 
@@ -38,7 +38,7 @@ function png(size, pixel) {
 }
 
 const hex = (value) => [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16));
-const BG = hex("#14110e");
+const BG = hex("#050505");
 const GLOW = hex("#241c14");
 const AMBER = hex("#f2a93b");
 const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * Math.max(0, Math.min(1, t))));
