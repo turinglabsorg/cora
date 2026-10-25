@@ -102,7 +102,7 @@ function layout({ title = TITLE, description = DESCRIPTION, body, page = "", acc
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>${esc(title)}</title>
 <meta name="description" content="${esc(description)}">
-<meta name="theme-color" content="#14110e">
+<meta name="theme-color" content="#050505">
 <meta property="og:title" content="${esc(TITLE)}">
 <meta property="og:description" content="${esc(DESCRIPTION)}">
 <meta property="og:type" content="website">
@@ -110,7 +110,7 @@ function layout({ title = TITLE, description = DESCRIPTION, body, page = "", acc
 <link rel="icon" href="${BASE}/assets/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Instrument+Sans:wght@400;500;600&family=Martian+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="${BASE}/assets/cloud.css">
 <script src="${BASE}/assets/cloud.js"></script>
 </head>
@@ -230,7 +230,7 @@ export function landing({ account }) {
       <div class="byoi-head reveal">
         <span class="byoi-ico">${ICONS.plug}</span>
         <p class="kicker">02 / Bring your own intelligence</p>
-        <h2>Bring your own intelligence.</h2>
+        <h2><em>Bring your own</em> intelligence.</h2>
         <p class="lead">Cora is not a model, and it does not resell one. Plug in the brains your company already pays for, agent by agent: your Claude or ChatGPT subscription, or open models in the cloud with your key. Switch any time, choose how hard each one thinks, and keep the accounts, the data and the bill in your hands.</p>
       </div>
       ${patchBay()}
