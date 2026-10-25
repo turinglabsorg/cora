@@ -159,8 +159,9 @@ describe("usecora.space", () => {
   test("the apex is the landing; www goes to the apex; an unknown space and an unknown host are not found", async () => {
     const landing = await request("/");
     assert.equal(landing.status, 200);
-    assert.match(landing.body, /Lives where/);
-    assert.match(landing.body, /Bring your own intelligence/);
+    assert.match(landing.body, /AI agents that live/);
+    assert.match(landing.body, /Bring your own<\/em> intelligence/);
+    assert.doesNotMatch(landing.body, /href="[^"]*\/(login|account)/, "the landing has no sign-in until it opens");
     assert.match(landing.headers["content-security-policy"], /frame-ancestors 'none'/);
     assert.match(landing.headers["content-security-policy"], /script-src 'self'/);
     assert.equal((await request("/assets/cloud.css")).status, 200);
@@ -243,6 +244,21 @@ describe("usecora.space", () => {
     assert.equal(deleted.headers.location, "/");
     assert.equal((await request("/account", { headers: { cookie } })).status, 302, "a deleted account is signed out");
     assert.deepEqual(store.requests(), []);
+  });
+
+  test("people join the waitlist from the landing with an email, once each; bad addresses, other sites and bots get nowhere", async () => {
+    const join = (body, headers = {}) => request("/waitlist", { method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded", origin, ...headers } });
+    const joined = await join("email=Ada%40Acme.example&company=Acme&website=");
+    assert.equal(joined.headers.location, "/?joined=1#waitlist");
+    assert.equal((await join("email=ada%40acme.example&company=")).headers.location, "/?joined=1#waitlist", "joining again is fine");
+    assert.equal((await join("email=not-an-address")).headers.location, "/?waitlist=invalid#waitlist");
+    assert.equal((await join("email=eve%40evil.example", { origin: "https://evil.example" })).status, 403);
+    assert.equal((await join("email=bot%40spam.example&website=http%3A%2F%2Fspam")).headers.location, "/?joined=1#waitlist", "a bot gets the same thanks");
+    assert.deepEqual(store.waitlist().map((entry) => [entry.email, entry.company]), [["ada@acme.example", "Acme"]]);
+    const thanks = await request("/?joined=1");
+    assert.match(thanks.body, /You're on the list/);
+    assert.doesNotMatch(thanks.body, /name="email"/, "no form once you joined");
+    assert.match((await request("/?waitlist=invalid")).body, /doesn't look right/);
   });
 
   test("signing out everywhere ends every session of the account", async () => {

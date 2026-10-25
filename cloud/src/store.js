@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS spaces (
   upstream TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS waitlist (
+  email TEXT PRIMARY KEY,
+  company TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS requests (
   account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
   slug TEXT NOT NULL,
@@ -167,6 +172,19 @@ export class CloudStore {
 
   spaces() {
     return this.stmt("SELECT slug FROM spaces ORDER BY created_at").all().map((row) => this.space(row.slug));
+  }
+
+  /** Someone who wants a space before sign-in opens. Joining twice keeps the first date and the latest company. */
+  joinWaitlist(email, company = "") {
+    const clean = String(email || "").trim().toLowerCase();
+    if (!/^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/.test(clean) || clean.length > 200) throw new Error("invalid");
+    this.stmt(`INSERT INTO waitlist (email, company, created_at) VALUES (?, ?, ?)
+      ON CONFLICT(email) DO UPDATE SET company = CASE WHEN excluded.company != '' THEN excluded.company ELSE waitlist.company END`)
+      .run(clean, String(company || "").trim().slice(0, 80), Date.now());
+  }
+
+  waitlist() {
+    return this.stmt("SELECT * FROM waitlist ORDER BY created_at").all().map((row) => ({ email: row.email, company: row.company, createdAt: row.created_at }));
   }
 
   /** Someone without a space asks for one: the name they want and a note. One request per account. */

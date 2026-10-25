@@ -18,6 +18,40 @@ document.addEventListener("DOMContentLoaded", () => {
     reveals.forEach((el) => watcher.observe(el));
   }
 
+  // The orb: every pulse is an agent doing something, in its own color.
+  const orb = document.querySelector("[data-orb]");
+  if (orb && !still) {
+    const chips = [...orb.querySelectorAll(".pulse-chip")];
+    const rings = [...orb.querySelectorAll(".orb-rings i")];
+    const stage = orb.querySelector(".orb-stage");
+    const tint = (hex, alpha) => {
+      const value = parseInt(hex.replace("#", ""), 16);
+      return `rgba(${value >> 16 & 255}, ${value >> 8 & 255}, ${value & 255}, ${alpha})`;
+    };
+    let count = 0;
+    const pulse = () => {
+      const chip = chips[count % chips.length];
+      const color = chip.style.getPropertyValue("--c").trim() || "#f2a93b";
+      const ring = rings[count % rings.length];
+      ring.style.setProperty("--c", color);
+      ring.classList.remove("go");
+      void ring.offsetWidth;
+      ring.classList.add("go");
+      stage.style.setProperty("--glow", tint(color, 0.3));
+      orb.classList.remove("beat");
+      void orb.offsetWidth;
+      orb.classList.add("beat");
+      chip.classList.add("on");
+      const phone = matchMedia("(max-width: 719px)").matches;
+      setTimeout(() => chip.classList.remove("on"), phone ? 2000 : 4400);
+      count += 1;
+    };
+    setTimeout(() => {
+      pulse();
+      setInterval(pulse, 2300);
+    }, 600);
+  }
+
   // The console plays its transcript one line at a time, then starts over.
   const teletype = document.querySelector("[data-teletype]");
   const clock = document.querySelector("[data-clock]");

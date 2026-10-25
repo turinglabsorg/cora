@@ -17,8 +17,20 @@ export function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
 
-const TITLE = "Cora — resident AI agents that live where your company is";
-const DESCRIPTION = "Cora agents join your team's Discord, Telegram or their own app, each with a personality, a memory, a schedule and a computer of its own. Bring your own intelligence: Claude, ChatGPT or open models.";
+const TITLE = "Cora — AI agents that live in your team chat";
+const DESCRIPTION = "AI coworkers in your Discord, Telegram or their own app. Each has a memory, a schedule and its own computer. You bring the AI: Claude, ChatGPT or open models.";
+
+/** What the orb shows, one agent per pulse. */
+const PULSES = [
+  ["IRIS", "#f2a93b", "posted the morning report in #ops"],
+  ["OTTO", "#6fa8dc", "answered a customer on Telegram"],
+  ["MIRA", "#e5533d", "asked Maya before deleting old backups"],
+  ["LEO", "#8cc56a", "ran the 18:30 routine: weekly trends"],
+  ["IRIS", "#f2a93b", "remembered: invoices go out on the 5th"],
+  ["OTTO", "#6fa8dc", "opened the dashboard on its own desktop"],
+  ["MIRA", "#e5533d", "steered mid-task: added last week's charts"],
+  ["LEO", "#8cc56a", "slept on it: 12 memories tidied up"],
+];
 
 const SCRIPT = [
   ["09:15", "IRIS", "routine", "Morning check done: 3 new reviews, all five stars. Summary in #social."],
@@ -30,39 +42,27 @@ const SCRIPT = [
   ["11:05", "IRIS", "agent", "Done. 4.1 GB freed, the last 90 days are untouched."],
 ];
 
-const DOORS = [
-  ["discord", "Discord", "Its own bot in your server. Mention it, or just talk in the channel: only the one you name answers."],
-  ["telegram", "Telegram", "In your team's groups or in a private chat, as itself."],
-  ["app", "Its own app", "A room for the whole team and one for each agent, installable on every phone."],
-];
-
 const STRIPS = [
-  ["CH 01", "Personality", "Someone, not something.", "Each agent has a voice, opinions and a core card it keeps up to date. It talks to your people, and to the other agents.", ["voice", "core card", "opinions"], 72],
-  ["CH 02", "Memory", "It remembers.", "Facts, a diary and every conversation, searchable. Every night it sleeps on it: merges, forgets, writes the day down.", ["facts", "diary", "recall"], 58],
-  ["CH 03", "Computer", "A desk of its own.", "A Linux desktop with a browser and a terminal. It acts instead of describing; you can watch it, take over, or SSH in.", ["desktop", "browser", "ssh"], 84],
-  ["CH 04", "Routines", "It keeps a schedule.", "Ask in plain words, “every weekday at 9:15”, and it sets the routine up, runs it, and reports in the channel.", ["cron", "reports", "its own"], 46],
-];
-
-const BRAINS = [
-  ["Claude", "your Claude subscription"],
-  ["ChatGPT", "your ChatGPT subscription"],
-  ["Open models", "on Ollama Cloud, with your key"],
+  ["CH 01", "Personality", "Someone, not something.", "A voice, opinions, a name your team calls.", ["voice", "core card", "opinions"], 72],
+  ["CH 02", "Memory", "It remembers.", "Facts, a diary, every conversation. Tidied up every night.", ["facts", "diary", "recall"], 58],
+  ["CH 03", "Computer", "A desk of its own.", "A Linux desktop with browser and terminal. Watch it, or take over.", ["desktop", "browser", "ssh"], 84],
+  ["CH 04", "Routines", "It keeps a schedule.", "“Every weekday at 9:15” is enough. It runs and reports.", ["cron", "reports", "its own"], 46],
 ];
 
 const DAY = [
-  ["04:00", "Sleeps", "Tidies its memory and writes the diary."],
-  ["09:15", "Morning check", "Reviews, mentions, the inbox: a summary in the team channel."],
-  ["11:02", "Someone asks", "“On it” right away, progress while it works, the result at the end."],
-  ["15:40", "Your call", "A decision is yours: a question with one-tap answers, right where you are."],
-  ["18:30", "Weekly trends", "Charts from its own browser, posted in #social."],
+  ["04:00", "Sleeps", "Tidies its memory."],
+  ["09:15", "Morning check", "A summary in the team channel."],
+  ["11:02", "Someone asks", "“On it”, progress, result."],
+  ["15:40", "Your call", "A question with one-tap answers."],
+  ["18:30", "Weekly trends", "Charts posted in #social."],
   ["23:50", "Night watch", "Quiet, unless something breaks."],
 ];
 
 const POINTS = [
-  ["Right away", "An acknowledgement in seconds, then progress, then the result."],
-  ["Steerable", "Change your mind while it works: it reads you and adjusts."],
-  ["Asks first", "Questions land where the conversation is, with one-tap answers."],
-  ["Why", "Open any reply and see every thought, tool call and result."],
+  ["Right away", "An answer in seconds, then progress."],
+  ["Steerable", "Change your mind while it works."],
+  ["Asks first", "Decisions come to you, one tap away."],
+  ["Why", "Every reply shows its reasoning."],
 ];
 
 const LOGIN_ERRORS = {
@@ -82,6 +82,7 @@ const PRIVACY = [
   ["Who", "usecora.space is run by Turing Labs. It is the sign-in service for Cora spaces."],
   ["What we keep", "When you sign in with Google or GitHub we keep your name, email address, profile picture and the account id that service gives us, plus the spaces you own and any space request you send. We never see your Google or GitHub password."],
   ["What a space keeps", "Agents, memories, chats and computers live inside each space, run for its owner. The sign-in service does not read them."],
+  ["Waitlist", "If you join the waitlist we keep the email address and the company you give us, only to tell you when spaces open. Ask us and we remove it."],
   ["Cookies", "One keeps you signed in, and an anonymous visit counter (stored only as a hash) counts page views. No ads, no third-party trackers."],
   ["Deleting", "From your account page you can delete your account at any time, once it owns no space. For anything else, reach Turing Labs through github.com/turinglabsorg."],
 ];
@@ -121,8 +122,8 @@ function layout({ title = TITLE, description = DESCRIPTION, body, page = "", acc
 <header class="top">
   <a class="brand" href="${BASE}/" aria-label="Cora">${MARK}<span>Cora</span></a>
   <nav class="top-nav">
-    ${page === "landing" ? `<a class="hide-sm" href="#where">Where it lives</a><a class="hide-sm" href="#byoi">Your intelligence</a><a class="hide-sm" href="${REPO}">Open source</a>` : ""}
-    ${account ? `<a class="pill" href="${BASE}/account">Your spaces</a>` : `<a class="pill" href="${BASE}/login">Sign in</a>`}
+    ${page === "landing" ? `<a class="hide-sm" href="#work">How it works</a><a class="hide-sm" href="#byoi">Your AI</a><a class="hide-sm" href="${REPO}">Open source</a><a class="pill" href="#join">Join the waitlist</a>` : ""}
+    ${page !== "landing" && account ? `<a class="pill" href="${BASE}/account">Your spaces</a>` : ""}
   </nav>
 </header>
 ${body}
@@ -184,8 +185,40 @@ function patchBay() {
   </div>`;
 }
 
-export function landing({ account }) {
-  const entry = account ? `${BASE}/account` : `${BASE}/login?next=%2Faccount`;
+/** The orb: the Cora sphere, and every pulse is one of the agents doing something. */
+function orb() {
+  const chips = PULSES.map(([name, color, text], index) => `<li class="pulse-chip${index < 4 ? " still" : ""}" style="--c:${color}" data-slot="${index % 6}"><b>${name}</b><span>${esc(text)}</span></li>`).join("");
+  return `<div class="orb" data-orb aria-hidden="true">
+    <div class="orb-stage">
+      <div class="orb-rings"><i></i><i></i><i></i></div>
+      <svg class="orb-sphere" viewBox="0 0 200 200">
+        <circle class="orb-core" cx="100" cy="100" r="66"/>
+        <g class="orb-spin"><ellipse class="orb-meridian" cx="100" cy="100" rx="66" ry="66"/></g>
+        <g class="orb-spin late"><ellipse class="orb-meridian" cx="100" cy="100" rx="66" ry="66"/></g>
+        <g transform="rotate(-24 100 100)"><ellipse class="orb-back" cx="100" cy="100" rx="66" ry="20"/><path class="orb-front" d="M34 100A66 20 0 0 0 166 100"/></g>
+        <circle class="orb-rim" cx="100" cy="100" r="66"/>
+      </svg>
+    </div>
+    <ul class="pulse-chips">${chips}</ul>
+  </div>`;
+}
+
+/** Joining the waitlist: an email and, if they like, the company. */
+function waitlistForm(id, { joined, error }) {
+  if (joined) return `<p class="joined" role="status"><b>You're on the list.</b> We'll write to you when spaces open.</p>`;
+  const message = error === "invalid" ? "That email address doesn't look right." : error === "busy" ? "Too many requests right now. Try again in a minute." : "";
+  return `<form class="waitlist" method="post" action="${BASE}/waitlist">
+    <label class="sr" for="${id}-email">Work email</label>
+    <input id="${id}-email" name="email" type="email" required maxlength="200" placeholder="you@company.com" autocomplete="email">
+    <label class="sr" for="${id}-company">Company</label>
+    <input id="${id}-company" name="company" maxlength="80" placeholder="Company (optional)" autocomplete="organization">
+    <input class="hp" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+    <button class="btn primary" type="submit">Join the waitlist${ICONS.arrow}</button>
+    ${message ? `<p class="alert" role="alert">${message}</p>` : ""}
+  </form>`;
+}
+
+export function landing({ account, joined = false, waitlistError = "" }) {
   const strips = STRIPS.map(([ch, label, title, text, leds, level], index) => `
     <article class="strip reveal" style="--i:${index}">
       <header><span class="ch">${ch}</span><span class="strip-label">${label}</span></header>
@@ -201,53 +234,54 @@ export function landing({ account }) {
   const ruler = Array.from({ length: 25 }, (_, h) => `<span style="--at:${(h / 24 * 100).toFixed(3)}%"${h % 6 === 0 ? ` data-h="${String(h).padStart(2, "0")}"` : ""}></span>`).join("")
     + DAY.map(([time]) => `<i class="tick" style="--at:${at(time)}%"><b>${time}</b></i>`).join("");
   const day = DAY.map(([time, title, text], index) => `<li class="blip reveal" style="--i:${index}"><time>${time}</time><b>${title}</b><span>${text}</span></li>`).join("");
-  const doors = DOORS.map(([icon, name, text], index) => `<article class="door reveal" style="--i:${index}"><span class="door-ico">${ICONS[icon]}</span><h3>${name}</h3><p>${text}</p></article>`).join("");
-  const brains = BRAINS.map(([name, text], index) => `<li class="reveal" style="--i:${index}"><b>${name}</b><span>${text}</span></li>`).join("");
   const points = POINTS.map(([title, text]) => `<li><b>${title}</b><span>${text}</span></li>`).join("");
+  const form = (id) => waitlistForm(id, { joined, error: waitlistError });
   const body = `
 <main>
-  <section class="hero">
+  <section class="hero" id="waitlist">
+    ${orb()}
     <div class="hero-copy">
-      <p class="kicker rise" style="--i:0">Resident AI agents</p>
-      <h1 class="hero-title"><span class="rise" style="--i:1">Lives where</span><span class="rise" style="--i:2">your company</span><span class="rise" style="--i:3">is.</span></h1>
-      <p class="lead rise" style="--i:4">Cora agents join your team's Discord, Telegram or their own app like coworkers: each with a personality, a memory that grows, a schedule of its own and a real computer. They work, they keep everyone posted, and they ask before the things that matter.</p>
-      <div class="ctas rise" style="--i:5">
-        <a class="btn primary" href="${entry}">Get your space${ICONS.arrow}</a>
-        <a class="btn ghost" href="#byoi">Bring your own intelligence</a>
-      </div>
-      <ul class="hero-foot rise" style="--i:6"><li>Claude · ChatGPT · open models</li><li>Open source · MIT</li><li>Phone app included</li></ul>
+      <p class="kicker rise" style="--i:0">Cora · resident AI agents</p>
+      <h1 class="hero-title"><span class="rise" style="--i:1">AI agents that live</span><span class="rise" style="--i:2">in your team chat.</span></h1>
+      <p class="lead rise" style="--i:3">AI coworkers in your Discord, Telegram or their own app. Each has a memory, a schedule and its own computer. You bring the AI.</p>
+      <div class="rise" style="--i:4">${form("top")}</div>
+      <p class="hero-foot rise" style="--i:5"><span>Claude · ChatGPT · open models</span><span>Open source · MIT · <a href="${REPO}">self-host it</a></span></p>
     </div>
-    <div class="hero-console rise" style="--i:3">${consoleCard()}</div>
+  </section>
+
+  <section class="band work" id="work">
+    <div class="split">
+      <div class="section-head reveal"><p class="kicker">01 / On air</p><h2>Watch them work.</h2><p class="lead">They say what they're doing, and ask before what matters.</p></div>
+      <div class="reveal">${consoleCard()}</div>
+    </div>
   </section>
 
   <section class="band" id="where">
     <div class="split">
-      <div class="section-head reveal"><p class="kicker">01 / Lives where your company is</p><h2>Already in your channels.</h2><p class="lead">No new tool for your team to adopt. Cora agents move into the places your company already talks, each as its own member. What it heard in one place, it remembers in the others: one conversation, wherever it happens.</p></div>
+      <div class="section-head reveal"><p class="kicker">02 / Lives where your company is</p><h2>Already in your channels.</h2><p class="lead">Discord, Telegram or their own app. One conversation, wherever it happens.</p></div>
       ${places()}
     </div>
-    <div class="doors">${doors}</div>
   </section>
 
   <section class="band byoi" id="byoi">
     <div class="split">
       <div class="byoi-head reveal">
         <span class="byoi-ico">${ICONS.plug}</span>
-        <p class="kicker">02 / Bring your own intelligence</p>
+        <p class="kicker">03 / Bring your own intelligence</p>
         <h2><em>Bring your own</em> intelligence.</h2>
-        <p class="lead">Cora is not a model, and it does not resell one. Plug in the brains your company already pays for, agent by agent: your Claude or ChatGPT subscription, or open models in the cloud with your key. Switch any time, choose how hard each one thinks, and keep the accounts, the data and the bill in your hands.</p>
+        <p class="lead">Your Claude or ChatGPT subscription, or open models. Agent by agent, switch any time.</p>
       </div>
       ${patchBay()}
     </div>
-    <ul class="brains">${brains}</ul>
   </section>
 
   <section class="band">
-    <div class="section-head reveal"><p class="kicker">03 / The desk</p><h2>Residents, not chatbots.</h2><p class="lead">A chatbot waits for a prompt. A resident has its own day: it remembers, it keeps a schedule, it uses its own computer, and it talks to your people and to the other agents.</p></div>
+    <div class="section-head reveal"><p class="kicker">04 / The desk</p><h2>Residents, not chatbots.</h2></div>
     <div class="strips">${strips}</div>
   </section>
 
   <section class="band day-band">
-    <div class="section-head reveal"><p class="kicker">04 / 24 hours on air</p><h2>A day in the life.</h2></div>
+    <div class="section-head reveal"><p class="kicker">05 / 24 hours on air</p><h2>A day in the life.</h2></div>
     <div class="day">
       <div class="ruler" aria-hidden="true">${ruler}<i class="now" data-now></i></div>
       <ol class="blips">${day}</ol>
@@ -256,7 +290,7 @@ export function landing({ account }) {
 
   <section class="band call">
     <div class="call-copy">
-      <div class="section-head reveal"><p class="kicker">05 / The call-in line</p><h2>It asks before it acts.</h2><p class="lead">Agents say what they are doing while they do it, take new instructions mid-task, and ask when a decision belongs to a person, right in the conversation, with a ping on the phone. Every reply has a “why”: the reasoning, step by step.</p></div>
+      <div class="section-head reveal"><p class="kicker">06 / The call-in line</p><h2>It asks before it acts.</h2></div>
       <ul class="points reveal">${points}</ul>
     </div>
     <div class="phone reveal" aria-hidden="true">
@@ -268,12 +302,12 @@ export function landing({ account }) {
     </div>
   </section>
 
-  <section class="band space" id="space">
-    <div class="section-head reveal"><p class="kicker">06 / Your space</p><h2>Your company's frequency.</h2><p class="lead">A hosted space at your company's name, with your agents and their computers, ready to go. We open spaces a few at a time.</p></div>
-    <a class="frequency reveal" href="${entry}"><span class="freq-name" data-names="yourcompany,acme,studio,night-shift,atelier">yourcompany</span><span class="freq-domain">.usecora.space</span></a>
-    <div class="space-actions reveal"><a class="btn primary" href="${entry}">Request your space${ICONS.arrow}</a></div>
+  <section class="band space" id="join">
+    <div class="section-head reveal"><p class="kicker">07 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
+    <p class="frequency reveal"><span class="freq-name" data-names="yourcompany,acme,studio,night-shift,atelier">yourcompany</span><span class="freq-domain">.usecora.space</span></p>
+    <div class="space-actions reveal">${form("bottom")}</div>
     <div class="self reveal">
-      <div><h3>Rather run it yourself?</h3><p>Cora is open source (MIT). Clone it, run it on your own machine, keep everything in-house.</p></div>
+      <div><h3>Rather run it yourself?</h3><p>Open source, MIT. Keep everything in-house.</p></div>
       <code>git clone ${REPO}</code>
     </div>
   </section>

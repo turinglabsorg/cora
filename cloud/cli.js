@@ -10,6 +10,7 @@ const USAGE = `usage:
   cloud/cli.js space add <name> --upstream <url> [--owner <account-id>] [--name <person>] [--google <email>]... [--github <login>]...
   cloud/cli.js space list
   cloud/cli.js requests
+  cloud/cli.js waitlist
   cloud/cli.js invite <account-id> --google <email> | --github <login>
   cloud/cli.js public-key          (needs CORA_CLOUD_SEED, e.g. through hush run)`;
 
@@ -38,6 +39,8 @@ try {
     for (const space of store.spaces()) console.log(`${space.slug}\t${space.upstream}\t${space.accountId}`);
   } else if (command === "requests") {
     for (const request of store.requests()) console.log(`${request.slug}\t${request.name} <${request.email}>\t${new Date(request.createdAt).toISOString()}\t${request.note}`);
+  } else if (command === "waitlist") {
+    for (const entry of store.waitlist()) console.log(`${new Date(entry.createdAt).toISOString()}\t${entry.email}\t${entry.company}`);
   } else if (command === "invite" && sub && (values.google || values.github)) {
     if (!store.account(sub)) throw new Error(`no account ${sub}`);
     invite(sub);

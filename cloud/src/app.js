@@ -22,6 +22,7 @@ const TYPES = {
   ".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp", ".woff2": "font/woff2", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8",
 };
 const SESSION_DAYS = 30;
+const WAITLIST_PER_MINUTE = 20;
 const OAUTH_MINUTES = 10;
 const CSP = [
   "default-src 'self'",
@@ -142,6 +143,7 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
   };
 
   const providers = () => Object.fromEntries(PROVIDERS.map((provider) => [provider, oauth.enabled(provider)]));
+  const joins = [];
 
   /** The apex: landing, sign-in, the account page and the way into a space. */
   async function site(req, res, url) {
@@ -164,7 +166,27 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       return res.end("User-agent: *\nAllow: /\nDisallow: /account\nDisallow: /go/\nDisallow: /auth/\n");
     }
 
-    if (method === "GET" && path === "/") return html(res, 200, views.landing(page));
+    if (method === "GET" && path === "/") {
+      return html(res, 200, views.landing({ ...page, joined: url.searchParams.get("joined") === "1", waitlistError: url.searchParams.get("waitlist") || "" }));
+    }
+
+    if (method === "POST" && path === "/waitlist") {
+      if (req.headers.origin !== origin.origin) return html(res, 403, views.notFound(page));
+      const form = await readForm(req, 4096);
+      // A field people never see: whoever fills it is a bot, and gets the same thanks.
+      if (form.website) return redirect(res, "/?joined=1#waitlist");
+      const now = Date.now();
+      while (joins.length && now - joins[0] > 60000) joins.shift();
+      if (joins.length >= WAITLIST_PER_MINUTE) return redirect(res, "/?waitlist=busy#waitlist");
+      try {
+        store.joinWaitlist(form.email, form.company);
+      } catch {
+        return redirect(res, "/?waitlist=invalid#waitlist");
+      }
+      joins.push(now);
+      log({ type: "waitlist", company: String(form.company || "").slice(0, 80) });
+      return redirect(res, "/?joined=1#waitlist");
+    }
     if (method === "GET" && path === "/privacy") return html(res, 200, views.privacy(page));
 
     if (method === "GET" && path === "/login") {
