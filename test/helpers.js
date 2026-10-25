@@ -331,7 +331,7 @@ process.stdin.on("end", async () => {
     hermesConfig = fs.readFileSync(path.join(process.env.HERMES_HOME, "config.yaml"), "utf8");
     const fill = (value) => value.replace(/\\$\\{(\\w+)\\}/g, (_, key) => process.env[key] || "");
     const pick = (pattern) => JSON.parse(hermesConfig.match(pattern)[1]);
-    if ((argv[argv.indexOf("-t") + 1] || "").split(",").includes("mcp-cora")) {
+    if ((argv[argv.indexOf("-t") + 1] || "").split(",").includes("cora")) {
       server = {
         command: pick(/^    command: (.*)$/m), args: [pick(/^      - (.*)$/m)],
         env: { CORA_BRIDGE_URL: fill(pick(/CORA_BRIDGE_URL: (.*)$/m)), CORA_BRIDGE_TOKEN: fill(pick(/CORA_BRIDGE_TOKEN: (.*)$/m)) },

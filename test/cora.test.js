@@ -973,6 +973,7 @@ describe("talking with the agents", () => {
     const models = (await call("/api/state")).data.models.map((model) => model.id);
     assert.ok(models.includes("hermes/test-model"));
     assert.ok(!models.includes("hermes/embed"), "only models that write");
+    assert.ok(models.includes("hermes/test-model:cloud"), "Ollama Cloud models through the local Ollama");
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/test-model" } });
     t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
     const before = cli.calls().length;
@@ -981,7 +982,7 @@ describe("talking with the agents", () => {
     await waitFor(() => posts("Olga").some((text) => text.startsWith("Routine controllate con Hermes.")), { what: "Olga's answer through Hermes" });
     await quiet();
     const run = cli.calls().slice(before).find((item) => item.flavor === "hermes");
-    assert.equal(run.argv[run.argv.indexOf("-t") + 1], "mcp-cora", "only Cora's tools: no terminal, files or computer use");
+    assert.equal(run.argv[run.argv.indexOf("-t") + 1], "cora", "only Cora's tools: no terminal, files or computer use");
     assert.ok(run.argv.includes("--ignore-rules"));
     assert.equal(run.argv[run.argv.indexOf("-m") + 1], "test-model");
     assert.match(run.argv[run.argv.indexOf("-z") + 1], /^Sei Olga\./, "Cora's system prompt leads the prompt");

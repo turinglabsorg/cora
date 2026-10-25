@@ -114,6 +114,15 @@ export class LLM {
           models.push({ id: `hermes/${model.name}`, provider: "hermes", label: model.name, tools: true, vision: false, thinking: false });
         }
       } catch {}
+      // Ollama Cloud models reach Hermes through the local Ollama under their cloud name: name:cloud, name:tag-cloud.
+      const seen = new Set(models.filter((model) => model.provider === "hermes").map((model) => model.id));
+      for (const model of models.filter((item) => item.provider === "ollama")) {
+        const name = splitModel(model.id).name;
+        const cloud = name.includes(":") ? `${name}-cloud` : `${name}:cloud`;
+        if (/^argo-/i.test(name) || seen.has(`hermes/${cloud}`)) continue;
+        seen.add(`hermes/${cloud}`);
+        models.push({ id: `hermes/${cloud}`, provider: "hermes", label: `${cloud}`, tools: model.tools, vision: false, thinking: false });
+      }
     }
     for (const [provider, router] of Object.entries(this.routers)) {
       if (!available[provider]) continue;

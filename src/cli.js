@@ -155,7 +155,7 @@ export function hermesConfig({ baseUrl, model }) {
 }
 
 /**
- * One agent turn on Hermes Agent, one-shot: only Cora's tools (the mcp-cora
+ * One agent turn on Hermes Agent, one-shot: only Cora's tools (the cora
  * toolset: no terminal, files or computer use on the host), no personal rules
  * or memory of the owner's Hermes, the answer on stdout.
  */
@@ -170,7 +170,8 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   const settled = (text) => text.replace(/^\s+default(_model)?:.*$/gm, "");
   if (settled(current) !== settled(config)) writeFileSync(configFile, config, { mode: 0o600 });
   const tools = mcp && toolNames.length;
-  const args = ["-z", `${system}\n\n---\n\n${prompt}`, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "mcp-cora" : "clarify"];
+  // In one-shot mode an MCP server's toolset is named after the server, and -t is the complete list.
+  const args = ["-z", `${system}\n\n---\n\n${prompt}`, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify"];
   const env = { HERMES_HOME: home, ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
   const out = await run(bin, args, { cwd: workDir, timeoutMs, env });
   if (out.timedOut) throw new Error(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`);
