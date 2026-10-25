@@ -424,7 +424,7 @@ function requestCards() {
     h("div", { class: "requests-head" }, icon("ask"), h("b", {}, requests.length === 1 ? "Una richiesta per te" : tr("{count} richieste per te", { count: requests.length }))),
     requests.map((request) => {
       const agent = S.data.agents.find((item) => item.id === request.agentId);
-      return h("a", { class: "request-card", href: `#/agent/${request.agentId}/chat` },
+      return h("a", { class: "request-card", href: request.channelId === "web" ? "#/" : `#/agent/${request.agentId}/chat` },
         agent ? avatar(agent, "sm") : null,
         h("span", { class: "grow" }, h("b", {}, raw(agent?.name || "?")), h("span", { class: "row-text" }, raw(request.content))),
         h("span", { class: "row-meta" }, fmtTime(request.at)),
@@ -1091,6 +1091,29 @@ function chatFile(file) {
   return h("a", { href: url, class: "chat-file doc" }, icon("file"), raw(file.name));
 }
 
+/** Message text with its web links clickable; nothing else in it is interpreted. */
+function linkedText(text) {
+  const pattern = /\[([^\]\n]{1,200})\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s<>"]+/g;
+  const count = (value, char) => value.split(char).length - 1;
+  const parts = [];
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    let url = match[2] || match[0];
+    let end = match.index + match[0].length;
+    if (!match[2]) {
+      // Sentence punctuation after a bare link is not part of it; a closing bracket only when unbalanced.
+      while (/[.,;:!?'»…]$/.test(url) || (url.endsWith(")") && count(url, ")") > count(url, "("))) {
+        url = url.slice(0, -1);
+        end -= 1;
+      }
+    }
+    parts.push(raw(text.slice(last, match.index)), h("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, raw(match[1] || url)));
+    last = end;
+  }
+  parts.push(raw(text.slice(last)));
+  return parts;
+}
+
 function chatMessage(item, answer) {
   const agent = item.agentId ? S.data.agents.find((entry) => entry.id === item.agentId) : null;
   const mine = item.kind === "owner";
@@ -1106,7 +1129,7 @@ function chatMessage(item, answer) {
         h("time", {}, fmtTime(item.at)),
         item.traceId && agent ? h("a", { class: "why", href: `#/agent/${agent.id}/ragionamento/${item.traceId}`, title: "Ragionamento" }, icon("bulb"), "perché") : null),
       item.request ? h("div", { class: "request-tag" }, icon("ask"), "Richiesta") : null,
-      text ? h("div", { class: "text" }, raw(text)) : null,
+      text ? h("div", { class: "text" }, linkedText(text)) : null,
       item.file ? chatFile(item.file) : null,
       choices));
 }

@@ -72,7 +72,7 @@ export function startCora(overrides = {}) {
   const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push });
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, emit: live, filesDir, notifier: push, watching: () => web?.watching() });
-  brain.ask = (agent, request) => orchestrator.askOwner(agent, request);
+  brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
   const scheduler = new Scheduler({ store, orchestrator, brain, timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
   web = createWeb({ config: { ...cfg, filesDir }, store, discord, telegram, channels, boxes, llm, orchestrator, brain, bots, tgBots, activity, storeSecret, traces, push });

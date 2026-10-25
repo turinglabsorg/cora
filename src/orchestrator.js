@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isTelegramChannel, telegramChannel, telegramChatId } from "./channels.js";
-import { isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
+import { SALOTTO, isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { userName } from "./telegram.js";
 
 const MAX_PARALLEL_AGENTS = 4;
@@ -261,8 +261,12 @@ export class Orchestrator {
   address(state, item) {
     const named = this.agentsFor(state.id).filter((agent) => mentions(item.content, agent.name)).map((agent) => agent.id);
     const now = Date.now();
+    // An open question to the owner: their next message is the answer, even without the agent's name.
+    const asked = item.kind === "owner" && state.request && !item.others?.length ? state.request : null;
+    if (item.kind === "owner" && !item.others?.length) state.request = null;
     if (named.length) state.focus = { ids: named, at: now };
     else if (item.others?.length) state.focus = null;
+    else if (asked && this.store.agent(asked.agentId)?.enabled) state.focus = { ids: [asked.agentId], at: now };
     else if (state.focus && now - state.focus.at < FOCUS_MS) state.focus.at = now;
     else state.focus = null;
     item.addressed = state.focus ? [...state.focus.ids] : [];
@@ -460,7 +464,7 @@ export class Orchestrator {
         return this.postAs(agent, state, text);
       };
       const ack = isForced ? setTimeout(() => {
-        if (spoke) return;
+        if (spoke || (state.request?.agentId === agent.id && state.request.at >= started)) return;
         say(this.ackText || ACK_TEXT[this.store.settings.language] || ACK_TEXT.it).catch(() => {});
         this.log({ type: "say", agentId: agent.id, channelId: state.id, text: "(conferma automatica: sta ancora lavorando)" });
       }, this.ackAfterMs) : null;
@@ -542,16 +546,18 @@ export class Orchestrator {
     if (shared) this.discord.typing(channelId);
   }
 
-  async postAs(agent, state, text, file, traceId) {
-    if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId);
+  async postAs(agent, state, text, file, traceId, { ping = "", request } = {}) {
+    if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request });
     const chatId = telegramChatId(state.id);
+    // The ping (a Discord mention) goes out with the message but stays out of the archive and the agents' transcripts.
+    const content = ping && text ? `${ping} ${text}` : text || "";
     let sent;
-    if (chatId) sent = await this.postTelegram(agent, chatId, text, file);
+    if (chatId) sent = await this.postTelegram(agent, chatId, content, file);
     else {
       const own = this.bots?.client(agent.id);
       sent = own
-        ? await own.say(state.id, { content: text || "", file })
-        : await this.discord.post(state.id, { username: agent.name, avatarUrl: agent.avatarUrl, content: text || "", file });
+        ? await own.say(state.id, { content, file })
+        : await this.discord.post(state.id, { username: agent.name, avatarUrl: agent.avatarUrl, content, file });
     }
     const last = sent[sent.length - 1];
     if (text) {
@@ -564,6 +570,7 @@ export class Orchestrator {
         agentId: agent.id,
         content: file ? `${text} [file: ${file.name}]` : text,
         traceId,
+        request,
       };
       this.push(state, item);
       this.store.appendArchive(state.id, item);
@@ -588,7 +595,7 @@ export class Orchestrator {
   }
 
   /** A message in a panel room: archived like a Discord one and pushed live to the panel. */
-  postWeb(agent, state, text, file, traceId) {
+  postWeb(agent, state, text, file, traceId, { request } = {}) {
     const item = {
       id: `web_${randomBytes(8).toString("hex")}`,
       at: Date.now(),
@@ -599,6 +606,7 @@ export class Orchestrator {
       content: file ? `${text || ""} [file: ${file.name}]`.trim() : text,
       traceId,
       file: file ? this.saveWebFile(file) : undefined,
+      request,
     };
     this.push(state, item);
     this.store.appendArchive(state.id, item);
@@ -614,11 +622,14 @@ export class Orchestrator {
   }
 
   /**
-   * An agent asking the owner something: the question lands in their private
-   * room (with quick answers) and on the owner's phone. The answer, typed or
-   * tapped, is an ordinary owner message there, so the agent gets a turn with it.
+   * An agent asking the owner something. The question lands where the
+   * conversation is: in a Discord or Telegram channel it mentions the owner and
+   * lists the answers as text (the app on their phone does the notifying); in a
+   * panel room it shows quick answers and goes out as a push. Without a
+   * conversation it goes to the agent's private room. The owner's next message
+   * there, typed or tapped, is the answer and goes to this agent.
    */
-  async askOwner(agent, { question, choices = [] }) {
+  async askOwner(agent, { question, choices = [] }, { channelId } = {}) {
     const text = String(question || "").trim().slice(0, 1500);
     if (!text) throw new Error("empty question");
     const now = Date.now();
@@ -627,22 +638,29 @@ export class Orchestrator {
     if (recent.length >= 30) throw new Error("daily limit of requests reached");
     recent.push(now);
     this.requestsByAgent.set(agent.id, recent);
-    const state = this.state(privateRoom(agent.id));
+    const here = channelId && (isWebRoom(channelId) || this.channels?.isActive(channelId));
+    const state = this.state(here ? channelId : privateRoom(agent.id));
     await this.ensureHistory(state);
     const clean = [...new Set((Array.isArray(choices) ? choices : []).map((choice) => String(choice).trim().slice(0, 40)).filter(Boolean))].slice(0, 4);
-    const item = {
-      id: `web_${randomBytes(8).toString("hex")}`, at: now, authorId: null, authorName: agent.name, kind: "agent", agentId: agent.id,
-      content: text, request: { choices: clean },
-    };
-    this.push(state, item);
-    this.store.appendArchive(state.id, item);
-    this.emit({ type: "web-message", room: state.id, item });
-    this.emit({ type: "request", agentId: agent.id });
-    this.log({ type: "request", agentId: agent.id, channelId: state.id, text: text.slice(0, 300) });
-    if (this.notifier?.enabled) {
-      this.notifier.notify({ title: this.store.settings.language === "en" ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: text, url: `/#/agent/${agent.id}/chat`, tag: `request-${agent.id}` }).catch(() => {});
+    const request = { choices: clean };
+    const english = this.store.settings.language === "en";
+    let item;
+    if (isWebRoom(state.id)) {
+      [item] = this.postWeb(agent, state, text, undefined, undefined, { request });
+      this.emit({ type: "request", agentId: agent.id });
+      if (this.notifier?.enabled) {
+        const url = state.id === SALOTTO ? "/#/" : `/#/agent/${agent.id}/chat`;
+        this.notifier.notify({ title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: text, url, tag: `request-${agent.id}` }).catch(() => {});
+      }
+    } else {
+      const owner = !telegramChatId(state.id) && this.store.settings.ownerIds[0];
+      const body = clean.length ? `${text}\n${english ? "Answers" : "Risposte"}: ${clean.join(" · ")}` : text;
+      await this.postAs(agent, state, body, undefined, undefined, { ping: owner ? `<@${owner}>` : "", request });
+      item = state.history.findLast((entry) => entry.agentId === agent.id && entry.request === request);
     }
-    return item;
+    state.request = { agentId: agent.id, at: Date.now() };
+    this.log({ type: "request", agentId: agent.id, channelId: state.id, text: text.slice(0, 300) });
+    return { id: item?.id, where: this.channels?.label(state.id) || state.id, here: Boolean(here) };
   }
 
   saveWebFile(file) {

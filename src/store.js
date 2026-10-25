@@ -516,9 +516,21 @@ export class Store {
     return this.stmt("SELECT * FROM (SELECT * FROM messages WHERE channel_id = ? ORDER BY at DESC LIMIT ?) ORDER BY at").all(String(channelId), limit).map(messageRow);
   }
 
-  /** The newest request in each private room that the owner has not answered yet. */
+  /** The channels where an agent spoke most recently, each with its latest messages since `since`. */
+  recentElsewhere(agentId, channelIds, since, { channels = 2, perChannel = 8 } = {}) {
+    if (!channelIds.length) return [];
+    const placeholders = channelIds.map(() => "?").join(",");
+    const rows = this.db.prepare(`SELECT channel_id, MAX(at) AS last FROM messages WHERE agent_id = ? AND at > ? AND channel_id IN (${placeholders})
+      GROUP BY channel_id ORDER BY last DESC LIMIT ?`).all(String(agentId), since, ...channelIds.map(String), channels);
+    return rows.map((row) => ({
+      channelId: row.channel_id,
+      messages: this.stmt("SELECT * FROM (SELECT * FROM messages WHERE channel_id = ? AND at > ? ORDER BY at DESC LIMIT ?) ORDER BY at").all(row.channel_id, since, perChannel).map(messageRow),
+    })).reverse();
+  }
+
+  /** The newest request in each panel room that the owner has not answered yet (requests on Discord or Telegram are answered there). */
   pendingRequests() {
-    return this.stmt(`SELECT m.* FROM messages m WHERE m.channel_id LIKE 'web-%' AND m.kind = 'agent' AND m.meta LIKE '%"request"%'
+    return this.stmt(`SELECT m.* FROM messages m WHERE (m.channel_id = 'web' OR m.channel_id LIKE 'web-%') AND m.kind = 'agent' AND m.meta LIKE '%"request"%'
       AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.channel_id = m.channel_id AND o.kind = 'owner' AND o.at > m.at)
       ORDER BY m.at DESC LIMIT 20`).all().map(messageRow);
   }

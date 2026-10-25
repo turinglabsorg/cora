@@ -753,6 +753,47 @@ describe("talking with the agents", () => {
     await quiet();
   });
 
+  test("what the owner says on the panel reaches the agent on Discord too: one conversation, two places", async () => {
+    replies.set("Olga", () => ({ content: "Segnato." }));
+    const room = `web-${olga.id}`;
+    await call(`/api/rooms/${room}/messages`, { method: "POST", body: { text: "Il codice del cancello è 4721" } });
+    await waitFor(async () => (await call(`/api/rooms/${room}/messages`)).data.messages.some((item) => item.content === "Segnato."), { what: "Olga on the panel" });
+    await quiet();
+    let prompt = "";
+    replies.set("Olga", (body) => {
+      prompt = lastUserText(body);
+      return { content: "È 4721." };
+    });
+    discord.say({ content: "Olga, qual è il codice del cancello?" });
+    await waitFor(() => posts("Olga").includes("È 4721."), { what: "Olga on Discord" });
+    assert.match(prompt, /<altrove dove="chat privata con Olga \(pannello\)">[\s\S]*Il codice del cancello è 4721[\s\S]*<\/altrove>/);
+    await quiet();
+  });
+
+  test("a question to the owner lands where they are talking, mentions them, and their next message goes to the agent who asked", async () => {
+    replies.set("Pino", () => ({ content: "Ci sono anch'io!" }));
+    replies.set("Olga", (body) => {
+      if (body.messages[body.messages.length - 1].role === "tool") return { content: "PASS" };
+      if (/routine "Pulizia"/.test(lastUserText(body))) return { tool_calls: [{ function: { name: "ask_owner", arguments: { question: "Cancello i file vecchi?", choices: ["Sì", "No"] } } }] };
+      return { content: lastChatLine(body).endsWith(": Sì") ? "Perfetto, cancello." : "Ok." };
+    });
+    const before = posts("Olga").length;
+    const routine = (await call(`/api/agents/${olga.id}/routines`, { method: "POST", body: { name: "Pulizia", schedule: "0 3 * * *", channelId: CHANNEL, prompt: "Controlla lo spazio su disco" } })).data;
+    await call(`/api/routines/${routine.id}/run`, { method: "POST" });
+    await waitFor(() => posts("Olga").length > before, { what: "the question on Discord" });
+    await quiet();
+    assert.deepEqual(posts("Olga").slice(before), [`<@${OWNER}> Cancello i file vecchi?\nRisposte: Sì · No`], "asked once, in the channel, pinging the owner");
+    const archived = app.store.recentMessages(CHANNEL, 5).find((item) => item.request);
+    assert.deepEqual([archived.content, archived.request.choices], ["Cancello i file vecchi?\nRisposte: Sì · No", ["Sì", "No"]]);
+    assert.ok(!(await call("/api/state")).data.requests.some((item) => item.agentId === olga.id), "a Discord question is not left pending on the panel");
+
+    discord.say({ content: "Sì" });
+    await waitFor(() => posts("Olga").includes("Perfetto, cancello."), { what: "Olga acting on the answer" });
+    await quiet();
+    assert.ok(!posts("Pino").includes("Ci sono anch'io!"), "the answer goes to the agent who asked, not to the chattiest one");
+    await call(`/api/routines/${routine.id}`, { method: "DELETE" });
+  });
+
   test("after a restart the first message is answered, messages written while down are picked up, and a bot can call an agent by name", async () => {
     replies.set("Olga", (body) => ({ content: `Ok: ${lastChatLine(body).split(": ").pop()}` }));
     replies.set("Pino", () => ({ content: "Pino qui." }));

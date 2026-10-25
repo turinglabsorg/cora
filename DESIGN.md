@@ -70,7 +70,7 @@ The panel behaves like an installed app (web manifest, apple-touch-icon, no pinc
 - **Desktop frame** (`.monitor-frame`): the noVNC iframe inside a bezel with the agent's name plate.
 
 - **Chat** (`.panel.chat`): dark log well; owner bubbles amber on the right, agent bubbles with the agent's color as a left rule, a "ragionamento ›" link on each reply. While an agent works, a dashed amber card with its pulsing avatar shows the live step.
-- **Requests** (`.requests`): an amber strip on top of the Salotto and the Banco listing the agents' unanswered questions; in the chat a request bubble has an amber «Richiesta» tag and its quick answers as amber buttons, which disappear once the owner answers.
+- **Requests** (`.requests`): an amber strip on top of the Salotto and the Banco listing the agents' unanswered questions; in the chat a request bubble has an amber «Richiesta» tag and its quick answers as amber buttons, which disappear once the owner answers. Web links in chat messages (bare URLs and `[label](url)`) are clickable, amber with a faint amber underline that lights up on hover, opening in a new tab.
 - **Trace** (`.steps-log`): one row per step with its offset; thinking with an amber rule in italics, written text with a neutral rule, tool calls in blue as expandable `details` with arguments and result in mono wells. The answer sits in an amber box; context and system prompt are collapsed at the bottom.
 
 ## Motion

@@ -10,6 +10,8 @@ import { nextRuns } from "./scheduler.js";
 const CHAT_STEPS = 14;
 const ROUTINE_STEPS = 30;
 const CHAT_DEADLINE_MS = 6 * 60 * 1000;
+/** How far back an agent remembers, word for word, what it said in its other places. */
+const ELSEWHERE_MS = 12 * 3600 * 1000;
 const ROUTINE_DEADLINE_MS = 15 * 60 * 1000;
 const SLEEP_MESSAGES = 400;
 
@@ -151,6 +153,7 @@ export class Brain {
       "- Se per rispondere devi lavorare (strumenti, ricerche, più passaggi), prima scrivi subito due parole con say (es. «Ci guardo») e poi lavora; alla fine scrivi il risultato.",
       "- Mentre lavori, i nuovi messaggi della chat ti arrivano insieme ai risultati degli strumenti: leggili e, se cambiano la richiesta, cambia piano.",
       "- Non ripetere quello che ha già detto qualcun altro.",
+      "- Il proprietario ti parla da più posti (le chat, il pannello): per te è un'unica conversazione. Ricordi quello che vi siete detti altrove e rispondi dove ti scrive.",
       "- I messaggi con ★ vengono dal tuo proprietario: è lui che comanda, anche su dove vive il cora.",
     ].join("\n"));
     return sections.join("\n\n");
@@ -165,6 +168,18 @@ export class Brain {
     return parts.join("\n\n");
   }
 
+  /** The agent's latest exchanges in its other places (Discord, Telegram, the panel): one conversation, many surfaces. */
+  elsewhere(agent, channelId) {
+    const ids = this.channelIdsFor(agent).filter((id) => id !== channelId);
+    const places = this.store.recentElsewhere(agent.id, ids, Date.now() - ELSEWHERE_MS, { channels: 2, perChannel: 8 });
+    if (!places.length) return "";
+    const blocks = places.map(({ channelId: id, messages }) => {
+      const short = messages.map((item) => ({ ...item, content: item.content.length > 600 ? `${item.content.slice(0, 600)}…` : item.content }));
+      return `<altrove dove="${this.channelLabel(id)}">\n${formatTranscript(short, agent, this.timezone)}\n</altrove>`;
+    });
+    return `Le tue ultime conversazioni in altri posti. È la stessa conversazione con le stesse persone, solo su un'altra superficie: quello che vi siete detti lì vale anche qui.\n${blocks.join("\n")}`;
+  }
+
   async chatTurn({ agent, history, channel, forced, computer, postFile, say, inbox }) {
     const transcript = formatTranscript(history, agent, this.timezone);
     const last = history[history.length - 1];
@@ -174,16 +189,18 @@ export class Brain {
       : "Decidi se intervenire. Se non hai niente da aggiungere rispondi solo PASS.";
     const user = [
       this.memoryContext(agent, query),
+      this.elsewhere(agent, channel.id),
       `Ultimi messaggi ${channel.where || `in #${channel.name}`}${channel.note ? ` (${channel.note})` : ""}:\n<chat>\n${transcript}\n</chat>`,
       instruction,
-    ].join("\n\n");
+    ].filter(Boolean).join("\n\n");
     const turn = (prompt) => this.loop({
       agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox,
       maxSteps: CHAT_STEPS, deadline: Date.now() + CHAT_DEADLINE_MS,
       images: (last?.images || []).slice(0, 2),
     });
     const result = await turn(user);
-    if (result.text || !forced) return result;
+    // A question to the owner is already an answer: it is in the chat.
+    if (result.text || !forced || result.asked) return result;
     // Called by name and still passing: ask once more, plainly.
     return turn(`${user}\n\nHai risposto PASS, ma ${last?.authorName || "qualcuno"} ti ha chiamato per nome: scrivi una risposta vera, anche breve.`);
   }
@@ -192,6 +209,7 @@ export class Brain {
     const transcript = formatTranscript(history.slice(-12), agent, this.timezone);
     const user = [
       this.memoryContext(agent, `${routine.name} ${routine.prompt}`),
+      this.elsewhere(agent, channel.id),
       `È il momento della tua routine "${routine.name}" (pianificazione: ${routine.schedule}).`,
       `Compito:\n${routine.prompt}`,
       `Usa il tuo computer se serve. Alla fine scrivi il messaggio da pubblicare ${channel.where || `in #${channel.name}`}: è quello che vedrà il proprietario. Se non c'è niente da segnalare rispondi solo PASS.`,
@@ -215,9 +233,15 @@ export class Brain {
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools });
     const prompt = `Ora: ${formatNow(this.timezone)}.\n\n${user}`;
     const trace = this.startTrace({ agentId: agent.id, kind: mode, channelId: channel.id, model, system, prompt });
+    let asked = false;
     const ctx = {
       agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push,
-      ask: this.ask ? (request) => this.ask(agent, request) : null,
+      // The question goes where this conversation is, not to a separate place.
+      ask: this.ask ? async (request) => {
+        const posted = await this.ask(agent, request, { channelId: channel.id });
+        asked = true;
+        return posted;
+      } : null,
       say,
       checkSchedule: (expr) => {
         try {
@@ -253,7 +277,7 @@ export class Brain {
     const done = (raw, steps) => {
       const text = cleanReply(raw, agent);
       trace.finish({ status: text ? "done" : "pass", output: raw });
-      return { text, steps, traceId: trace.id };
+      return { text, steps, traceId: trace.id, asked };
     };
 
     try {

@@ -140,7 +140,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "ask_owner",
-    description: "Ask the owner something that needs their answer or decision: permission, a choice, missing information. It reaches their phone and your private chat with them; the answer comes back to you there later, so do not wait for it: say you asked and stop. Write the question so it makes sense on its own, and offer up to 4 short choices when they fit.",
+    description: "Ask the owner something that needs their answer or decision: permission, a choice, missing information. The question is posted in this conversation, addressed to the owner (it reaches their phone), and their answer comes back to you here later: do not wait for it and do not repeat the question, just stop. Write the question so it makes sense on its own, and offer up to 4 short choices when they fit.",
     parameters: {
       type: "object",
       properties: {
@@ -327,8 +327,12 @@ export async function executeTool(call, ctx) {
       }
       case "ask_owner": {
         if (!ctx.ask) return { text: "error: requests are not available" };
-        const item = await ctx.ask({ question: args.question, choices: args.choices });
-        return { text: `asked the owner in your private chat (request ${item.id}); their answer will reach you there` };
+        const posted = await ctx.ask({ question: args.question, choices: args.choices });
+        return {
+          text: posted.here
+            ? `question posted in this chat (${posted.where}), addressed to the owner; their next message here is the answer and comes back to you. Do not repeat it: end your turn (answer PASS unless you have something else to add)`
+            : `question posted in ${posted.where}, addressed to the owner; their answer will reach you there`,
+        };
       }
       case "send_file": {
         if (!postFile || !channelId) return { text: "error: there is no channel to post to right now" };
