@@ -7,13 +7,40 @@ import { MEMORY_TOOLS, TOOL_DEFS, executeTool, summarizeArgs } from "./tools.js"
 import { NO_TRACE } from "./traces.js";
 import { nextRuns } from "./scheduler.js";
 
+/** A conversation without the computer is short; a task runs until it is done, within these bounds. */
 const CHAT_STEPS = 14;
-const ROUTINE_STEPS = 30;
 const CHAT_DEADLINE_MS = 6 * 60 * 1000;
+// A task can run for hours: what stops it is finishing, a loop, or this far-off bound.
+const TASK_STEPS = 5000;
+const TASK_DEADLINE_MS = 8 * 3600 * 1000;
+const ROUTINE_STEPS = 5000;
+/** Past this much conversation the agent writes itself a summary and carries on from it. */
+const COMPACT_CHARS = 180_000;
+/** An agent that has said nothing for this long is reminded to send an update. */
+const UPDATE_EVERY_MS = 15 * 60 * 1000;
+/** Times the Cora harness sends an agent back to work when it stops before the task is done. */
+const NUDGES = 4;
+/** The same tool call with the same arguments this many times in a short window is a loop. */
+const LOOP_REPEATS = 4;
+const LOOP_WINDOW = 10;
 /** How far back an agent remembers, word for word, what it said in its other places. */
 const ELSEWHERE_MS = 12 * 3600 * 1000;
-const ROUTINE_DEADLINE_MS = 15 * 60 * 1000;
+const ROUTINE_DEADLINE_MS = 8 * 3600 * 1000;
 const SLEEP_MESSAGES = 400;
+
+/**
+ * A final message that is not one: out of steps, asking whether to go on, or
+ * announcing what it is about to do instead of doing it.
+ */
+const UNFINISHED = [
+  /\b(finit[oi]|esaurit[oi]) (i |il )?(passi|tempo)\b|passi a disposizione|\bout of (steps|time)\b|\bran out of\b/i,
+  /\b(vuoi|volete) che (continu|proced|vada avanti|finisca|completi)|\b(continuo|procedo|vado avanti|proseguo)\s*\?|\b(shall|should) i (continue|proceed|go on|keep going)\b|\bwant me to (continue|proceed|go on|finish|keep going)\b/i,
+  /\b(sto|stiamo) (scaricando|caricando|lavorando|applicando|facendo|preparando|verificando|controllando|installando|sistemando|aggiornando|generando|creando)\b|\b(adesso|ora|subito) (faccio|passo|carico|applico|scarico|sistemo|procedo|verifico|controllo|installo|creo|genero)\b|\bripart[oi]\b|\bti (aggiorno|scrivo|avviso) (qui )?(appena|quando|non appena)\b|\bi'?ll (now |next |then )?(do|start|apply|upload|deploy|fix|check|download|update|finish|create|build)\b|\bi'?m (now )?(downloading|uploading|applying|deploying|fixing|checking|building|working on)\b|\bnext,? i'?ll\b|\bstarting (now|the)\b/i,
+];
+
+export function unfinished(text) {
+  return UNFINISHED.some((pattern) => pattern.test(String(text || "")));
+}
 
 export function formatTime(ms, timezone) {
   return new Intl.DateTimeFormat("it-IT", { timeZone: timezone, hour: "2-digit", minute: "2-digit" }).format(new Date(ms));
@@ -109,7 +136,7 @@ export class Brain {
     return this.channels ? this.channels.label(channelId) : `#${channelId}`;
   }
 
-  systemPrompt(agent, { place, computer }) {
+  systemPrompt(agent, { place, computer, withoutComputer = false }) {
     const others = this.store.agents()
       .filter((other) => other.id !== agent.id && other.enabled)
       .map((other) => `- ${other.name}: ${other.personality.split("\n")[0].slice(0, 140) || "(nessuna descrizione)"}`)
@@ -132,6 +159,9 @@ export class Brain {
     if (personal) {
       sections.push(`## Istruzioni personali del proprietario\nIl tuo proprietario vuole che tu segua anche le sue istruzioni personali per gli agenti. Valgono per te quando sono pertinenti a quello che fai qui.\nSono già tutte qui sotto: quando dicono di leggere o rileggere ~/.agents/AGENTS.md (o altri file del proprietario) consideralo fatto. Quei percorsi sono sui computer del proprietario, non sul tuo: non cercarli e non segnalare che mancano.\n\n<istruzioni_personali>\n${personal}\n</istruzioni_personali>`);
     }
+    if (withoutComputer) {
+      sections.push("## Il tuo computer\nIn questa conversazione non hai il tuo computer: lo usi solo per chi ha il permesso del proprietario. Se ti chiedono un lavoro che lo richiede, non restare in silenzio: chiedi il via libera al proprietario con ask_owner, oppure spiega che serve il suo permesso.");
+    }
     if (computer) {
       sections.push([
         "## Il tuo computer",
@@ -139,6 +169,7 @@ export class Brain {
         "Usa gli strumenti quando ti chiedono di fare qualcosa davvero (cercare, controllare, scrivere file, aprire siti): agisci invece di descrivere cosa faresti.",
         "Sul tuo computer sei amministratore: con shell puoi installare, scrivere file e avviare servizi. Se l'ambiente in cui giri ti dice di essere in sola lettura, vale solo per quello, non per il tuo computer né per i tuoi strumenti.",
         "Le tue routine (compiti a orari fissi) le gestisci tu con list_routines, set_routine e delete_routine: quando il proprietario te ne chiede una, creala o sistemala subito.",
+        "Quando ti danno un compito, lavori finché non è finito e verificato, anche per ore: non ti fermi a metà, non chiedi se continuare e non annunci cosa farai, lo fai. Ti fermi solo quando è finito, quando serve una decisione del proprietario (ask_owner) o quando sei bloccato davvero: allora spieghi cosa ti blocca.",
         "Per navigare preferisci shell con curl quando basta il testo; usa open_url + screenshot + computer quando serve il browser vero.",
         "Non inventare risultati: riporta solo quello che hai visto o fatto.",
       ].join("\n"));
@@ -195,14 +226,14 @@ export class Brain {
     ].filter(Boolean).join("\n\n");
     const turn = (prompt) => this.loop({
       agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox,
-      maxSteps: CHAT_STEPS, deadline: Date.now() + CHAT_DEADLINE_MS,
-      images: (last?.images || []).slice(0, 2),
+      maxSteps: computer ? TASK_STEPS : CHAT_STEPS, deadline: Date.now() + (computer ? TASK_DEADLINE_MS : CHAT_DEADLINE_MS),
+      images: (last?.images || []).slice(0, 2), task: Boolean(computer),
     });
     const result = await turn(user);
     // A question to the owner is already an answer: it is in the chat.
     if (result.text || !forced || result.asked) return result;
     // Called by name and still passing: ask once more, plainly.
-    return turn(`${user}\n\nHai risposto PASS, ma ${last?.authorName || "qualcuno"} ti ha chiamato per nome: scrivi una risposta vera, anche breve.`);
+    return turn(`${user}\n\nHai risposto PASS, ma ${last?.authorName || "qualcuno"} ti ha chiamato per nome: scrivi una risposta vera, anche breve. Se ti chiede qualcosa che non puoi fare da solo, diglielo, oppure chiedi il via libera al proprietario con ask_owner.`);
   }
 
   async routineTurn({ agent, routine, history, channel, postFile, say, inbox }) {
@@ -217,7 +248,28 @@ export class Brain {
     ].filter(Boolean).join("\n\n");
     return this.loop({
       agent, mode: "routine", channel, user, computer: agent.tools, postFile, say, inbox,
-      maxSteps: ROUTINE_STEPS, deadline: Date.now() + ROUTINE_DEADLINE_MS, images: [],
+      maxSteps: ROUTINE_STEPS, deadline: Date.now() + ROUTINE_DEADLINE_MS, images: [], task: Boolean(agent.tools),
+    });
+  }
+
+  /**
+   * A task cut short by a restart of Cora: the same instructions, the last
+   * steps the agent had taken, and the request to check where things stand
+   * and finish.
+   */
+  async resumeTurn({ agent, trace, channel, postFile, say, inbox }) {
+    const steps = (trace.steps || []).filter((step) => step.type === "tool" || step.type === "text").slice(-20).map((step) => step.type === "tool"
+      ? `- ${step.name} ${JSON.stringify(step.args || {}).slice(0, 300)} → ${String(step.result || "").replace(/\s+/g, " ").slice(0, 300)}`
+      : `- (scritto) ${String(step.text || "").replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
+    const original = String(trace.prompt || "").replace(/^Ora: [^\n]*\n\n/, "");
+    const user = [
+      original,
+      `[Cora] Cora si è riavviata mentre lavoravi a questo compito (iniziato ${formatWhen(Date.parse(trace.startedAt), this.timezone)}). Gli ultimi passi che avevi fatto:\n${steps || "- (nessuno registrato)"}`,
+      "Riprendi da dove eri: controlla com'è la situazione adesso (qualcosa potrebbe essere già fatto), poi porta a termine il compito e scrivi il risultato.",
+    ].join("\n\n");
+    return this.loop({
+      agent, mode: trace.kind === "routine" ? "routine" : "chat", channel, user, computer: agent.tools, postFile, say, inbox,
+      maxSteps: TASK_STEPS, deadline: Date.now() + TASK_DEADLINE_MS, images: [], task: true,
     });
   }
 
@@ -225,15 +277,24 @@ export class Brain {
     return this.traces ? this.traces.start(fields) : NO_TRACE;
   }
 
-  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images }) {
+  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false }) {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
     const tools = caps.tools ? TOOL_DEFS.filter((tool) => MEMORY_TOOLS.has(tool.name) || computer) : [];
     const place = channel.place || "";
-    const system = this.systemPrompt(agent, { place, computer: computer && caps.tools });
+    const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
     const prompt = `Ora: ${formatNow(this.timezone)}.\n\n${user}`;
     const trace = this.startTrace({ agentId: agent.id, kind: mode, channelId: channel.id, model, system, prompt });
     let asked = false;
+    // What the Cora harness watches while an agent works: real work done, and calls repeated without progress.
+    let worked = 0;
+    let looping = false;
+    const recent = [];
+    let lastUpdate = Date.now();
+    const sayTracked = say ? async (text) => {
+      lastUpdate = Date.now();
+      return say(text);
+    } : null;
     const ctx = {
       agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push,
       // The question goes where this conversation is, not to a separate place.
@@ -242,7 +303,7 @@ export class Brain {
         asked = true;
         return posted;
       } : null,
-      say,
+      say: sayTracked,
       checkSchedule: (expr) => {
         try {
           return nextRuns(expr, this.timezone, 1).length ? "" : "it never runs in the next month";
@@ -257,7 +318,18 @@ export class Brain {
     const runTool = async (name, args) => {
       const started = Date.now();
       const allowed = tools.some((tool) => tool.name === name);
-      const output = allowed ? await executeTool({ name, args }, ctx) : { text: `error: the tool ${name} is not available now` };
+      const signature = `${name}:${JSON.stringify(args || {})}`;
+      recent.push(signature);
+      if (recent.length > LOOP_WINDOW) recent.shift();
+      const repeated = !MEMORY_TOOLS.has(name) && recent.filter((item) => item === signature).length >= LOOP_REPEATS;
+      if (repeated && !looping) {
+        looping = true;
+        trace.add({ type: "note", text: `Ripete ${name} con gli stessi argomenti: lo fermo.` });
+      }
+      if (allowed && !MEMORY_TOOLS.has(name)) worked += 1;
+      const output = !allowed ? { text: `error: the tool ${name} is not available now` }
+        : repeated ? { text: "error: you have already done exactly this several times with the same result. Stop repeating it: write what you have so far and what is blocking you." }
+        : await executeTool({ name, args }, ctx);
       const ok = !output.text.startsWith("error:");
       this.log?.({
         type: "tool", agentId: agent.id, channelId: channel.id, tool: name,
@@ -269,23 +341,59 @@ export class Brain {
     };
     // New chat messages reach a working agent with its next tool result (or its next step on Ollama).
     const news = () => {
+      const parts = [];
       const fresh = inbox?.() || [];
-      if (!fresh.length) return "";
-      trace.add({ type: "note", text: `Nuovi messaggi mentre lavora:\n${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}` });
-      return `[Nel frattempo nella chat]\n${formatTranscript(fresh, agent, this.timezone)}\n(Se cambiano quello che ti chiedono, adatta il piano.)`;
+      if (fresh.length) {
+        trace.add({ type: "note", text: `Nuovi messaggi mentre lavora:\n${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}` });
+        parts.push(`[Nel frattempo nella chat]\n${formatTranscript(fresh, agent, this.timezone)}\n(Se cambiano quello che ti chiedono, adatta il piano.)`);
+      }
+      if (task && sayTracked && Date.now() - lastUpdate > UPDATE_EVERY_MS) {
+        lastUpdate = Date.now();
+        parts.push("[Cora] Non scrivi in chat da un po': manda con say due righe su a che punto sei, poi continua.");
+      }
+      return parts.join("\n\n");
     };
     const done = (raw, steps) => {
       const text = cleanReply(raw, agent);
       trace.finish({ status: text ? "done" : "pass", output: raw });
       return { text, steps, traceId: trace.id, asked };
     };
+    /**
+     * The Cora harness at the end of a task turn: is it really finished? An
+     * agent that did real work and then stops with nothing, with a question
+     * about going on, or with what it is about to do, is sent back to work.
+     * Once it looks finished it is asked once to confirm. Never while looping
+     * or after asking the owner something.
+     */
+    let nudges = 0;
+    let confirmed = false;
+    const verdict = (raw) => {
+      if (!task || !worked || looping || asked || nudges >= NUDGES || Date.now() > deadline - 20000) return null;
+      const text = cleanReply(raw, agent);
+      if (!text) return { kind: "silent", prompt: "[Cora] Hai lavorato ma non hai scritto niente. Se il lavoro è finito, scrivi il risultato per chi aspetta; se manca qualcosa, continua adesso con gli strumenti." };
+      if (unfinished(text)) return { kind: "unfinished", text, prompt: "[Cora] Non hai finito: quello che hai scritto è un aggiornamento, non il risultato. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare: fallo. Quando è tutto fatto e verificato, scrivi il risultato." };
+      if (!confirmed) return { kind: "confirm", text, prompt: "[Cora] Prima di chiudere: il compito che ti hanno dato è finito davvero e verificato? Se manca qualcosa, continua adesso con gli strumenti. Se è tutto fatto, rispondi solo DONE." };
+      return null;
+    };
+    const isDone = (raw) => /^\W*done\W*$/i.test(String(raw || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim());
 
     try {
       if (this.llm.isAgentic(model)) {
-        const result = await this.llm.runAgent({
-          model, system, prompt, tools, execute: runTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
+        const run = (input) => this.llm.runAgent({
+          model, system, prompt: input, tools, execute: runTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
         });
-        return done(result.text, 0);
+        let result = await run(prompt);
+        let final = result.text;
+        for (let next = verdict(final); next; next = verdict(result.text)) {
+          nudges += 1;
+          if (next.kind === "confirm") confirmed = true;
+          if (next.kind === "unfinished" && sayTracked) await sayTracked(next.text).catch(() => {});
+          trace.add({ type: "note", text: `Cora harness: ${next.kind === "confirm" ? "chiedo conferma che sia finito" : "lo rimando al lavoro"}.` });
+          result = await run(`${prompt}\n\n[Il tuo turno precedente si è chiuso con: «${cleanReply(result.text, agent) || "(niente)"}»]\n\n${next.prompt}`);
+          if (next.kind === "confirm" && isDone(result.text)) break;
+          final = result.text;
+        }
+        return done(final, 0);
       }
 
       const messages = [{ role: "system", content: system }, { role: "user", content: prompt, images }];
@@ -294,14 +402,46 @@ export class Brain {
         for (const text of [result.thinking, ...inline]) if (String(text || "").trim()) trace.add({ type: "thinking", text });
       };
       let steps = 0;
+      let pendingFinal = null;
+      const size = () => messages.reduce((total, message) => total + String(message.content || "").length + JSON.stringify(message.toolCalls || "").length, 0);
       for (; steps < maxSteps && Date.now() < deadline; steps += 1) {
         if (steps > 0) {
           const steer = news();
           if (steer) messages.push({ role: "user", content: steer });
         }
+        if (task && size() > COMPACT_CHARS) {
+          // Hours of work outgrow any context: the agent writes down where it is and carries on from that.
+          const summary = await this.llm.chat({
+            model, effort: "low", tools: [],
+            messages: [...messages, { role: "user", content: "[Cora] Il lavoro è lungo e la conversazione sta diventando troppo grande. Scrivi un riassunto per te stesso: l'obiettivo, cosa hai già fatto (comandi, file, link e risultati importanti), cosa manca e i prossimi passi. Solo il riassunto." }],
+          });
+          const notes = String(summary.text || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim().slice(0, 12000);
+          trace.add({ type: "note", text: `Cora harness: conversazione riassunta per continuare.\n${notes}` });
+          messages.splice(0, messages.length,
+            { role: "system", content: system },
+            { role: "user", content: prompt },
+            { role: "user", content: `[Cora] Stai lavorando a questo compito da un po'. Il tuo riassunto di dove sei arrivato:\n${notes}\n\nContinua da qui.` });
+        }
         const result = await this.llm.chat({ model, messages, tools, effort: effortOf(agent) });
         think(result);
-        if (!result.toolCalls.length) return done(result.text, steps);
+        if (!result.toolCalls.length) {
+          if (pendingFinal !== null && isDone(result.text)) return done(pendingFinal, steps);
+          const next = verdict(result.text);
+          if (!next) return done(result.text, steps);
+          nudges += 1;
+          if (next.kind === "confirm") {
+            confirmed = true;
+            pendingFinal = result.text;
+          } else {
+            pendingFinal = null;
+            if (next.kind === "unfinished" && sayTracked) await sayTracked(next.text).catch(() => {});
+          }
+          trace.add({ type: "note", text: `Cora harness: ${next.kind === "confirm" ? "chiedo conferma che sia finito" : "lo rimando al lavoro"}.` });
+          messages.push({ role: "assistant", content: result.text || "" });
+          messages.push({ role: "user", content: next.prompt });
+          continue;
+        }
+        pendingFinal = null;
         const said = String(result.text || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
         if (said) trace.add({ type: "text", text: said });
         messages.push({ role: "assistant", content: result.text, toolCalls: result.toolCalls });
@@ -310,8 +450,9 @@ export class Brain {
           messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: output.text, image: output.image });
         }
       }
-      trace.add({ type: "note", text: "Finiti il tempo o i passi a disposizione: chiedo il messaggio finale." });
-      messages.push({ role: "user", content: "Hai finito il tempo o i passi a disposizione: scrivi ora il messaggio finale con quello che hai ottenuto." });
+      if (pendingFinal !== null) return done(pendingFinal, steps);
+      trace.add({ type: "note", text: "Lavora da troppo: chiedo il messaggio finale." });
+      messages.push({ role: "user", content: "[Cora] Ci stai lavorando da molto: fermati qui e scrivi cosa hai fatto, cosa manca e cosa ti blocca." });
       const final = await this.llm.chat({ model, messages, tools: [], effort: "low" });
       think(final);
       return done(final.text, steps);

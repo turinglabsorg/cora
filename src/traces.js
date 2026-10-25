@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 
+/** A task can run for hours: the trace keeps the latest steps, and saves them as it goes. */
 const MAX_STEPS = 300;
+const SAVE_EVERY_MS = 30000;
 const MAX_TEXT = 20000;
 const MAX_ARGS = 8000;
 
@@ -51,17 +53,28 @@ class Trace {
     this.steps = [];
     this.output = "";
     this.error = "";
+    this.dropped = 0;
+    this.savedAt = Date.now();
     Object.assign(this, fields);
   }
 
   add(step) {
-    if (this.status !== "running" || this.steps.length >= MAX_STEPS) return;
+    if (this.status !== "running") return;
     const entry = { at: Date.now(), ...step };
     if (entry.text !== undefined) entry.text = clip(entry.text);
     if (entry.result !== undefined) entry.result = clip(entry.result);
     if (entry.args !== undefined) entry.args = clipArgs(entry.args);
     this.steps.push(entry);
+    if (this.steps.length > MAX_STEPS) {
+      this.steps.shift();
+      this.dropped += 1;
+    }
     this.owner.emit({ type: "trace", event: "step", traceId: this.id, agentId: this.agentId, channelId: this.channelId, step: entry });
+    // Saved along the way, so a restart in the middle of a long task knows where it was.
+    if (Date.now() - this.savedAt > SAVE_EVERY_MS) {
+      this.savedAt = Date.now();
+      try { this.owner.store.saveTrace(this); } catch {}
+    }
   }
 
   finish({ status, output = "", error = "" }) {
@@ -78,7 +91,7 @@ class Trace {
   summary() {
     return {
       id: this.id, agentId: this.agentId, kind: this.kind, channelId: this.channelId, model: this.model,
-      startedAt: this.startedAt, endedAt: this.endedAt, status: this.status, stepCount: this.steps.length,
+      startedAt: this.startedAt, endedAt: this.endedAt, status: this.status, stepCount: this.steps.length + this.dropped,
       tools: [...new Set(this.steps.filter((step) => step.type === "tool").map((step) => step.name))],
       output: this.output.slice(0, 240), error: this.error,
     };

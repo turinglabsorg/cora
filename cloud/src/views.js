@@ -65,6 +65,14 @@ const POINTS = [
   ["Why", "Every reply shows its reasoning."],
 ];
 
+/** The Cora harness: our own agent loop, the flagship. */
+const HARNESS = [
+  ["Works until done", "For hours if it takes hours. No “shall I continue?”."],
+  ["Steer it mid-task", "New messages reach it while it works."],
+  ["Survives restarts", "It picks the task up where it was."],
+  ["Stops when looping", "Same action, same result: it stops and tells you why."],
+];
+
 const LOGIN_ERRORS = {
   expired: "The sign-in took too long or started somewhere else. Try again.",
   denied: "Sign-in was cancelled.",
@@ -275,13 +283,20 @@ export function landing({ account, joined = false, waitlistError = "" }) {
     </div>
   </section>
 
+  <section class="band harness" id="harness">
+    <div class="split">
+      <div class="section-head reveal"><p class="kicker">04 / The Cora harness</p><h2>Built to finish the job.</h2><p class="lead">Our own agent loop, for any model. Or run your agents on Claude Code or Codex with your subscriptions.</p></div>
+      <ol class="harness-loop reveal" aria-label="The Cora harness">${HARNESS.map(([title, text], index) => `<li style="--i:${index}"><span class="loop-led"></span><b>${title}</b><span>${text}</span></li>`).join("")}</ol>
+    </div>
+  </section>
+
   <section class="band">
-    <div class="section-head reveal"><p class="kicker">04 / The desk</p><h2>Residents, not chatbots.</h2></div>
+    <div class="section-head reveal"><p class="kicker">05 / The desk</p><h2>Residents, not chatbots.</h2></div>
     <div class="strips">${strips}</div>
   </section>
 
   <section class="band day-band">
-    <div class="section-head reveal"><p class="kicker">05 / 24 hours on air</p><h2>A day in the life.</h2></div>
+    <div class="section-head reveal"><p class="kicker">06 / 24 hours on air</p><h2>A day in the life.</h2></div>
     <div class="day">
       <div class="ruler" aria-hidden="true">${ruler}<i class="now" data-now></i></div>
       <ol class="blips">${day}</ol>
@@ -290,7 +305,7 @@ export function landing({ account, joined = false, waitlistError = "" }) {
 
   <section class="band call">
     <div class="call-copy">
-      <div class="section-head reveal"><p class="kicker">06 / The call-in line</p><h2>It asks before it acts.</h2></div>
+      <div class="section-head reveal"><p class="kicker">07 / The call-in line</p><h2>It asks before it acts.</h2></div>
       <ul class="points reveal">${points}</ul>
     </div>
     <div class="phone reveal" aria-hidden="true">
@@ -303,7 +318,7 @@ export function landing({ account, joined = false, waitlistError = "" }) {
   </section>
 
   <section class="band space" id="join">
-    <div class="section-head reveal"><p class="kicker">07 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
+    <div class="section-head reveal"><p class="kicker">08 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
     <p class="frequency reveal"><span class="freq-name" data-names="yourcompany,acme,studio,night-shift,atelier">yourcompany</span><span class="freq-domain">.usecora.space</span></p>
     <div class="space-actions reveal">${form("bottom")}</div>
     <div class="self reveal">

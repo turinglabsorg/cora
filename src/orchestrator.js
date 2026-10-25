@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isTelegramChannel, telegramChannel, telegramChatId } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
+import { MEMORY_TOOLS } from "./tools.js";
 import { userName } from "./telegram.js";
 
 const MAX_PARALLEL_AGENTS = 4;
@@ -13,6 +14,8 @@ const FOCUS_MS = 5 * 60 * 1000;
 const CATCH_UP_MS = 15 * 60 * 1000;
 // Someone called an agent and it has said nothing yet: it acknowledges on its own after this long.
 const ACK_AFTER_MS = 15000;
+/** How long a round holds its channel before the agents still working carry on in the background. */
+const RELEASE_AFTER_MS = 20000;
 const ACK_TEXT = { it: "Ricevuto, ci lavoro: ti aggiorno qui.", en: "Got it, working on it: I'll keep you posted here." };
 const IMAGE_LIMIT_BYTES = 5 * 1024 * 1024;
 
@@ -69,6 +72,8 @@ export class Orchestrator {
     this.states = new Map();
     this.routineRuns = new Set();
     this.ackAfterMs = ACK_AFTER_MS;
+    // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
+    this.releaseAfterMs = RELEASE_AFTER_MS;
     this.ackText = null;
   }
 
@@ -387,9 +392,9 @@ export class Orchestrator {
     }, delay);
   }
 
-  /** True when no channel has a round running or scheduled. */
+  /** True when no channel has a round running or scheduled, and no agent is still working. */
   quiet() {
-    return [...this.states.values()].every((state) => !state.running && !state.nextRoundAt && !state.pending);
+    return [...this.states.values()].every((state) => !state.running && !state.nextRoundAt && !state.pending && !state.working?.size);
   }
 
   async runRound(state) {
@@ -399,9 +404,9 @@ export class Orchestrator {
     }
     state.running = true;
     try {
-      await this.round(state);
-    } catch (error) {
-      this.log({ type: "error", channelId: state.id, text: `round: ${error.message}` });
+      // Agents on a long task keep working after this; the channel answers the others meanwhile.
+      const round = this.round(state).catch((error) => this.log({ type: "error", channelId: state.id, text: `round: ${error.message}` }));
+      await Promise.race([round, sleep(this.releaseAfterMs)]);
     } finally {
       state.running = false;
       if (state.pending) {
@@ -439,7 +444,9 @@ export class Orchestrator {
   async round(state) {
     const last = state.history[state.history.length - 1];
     if (!last) return;
-    const agents = this.agentsFor(state.id);
+    state.working ??= new Set();
+    // An agent still on a task gets new messages through its inbox, never a second turn.
+    const agents = this.agentsFor(state.id).filter((agent) => !state.working.has(agent.id));
     if (!agents.length) return;
     const { forced, optional } = this.pickCandidates(state, last, agents);
     if (!forced.length && !optional.length) return;
@@ -456,6 +463,14 @@ export class Orchestrator {
     const typing = setInterval(typeNow, 8000);
     typeNow();
     const turn = async (agent, isForced) => {
+      state.working.add(agent.id);
+      try {
+        return await work(agent, isForced);
+      } finally {
+        state.working.delete(agent.id);
+      }
+    };
+    const work = async (agent, isForced) => {
       const computer = agent.tools && state.ownerOrigin;
       const started = Date.now();
       let spoke = false;
@@ -474,7 +489,8 @@ export class Orchestrator {
           agent, history: snapshot, channel, forced: isForced, computer,
           postFile: (file, caption) => this.postAs(agent, state, caption, file),
           say,
-          inbox: this.inbox(state, snapshot),
+          // Everything already in the channel when the turn starts is old news, not just what the prompt shows.
+          inbox: this.inbox(state, state.history.slice()),
         });
       } catch (error) {
         this.log({ type: "error", agentId: agent.id, channelId: state.id, text: error.message });
@@ -508,6 +524,51 @@ export class Orchestrator {
       clearInterval(typing);
     }
     if (posted && state.budget > 0 && state.generation === generation) this.schedule(state, 2500 + Math.random() * 4000);
+  }
+
+  /**
+   * After a restart: the long tasks that the restart cut short are picked up
+   * again, in the same place, by the same agents, if they started in the last
+   * hours and used the agent's computer.
+   */
+  resumeInterrupted({ withinMs = 8 * 3600 * 1000 } = {}) {
+    const ids = this.store.interruptedAtStart || [];
+    this.store.interruptedAtStart = [];
+    const resumed = [];
+    for (const id of ids) {
+      const trace = this.store.trace(id);
+      if (!trace || !["chat", "routine"].includes(trace.kind) || !trace.channelId) continue;
+      if (Date.now() - Date.parse(trace.startedAt) > withinMs) continue;
+      if (!trace.tools.some((name) => !MEMORY_TOOLS.has(name))) continue;
+      const agent = this.store.agent(trace.agentId);
+      if (!agent?.enabled || !agent.tools) continue;
+      if (!isWebRoom(trace.channelId) && !this.channels?.isActive(trace.channelId)) continue;
+      resumed.push(trace.id);
+      this.resumeTask(agent, trace).catch((error) => this.log({ type: "error", agentId: agent.id, channelId: trace.channelId, text: `ripresa: ${error.message}` }));
+    }
+    return resumed;
+  }
+
+  async resumeTask(agent, trace) {
+    const state = this.state(trace.channelId);
+    await this.ensureHistory(state);
+    state.working ??= new Set();
+    if (state.working.has(agent.id)) return;
+    state.working.add(agent.id);
+    this.log({ type: "settings", agentId: agent.id, channelId: state.id, text: "riprende il lavoro interrotto dal riavvio" });
+    try {
+      const english = this.store.settings.language === "en";
+      await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.");
+      const result = await this.brain.resumeTurn({
+        agent, trace, channel: this.channelMeta(state.id),
+        postFile: (file, caption) => this.postAs(agent, state, caption, file),
+        say: (text) => this.postAs(agent, state, text),
+        inbox: this.inbox(state, state.history),
+      });
+      if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId);
+    } finally {
+      state.working.delete(agent.id);
+    }
   }
 
   /** Messages people wrote in the channel after a turn started, each handed out once: how a busy agent gets steered. */

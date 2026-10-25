@@ -281,6 +281,8 @@ export class Store {
     try { chmodSync(this.path, 0o600); } catch {}
     this.db.exec(SCHEMA);
     try { this.db.exec("ALTER TABLE messages ADD COLUMN meta TEXT"); } catch {}
+    // Turns cut short by the restart: the long tasks among them are picked up again (Orchestrator.resumeInterrupted).
+    this.interruptedAtStart = this.db.prepare("SELECT id FROM traces WHERE status = 'running'").all().map((row) => row.id);
     this.db.exec("UPDATE traces SET status = 'interrupted' WHERE status = 'running'");
     this.q = {};
     const settingsRow = this.db.prepare("SELECT value FROM settings WHERE key = 'settings'").get();
@@ -618,7 +620,7 @@ export class Store {
     this.stmt(`INSERT OR REPLACE INTO traces(id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, system_hash, prompt, steps, output, error)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       trace.id, trace.agentId, trace.kind, trace.channelId || null, trace.model || "", trace.startedAt, trace.endedAt || null, trace.status,
-      trace.steps.length, tools, systemHash, trace.prompt || "", JSON.stringify(trace.steps), trace.output || "", trace.error || "",
+      trace.steps.length + (trace.dropped || 0), tools, systemHash, trace.prompt || "", JSON.stringify(trace.steps), trace.output || "", trace.error || "",
     );
     if (trace.status !== "running" && Math.random() < 0.05) this.pruneTraces(trace.agentId);
   }

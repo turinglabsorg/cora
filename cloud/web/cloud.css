@@ -303,6 +303,16 @@ html:not(.js) .cable { stroke-dashoffset: 0; }
 @keyframes ring { 0% { opacity: 0.75; transform: scale(1); } 100% { opacity: 0; transform: scale(2.25); } }
 @keyframes plug { to { stroke-dashoffset: 0; } }
 
+/* the Cora harness: the loop that finishes the job */
+.harness .section-head h2 { max-width: 16ch; }
+.harness-loop { list-style: none; margin: 0; padding: 0; position: relative; display: grid; gap: 10px; counter-reset: loop; }
+.harness-loop::before { content: ""; position: absolute; left: 22px; top: 18px; bottom: 18px; width: 2px; background: linear-gradient(180deg, var(--amber), rgba(242, 169, 59, 0.15)); border-radius: 2px; }
+.harness-loop li { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 18px; padding: 16px 18px 16px 14px; border-radius: 16px; border: 1px solid var(--line); background: var(--panel); }
+.harness-loop li > span:last-child { grid-column: 2; color: var(--soft); font-size: 15px; }
+.harness-loop b { grid-column: 2; font: 600 20px/1.2 var(--display); letter-spacing: -0.02em; }
+.loop-led { grid-row: span 2; align-self: center; position: relative; z-index: 1; width: 18px; height: 18px; border-radius: 50%; background: var(--well); border: 2px solid var(--amber); box-shadow: 0 0 12px var(--amber-glow); }
+.loop-led::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--amber); animation: pulse 2.4s ease-in-out infinite; animation-delay: calc(var(--i, 0) * 0.6s); }
+
 /* the desk: channel strips */
 .strips { display: grid; grid-auto-flow: column; grid-auto-columns: 82%; gap: 14px; overflow-x: auto; scroll-snap-type: x mandatory; margin: 0 calc(-1 * var(--gutter)); padding: 4px var(--gutter) 18px; scrollbar-width: none; }
 .strips::-webkit-scrollbar { display: none; }

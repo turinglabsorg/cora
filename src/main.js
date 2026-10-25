@@ -82,10 +82,22 @@ export function startCora(overrides = {}) {
   });
   discord.on("status", (status) => web.broadcast({ type: "discord", state: status.state, error: status.error }));
   discord.on("warning", (text) => activity({ type: "warning", text }));
+  // Long tasks a restart cut short start again once: when Discord is up, or after a while if Cora lives elsewhere.
+  let resumed = false;
+  const resume = () => {
+    if (resumed) return;
+    resumed = true;
+    const ids = orchestrator.resumeInterrupted();
+    if (ids.length) activity({ type: "settings", text: `riprendo ${ids.length} lavori interrotti dal riavvio` });
+  };
+  const resumeFallback = setTimeout(resume, 20000);
   discord.on("ready", () => {
     activity({ type: "discord", text: `connesso come ${discord.user?.username}` });
     // Give the gateway a moment to deliver the servers' channels, then answer what was missed.
-    setTimeout(() => orchestrator.catchUp().catch((error) => activity({ type: "error", text: `recupero messaggi: ${error.message}` })), 3000);
+    setTimeout(() => {
+      orchestrator.catchUp().catch((error) => activity({ type: "error", text: `recupero messaggi: ${error.message}` }));
+      resume();
+    }, 3000);
   });
   telegram.on("message", (message) => {
     orchestrator.onTelegramMessage(message).catch((error) => activity({ type: "error", text: `telegram: ${error.message}` }));
@@ -123,6 +135,7 @@ export function startCora(overrides = {}) {
 
   let botTimer = null;
   const stop = async () => {
+    clearTimeout(resumeFallback);
     clearInterval(botTimer);
     scheduler.stop();
     discord.stop();

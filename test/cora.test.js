@@ -796,6 +796,127 @@ describe("talking with the agents", () => {
     await call(`/api/routines/${routine.id}`, { method: "DELETE" });
   });
 
+  test("Cora harness: a task goes past the old 14 steps, an agent that announces work is sent back to it, and the end is confirmed before posting", async () => {
+    let calls = 0;
+    const nudges = [];
+    replies.set("Olga", (body) => {
+      calls += 1;
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "user" && String(last.content).startsWith("[Cora]")) nudges.push(String(last.content).split(":")[0] + ":" + String(last.content).split(":")[1]);
+      if (calls <= 20) return { tool_calls: [{ function: { name: "list_routines", arguments: { pass: calls } } }] };
+      if (calls === 21) return { content: "Sto preparando il resoconto, ti aggiorno appena è pronto." };
+      if (calls === 22) return { tool_calls: [{ function: { name: "list_routines", arguments: { pass: calls } } }] };
+      if (calls === 23) return { content: "Fatto: 22 controlli, tutto in ordine." };
+      return { content: "DONE" };
+    });
+    discord.say({ content: "Olga, controlla le routine finché non è tutto a posto" });
+    await waitFor(() => posts("Olga").includes("Fatto: 22 controlli, tutto in ordine."), { what: "the finished task", timeout: 20000 });
+    await quiet();
+    const said = posts("Olga");
+    assert.ok(said.indexOf("Sto preparando il resoconto, ti aggiorno appena è pronto.") < said.indexOf("Fatto: 22 controlli, tutto in ordine."), "the announcement reached the chat as an update");
+    assert.ok(!said.includes("DONE"));
+    assert.deepEqual(nudges, ["[Cora] Non hai finito: quello che hai scritto è un aggiornamento, non il risultato. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare", "[Cora] Prima di chiudere: il compito che ti hanno dato è finito davvero e verificato? Se manca qualcosa, continua adesso con gli strumenti. Se è tutto fatto, rispondi solo DONE."]);
+    const [trace] = (await call(`/api/agents/${olga.id}/traces`)).data;
+    assert.ok(trace.stepCount > 22, `worked through ${trace.stepCount} steps`);
+  });
+
+  test("Cora harness: an agent that works and says nothing is asked for the result, and one that repeats itself is stopped", async () => {
+    let calls = 0;
+    replies.set("Olga", (body) => {
+      calls += 1;
+      const last = body.messages[body.messages.length - 1];
+      if (calls === 1) return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
+      if (calls === 2) return { content: "" };
+      if (/non hai scritto niente/.test(String(last.content))) return { content: "Nessuna routine da sistemare." };
+      return { content: "DONE" };
+    });
+    discord.say({ content: "Olga, guarda le routine" });
+    await waitFor(() => posts("Olga").includes("Nessuna routine da sistemare."), { what: "the result after the nudge" });
+    await quiet();
+
+    let looped = "";
+    replies.set("Olga", (body) => {
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "tool" && /already done exactly this/.test(String(last.content))) {
+        looped = String(last.content);
+        return { content: "Mi fermo: la lista delle routine non cambia, mi serve un'indicazione." };
+      }
+      return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
+    });
+    discord.say({ content: "Olga, controlla di nuovo le routine" });
+    await waitFor(() => posts("Olga").includes("Mi fermo: la lista delle routine non cambia, mi serve un'indicazione."), { what: "the agent stopped in a loop" });
+    assert.match(looped, /Stop repeating it/);
+    await quiet();
+  });
+
+  test("Cora harness: a long task frees the channel for the others, still gets new messages, and picks up again after a restart", async () => {
+    app.orchestrator.releaseAfterMs = 300;
+    let open;
+    const gate = new Promise((resolve) => { open = resolve; });
+    let steered = "";
+    let calls = 0;
+    replies.set("Olga", async (body) => {
+      calls += 1;
+      const last = body.messages[body.messages.length - 1];
+      if (calls === 1) {
+        await gate;
+        return { tool_calls: [{ function: { name: "list_routines", arguments: { step: 1 } } }] };
+      }
+      if (last.role === "tool" && /Nel frattempo nella chat/.test(String(last.content))) steered = String(last.content);
+      if (calls === 2) return { content: "Lavoro lungo finito, con la nota sulla cucina." };
+      return { content: "DONE" };
+    });
+    replies.set("Pino", () => ({ content: "Ci sono io." }));
+    discord.say({ content: "Olga, fai il lavoro lungo" });
+    await waitFor(() => calls === 1, { what: "Olga starting her task" });
+    await sleep(500);
+    discord.say({ content: "Pino, ci sei?" });
+    await waitFor(() => posts("Pino").includes("Ci sono io."), { what: "Pino answering while Olga works" });
+    assert.ok(!posts("Olga").includes("Lavoro lungo finito, con la nota sulla cucina."), "Olga is still on her task");
+    discord.say({ content: "Olga, aggiungi anche la cucina" });
+    await sleep(300);
+    open();
+    await waitFor(() => posts("Olga").includes("Lavoro lungo finito, con la nota sulla cucina."), { what: "Olga's long task" });
+    assert.match(steered, /aggiungi anche la cucina/);
+    await quiet();
+    app.orchestrator.releaseAfterMs = 20000;
+
+    // A task the restart cut short: the trace was still running when Cora went down.
+    const cut = {
+      id: "tr_cut_by_restart", agentId: olga.id, kind: "chat", channelId: CHANNEL, model: "ollama/test-model", startedAt: new Date(Date.now() - 600000).toISOString(),
+      endedAt: null, status: "running", prompt: "Ora: ieri.\n\nRifai l'inventario delle routine", system: "", output: "", error: "", dropped: 0,
+      steps: [{ at: Date.now() - 500000, type: "tool", name: "list_routines", args: { page: 1 }, result: "Nessuna routine.", ok: true }],
+    };
+    app.store.saveTrace(cut);
+    app.store.interruptedAtStart = [cut.id];
+    let resumePrompt = "";
+    replies.set("Olga", (body) => {
+      const first = body.messages.find((message) => message.role === "user");
+      if (!resumePrompt) resumePrompt = String(first.content);
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "user" && !String(last.content).startsWith("[Cora]")) return { tool_calls: [{ function: { name: "list_routines", arguments: { page: 2 } } }] };
+      if (last.role === "tool") return { content: "Inventario ripreso e finito." };
+      return { content: "DONE" };
+    });
+    assert.deepEqual(app.orchestrator.resumeInterrupted(), [cut.id]);
+    await waitFor(() => posts("Olga").includes("Inventario ripreso e finito."), { what: "the resumed task" });
+    assert.ok(posts("Olga").includes("Cora si è riavviata mentre lavoravo: riprendo da dove ero."));
+    assert.match(resumePrompt, /Rifai l'inventario delle routine[\s\S]*Cora si è riavviata[\s\S]*list_routines \{"page":1\} → Nessuna routine\./);
+    await quiet();
+  });
+
+  test("an agent without its computer is told to ask the owner instead of passing when someone else wants work done", async () => {
+    let system = "";
+    replies.set("Olga", (body) => {
+      system = String(body.messages[0].content);
+      return { content: "Serve il via libera di Sam: glielo chiedo." };
+    });
+    discord.say({ content: "Olga, mi sistemi il sito?", author: STRANGER, username: "Ospite" });
+    await waitFor(() => posts("Olga").includes("Serve il via libera di Sam: glielo chiedo."), { what: "Olga answering a guest" });
+    assert.match(system, /non hai il tuo computer[\s\S]*ask_owner/);
+    await quiet();
+  });
+
   test("after a restart the first message is answered, messages written while down are picked up, and a bot can call an agent by name", async () => {
     replies.set("Olga", (body) => ({ content: `Ok: ${lastChatLine(body).split(": ").pop()}` }));
     replies.set("Pino", () => ({ content: "Pino qui." }));

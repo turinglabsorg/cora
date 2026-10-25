@@ -79,6 +79,17 @@ Environment: `PORT` (default 4370), `CORA_LISTEN_HOST` (default 127.0.0.1), `COR
 
 `deploy/macos.sh` deploys to a Mac over SSH (`CORA_DEPLOY_HOST=user@host`) as the LaunchAgent in `deploy/org.turinglabs.cora.plist`; put the panel behind your own HTTPS tunnel or reverse proxy.
 
+## The Cora harness
+
+Agents on `ollama/` run on Cora's own agent loop, the Cora harness; agents on Claude Code or Codex get the same checks around their CLI.
+
+- A task (a turn where the agent has its computer, or a routine) runs until it is done, for hours if needed: no fixed number of steps per turn.
+- An agent that stops with nothing, with "shall I continue?", or with what it is about to do instead of doing it is sent back to work; its announcement still reaches the chat as an update. A finished agent confirms once before its result is posted.
+- The same tool call with the same arguments over and over is a loop: the call is refused and the agent writes what blocks it.
+- New messages reach a working agent with its next tool result; the channel stays open to the other agents meanwhile.
+- Long conversations are summarised by the agent and carried on; a silent agent is reminded to send an update every 15 minutes.
+- A task cut short by a restart of Cora is picked up again where it was.
+
 ## Hosted: usecora.space
 
 `cloud/` is the hosted side: a small service (Node, no dependencies, SQLite in `~/.cora-cloud`) for a domain where each space is one Cora.
