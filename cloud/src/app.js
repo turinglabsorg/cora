@@ -1,4 +1,4 @@
-import { createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import http from "node:http";
 import { dirname, extname, join, normalize } from "node:path";
@@ -85,7 +85,8 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
   const SESSION = secure ? "__Host-cora" : "cora_cloud";
   const STATE = secure ? "__Host-cora_oauth" : "cora_oauth";
   const spaceOrigin = (slug) => `${origin.protocol}//${slug}.${origin.host}`;
-  views.configure({ origin: origin.origin });
+  const version = createHash("sha256").update(readFileSync(join(ASSETS, "cloud.css"))).update(readFileSync(join(ASSETS, "cloud.js"))).digest("hex").slice(0, 10);
+  views.configure({ origin: origin.origin, version });
   const policy = CSP.replace("script-src 'self'", `script-src 'self' ${origin.origin}`).replace("style-src 'self'", `style-src 'self' ${origin.origin}`);
 
   const cookie = (name, value, { maxAge, sameSite = "Lax" }) =>

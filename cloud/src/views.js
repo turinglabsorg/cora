@@ -5,9 +5,12 @@
 const REPO = "https://github.com/turinglabsorg/cora";
 /** The cloud's own address: pages shown on a space's name still load from here. */
 let BASE = "";
+/** Changes with the CSS and JS, so a deploy is never hidden behind the browser's cache. */
+let VERSION = "";
 
-export function configure({ origin }) {
+export function configure({ origin, version = "" }) {
   BASE = String(origin || "").replace(/\/$/, "");
+  VERSION = version ? `?v=${version}` : "";
 }
 
 export function esc(value) {
@@ -111,8 +114,8 @@ function layout({ title = TITLE, description = DESCRIPTION, body, page = "", acc
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap">
-<link rel="stylesheet" href="${BASE}/assets/cloud.css">
-<script src="${BASE}/assets/cloud.js"></script>
+<link rel="stylesheet" href="${BASE}/assets/cloud.css${VERSION}">
+<script src="${BASE}/assets/cloud.js${VERSION}"></script>
 </head>
 <body class="${page}">
 <header class="top">

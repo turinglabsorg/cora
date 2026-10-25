@@ -75,12 +75,10 @@ The panel behaves like an installed app (web manifest, apple-touch-icon, no pinc
 
 ## usecora.space (the cloud's pages, `cloud/`)
 
-The desk at night, made premium. English only. Server-rendered, no build; tokens in `cloud/web/cloud.css`.
+The radio desk at night: the same details as the panel (teletype on perforated paper, channel strips with fader and LEDs, ON AIR lamp, frequency dial, mono capitals for small labels), on near-pure black. English only. Server-rendered, no build; tokens in `cloud/web/cloud.css`, linked with `?v=<hash>` so a deploy is never hidden by the cache.
 
-- **Color:** near-pure black (`--bg #050505`, panels `#0f0f0f`/`#171717`, hairlines `#232323`), neutral greys for text (`#f5f5f3`, `#c9c9c5`, `#8f8f8a`), never brown; the yellow-amber `#f2a93b` is the one accent (primary buttons are solid amber with black text), red only for the ON AIR lamp and the owner's dot.
-- **Type:** Outfit 600 for headings, sentence case with tight tracking (−0.035 to −0.05em); Manrope for text; DM Mono for labels and the transcript. Rounded, no condensed capitals.
-- **Shape:** pills for buttons and chips, 18–26px radii on cards.
-
+- **Color:** near-pure black (`--bg #050505`, panels `#0f0f0f`/`#171717`, hairlines `#232323`), neutral greys for text (`#f5f5f3`, `#c9c9c5`, `#8f8f8a`), never brown; the amber `#f2a93b` is the one accent; the teletype keeps its cream paper with black perforations.
+- **Type:** Outfit 600 for headings (sentence case, tight tracking; the hero's second line is an outline drawn as a thick stroke under a fill the color of the page, so glyph overlaps never show), Manrope for text, DM Mono for labels (capitals with letter-spacing) and the teletype.
 - **Landing:** the hero headline "Lives where your company is" in Big Shoulders Display 900 (second line outlined, last word amber with a glow), beside a broadcast console: ON AIR lamp, clock, a paper teletype that replays one exchange (routine, request with Yes/Not yet, answer) and a frequency dial with the agents as stations. Then: where it lives (one thread moving across Discord, Telegram and the app, as three tilted windows), Bring your own intelligence (the biggest statement on the page, with a patch bay: brains on the left, agents on the right, a cable for each choice), the desk (four channel strips with fader and LEDs), a day in the life (a 24-hour ruler with the real time as a red line), the call-in line (a phone with the request), and your space (`yourcompany.usecora.space` typing itself).
 - **Sign-in and account:** one centered card with the mark; provider buttons; spaces as rows with the ON AIR lamp and an Enter button; the space request as a name field with the `.usecora.space` suffix.
 - Every section is readable without JavaScript; the teletype starts complete and replays after a moment; `prefers-reduced-motion` stops all motion.
