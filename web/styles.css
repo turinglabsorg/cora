@@ -295,6 +295,9 @@ a.stat:hover { border-color: var(--line-strong); }
 .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 18px; }
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .field.full { grid-column: 1 / -1; }
+.model-pick { display: grid; gap: 8px; min-width: 0; }
+.model-pick select:disabled { opacity: 0.45; }
+.model-pick input { font-family: var(--mono); }
 .field small { color: var(--faint); font-size: 12px; line-height: 1.4; }
 .field-row { display: flex; align-items: center; justify-content: space-between; }
 .fader-value { font: 600 20px/1 var(--display); color: var(--amber); }

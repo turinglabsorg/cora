@@ -68,6 +68,7 @@ The panel behaves like an installed app (web manifest, apple-touch-icon, no pinc
 - **Tabs** (`.tabs`): hardware buttons; active one is lit amber with a small LED dot. Scroll horizontally on phones.
 - **Buttons**: `.btn` (panel-2, line border), `.btn.primary` (amber fill, ink text), `.btn.danger` (red outline), `.btn.ghost`. 36px tall, 44px on touch.
 - **Toggle** (`.switch`): small rocker switch with LED.
+- **Model picker** (`.model-pick`): the model list grouped by provider, and under it a mono text box for any `provider/model` id; when the box is filled it wins and the list dims.
 - **Chips** (`.chip`): channel selection, `# name`, toggled amber when selected.
 - **Desktop frame** (`.monitor-frame`): the noVNC iframe inside a bezel with the agent's name plate.
 

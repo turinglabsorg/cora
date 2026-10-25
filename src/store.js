@@ -5,6 +5,18 @@ import { DatabaseSync } from "node:sqlite";
 import { plainKeys } from "./box.js";
 
 export const SHARED = "_shared";
+/** The providers a model id can name (provider/model). */
+export const MODEL_PROVIDERS = ["claude", "codex", "ollama", "orcarouter", "hermes"];
+
+function checkModel(value) {
+  const model = cleanText(value, 160).trim();
+  if (!model) return "";
+  const slash = model.indexOf("/");
+  if (slash <= 0 || slash === model.length - 1 || !MODEL_PROVIDERS.includes(model.slice(0, slash)) || /\s/.test(model)) {
+    throw new ValidationError(`modello non valido: usa provider/modello, con provider fra ${MODEL_PROVIDERS.join(", ")}`);
+  }
+  return model;
+}
 
 const DEFAULT_SETTINGS = {
   guildIds: [],
@@ -169,7 +181,7 @@ export function sanitizeAgent(input, previous = {}) {
     color: /^#[0-9a-fA-F]{6}$/.test(merged.color) ? merged.color : AGENT_DEFAULTS.color,
     personality: cleanText(merged.personality, 8000),
     core: cleanText(merged.core, 4000),
-    model: cleanText(merged.model, 120).trim(),
+    model: checkModel(merged.model),
     chattiness: clampNumber(merged.chattiness, 0, 1, 0.5),
     channelIds: cleanIds(merged.channelIds, CHANNEL_ID),
     enabled: Boolean(merged.enabled),
@@ -192,7 +204,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     maxRepliesPerRound: Math.round(clampNumber(merged.maxRepliesPerRound, 1, 6, 2)),
     historySize: Math.round(clampNumber(merged.historySize, 5, 100, 30)),
     sharedMemory: cleanText(merged.sharedMemory, 12000),
-    defaultModel: cleanText(merged.defaultModel, 120).trim() || DEFAULT_SETTINGS.defaultModel,
+    defaultModel: checkModel(merged.defaultModel) || DEFAULT_SETTINGS.defaultModel,
     sleepHour: Math.round(clampNumber(merged.sleepHour, 0, 23, 4)),
     transport: TRANSPORTS.includes(merged.transport) ? merged.transport : "discord",
     telegramChatIds: cleanIds(merged.telegramChatIds, /^-?\d{1,20}$/),

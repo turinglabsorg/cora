@@ -969,6 +969,17 @@ describe("talking with the agents", () => {
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } });
   });
 
+  test("a model can be typed by hand: any provider/model with a provider Cora knows", async (t) => {
+    t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
+    const bad = await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "deepseek-v4" } });
+    assert.equal(bad.status, 400);
+    assert.match(bad.data.error, /provider\/modello/);
+    assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "nope/some-model" } })).status, 400);
+    const typed = await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "orcarouter/vendor/brand-new-model" } });
+    assert.equal(typed.status, 200);
+    assert.equal(app.store.agent(olga.id).model, "orcarouter/vendor/brand-new-model", "a model the list does not show yet is kept as typed");
+  });
+
   test("an agent on Hermes gets Cora's tools only, through its own Hermes home, and no secrets", async (t) => {
     const models = (await call("/api/state")).data.models.map((model) => model.id);
     assert.ok(models.includes("hermes/test-model"));

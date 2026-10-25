@@ -609,6 +609,22 @@ function modelSelect(name, current, { allowDefault = true } = {}) {
   return select;
 }
 
+/**
+ * The model list, plus a box to type any model id (provider/model) that the
+ * list does not show. When the box is filled it wins, and the list dims.
+ */
+function modelPicker(name, current, options) {
+  const select = modelSelect(name, current, options);
+  const custom = h("input", { type: "text", name: `${name}Custom`, autocomplete: "off", autocapitalize: "off", spellcheck: "false", placeholder: "oppure scrivi l'id, es. orcarouter/deepseek/deepseek-v4.1-flash" });
+  custom.addEventListener("input", () => { select.disabled = Boolean(custom.value.trim()); });
+  return h("div", { class: "model-pick" }, select, custom);
+}
+
+/** The model a form asks for: the typed id if there is one, otherwise the list. */
+function pickedModel(data, name) {
+  return String(data.get(`${name}Custom`) || "").trim() || data.get(name) || "";
+}
+
 function channelChips(selected) {
   const chosen = new Set(selected);
   const wrap = h("div", { class: "chips", "data-channels": "" });
@@ -658,7 +674,7 @@ function agentForm(agent) {
             } }))))),
     panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
       h("div", { class: "stack-sm" },
-        field("Modello", modelSelect("model", agent.model || "")),
+        field("Modello", modelPicker("model", agent.model || "")),
         field("Ragionamento: livello", h("select", { name: "effort" },
           [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) => h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label))),
         "Quanto pensa prima di rispondere: più alto è più accurato ma più lento."),
@@ -687,7 +703,7 @@ function agentForm(agent) {
     const body = {
       name: data.get("name"),
       avatarUrl: data.get("avatarUrl"),
-      model: data.get("model"),
+      model: pickedModel(data, "model"),
       color: data.get("color"),
       chattiness: Number(data.get("chattiness")) / 100,
       channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
@@ -1504,7 +1520,7 @@ function renderSettings() {
         field("Messaggi di contesto", h("input", { type: "number", name: "historySize", min: 5, max: 100, value: settings.historySize, inputmode: "numeric" }), "quanta chat rileggono"))),
     panel({ icon: "chip", title: "Cervelli e sonno", hint: "Il modello di chi non ne sceglie uno e l'ora in cui riordinano la memoria." },
       h("div", { class: "grid2" },
-        field("Modello predefinito", modelSelect("defaultModel", settings.defaultModel, { allowDefault: false })),
+        field("Modello predefinito", modelPicker("defaultModel", settings.defaultModel, { allowDefault: false })),
         field("Ora del sonno", h("input", { type: "number", name: "sleepHour", min: 0, max: 23, value: settings.sleepHour, inputmode: "numeric" }), "consolidamento notturno della memoria"),
         h("div", { class: "field full" }, h("span", { class: "label" }, "Provider"), providers))),
     panel({ icon: "book", title: "Memoria condivisa", hint: "Cose che tutti gli agenti sanno: chi sei, i progetti, le regole della casa." },
@@ -1523,7 +1539,7 @@ function renderSettings() {
       maxAgentTurns: Number(data.get("maxAgentTurns")),
       maxRepliesPerRound: Number(data.get("maxRepliesPerRound")),
       historySize: Number(data.get("historySize")),
-      defaultModel: data.get("defaultModel"),
+      defaultModel: pickedModel(data, "defaultModel"),
       sleepHour: Number(data.get("sleepHour")),
       sharedMemory: data.get("sharedMemory"),
       sshKeys: String(data.get("sshKeys") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),

@@ -8,6 +8,8 @@ export const EN = {
   "Codex non trovato su questa macchina": "Codex not found on this machine",
   "manca CORA_OLLAMA_API_KEY in hush": "CORA_OLLAMA_API_KEY is missing from hush",
   "manca CORA_ORCAROUTER_API_KEY in hush": "CORA_ORCAROUTER_API_KEY is missing from hush",
+  "oppure scrivi l'id, es. orcarouter/deepseek/deepseek-v4.1-flash": "or type the id, e.g. orcarouter/deepseek/deepseek-v4.1-flash",
+  "modello non valido: usa provider/modello, con provider fra {providers}": "invalid model: use provider/model, with provider one of {providers}",
   "Hermes non trovato su questa macchina": "Hermes not found on this machine",
   "Ogni mattina 9:00": "Every morning 9:00",
   "Ogni sera 21:00": "Every evening 21:00",
