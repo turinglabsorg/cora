@@ -4,7 +4,9 @@ import http from "node:http";
 import net from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { botEnvName } from "./agent-bots.js";
+import { passLedger, verifyPass } from "./pass.js";
 import { telegramChatId } from "./channels.js";
 import { Telegram } from "./telegram.js";
 import { telegramBotEnvName } from "./telegram-bots.js";
@@ -38,6 +40,21 @@ const CSP = [
   "form-action 'self'",
   "frame-ancestors 'self'",
 ].join("; ");
+
+/** A path on this panel to land on after signing in: never another host. */
+function safeNext(value) {
+  const next = String(value || "");
+  return next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") && next.length < 2000 ? next : "/";
+}
+
+/**
+ * A one-time sign-in link for when usecora.space cannot be reached, made on
+ * the host with the session key (bin/login-link.mjs).
+ */
+export function loginLinkToken(sessionKey, now = Date.now()) {
+  const body = `${now + 10 * 60000}.${randomBytes(12).toString("base64url")}`;
+  return `${body}.${sign(sessionKey, `link.${body}`)}`;
+}
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -88,6 +105,15 @@ async function readJson(req, limit = 256 * 1024) {
 export function createWeb({ config, store, discord, telegram, channels, boxes, llm, orchestrator, brain, bots, tgBots, activity, storeSecret, traces, push = null }) {
   const sessionKey = config.sessionKey || config.adminPassword;
   const failures = [];
+  // On usecora.space the cloud signs people in; this panel only checks the pass it hands over.
+  const cloud = config.cloudUrl && config.cloudKey && config.cloudSpace ? {
+    url: config.cloudUrl.replace(/\/$/, ""),
+    key: config.cloudKey,
+    audience: `${config.cloudSpace}.${new URL(config.cloudUrl).host}`,
+    login: `${config.cloudUrl.replace(/\/$/, "")}/go/${config.cloudSpace}`,
+    logout: `${config.cloudUrl.replace(/\/$/, "")}/logout`,
+  } : null;
+  const firstUse = passLedger();
 
   const sessionCookie = () => {
     const expires = Date.now() + SESSION_DAYS * 86400000;
@@ -146,8 +172,9 @@ export function createWeb({ config, store, discord, telegram, channels, boxes, l
   async function api(req, res, url) {
     const path = url.pathname;
     const method = req.method;
-    if (path === "/api/me" && method === "GET") return send(res, 200, { authed: authed(req) });
+    if (path === "/api/me" && method === "GET") return send(res, 200, { authed: authed(req), cloud: cloud ? { login: cloud.login, logout: cloud.logout } : null });
     if (path === "/api/login" && method === "POST") {
+      if (cloud) throw new HttpError(403, "si entra da usecora.space");
       const now = Date.now();
       while (failures.length && now - failures[0] > 60000) failures.shift();
       if (failures.length >= 5) throw new HttpError(429, "troppi tentativi, riprova tra un minuto");
@@ -494,6 +521,28 @@ export function createWeb({ config, store, discord, telegram, channels, boxes, l
     throw new HttpError(404, "not found");
   }
 
+  /** A pass from usecora.space, or a one-time link made on the host, becomes this panel's usual session. */
+  function signInFrom(req, res, url) {
+    let ok = false;
+    if (url.pathname === "/auth/cloud" && cloud) {
+      const fields = verifyPass(cloud.key, url.searchParams.get("pass"), { audience: cloud.audience });
+      ok = Boolean(fields && firstUse(fields));
+      activity({ type: ok ? "settings" : "warning", text: ok ? `accesso da usecora.space (${fields.email || fields.sub})` : "pass di usecora.space rifiutato" });
+    }
+    if (url.pathname === "/auth/link" && sessionKey) {
+      const [expires, nonce, mac] = String(url.searchParams.get("token") || "").split(".");
+      ok = Boolean(expires && nonce && mac && Number(expires) > Date.now() && safeEqual(mac, sign(sessionKey, `link.${expires}.${nonce}`))
+        && firstUse({ jti: `link.${nonce}`, exp: Number(expires) }));
+      activity({ type: ok ? "settings" : "warning", text: ok ? "accesso col link d'emergenza" : "link d'emergenza rifiutato" });
+    }
+    if (!ok) {
+      res.writeHead(302, { Location: "/?signin=refused", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+      return res.end();
+    }
+    res.writeHead(302, { Location: safeNext(url.searchParams.get("next")), "Set-Cookie": sessionCookie(), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+    res.end();
+  }
+
   const clients = new Set();
   const broadcast = (entry) => {
     const line = `data: ${JSON.stringify(entry)}\n\n`;
@@ -548,6 +597,7 @@ export function createWeb({ config, store, discord, telegram, channels, boxes, l
         if (origin && new URL(origin).host !== req.headers.host) throw new HttpError(403, "cross-origin request");
       }
       if (url.pathname === "/healthz") return send(res, 200, "ok");
+      if (url.pathname === "/auth/cloud" || url.pathname === "/auth/link") return signInFrom(req, res, url);
       if (url.pathname === "/api/events") return events(req, res);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (url.pathname.startsWith("/box/")) return await proxyBox(req, res);

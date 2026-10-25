@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import http from "node:http";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { startCora } from "../src/main.js";
+import { passKeys, signPass } from "../src/pass.js";
+import { loginLinkToken } from "../src/web.js";
 import { SHARED, Store } from "../src/store.js";
 import { readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -880,6 +882,57 @@ describe("listening without a dedicated bot", () => {
     assert.equal(fake.state.botPosts.filter((item) => item.content === "Ti sento.").length, 1, "its own message is not heard as new");
     await other.stop();
     await fake.close();
+  });
+});
+
+describe("hosted on usecora.space", () => {
+  test("the panel opens only with a pass from the cloud, each pass once; the password is off; a one-time link made on the host works once", async () => {
+    const keys = passKeys("a cloud seed for the hosted test 0123456789");
+    const otherHome = tempHome();
+    const seed = new Store(otherHome);
+    seed.updateSettings({ guildIds: [GUILD] });
+    seed.close();
+    const hosted = startCora({
+      home: otherHome, host: "127.0.0.1", port: 0, adminPassword: "an old password", sessionKey: "hosted-session-key", insecureCookies: true,
+      cloudUrl: "https://usecora.test/", cloudKey: keys.publicKey, cloudSpace: "acme",
+      discordToken: "", discordApi: discord.url, telegramApi: telegram.url, telegramPollTimeout: 1, ollamaUrl: ollama.url, ollamaKey: "k",
+      claudeBin: cli.claude, codexBin: cli.codex, codexModelsFile: cli.models, ownerInstructions: join(home, "owner-AGENTS.md"),
+      botTokenFor: () => "", storeSecret: async () => {}, docker: docker.path, schedulerTickMs: 3600000, startBoxes: false,
+    });
+    await hosted.ready;
+    const at = `http://127.0.0.1:${hosted.server.address().port}`;
+    const get = (path, cookie = "") => fetch(`${at}${path}`, { redirect: "manual", headers: cookie ? { Cookie: cookie } : {} });
+    const sessionOf = (response) => (response.headers.get("set-cookie") || "").split(";")[0];
+
+    const me = await (await get("/api/me")).json();
+    assert.deepEqual(me, { authed: false, cloud: { login: "https://usecora.test/go/acme", logout: "https://usecora.test/logout" } });
+    const password = await fetch(`${at}/api/login`, { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ password: "an old password" }) });
+    assert.equal(password.status, 403, "no password on a hosted space");
+
+    const pass = signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_1", email: "sam@example.com" });
+    const entered = await get(`/auth/cloud?pass=${encodeURIComponent(pass)}&next=${encodeURIComponent("/#/agenti")}`);
+    assert.equal(entered.status, 302);
+    assert.equal(entered.headers.get("location"), "/#/agenti");
+    const cookie = sessionOf(entered);
+    assert.equal((await get("/api/state", cookie)).status, 200);
+    assert.equal((await get(`/auth/cloud?pass=${encodeURIComponent(pass)}`)).headers.get("location"), "/?signin=refused", "a pass works once");
+
+    const elsewhere = signPass(keys.privateKey, { aud: "other.usecora.test", sub: "ac_1" });
+    assert.equal((await get(`/auth/cloud?pass=${encodeURIComponent(elsewhere)}`)).headers.get("location"), "/?signin=refused", "a pass for another space does not open this one");
+    const forged = signPass(passKeys("somebody else's seed 0123456789abcdef").privateKey, { aud: "acme.usecora.test", sub: "ac_1" });
+    assert.equal((await get(`/auth/cloud?pass=${encodeURIComponent(forged)}`)).headers.get("location"), "/?signin=refused", "only the cloud's key signs passes");
+    const stale = signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_1" }, Date.now() - 120000);
+    assert.equal((await get(`/auth/cloud?pass=${encodeURIComponent(stale)}`)).headers.get("location"), "/?signin=refused", "an old pass has expired");
+    const away = signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_1" });
+    assert.equal((await get(`/auth/cloud?pass=${encodeURIComponent(away)}&next=${encodeURIComponent("//evil.example/x")}`)).headers.get("location"), "/", "it never sends you to another site");
+
+    const token = loginLinkToken("hosted-session-key");
+    const link = await get(`/auth/link?token=${encodeURIComponent(token)}`);
+    assert.equal(link.status, 302);
+    assert.equal((await get("/api/state", sessionOf(link))).status, 200);
+    assert.equal((await get(`/auth/link?token=${encodeURIComponent(token)}`)).headers.get("location"), "/?signin=refused", "the emergency link works once");
+    assert.equal((await get(`/auth/link?token=${encodeURIComponent(loginLinkToken("a guessed key"))}`)).headers.get("location"), "/?signin=refused");
+    await hosted.stop();
   });
 });
 

@@ -409,6 +409,11 @@ async function logout() {
   await guard(api("/api/logout", { method: "POST" }));
   S.events?.close();
   S.events = null;
+  // On usecora.space, leaving the panel also signs out there, or the next visit would walk straight back in.
+  if (S.cloud) {
+    location.href = S.cloud.logout;
+    return;
+  }
   renderLogin();
 }
 
@@ -1529,8 +1534,31 @@ function renderSettings() {
 }
 
 /* ---------- login ---------- */
+/** On usecora.space: sign in there and come back with a pass. Goes by itself, at most once every 30 seconds. */
+function renderCloudLogin() {
+  const refused = new URLSearchParams(location.search).get("signin") === "refused";
+  const target = `${S.cloud.login}?next=${encodeURIComponent(`/${location.hash}`)}`;
+  let last = 0;
+  try { last = Number(sessionStorage.getItem("cora.cloudSignIn") || 0); } catch {}
+  if (!refused && Date.now() - last > 30000) {
+    try { sessionStorage.setItem("cora.cloudSignIn", String(Date.now())); } catch {}
+    location.replace(target);
+    return;
+  }
+  app.replaceChildren(h("div", { class: "login" },
+    h("div", { class: "login-inner" },
+      h("img", { class: "login-icon", src: "/assets/icon-192.png", alt: "" }),
+      h("h1", {}, "Cora"),
+      h("p", { class: "login-sub" }, "Computer-Operating Resident Agents"),
+      h("div", { class: "login-card" },
+        refused ? h("p", { class: "login-error", role: "alert" }, "L'accesso da usecora.space non è riuscito: riprova.") : null,
+        btn("Entra con usecora.space", { icon: "next", cls: "primary", href: target })),
+      h("p", { class: "login-foot" }, icon("shield"), "Accesso privato"))));
+}
+
 function renderLogin() {
   clearTimers();
+  if (S.cloud) return renderCloudLogin();
   const password = h("input", { type: "password", id: "password", name: "password", autocomplete: "current-password", required: true, placeholder: "La password del pannello", enterkeyhint: "go" });
   const reveal = btn("", { icon: "eye", cls: "sm ghost", title: "Mostra la password", onclick: () => {
     password.type = password.type === "password" ? "text" : "password";
@@ -1585,6 +1613,7 @@ document.title = "Cora · Computer-Operating Resident Agents";
 
 async function boot() {
   const me = await fetch("/api/me", { credentials: "same-origin" }).then((response) => response.json()).catch(() => ({}));
+  S.cloud = me.cloud || null;
   if (!me.authed) return renderLogin();
   try {
     await loadState();

@@ -438,6 +438,9 @@ export const EN = {
   "Mostra la password": "Show the password",
   "Entra": "Enter",
   "Accesso privato": "Private access",
+  "Entra con usecora.space": "Sign in with usecora.space",
+  "L'accesso da usecora.space non è riuscito: riprova.": "Signing in from usecora.space did not work: try again.",
+  "si entra da usecora.space": "sign in from usecora.space",
 
   // messages from the server
   "agente non trovato": "agent not found",

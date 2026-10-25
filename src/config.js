@@ -37,6 +37,10 @@ export const config = {
   timezone: setting("TZ") || "Europe/Rome",
   insecureCookies: setting("INSECURE_COOKIES") === "1",
   schedulerTickMs: Number(setting("SCHEDULER_TICK_MS") || 20000),
+  // Hosted on usecora.space: people sign in there and arrive with a signed pass. None of these is secret.
+  cloudUrl: setting("CLOUD_URL") || "",
+  cloudKey: setting("CLOUD_KEY") || "",
+  cloudSpace: setting("CLOUD_SPACE") || "",
 };
 
 /** The Discord bot token comes only from the environment (injected by hush as DISCORD_BOT_TOKEN). */

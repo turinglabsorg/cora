@@ -79,13 +79,24 @@ Environment: `PORT` (default 4370), `CORA_LISTEN_HOST` (default 127.0.0.1), `COR
 
 `deploy/macos.sh` deploys to a Mac over SSH (`CORA_DEPLOY_HOST=user@host`) as the LaunchAgent in `deploy/org.turinglabs.cora.plist`; put the panel behind your own HTTPS tunnel or reverse proxy.
 
+## Hosted: usecora.space
+
+`cloud/` is the hosted side: a small service (Node, no dependencies, SQLite in `~/.cora-cloud`) for a domain where each space is one Cora.
+
+- The apex (`usecora.space`) is the landing and the only place people sign in, with Google (OpenID Connect) or GitHub (OAuth), both with PKCE and a state bound to the browser. One account can have both identities.
+- `<space>.usecora.space` is routed by its Host to that space's Cora (requests, event streams and the desktop's WebSockets pass through).
+- Entering a space goes through `/go/<space>`: the cloud signs a one-minute, single-use pass with its Ed25519 key, and the space's Cora (`/auth/cloud`) checks it with the public key alone, then opens its usual session. With `CORA_CLOUD_URL`, `CORA_CLOUD_KEY` (the public key, `cloud/cli.js public-key`) and `CORA_CLOUD_SPACE` set, a Cora has no password login; `bin/login-link.mjs` makes a one-time link on the host for when the cloud cannot be reached.
+- People without a space can ask for one from their account page; spaces are added by hand: `cloud/cli.js space add <name> --upstream <url> --google <email> --github <login>`.
+
+Secrets in hush: `CORA_CLOUD_SEED` (sessions and the signing key), `CORA_CLOUD_GOOGLE_SECRET`, `CORA_CLOUD_GITHUB_SECRET`; the client ids go in `GOOGLE_CLIENT_ID` and `GITHUB_CLIENT_ID`. Start it with `cloud/bin/start.sh` (port 4380). The OAuth callbacks are `https://usecora.space/auth/google/callback` and `https://usecora.space/auth/github/callback`.
+
 ## Test
 
 ```bash
 npm test
 ```
 
-The integration tests run the whole service against stand-ins for Discord (REST + Gateway WebSocket), Telegram (Bot API), Ollama, the `claude` / `codex` CLIs (driving the real MCP server), `docker`, and a Web Push service that decrypts what it receives.
+The integration tests run the whole service against stand-ins for Discord (REST + Gateway WebSocket), Telegram (Bot API), Ollama, the `claude` / `codex` CLIs (driving the real MCP server), `docker`, and a Web Push service that decrypts what it receives. `test/cloud.test.js` runs usecora.space against stand-ins for Google, GitHub and a space.
 
 ## License
 

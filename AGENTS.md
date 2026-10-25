@@ -20,6 +20,8 @@ Always-on Discord agents with personalities, layered memory, routines and their 
 - `src/push.js` Web Push (VAPID + aes128gcm) to the owner's devices; agents' `notify` tool and panel requests. `ask_owner` posts where the conversation is (`Orchestrator.askOwner`): a Discord/Telegram channel (owner mentioned, answers as text, no Web Push) or a panel room (buttons + push); the owner's next message there is routed to the asking agent (`state.request` in `address()`).
 - `src/web.js` panel API, SSE, password login (HMAC cookie, `X-Cora` header + Origin check on writes), authenticated noVNC proxy at `/box/<agentId>/`.
 - `web/` vanilla JS panel, no build. `box/` the desktop image (Debian, XFCE, Chromium, x11vnc, noVNC).
+- `src/pass.js` passes from usecora.space: Ed25519 key derived from `CORA_CLOUD_SEED`, `signPass`/`verifyPass` (audience = the space's host, one minute, single use). `src/web.js` turns a pass (`/auth/cloud`) or a one-time link made on the host (`/auth/link`, `bin/login-link.mjs`) into the panel session; with `CORA_CLOUD_URL`/`KEY`/`SPACE` set the password login is off.
+- `cloud/` usecora.space: `src/app.js` routes by Host (apex = landing + sign-in, `<space>.<domain>` = proxy to that space's Cora), `src/oauth.js` Google/GitHub with PKCE, `src/store.js` accounts, identities, invites, spaces, requests (`~/.cora-cloud/cloud.db`), `src/views.js` the pages (English only), `web/` their CSS/JS, `cli.js` adds spaces by hand. Tests in `test/cloud.test.js`.
 
 ## Rules
 
@@ -33,5 +35,7 @@ Always-on Discord agents with personalities, layered memory, routines and their 
 - UI copy is written in Italian and translated through `web/i18n.js` (English); content written by people or agents is wrapped in `raw()` and never translated. Code, comments and docs are English.
 
 ## Deployment
+
+usecora.space runs on the host behind the grog relay (`~/.grog/sites.json`: the apex and each space name point at the cloud's port 4380) with `cloud/bin/start.sh`; each space's Cora gets `CORA_CLOUD_URL=https://usecora.space`, `CORA_CLOUD_KEY` and `CORA_CLOUD_SPACE`.
 
 Runs on a macOS host as the LaunchAgent `org.turinglabs.cora` from `~/Services/cora`, listening on 127.0.0.1:4370; put it behind your own HTTPS tunnel or reverse proxy. Deploy with `CORA_DEPLOY_HOST=user@host deploy/macos.sh` (it rebuilds the desktop image only when `box/` changed).

@@ -73,6 +73,14 @@ The panel behaves like an installed app (web manifest, apple-touch-icon, no pinc
 - **Requests** (`.requests`): an amber strip on top of the Salotto and the Banco listing the agents' unanswered questions; in the chat a request bubble has an amber «Richiesta» tag and its quick answers as amber buttons, which disappear once the owner answers. Web links in chat messages (bare URLs and `[label](url)`) are clickable, amber with a faint amber underline that lights up on hover, opening in a new tab.
 - **Trace** (`.steps-log`): one row per step with its offset; thinking with an amber rule in italics, written text with a neutral rule, tool calls in blue as expandable `details` with arguments and result in mono wells. The answer sits in an amber box; context and system prompt are collapsed at the bottom.
 
+## usecora.space (the cloud's pages, `cloud/`)
+
+The same desk, as a late-night broadcast. English only. Server-rendered, no build; `cloud/web/cloud.css` repeats the panel's tokens.
+
+- **Landing:** the hero headline "Lives where your company is" in Big Shoulders Display 900 (second line outlined, last word amber with a glow), beside a broadcast console: ON AIR lamp, clock, a paper teletype that replays one exchange (routine, request with Yes/Not yet, answer) and a frequency dial with the agents as stations. Then: where it lives (one thread moving across Discord, Telegram and the app, as three tilted windows), Bring your own intelligence (the biggest statement on the page, with a patch bay: brains on the left, agents on the right, a cable for each choice), the desk (four channel strips with fader and LEDs), a day in the life (a 24-hour ruler with the real time as a red line), the call-in line (a phone with the request), and your space (`yourcompany.usecora.space` typing itself).
+- **Sign-in and account:** one centered card with the mark; provider buttons; spaces as rows with the ON AIR lamp and an Enter button; the space request as a name field with the `.usecora.space` suffix.
+- Every section is readable without JavaScript; the teletype starts complete and replays after a moment; `prefers-reduced-motion` stops all motion.
+
 ## Motion
 
 - Page load: strips rise in with staggered `animation-delay` (60ms steps).
