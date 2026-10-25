@@ -1,0 +1,177 @@
+import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const MCP_SCRIPT = fileURLToPath(new URL("./mcp-server.js", import.meta.url));
+const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "OLLAMA_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "VAPID_KEY"];
+const CODEX_DISABLED_FEATURES = [
+  "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external", "computer_use",
+  "tool_suggest", "view_image", "memories", "sleep_tool", "multi_agent",
+];
+
+function childEnv() {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (SECRET_ENV.includes(name) || name.startsWith("CORA_BOT_") || name.startsWith("CORA_TG_BOT_")) delete env[name];
+  return env;
+}
+
+function run(bin, args, { input, cwd, timeoutMs, onLine }) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { cwd, env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+    const stdout = [];
+    const stderr = [];
+    let partial = "";
+    const lines = (chunk, end = false) => {
+      if (!onLine) return;
+      partial += chunk;
+      const parts = partial.split("\n");
+      partial = end ? "" : parts.pop();
+      for (const line of parts) {
+        if (!line.trim()) continue;
+        try { onLine(line); } catch {}
+      }
+    };
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 5000);
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout.push(chunk);
+      lines(String(chunk));
+    });
+    child.stderr.on("data", (chunk) => { if (stderr.length < 200) stderr.push(chunk); });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ code: -1, stdout: "", stderr: error.message, timedOut });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      lines("", true);
+      resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), timedOut });
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(input);
+  });
+}
+
+function tomlString(value) {
+  return JSON.stringify(String(value));
+}
+
+/**
+ * Text the model writes between tool calls is part of its reasoning; the last
+ * text is the answer itself. Hold each text until something follows it.
+ */
+function textSteps(onStep) {
+  let pending = "";
+  return {
+    text(value) {
+      if (pending) onStep?.({ type: "text", text: pending });
+      pending = value;
+    },
+    flush() {
+      if (pending) onStep?.({ type: "text", text: pending });
+      pending = "";
+    },
+    finish(answer) {
+      if (pending && pending.trim() !== String(answer || "").trim()) onStep?.({ type: "text", text: pending });
+      pending = "";
+    },
+  };
+}
+
+/** One agent turn on Claude Code with the owner's subscription; cora's tools arrive over MCP. */
+export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "" }) {
+  mkdirSync(workDir, { recursive: true, mode: 0o700 });
+  const id = randomBytes(6).toString("hex");
+  const mcpFile = join(workDir, `mcp-${id}.json`);
+  const args = ["-p", "--output-format", "stream-json", "--verbose", ...(effort ? ["--effort", effort] : []), "--model", model, "--system-prompt", system, "--tools", "", "--no-session-persistence", "--strict-mcp-config"];
+  if (mcp && toolNames.length) {
+    writeFileSync(mcpFile, JSON.stringify({
+      mcpServers: { cora: { command: process.execPath, args: [MCP_SCRIPT], env: { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } } },
+    }), { mode: 0o600 });
+    args.push("--mcp-config", mcpFile, "--allowedTools", toolNames.map((name) => `mcp__cora__${name}`).join(","));
+  }
+  let data = null;
+  const texts = textSteps(onStep);
+  const onLine = (line) => {
+    const event = JSON.parse(line);
+    if (event.type === "result") data = event;
+    if (event.type !== "assistant") return;
+    for (const block of event.message?.content || []) {
+      if (block.type === "thinking" || block.type === "redacted_thinking") {
+        texts.flush();
+        onStep?.(block.thinking?.trim() ? { type: "thinking", text: block.thinking } : { type: "thinking", hidden: true });
+      } else if (block.type === "text" && block.text?.trim()) {
+        texts.text(block.text);
+      } else if (block.type === "tool_use") {
+        texts.flush();
+      }
+    }
+  };
+  try {
+    const out = await run(bin, args, { input: prompt, cwd: workDir, timeoutMs, onLine });
+    if (out.timedOut) throw new Error(`claude: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (!data) throw new Error(`claude: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`);
+    if (data.is_error) throw new Error(`claude: ${String(data.result || data.subtype || "error").slice(0, 240)}`);
+    texts.finish(data.result);
+    return { text: String(data.result || "") };
+  } finally {
+    rmSync(mcpFile, { force: true });
+  }
+}
+
+/** One agent turn on the Codex CLI with the owner's ChatGPT subscription; its own shell and browser tools are off. */
+export async function runCodex({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "" }) {
+  mkdirSync(workDir, { recursive: true, mode: 0o700 });
+  const id = randomBytes(6).toString("hex");
+  const outFile = join(workDir, `codex-${id}.txt`);
+  const args = [
+    "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--color", "never",
+    "-s", "read-only", "-C", workDir, "-m", model, "-o", outFile, "--json",
+    "-c", "approval_policy=\"never\"", "-c", "model_reasoning_summary=\"detailed\"",
+    ...(effort ? ["-c", `model_reasoning_effort=${tomlString(effort)}`] : []),
+  ];
+  for (const feature of CODEX_DISABLED_FEATURES) args.push("--disable", feature);
+  if (mcp && toolNames.length) {
+    args.push(
+      "-c", `mcp_servers.cora.command=${tomlString(process.execPath)}`,
+      "-c", `mcp_servers.cora.args=[${tomlString(MCP_SCRIPT)}]`,
+      "-c", `mcp_servers.cora.env={ CORA_BRIDGE_URL = ${tomlString(mcp.url)}, CORA_BRIDGE_TOKEN = ${tomlString(mcp.token)} }`,
+      "-c", "mcp_servers.cora.default_tools_approval_mode=\"approve\"",
+    );
+  }
+  args.push("-");
+  const input = `<istruzioni_di_sistema>\n${system}\n</istruzioni_di_sistema>\n\n${prompt}`;
+  const texts = textSteps(onStep);
+  let failure = "";
+  const onLine = (line) => {
+    const event = JSON.parse(line);
+    if (event.type === "error" || event.type === "turn.failed") failure = String(event.message || event.error?.message || failure);
+    if (event.type !== "item.completed") return;
+    const item = event.item || {};
+    if (item.type === "reasoning" && item.text?.trim()) {
+      texts.flush();
+      onStep?.({ type: "thinking", text: item.text });
+    } else if (item.type === "agent_message" && item.text?.trim()) {
+      texts.text(item.text);
+    } else if (item.type === "mcp_tool_call") {
+      texts.flush();
+    }
+  };
+  try {
+    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine });
+    if (out.timedOut) throw new Error(`codex: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    let text = "";
+    try { text = readFileSync(outFile, "utf8"); } catch {}
+    if (out.code !== 0 && !text.trim()) throw new Error(`codex: ${(failure || out.stderr || out.stdout).trim().split("\n").slice(-3).join(" ").slice(0, 240) || `exit ${out.code}`}`);
+    texts.finish(text);
+    return { text };
+  } finally {
+    rmSync(outFile, { force: true });
+  }
+}

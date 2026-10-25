@@ -1,0 +1,686 @@
+import { randomBytes } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { isTelegramChannel, telegramChannel, telegramChatId } from "./channels.js";
+import { isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
+import { userName } from "./telegram.js";
+
+const MAX_PARALLEL_AGENTS = 4;
+const HUMAN_DEBOUNCE_MS = 1200;
+// A follow-up without names within this window goes to the agents the human was talking to.
+const FOCUS_MS = 5 * 60 * 1000;
+// Someone called an agent and it has said nothing yet: it acknowledges on its own after this long.
+const ACK_AFTER_MS = 15000;
+const ACK_TEXT = { it: "Ricevuto, ci lavoro: ti aggiorno qui.", en: "Got it, working on it: I'll keep you posted here." };
+const IMAGE_LIMIT_BYTES = 5 * 1024 * 1024;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function normalize(text) {
+  return String(text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+
+export function mentions(text, name) {
+  const escaped = normalize(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\p{L}\\p{N}])@?${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(normalize(text));
+}
+
+function describeMessage(raw, nameFor = () => null) {
+  const parts = [];
+  if (raw.content) {
+    const mentioned = new Map((raw.mentions || []).map((user) => [user.id, user.global_name || user.username]));
+    parts.push(raw.content.replace(/<@!?(\d+)>/g, (match, id) => {
+      const name = nameFor(id) || mentioned.get(id);
+      return name ? `@${name}` : match;
+    }));
+  }
+  for (const attachment of raw.attachments || []) {
+    parts.push(`[allegato: ${attachment.filename} ${attachment.url}]`);
+  }
+  for (const embed of raw.embeds || []) {
+    const text = [embed.title, embed.description].filter(Boolean).join(" — ");
+    if (text) parts.push(`[embed: ${text.slice(0, 400)}]`);
+  }
+  for (const sticker of raw.sticker_items || []) parts.push(`[sticker: ${sticker.name}]`);
+  if (raw.referenced_message?.content) {
+    const ref = raw.referenced_message;
+    parts.unshift(`(in risposta a ${ref.author?.global_name || ref.author?.username}: "${ref.content.slice(0, 160)}")`);
+  }
+  return parts.join(" ").slice(0, 3000) || "(messaggio vuoto)";
+}
+
+export class Orchestrator {
+  constructor({ store, discord, brain, log, bots = null, channels, telegram = null, tgBots = null, emit = () => {}, filesDir = null, notifier = null, watching = () => false }) {
+    this.notifier = notifier;
+    this.watching = watching;
+    this.requestsByAgent = new Map();
+    this.bots = bots;
+    this.channels = channels;
+    this.telegram = telegram;
+    this.tgBots = tgBots;
+    this.emit = emit;
+    this.filesDir = filesDir;
+    this.store = store;
+    this.discord = discord;
+    this.brain = brain;
+    this.log = log;
+    this.states = new Map();
+    this.routineRuns = new Set();
+    this.ackAfterMs = ACK_AFTER_MS;
+    this.ackText = null;
+  }
+
+  state(channelId) {
+    let state = this.states.get(channelId);
+    if (!state) {
+      state = { id: channelId, history: [], seen: new Set(), generation: 0, budget: 0, ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
+      this.states.set(channelId, state);
+    }
+    return state;
+  }
+
+  allowedGuild(guildId) {
+    return this.store.settings.guildIds.includes(guildId);
+  }
+
+  channelMeta(channelId) {
+    return this.channels.info(channelId);
+  }
+
+  agentsFor(channelId) {
+    if (isWebRoom(channelId)) {
+      const only = roomAgentId(channelId);
+      return this.store.agents().filter((agent) => agent.enabled && (!only || agent.id === only));
+    }
+    const telegram = isTelegramChannel(channelId);
+    const info = telegram ? null : this.discord.channelInfo(channelId);
+    return this.store.agents().filter((agent) => {
+      if (!agent.enabled) return false;
+      const chosen = agent.channelIds.filter((id) => isTelegramChannel(id) === telegram);
+      return !chosen.length || chosen.includes(channelId) || Boolean(info?.parentId && chosen.includes(info.parentId));
+    });
+  }
+
+  isOwner(userId) {
+    const owners = this.store.settings.ownerIds;
+    return !owners.length || owners.includes(userId);
+  }
+
+  nameForUser(userId) {
+    const agentId = this.bots?.agentIdForUser(userId);
+    if (agentId) return this.store.agent(agentId)?.name || null;
+    if (userId && userId === this.discord.user?.id) return this.discord.user.username;
+    return null;
+  }
+
+  classify(raw) {
+    const agents = this.store.agents();
+    const username = raw.author?.username || "";
+    const ownBot = raw.author?.id && this.bots?.agentIdForUser(raw.author.id);
+    if (ownBot) return { kind: "agent", agentId: ownBot, authorName: this.store.agent(ownBot)?.name || username };
+    if (raw.webhook_id) {
+      const agent = agents.find((item) => item.name === username);
+      if (agent && (this.discord.isAgentWebhook(raw) || !this.discord.ownWebhookIds.size)) {
+        return { kind: "agent", agentId: agent.id, authorName: agent.name };
+      }
+      return { kind: "bot", authorName: username || "webhook" };
+    }
+    if (raw.author?.id && raw.author.id === this.discord.user?.id) {
+      const match = /^\*\*(.+?)\*\* · /.exec(raw.content || "");
+      const agent = match && agents.find((item) => item.name === match[1]);
+      if (agent) return { kind: "agent", agentId: agent.id, authorName: agent.name, strip: match[0].length };
+      return { kind: "bot", authorName: raw.author.global_name || username };
+    }
+    if (raw.author?.bot) return { kind: "bot", authorName: raw.author.global_name || username };
+    const authorName = raw.member?.nick || raw.author?.global_name || username || "qualcuno";
+    return { kind: this.isOwner(raw.author?.id) ? "owner" : "human", authorName };
+  }
+
+  toItem(raw) {
+    const who = this.classify(raw);
+    let content = describeMessage(raw, (id) => this.nameForUser(id));
+    if (who.strip) content = content.slice(who.strip);
+    // People or bots named with a real Discord mention who are not agents (e.g. "@GROG ci sei?").
+    const others = (raw.mentions || []).filter((user) => !this.bots?.agentIdForUser(user.id)).map((user) => user.global_name || user.username);
+    return {
+      id: raw.id,
+      at: Date.parse(raw.timestamp || "") || Date.now(),
+      authorId: raw.author?.id,
+      authorName: who.authorName,
+      kind: who.kind,
+      agentId: who.agentId || null,
+      content,
+      others,
+    };
+  }
+
+  push(state, item) {
+    if (state.seen.has(item.id)) return false;
+    state.seen.add(item.id);
+    state.history.push(item);
+    const keep = this.store.settings.historySize;
+    if (state.history.length > keep * 2) {
+      const removed = state.history.splice(0, state.history.length - keep);
+      for (const old of removed) state.seen.delete(old.id);
+    }
+    return true;
+  }
+
+  async ensureHistory(state) {
+    if (state.loaded) return;
+    if (isWebRoom(state.id) || isTelegramChannel(state.id)) {
+      const existing = state.history;
+      state.history = [];
+      state.seen = new Set();
+      for (const item of [...this.store.recentMessages(state.id, this.store.settings.historySize), ...existing]) this.push(state, item);
+      state.loaded = true;
+      return;
+    }
+    if (!state.loading) {
+      state.loading = this.discord.fetchMessages(state.id, this.store.settings.historySize)
+        .then((messages) => {
+          const items = messages.map((raw) => this.toItem(raw));
+          const existing = state.history;
+          state.history = [];
+          state.seen = new Set();
+          for (const item of [...items, ...existing]) this.push(state, item);
+          state.history.sort((a, b) => a.at - b.at);
+        })
+        .catch((error) => this.log({ type: "error", channelId: state.id, text: `history: ${error.message}` }))
+        .finally(() => { state.loaded = true; });
+    }
+    await state.loading;
+  }
+
+  async attachImages(item, raw) {
+    const images = [];
+    for (const attachment of raw.attachments || []) {
+      if (!String(attachment.content_type || "").startsWith("image/") || attachment.size > IMAGE_LIMIT_BYTES) continue;
+      try {
+        const response = await fetch(attachment.url, { signal: AbortSignal.timeout(15000) });
+        if (response.ok) images.push(Buffer.from(await response.arrayBuffer()).toString("base64"));
+      } catch {}
+      if (images.length >= 2) break;
+    }
+    if (images.length) item.images = images;
+  }
+
+  async onMessage(raw) {
+    const guildId = raw.guild_id || this.discord.channelInfo(raw.channel_id)?.guildId;
+    if (!guildId || !this.allowedGuild(guildId)) return;
+    // Only real messages and replies: joins, pins, boosts and the like have no text for the agents.
+    if (raw.type !== undefined && raw.type !== 0 && raw.type !== 19) return;
+    if (!raw.content && !raw.attachments?.length && !raw.embeds?.length && !raw.sticker_items?.length) return;
+    if (this.discord.isOwnMessage(raw) || this.bots?.isOwnMessage(raw)) return;
+    const state = this.state(raw.channel_id);
+    await this.ensureHistory(state);
+    const item = this.toItem(raw);
+    if (item.kind === "owner" || item.kind === "human") await this.attachImages(item, raw);
+    this.ingest(state, item);
+  }
+
+  /**
+   * Who a human message is for: the agents it names, or else the ones the
+   * human was just talking to. Addressed messages keep the others quiet.
+   */
+  address(state, item) {
+    const named = this.agentsFor(state.id).filter((agent) => mentions(item.content, agent.name)).map((agent) => agent.id);
+    const now = Date.now();
+    if (named.length) state.focus = { ids: named, at: now };
+    else if (item.others?.length) state.focus = null;
+    else if (state.focus && now - state.focus.at < FOCUS_MS) state.focus.at = now;
+    else state.focus = null;
+    item.addressed = state.focus ? [...state.focus.ids] : [];
+    item.toOthers = !named.length && Boolean(item.others?.length);
+  }
+
+  /** A message someone else wrote: archive it and wake the agents. */
+  ingest(state, item) {
+    if (!this.push(state, item)) return;
+    this.store.appendArchive(state.id, item);
+    this.log({ type: "message", channelId: state.id, author: item.authorName, kind: item.kind, text: item.content.slice(0, 300) });
+    if (item.kind === "owner" || item.kind === "human") {
+      this.address(state, item);
+      state.generation += 1;
+      state.budget = this.store.settings.maxAgentTurns;
+      state.ownerOrigin = item.kind === "owner";
+      this.schedule(state, HUMAN_DEBOUNCE_MS);
+    } else if (item.kind === "bot" && state.budget > 0) {
+      this.schedule(state, 2500);
+    }
+  }
+
+  /* ---------- Telegram ---------- */
+  isTelegramOwner(userId) {
+    const owners = this.store.settings.telegramOwnerIds;
+    return !owners.length || owners.includes(String(userId));
+  }
+
+  /** Until an owner is set, the person in a private chat or the group's creator becomes it. */
+  async claimTelegramOwner(chat, from) {
+    if (this.store.settings.telegramOwnerIds.length || !from?.id) return;
+    let ownerId = null;
+    if (chat.type === "private") ownerId = String(from.id);
+    else {
+      try {
+        const admins = await this.telegram.request("getChatAdministrators", { chat_id: chat.id });
+        const creator = admins.find((member) => member.status === "creator");
+        if (creator) ownerId = String(creator.user.id);
+      } catch {}
+    }
+    if (!ownerId || this.store.settings.telegramOwnerIds.length) return;
+    this.store.updateSettings({ telegramOwnerIds: [ownerId] });
+    this.log({ type: "settings", text: `proprietario Telegram impostato (${chat.type === "private" ? "chat privata" : "creatore del gruppo"})` });
+  }
+
+  telegramText(message) {
+    const parts = [];
+    let text = message.text || message.caption || "";
+    const entities = message.entities || message.caption_entities || [];
+    for (const entity of [...entities].sort((a, b) => b.offset - a.offset)) {
+      if (entity.type !== "mention") continue;
+      const handle = text.slice(entity.offset, entity.offset + entity.length);
+      const agentId = this.tgBots?.agentIdForUsername(handle);
+      const agent = agentId && this.store.agent(agentId);
+      if (agent) text = `${text.slice(0, entity.offset)}@${agent.name}${text.slice(entity.offset + entity.length)}`;
+    }
+    if (text) parts.push(text);
+    if (message.photo) parts.push("[foto]");
+    if (message.document) parts.push(`[allegato: ${message.document.file_name || "file"}]`);
+    if (message.voice || message.audio) parts.push("[messaggio vocale]");
+    if (message.video || message.video_note) parts.push("[video]");
+    if (message.sticker) parts.push(`[sticker ${message.sticker.emoji || ""}]`.replace(" ]", "]"));
+    if (message.location) parts.push(`[posizione: ${message.location.latitude}, ${message.location.longitude}]`);
+    const ref = message.reply_to_message;
+    if (ref && (ref.text || ref.caption)) {
+      let who = userName(ref.from);
+      let quoted = String(ref.text || ref.caption);
+      const ownBot = this.tgBots?.agentIdForUser(ref.from?.id);
+      if (ownBot) who = this.store.agent(ownBot)?.name || who;
+      else if (ref.from?.id && String(ref.from.id) === String(this.telegram.user?.id)) {
+        const [first, ...rest] = quoted.split("\n");
+        if (this.store.agents().some((agent) => agent.name === first)) {
+          who = first;
+          quoted = rest.join("\n");
+        }
+      }
+      parts.unshift(`(in risposta a ${who}: "${quoted.slice(0, 160)}")`);
+    }
+    return parts.join(" ").slice(0, 3000) || "(messaggio vuoto)";
+  }
+
+  async onTelegramMessage(message) {
+    if (this.channels.active !== "telegram" || !message?.chat) return;
+    const chatId = String(message.chat.id);
+    if (!this.store.settings.telegramChatIds.includes(chatId)) return;
+    const from = message.from || {};
+    if (from.is_bot && (String(from.id) === String(this.telegram.user?.id) || this.tgBots?.agentIdForUser(from.id))) return;
+    await this.claimTelegramOwner(message.chat, from);
+    const state = this.state(telegramChannel(chatId));
+    await this.ensureHistory(state);
+    const kind = from.is_bot ? "bot" : this.isTelegramOwner(from.id) ? "owner" : "human";
+    const item = {
+      id: `tg_${chatId}_${message.message_id}`,
+      at: (message.date || Date.now() / 1000) * 1000,
+      authorId: String(from.id || ""),
+      authorName: userName(from),
+      kind,
+      agentId: null,
+      content: this.telegramText(message),
+    };
+    if ((kind === "owner" || kind === "human") && message.photo?.length) {
+      const photo = [...message.photo].sort((a, b) => (b.file_size || 0) - (a.file_size || 0)).find((size) => !size.file_size || size.file_size <= IMAGE_LIMIT_BYTES);
+      const data = photo && await this.telegram.download(photo.file_id, IMAGE_LIMIT_BYTES).catch(() => null);
+      if (data) item.images = [data.toString("base64")];
+    }
+    this.ingest(state, item);
+  }
+
+  schedule(state, delay) {
+    clearTimeout(state.timer);
+    state.nextRoundAt = Date.now() + delay;
+    state.timer = setTimeout(() => {
+      state.nextRoundAt = 0;
+      this.runRound(state);
+    }, delay);
+  }
+
+  /** True when no channel has a round running or scheduled. */
+  quiet() {
+    return [...this.states.values()].every((state) => !state.running && !state.nextRoundAt && !state.pending);
+  }
+
+  async runRound(state) {
+    if (state.running) {
+      state.pending = true;
+      return;
+    }
+    state.running = true;
+    try {
+      await this.round(state);
+    } catch (error) {
+      this.log({ type: "error", channelId: state.id, text: `round: ${error.message}` });
+    } finally {
+      state.running = false;
+      if (state.pending) {
+        state.pending = false;
+        this.schedule(state, 300);
+      }
+    }
+  }
+
+  pickCandidates(state, last, agents) {
+    const fromHuman = last.kind === "owner" || last.kind === "human";
+    if (!fromHuman && state.budget <= 0) return { forced: [], optional: [] };
+    const pool = agents.filter((agent) => agent.id !== last.agentId);
+    if (fromHuman && roomAgentId(state.id)) return { forced: pool, optional: [] };
+    const forced = pool.filter((agent) => mentions(last.content, agent.name) || (fromHuman && last.addressed?.includes(agent.id)));
+    if (fromHuman && forced.length) return { forced, optional: [] };
+    if (fromHuman && last.toOthers) return { forced: [], optional: [] };
+    // While the human is talking to someone, the others join only when called by name.
+    if (!fromHuman && state.focus && Date.now() - state.focus.at < FOCUS_MS) return { forced, optional: [] };
+    const factor = fromHuman ? 1 : 0.6;
+    let optional = pool.filter((agent) => !forced.includes(agent) && Math.random() < agent.chattiness * factor);
+    // A human always gets an answer: when chattiness picks nobody, the chattiest agent must reply.
+    if (fromHuman && !optional.length && pool.length) {
+      const ranked = [...pool].sort((a, b) => (b.chattiness - a.chattiness) || (Math.random() - 0.5));
+      return { forced: [ranked[0]], optional: [] };
+    }
+    optional = optional.sort(() => Math.random() - 0.5).slice(0, Math.max(0, MAX_PARALLEL_AGENTS - forced.length));
+    return { forced, optional };
+  }
+
+  async round(state) {
+    const last = state.history[state.history.length - 1];
+    if (!last) return;
+    const agents = this.agentsFor(state.id);
+    if (!agents.length) return;
+    const { forced, optional } = this.pickCandidates(state, last, agents);
+    if (!forced.length && !optional.length) return;
+
+    const generation = state.generation;
+    const channel = this.channelMeta(state.id);
+    const snapshot = state.history.slice(-this.store.settings.historySize);
+    const limitOptional = Math.max(0, this.store.settings.maxRepliesPerRound - forced.length);
+    let postedOptional = 0;
+    let posted = 0;
+    let queue = Promise.resolve();
+
+    const typeNow = () => this.typing(state.id, [...forced, ...optional]);
+    const typing = setInterval(typeNow, 8000);
+    typeNow();
+    const turn = async (agent, isForced) => {
+      const computer = agent.tools && state.ownerOrigin;
+      const started = Date.now();
+      let spoke = false;
+      const say = (text) => {
+        spoke = true;
+        return this.postAs(agent, state, text);
+      };
+      const ack = isForced ? setTimeout(() => {
+        if (spoke) return;
+        say(this.ackText || ACK_TEXT[this.store.settings.language] || ACK_TEXT.it).catch(() => {});
+        this.log({ type: "say", agentId: agent.id, channelId: state.id, text: "(conferma automatica: sta ancora lavorando)" });
+      }, this.ackAfterMs) : null;
+      let result;
+      try {
+        result = await this.brain.chatTurn({
+          agent, history: snapshot, channel, forced: isForced, computer,
+          postFile: (file, caption) => this.postAs(agent, state, caption, file),
+          say,
+          inbox: this.inbox(state, snapshot),
+        });
+      } catch (error) {
+        this.log({ type: "error", agentId: agent.id, channelId: state.id, text: error.message });
+        if (isForced) result = { text: `(non riesco a rispondere: ${error.message.slice(0, 180)})` };
+        else return;
+      } finally {
+        clearTimeout(ack);
+      }
+      if (!result.text) {
+        this.log({ type: "pass", agentId: agent.id, channelId: state.id, ms: Date.now() - started, traceId: result.traceId });
+        return;
+      }
+      queue = queue.then(async () => {
+        if (!isForced && (state.generation !== generation || postedOptional >= limitOptional)) return;
+        if (!isForced && last.kind !== "owner" && last.kind !== "human" && state.budget <= 0) return;
+        if (!isForced) postedOptional += 1;
+        if (posted > 0) await sleep(700 + Math.random() * 1500);
+        try {
+          await this.postAs(agent, state, result.text, undefined, result.traceId);
+          posted += 1;
+        } catch (error) {
+          this.log({ type: "error", agentId: agent.id, channelId: state.id, text: `post: ${error.message}` });
+        }
+      });
+      await queue;
+    };
+    try {
+      await Promise.all([...forced.map((agent) => turn(agent, true)), ...optional.map((agent) => turn(agent, false))]);
+      await queue;
+    } finally {
+      clearInterval(typing);
+    }
+    if (posted && state.budget > 0 && state.generation === generation) this.schedule(state, 2500 + Math.random() * 4000);
+  }
+
+  /** Messages people wrote in the channel after a turn started, each handed out once: how a busy agent gets steered. */
+  inbox(state, seenItems) {
+    const seen = new Set(seenItems.map((item) => item.id));
+    return () => {
+      const fresh = state.history.filter((item) => !seen.has(item.id) && (item.kind === "owner" || item.kind === "human"));
+      for (const item of fresh) seen.add(item.id);
+      return fresh;
+    };
+  }
+
+  /** Agents with their own bot type as themselves; the others share the main bot's indicator. */
+  typing(channelId, agents) {
+    if (isWebRoom(channelId)) {
+      this.emit({ type: "web-typing", room: channelId, agentIds: agents.map((agent) => agent.id) });
+      return;
+    }
+    const chatId = telegramChatId(channelId);
+    if (chatId) {
+      let shared = false;
+      for (const agent of agents) {
+        const own = this.tgBots?.client(agent.id);
+        if (own) own.typing(chatId);
+        else shared = true;
+      }
+      if (shared) this.telegram.typing(chatId);
+      return;
+    }
+    let shared = false;
+    for (const agent of agents) {
+      const own = this.bots?.client(agent.id);
+      if (own) own.typing(channelId);
+      else shared = true;
+    }
+    if (shared) this.discord.typing(channelId);
+  }
+
+  async postAs(agent, state, text, file, traceId) {
+    if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId);
+    const chatId = telegramChatId(state.id);
+    let sent;
+    if (chatId) sent = await this.postTelegram(agent, chatId, text, file);
+    else {
+      const own = this.bots?.client(agent.id);
+      sent = own
+        ? await own.say(state.id, { content: text || "", file })
+        : await this.discord.post(state.id, { username: agent.name, avatarUrl: agent.avatarUrl, content: text || "", file });
+    }
+    const last = sent[sent.length - 1];
+    if (text) {
+      const item = {
+        id: chatId && last?.message_id ? `tg_${chatId}_${last.message_id}` : last?.id || `local_${Date.now()}`,
+        at: Date.now(),
+        authorId: null,
+        authorName: agent.name,
+        kind: "agent",
+        agentId: agent.id,
+        content: file ? `${text} [file: ${file.name}]` : text,
+        traceId,
+      };
+      this.push(state, item);
+      this.store.appendArchive(state.id, item);
+      state.budget -= 1;
+    }
+    this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
+    return sent;
+  }
+
+  /** As the agent's own Telegram bot when it is in the chat, otherwise through the main bot with its name on top. */
+  async postTelegram(agent, chatId, text, file) {
+    const own = this.tgBots?.client(agent.id);
+    if (own && await this.tgBots.inChat(agent.id, chatId)) {
+      try {
+        return await own.say(chatId, { content: text || "", file });
+      } catch (error) {
+        this.tgBots.forgetMembership(agent.id);
+        this.log({ type: "warning", agentId: agent.id, channelId: telegramChannel(chatId), text: `bot Telegram suo: ${error.message}; scrivo col bot principale` });
+      }
+    }
+    return this.telegram.say(chatId, { content: text || "", file, name: agent.name });
+  }
+
+  /** A message in a panel room: archived like a Discord one and pushed live to the panel. */
+  postWeb(agent, state, text, file, traceId) {
+    const item = {
+      id: `web_${randomBytes(8).toString("hex")}`,
+      at: Date.now(),
+      authorId: null,
+      authorName: agent.name,
+      kind: "agent",
+      agentId: agent.id,
+      content: file ? `${text || ""} [file: ${file.name}]`.trim() : text,
+      traceId,
+      file: file ? this.saveWebFile(file) : undefined,
+    };
+    this.push(state, item);
+    this.store.appendArchive(state.id, item);
+    if (text) state.budget -= 1;
+    this.emit({ type: "web-message", room: state.id, item });
+    this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
+    // Nobody has the panel open: the reply reaches the owner's phone.
+    if (this.notifier?.enabled && !this.watching() && !item.request) {
+      const url = state.id === "web" ? "/#/" : `/#/agent/${agent.id}/chat`;
+      this.notifier.notify({ title: agent.name, body: text || `📎 ${file?.name}`, url, tag: state.id }).catch(() => {});
+    }
+    return [item];
+  }
+
+  /**
+   * An agent asking the owner something: the question lands in their private
+   * room (with quick answers) and on the owner's phone. The answer, typed or
+   * tapped, is an ordinary owner message there, so the agent gets a turn with it.
+   */
+  async askOwner(agent, { question, choices = [] }) {
+    const text = String(question || "").trim().slice(0, 1500);
+    if (!text) throw new Error("empty question");
+    const now = Date.now();
+    const recent = (this.requestsByAgent.get(agent.id) || []).filter((at) => now - at < 24 * 3600 * 1000);
+    if (recent.length && now - recent[recent.length - 1] < 60000) throw new Error("you asked the owner something less than a minute ago: wait for the answer");
+    if (recent.length >= 30) throw new Error("daily limit of requests reached");
+    recent.push(now);
+    this.requestsByAgent.set(agent.id, recent);
+    const state = this.state(privateRoom(agent.id));
+    await this.ensureHistory(state);
+    const clean = [...new Set((Array.isArray(choices) ? choices : []).map((choice) => String(choice).trim().slice(0, 40)).filter(Boolean))].slice(0, 4);
+    const item = {
+      id: `web_${randomBytes(8).toString("hex")}`, at: now, authorId: null, authorName: agent.name, kind: "agent", agentId: agent.id,
+      content: text, request: { choices: clean },
+    };
+    this.push(state, item);
+    this.store.appendArchive(state.id, item);
+    this.emit({ type: "web-message", room: state.id, item });
+    this.emit({ type: "request", agentId: agent.id });
+    this.log({ type: "request", agentId: agent.id, channelId: state.id, text: text.slice(0, 300) });
+    if (this.notifier?.enabled) {
+      this.notifier.notify({ title: this.store.settings.language === "en" ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: text, url: `/#/agent/${agent.id}/chat`, tag: `request-${agent.id}` }).catch(() => {});
+    }
+    return item;
+  }
+
+  saveWebFile(file) {
+    if (!this.filesDir) return undefined;
+    mkdirSync(this.filesDir, { recursive: true, mode: 0o700 });
+    const id = randomBytes(12).toString("hex");
+    const name = String(file.name || "file").replace(/[^\w.\- ]+/g, "_").slice(0, 120);
+    writeFileSync(join(this.filesDir, id), file.data, { mode: 0o600 });
+    writeFileSync(join(this.filesDir, `${id}.json`), JSON.stringify({ name, type: file.type || "application/octet-stream" }), { mode: 0o600 });
+    return { id, name, type: file.type || "application/octet-stream" };
+  }
+
+  /** The owner writing from the panel: same flow as a Discord message from the owner. */
+  async onWebMessage({ room, text }) {
+    const content = String(text || "").trim().slice(0, 3000);
+    if (!content) return null;
+    const state = this.state(room);
+    await this.ensureHistory(state);
+    const item = {
+      id: `web_${randomBytes(8).toString("hex")}`,
+      at: Date.now(),
+      authorId: "panel",
+      authorName: this.store.ownerName() || "Proprietario",
+      kind: "owner",
+      agentId: null,
+      content,
+    };
+    this.address(state, item);
+    this.push(state, item);
+    this.store.appendArchive(state.id, item);
+    this.emit({ type: "web-message", room, item });
+    this.log({ type: "message", channelId: room, author: item.authorName, kind: item.kind, text: content.slice(0, 300) });
+    state.generation += 1;
+    state.budget = this.store.settings.maxAgentTurns;
+    state.ownerOrigin = true;
+    this.schedule(state, 400);
+    return item;
+  }
+
+  async runRoutine(routine, { manual = false } = {}) {
+    if (this.routineRuns.has(routine.id)) return { status: "busy" };
+    const agent = this.store.agent(routine.agentId);
+    if (!agent) return { status: "missing-agent" };
+    const channel = this.channelMeta(routine.channelId);
+    if (!this.channels.isActive(routine.channelId)) {
+      this.store.recordRoutineRun(routine.id, "error", `il canale è su ${isTelegramChannel(routine.channelId) ? "Telegram" : "Discord"}, ma ora Cora vive sull'altro`);
+      return { status: "error" };
+    }
+    if (channel.guildId && !this.allowedGuild(channel.guildId)) {
+      this.store.recordRoutineRun(routine.id, "error", "channel is in a server cora does not use");
+      return { status: "error" };
+    }
+    this.routineRuns.add(routine.id);
+    this.log({ type: "routine-start", agentId: agent.id, channelId: routine.channelId, text: routine.name, manual });
+    const state = this.state(routine.channelId);
+    const typing = setInterval(() => this.typing(routine.channelId, [agent]), 8000);
+    try {
+      await this.ensureHistory(state);
+      const result = await this.brain.routineTurn({
+        agent, routine, history: state.history, channel,
+        postFile: (file, caption) => this.postAs(agent, state, caption, file),
+        say: (text) => this.postAs(agent, state, text),
+        inbox: this.inbox(state, state.history),
+      });
+      if (result.text) {
+        await this.postAs(agent, state, result.text);
+        state.ownerOrigin = false;
+        state.budget = Math.max(state.budget, Math.ceil(this.store.settings.maxAgentTurns / 2));
+        this.schedule(state, 3000);
+      }
+      this.store.recordRoutineRun(routine.id, result.text ? "posted" : "nothing", result.text || "PASS");
+      this.log({ type: "routine-end", agentId: agent.id, channelId: routine.channelId, text: routine.name, ok: true, steps: result.steps });
+      return { status: result.text ? "posted" : "nothing" };
+    } catch (error) {
+      this.store.recordRoutineRun(routine.id, "error", error.message);
+      this.log({ type: "routine-end", agentId: agent.id, channelId: routine.channelId, text: `${routine.name}: ${error.message}`, ok: false });
+      return { status: "error", error: error.message };
+    } finally {
+      clearInterval(typing);
+      this.routineRuns.delete(routine.id);
+    }
+  }
+}

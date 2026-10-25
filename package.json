@@ -1,0 +1,21 @@
+{
+  "name": "cora",
+  "version": "0.1.0",
+  "description": "Computer-Operated Rogue Agents: always-on AI agents with their own computers, memory, routines and a phone app",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "cora": "src/main.js"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/turinglabsorg/cora.git"
+  }
+}
