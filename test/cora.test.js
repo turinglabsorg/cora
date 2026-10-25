@@ -775,6 +775,12 @@ describe("talking with the agents", () => {
     discord.say({ content: "Olga, qui GROG, mi senti?", bot: true, author: "700000000000000009", username: "GROG" });
     await waitFor(() => posts("Olga").includes("Ok: Olga, qui GROG, mi senti?"), { what: "Olga answering a bot" });
     await quiet();
+    discord.offline = true;
+    discord.say({ content: "Olga, qui GROG di nuovo, mentre eri spenta", bot: true, author: "700000000000000009", username: "GROG" });
+    discord.offline = false;
+    await app.orchestrator.catchUp();
+    await waitFor(() => posts("Olga").includes("Ok: Olga, qui GROG di nuovo, mentre eri spenta"), { what: "a bot's call picked up after a restart" });
+    await quiet();
     const pino = posts("Pino").length;
     discord.say({ content: "messaggio di servizio", bot: true, author: "700000000000000009", username: "GROG" });
     await sleep(2000);

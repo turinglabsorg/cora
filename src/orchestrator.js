@@ -239,11 +239,16 @@ export class Orchestrator {
       const missed = state.history.filter((item) => !this.store.hasMessage(item.id));
       for (const item of missed) this.store.appendArchive(state.id, item);
       const last = state.history[state.history.length - 1];
-      if (!last || !missed.includes(last) || !["owner", "human"].includes(last.kind) || Date.now() - last.at > CATCH_UP_MS) continue;
+      if (!last || !missed.includes(last) || Date.now() - last.at > CATCH_UP_MS) continue;
+      const human = ["owner", "human"].includes(last.kind);
+      const botCall = last.kind === "bot" && this.agentsFor(state.id).some((agent) => mentions(last.content, agent.name));
+      if (!human && !botCall) continue;
       this.log({ type: "message", channelId: state.id, author: last.authorName, kind: last.kind, text: `(arrivato mentre ero spenta) ${last.content.slice(0, 280)}` });
-      this.address(state, last);
+      if (human) {
+        this.address(state, last);
+        state.budget = this.store.settings.maxAgentTurns;
+      }
       state.generation += 1;
-      state.budget = this.store.settings.maxAgentTurns;
       state.ownerOrigin = last.kind === "owner";
       this.schedule(state, HUMAN_DEBOUNCE_MS);
     }
