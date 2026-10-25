@@ -214,6 +214,7 @@ function waitlistForm(id, { joined, error }) {
     <label class="sr" for="${id}-company">Company</label>
     <input id="${id}-company" name="company" maxlength="80" placeholder="Company (optional)" autocomplete="organization">
     <input class="hp" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+    <input type="hidden" name="from" value="${id}">
     <button class="btn primary" type="submit">Join the waitlist${ICONS.arrow}</button>
     ${message ? `<p class="alert" role="alert">${message}</p>` : ""}
   </form>`;
@@ -236,6 +237,7 @@ export function landing({ account, joined = false, waitlistError = "" }) {
     + DAY.map(([time]) => `<i class="tick" style="--at:${at(time)}%"><b>${time}</b></i>`).join("");
   const day = DAY.map(([time, title, text], index) => `<li class="blip reveal" style="--i:${index}"><time>${time}</time><b>${title}</b><span>${text}</span></li>`).join("");
   const form = (id) => waitlistForm(id, { joined, error: waitlistError });
+  // The bottom form lives in #join, the top one in #waitlist: each comes back to itself.
   const body = `
 <main>
   <section class="hero" id="waitlist">

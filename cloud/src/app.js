@@ -173,19 +173,21 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
     if (method === "POST" && path === "/waitlist") {
       if (req.headers.origin !== origin.origin) return html(res, 403, views.notFound(page));
       const form = await readForm(req, 4096);
+      // Back to the form that was used: the one at the top (#waitlist) or the one at the bottom (#join).
+      const anchor = form.from === "bottom" ? "#join" : "#waitlist";
       // A field people never see: whoever fills it is a bot, and gets the same thanks.
-      if (form.website) return redirect(res, "/?joined=1#waitlist");
+      if (form.website) return redirect(res, `/?joined=1${anchor}`);
       const now = Date.now();
       while (joins.length && now - joins[0] > 60000) joins.shift();
-      if (joins.length >= WAITLIST_PER_MINUTE) return redirect(res, "/?waitlist=busy#waitlist");
+      if (joins.length >= WAITLIST_PER_MINUTE) return redirect(res, `/?waitlist=busy${anchor}`);
       try {
         store.joinWaitlist(form.email, form.company);
       } catch {
-        return redirect(res, "/?waitlist=invalid#waitlist");
+        return redirect(res, `/?waitlist=invalid${anchor}`);
       }
       joins.push(now);
       log({ type: "waitlist", company: String(form.company || "").slice(0, 80) });
-      return redirect(res, "/?joined=1#waitlist");
+      return redirect(res, `/?joined=1${anchor}`);
     }
     if (method === "GET" && path === "/privacy") return html(res, 200, views.privacy(page));
 

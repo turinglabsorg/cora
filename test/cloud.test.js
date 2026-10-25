@@ -250,7 +250,7 @@ describe("usecora.space", () => {
     const join = (body, headers = {}) => request("/waitlist", { method: "POST", body, headers: { "content-type": "application/x-www-form-urlencoded", origin, ...headers } });
     const joined = await join("email=Ada%40Acme.example&company=Acme&website=");
     assert.equal(joined.headers.location, "/?joined=1#waitlist");
-    assert.equal((await join("email=ada%40acme.example&company=")).headers.location, "/?joined=1#waitlist", "joining again is fine");
+    assert.equal((await join("email=ada%40acme.example&company=&from=bottom")).headers.location, "/?joined=1#join", "joining again is fine, and the bottom form comes back to the bottom");
     assert.equal((await join("email=not-an-address")).headers.location, "/?waitlist=invalid#waitlist");
     assert.equal((await join("email=eve%40evil.example", { origin: "https://evil.example" })).status, 403);
     assert.equal((await join("email=bot%40spam.example&website=http%3A%2F%2Fspam")).headers.location, "/?joined=1#waitlist", "a bot gets the same thanks");
