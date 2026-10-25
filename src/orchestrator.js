@@ -215,6 +215,8 @@ export class Orchestrator {
     if (raw.type !== undefined && raw.type !== 0 && raw.type !== 19) return;
     if (!raw.content && !raw.attachments?.length && !raw.embeds?.length && !raw.sticker_items?.length) return;
     if (this.discord.isOwnMessage(raw) || this.bots?.isOwnMessage(raw)) return;
+    // What an agent's own bot posts is already in the history (Cora posted it); the gateway echo can arrive first.
+    if (raw.author?.id && this.bots?.agentIdForUser(raw.author.id)) return;
     const state = this.state(raw.channel_id);
     await this.ensureHistory(state, { exclude: raw.id });
     const item = this.toItem(raw);
