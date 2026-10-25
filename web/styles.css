@@ -631,7 +631,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .icon-btn { width: 34px; height: 34px; }
   .icon-btn .ico { width: 20px; height: 20px; }
   .onair { padding: 4px 8px; font-size: 9px; gap: 6px; }
-  .tabbar { padding: 4px 4px calc(4px + var(--safe-bottom)); }
+  .tabbar { padding: 4px 4px max(4px, calc(var(--safe-bottom) - 14px)); }
   .tabbar a { height: 44px; gap: 4px; font-size: 8.5px; letter-spacing: 0.05em; }
   .tabbar a .ico { width: 20px; height: 20px; stroke-width: 1.6; }
   .wrap { padding: 12px 12px 20px; gap: 12px; }
@@ -677,6 +677,13 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .msg .bubble { padding: 7px 11px 9px; }
   .msg .meta { font-size: 9.5px; }
   .msg .meta b { font-size: 12px; }
+  .mode-chat .hero { display: none; }
+  .mode-chat .wrap { padding-bottom: 6px; gap: 8px; }
+  .mode-chat .chat-working { gap: 4px; }
+  .mode-chat .working { padding: 5px 10px; gap: 8px; }
+  .mode-chat .working .grow { flex-direction: row; align-items: baseline; gap: 8px; min-width: 0; }
+  .mode-chat .working b { flex: none; font-size: 12px; }
+  .mode-chat .working .line { min-width: 0; }
   .chat-compose { padding: 4px; border-radius: 14px; }
   .chat-compose .chat-input { height: 40px; min-height: 40px; padding: 9px 8px; }
   .chat-compose .btn.send { width: 40px; height: 40px; }

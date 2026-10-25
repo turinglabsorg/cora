@@ -55,7 +55,7 @@ Scale: 11 / 13 / 15 (base) / 17 / 20 / 38 / 44 / 56px.
 The panel behaves like an installed app (web manifest, apple-touch-icon, no pinch or double-tap zoom, 16px inputs on phones so iOS never zooms).
 
 - **Desktop (≥ 900px)**: a fixed sidebar (brand, the channel card with the ON AIR lamp, navigation, the agents with a status dot, Esci) and a scrolling content column.
-- **Phone**: a top app bar (back chevron on sub-pages, page title, lamp) and a bottom tab bar (Banco, Salotto, Agenti, Impostazioni) with safe-area padding. The shell is `position: fixed`; only the content scrolls. Chat pages fill the screen with the composer docked above the tab bar.
+- **Phone**: a top app bar (back chevron on sub-pages, page title, lamp) and a bottom tab bar (Banco, Salotto, Agenti, Impostazioni) with safe-area padding. The shell is `position: fixed`; only the content scrolls. Chat pages fill the screen with the composer docked above the tab bar: there the agent card is hidden (the app bar already names the agent), the working card is one line, and the tab bar keeps only the clearance the home indicator needs (`max(4px, safe-bottom - 14px)`) instead of the whole inset, so the log gets about two thirds of the screen.
 - **Icons**: inline 24px stroke icons (`ICONS` in `web/app.js`, stroke 1.8, round caps), in amber icon wells (`.panel-ico`) on panel headers and stat cards; Discord is `#`, Telegram is the paper plane.
 - **Panels**: every section is a `.panel` with a header (icon well, title in the display font, one-line hint, actions on the right; on phones status badges drop under the title) and a body with 14px rhythm. Forms end with a sticky `.savebar`.
 
