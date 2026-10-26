@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { cleanReply } from "../src/brain.js";
+import { asksToStop, cleanReply } from "../src/brain.js";
 import { Discord, splitMessage } from "../src/discord.js";
 import { mentions } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
@@ -32,6 +32,18 @@ describe("cron", () => {
     assert.ok(cronMatches(cron, { minute: 0, hour: 12, day: 1, month: 3, weekday: 4 }));
     assert.ok(cronMatches(cron, { minute: 0, hour: 12, day: 9, month: 3, weekday: 1 }));
     assert.ok(!cronMatches(cron, { minute: 0, hour: 12, day: 9, month: 3, weekday: 2 }));
+  });
+});
+
+describe("being told to stop", () => {
+  test("reads an order to stop, and not a turn of phrase that only sounds like one", () => {
+    for (const text of ["fermati", "Primo, fermati", "ok basta", "stop", "lascia stare", "annulla tutto", "smettila", "non serve più"]) {
+      assert.ok(asksToStop(text), `«${text}» is an order to stop`);
+    }
+    // "basta che" means "just", not "stop"; the rest are ordinary instructions.
+    for (const text of ["basta che li rilanci tu", "fai il deploy", "continua pure", "la settimana finisce", ""]) {
+      assert.ok(!asksToStop(text), `«${text}» is not`);
+    }
   });
 });
 

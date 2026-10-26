@@ -1068,6 +1068,65 @@ describe("talking with the agents", () => {
     assert.ok(trace.stepCount > 22, `worked through ${trace.stepCount} steps`);
   });
 
+  test("told to stop, an agent stops: no more tools, no more goal rounds", async (t) => {
+    await call("/api/settings", { method: "PUT", body: { goalMode: true } });
+    t.after(() => call("/api/settings", { method: "PUT", body: { goalMode: false } }));
+    goals = () => "tutti i file sono stati controllati uno per uno";
+    let checked = 0;
+    checks = () => { checked += 1; return JSON.stringify({ met: false, reason: "mancano file" }); };
+    let calls = 0;
+    const refusals = [];
+    replies.set("Olga", (body) => {
+      calls += 1;
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "tool" && /asked you to stop/.test(String(last.content))) refusals.push(String(last.content));
+      if (calls === 1) {
+        // The owner changes their mind while it works; the message reaches it with this result.
+        discord.say({ content: "Olga, fermati" });
+        return { tool_calls: [{ function: { name: "list_routines", arguments: { pass: 1 } } }] };
+      }
+      if (calls === 2) return { tool_calls: [{ function: { name: "list_routines", arguments: { pass: 2 } } }] };
+      return { content: "Ero a metà: controllati 2 file su 10." };
+    });
+    discord.say({ content: "Olga, controlla tutti i file" });
+    await waitFor(() => posts("Olga").includes("Ero a metà: controllati 2 file su 10."), { what: "Olga stopping", timeout: 25000 });
+    await quiet();
+    assert.ok(refusals.length >= 1, "the tools it tried after the stop were refused");
+    assert.equal(checked, 0, "the goal never sends it back once it has been told to stop");
+    assert.ok(calls < 6, `it stopped instead of going on (${calls} calls)`);
+  });
+
+  test("the owner's next words rewrite the goal instead of being argued with", async (t) => {
+    await call("/api/settings", { method: "PUT", body: { goalMode: true } });
+    t.after(() => call("/api/settings", { method: "PUT", body: { goalMode: false } }));
+    const asked = [];
+    goals = (body) => {
+      const text = String(body.messages[1].content);
+      asked.push(text);
+      return /Poi il proprietario ha detto/.test(text) ? "il report è su Telegram" : "il report è via email";
+    };
+    const judged = [];
+    checks = (body) => {
+      judged.push(String(body.messages[1].content));
+      return JSON.stringify({ met: judged.length > 1, reason: "manca l'invio" });
+    };
+    let calls = 0;
+    replies.set("Olga", () => {
+      calls += 1;
+      if (calls === 1) {
+        discord.say({ content: "Olga, anzi mandalo su Telegram non via email" });
+        return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
+      }
+      return { content: "Mandato su Telegram." };
+    });
+    discord.say({ content: "Olga, manda il report" });
+    await waitFor(() => posts("Olga").includes("Mandato su Telegram."), { what: "Olga's answer", timeout: 25000 });
+    await quiet();
+    assert.ok(asked.some((text) => /Poi il proprietario ha detto[\s\S]*Telegram/.test(text)), "the goal is rewritten from what they said next");
+    assert.ok(posts("Olga").some((text) => /Cambio obiettivo: il report è su Telegram/.test(text)), "and it says so out loud");
+    assert.ok(judged.some((text) => /Telegram/.test(text)), "the check judges the new goal, not the old one");
+  });
+
   test("with goal mode off nobody writes a goal and nobody checks one", async () => {
     let asked = false;
     goals = () => { asked = true; return "una condizione qualsiasi"; };

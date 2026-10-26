@@ -45,6 +45,19 @@ export function unfinished(text) {
   return UNFINISHED.some((pattern) => pattern.test(String(text || "")));
 }
 
+/**
+ * The owner telling an agent to stop. Deliberately narrow: "basta che" is a way
+ * of saying "just", not of calling something off, and "fine" lives inside too
+ * many ordinary words to be read as an order.
+ */
+const STOP = /(?:^|\b)(?:ferma(?:ti|te|tevi|lo|la)?|smetti(?:la)?|stop|annulla|lascia (?:stare|perdere)|abbandona|non (?:serve|importa) più)(?:\b|$)/i;
+
+export function asksToStop(text) {
+  const value = String(text || "").trim();
+  if (/\bbasta che\b/i.test(value)) return false;
+  return STOP.test(value) || /(?:^|\b)basta(?:\b|$)/i.test(value);
+}
+
 export function formatTime(ms, timezone) {
   return new Intl.DateTimeFormat("it-IT", { timeZone: timezone, hour: "2-digit", minute: "2-digit" }).format(new Date(ms));
 }
@@ -89,6 +102,9 @@ export function effortOf(agent) {
 
 export class Brain {
   constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null }) {
+    // One goal at a time per channel: a second task there joins the goal already being worked
+    // towards instead of writing a rival one. Channel id → the goal a live turn is holding.
+    this.channelGoals = new Map();
     this.traces = traces;
     this.push = push;
     this.ownerInstructionsPath = ownerInstructionsPath;
@@ -338,7 +354,13 @@ export class Brain {
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
     // Every task carries a goal, and the goal travels with the prompt: whichever harness
     // runs the agent sees the condition it has to meet, in its own words.
-    const { goal, usage: goalCost } = task ? await this.goalFor(user) : { goal: "", usage: null };
+    // A goal already being worked towards in this channel is the goal: one per channel, not per turn.
+    const held = task ? this.channelGoals.get(channel.id) : null;
+    let { goal, usage: goalCost } = !task ? { goal: "", usage: null }
+      : held ? { goal: held, usage: null }
+      : await this.goalFor(user);
+    if (task && goal && !held) this.channelGoals.set(channel.id, goal);
+    const ownsGoal = Boolean(task && goal && !held);
     // Claude Code checks a goal itself, inside one session: hand it the condition and stand back.
     const nativeGoal = Boolean(goal) && this.llm.hasGoalMode(model);
     const contract = goal && !nativeGoal ? `\n\n[Obiettivo] Il compito è finito solo quando è vero e verificato questo: ${goal}\nLavoraci fino a lì senza chiedere se andare avanti. Ogni volta che ti fermi un controllo separato verifica la condizione: se non è soddisfatta torni al lavoro.` : "";
@@ -355,6 +377,10 @@ export class Brain {
     const did = [];
     // What the owner said after the task started: a goal they have moved past must not hold.
     let steering = [];
+    // Told to stop, an agent stops: no more tools, no more rounds, whatever it has is the answer.
+    let halted = false;
+    // Steps taken since it was told to stop: enough to say where it was, never enough to go on.
+    let sinceHalt = 0;
     let lastUpdate = Date.now();
     const sayTracked = say ? async (text) => {
       lastUpdate = Date.now();
@@ -392,7 +418,8 @@ export class Brain {
         trace.add({ type: "note", text: `Ripete ${name} con gli stessi argomenti: lo fermo.` });
       }
       if (allowed && !MEMORY_TOOLS.has(name)) worked += 1;
-      const output = !allowed ? { text: `error: the tool ${name} is not available now` }
+      const output = halted ? { text: "error: the owner asked you to stop. Do not run anything else: say where you had got to, in one line." }
+        : !allowed ? { text: `error: the tool ${name} is not available now` }
         : repeated ? { text: "error: you have already done exactly this several times with the same result. Stop repeating it: write what you have so far and what is blocking you." }
         : await executeTool({ name, args }, ctx);
       const ok = !output.text.startsWith("error:");
@@ -410,7 +437,15 @@ export class Brain {
       const parts = [];
       const fresh = inbox?.() || [];
       if (fresh.length) {
-        for (const item of fresh) if (item.kind === "owner" || item.kind === "human") steering.push(`${item.authorName}: ${item.content}`);
+        for (const item of fresh) {
+          if (item.kind !== "owner" && item.kind !== "human") continue;
+          steering.push(`${item.authorName}: ${item.content}`);
+          if (asksToStop(item.content)) halted = true;
+        }
+        if (halted) {
+          trace.add({ type: "note", text: "Gli hanno detto di fermarsi: chiudo il turno." });
+          parts.push("[Cora] Ti hanno detto di fermarti. Fermati adesso: niente altri strumenti, scrivi in una riga a che punto eri e basta.");
+        }
         trace.add({ type: "note", text: `Nuovi messaggi mentre lavora:\n${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}` });
         parts.push(`[Nel frattempo nella chat]\n${formatTranscript(fresh, agent, this.timezone)}\n(Se cambiano quello che ti chiedono, adatta il piano.)`);
       }
@@ -450,8 +485,27 @@ export class Brain {
      */
     let goalRounds = 0;
     const goalVerdict = async (raw) => {
-      if (!worked || looping || asked || goalRounds >= GOAL_ROUNDS || Date.now() > deadline - 20000) return null;
+      if (halted || !worked || looping || asked || goalRounds >= GOAL_ROUNDS || Date.now() > deadline - 20000) return null;
       const text = cleanReply(raw, agent);
+      if (steering.length) {
+        // They have spoken since the goal was written: it is theirs to move, not ours to defend.
+        const said = steering.join("\n");
+        steering = [];
+        const { goal: next, usage: cost } = await this.goalFor(user, said);
+        trace.spent(cost);
+        if (next && next !== goal) {
+          trace.add({ type: "note", text: `Obiettivo aggiornato su quello che hanno detto: ${next}` });
+          if (sayTracked) await sayTracked(`Cambio obiettivo: ${next}`).catch(() => {});
+          goal = next;
+          if (ownsGoal) this.channelGoals.set(channel.id, next);
+        } else if (!next) {
+          // What they asked for is no longer a task: stop holding it to a condition.
+          trace.add({ type: "note", text: "Obiettivo lasciato cadere: non chiedono più un compito." });
+          goal = "";
+          if (ownsGoal) this.channelGoals.delete(channel.id);
+          return null;
+        }
+      }
       const { met, reason, usage } = await this.goalCheck(goal, { answer: text, work: did.slice(-40).join("\n") });
       trace.spent(usage);
       trace.add({ type: "note", text: `Controllo obiettivo: ${met ? "raggiunto" : "non ancora"}${reason ? ` — ${reason}` : ""}` });
@@ -496,7 +550,10 @@ export class Brain {
       // The last real answer the agent gave: a final "DONE" (confirming it is finished) posts this, not the word "DONE".
       let lastAnswer = "";
       const size = () => messages.reduce((total, message) => total + String(message.content || "").length + JSON.stringify(message.toolCalls || "").length, 0);
-      for (; steps < maxSteps && Date.now() < deadline; steps += 1) {
+      // Stopped, it still gets a step or two to say where it had got to — with every tool
+      // refused, so it can write that line and nothing else.
+      for (; steps < maxSteps && Date.now() < deadline && (!halted || sinceHalt < 3); steps += 1) {
+        if (halted) sinceHalt += 1;
         if (steps > 0) {
           const steer = news();
           if (steer) messages.push({ role: "user", content: steer });
@@ -545,6 +602,8 @@ export class Brain {
           messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: output.text, image: output.image });
         }
       }
+      // Stopped on request: what it has is the answer, and no further call is made for it.
+      if (halted) return done(lastAnswer || "Mi fermo qui.", steps);
       if (lastAnswer) return done(lastAnswer, steps);
       trace.add({ type: "note", text: "Lavora da troppo: chiedo il messaggio finale." });
       messages.push({ role: "user", content: "[Cora] Ci stai lavorando da molto: fermati qui e scrivi cosa hai fatto, cosa manca e cosa ti blocca." });
@@ -555,6 +614,8 @@ export class Brain {
     } catch (error) {
       trace.finish({ status: "error", error: error.message });
       throw error;
+    } finally {
+      if (ownsGoal) this.channelGoals.delete(channel.id);
     }
   }
 
