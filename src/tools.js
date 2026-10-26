@@ -7,6 +7,14 @@ const XDOTOOL_BUTTON = { click: "1", double_click: "1", right_click: "3", middle
 /** Tools every agent has, also without its computer. */
 export const MEMORY_TOOLS = new Set(["say", "remember", "forget", "recall", "update_core", "notify", "ask_owner"]);
 
+/**
+ * What an agent may do about its own life without the owner's computer: speak,
+ * remember, and run its own routines. Its routines are its own — creating,
+ * changing, pausing or deleting one touches nothing else — so they are not
+ * locked behind the computer, which only opens when the owner is the one asking.
+ */
+export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "delete_routine"]);
+
 export const TOOL_DEFS = [
   {
     name: "shell",

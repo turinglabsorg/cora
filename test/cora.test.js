@@ -562,7 +562,8 @@ describe("agents in Discord", () => {
     assert.deepEqual(run.secretEnv, [], "no bot token reaches the CLI");
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__notify", "mcp__cora__ask_owner"]);
+    // Its own routines travel with it: they are the agent's own, not the owner's computer.
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);
@@ -1066,6 +1067,28 @@ describe("talking with the agents", () => {
     assert.deepEqual(nudges, ["[Cora] Non hai finito: quello che hai scritto è un aggiornamento, non il risultato. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare", "[Cora] Prima di chiudere: il compito che ti hanno dato è finito davvero e verificato? Se manca qualcosa, continua adesso con gli strumenti. Se è tutto fatto, rispondi solo DONE."]);
     const [trace] = (await call(`/api/agents/${olga.id}/traces`)).data;
     assert.ok(trace.stepCount > 22, `worked through ${trace.stepCount} steps`);
+  });
+
+  test("an agent can pause and delete its own routines even without the owner's computer", async () => {
+    let offered = [];
+    let done = "";
+    replies.set("Pino", (body) => {
+      offered = (body.tools || []).map((tool) => tool.function.name);
+      if (!done) {
+        done = "set";
+        return { tool_calls: [{ function: { name: "set_routine", arguments: { name: "Promemoria", schedule: "0 9 * * *", prompt: "ricorda" } } }] };
+      }
+      return { content: "Routine sistemata." };
+    });
+    // Pino has no computer here: the conversation is a plain question, not the owner's work.
+    discord.say({ content: "Pino, mettiti un promemoria ogni mattina", author: STRANGER, username: "Ospite" });
+    await waitFor(() => posts("Pino").includes("Routine sistemata."), { what: "Pino's answer", timeout: 20000 });
+    await quiet();
+    assert.ok(offered.includes("set_routine") && offered.includes("delete_routine"), "its own routines are always within reach");
+    assert.ok(!offered.includes("shell"), "the owner's computer still is not");
+    const mine = (await call("/api/state")).data.routines.filter((r) => r.agentId === pino.id);
+    assert.ok(mine.some((r) => r.name === "Promemoria"), "and it really made one");
+    for (const r of mine) await call(`/api/routines/${r.id}`, { method: "DELETE" });
   });
 
   test("told to stop, an agent stops: no more tools, no more goal rounds", async (t) => {

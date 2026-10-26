@@ -3,7 +3,7 @@ import { Memory, parseJsonObject } from "./memory.js";
 import { isTelegramChannel } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom } from "./rooms.js";
 import { SHARED } from "./store.js";
-import { MEMORY_TOOLS, TOOL_DEFS, executeTool, summarizeArgs } from "./tools.js";
+import { MEMORY_TOOLS, OWN_TOOLS, TOOL_DEFS, executeTool, summarizeArgs } from "./tools.js";
 import { NO_TRACE } from "./traces.js";
 import { nextRuns } from "./scheduler.js";
 
@@ -173,6 +173,14 @@ export class Brain {
       "- Quando scopri qualcosa che vale la pena ricordare a lungo (preferenze, decisioni, persone, progetti, scadenze), salvalo subito con remember. Fatti brevi, uno per volta.",
       "- Se un ricordo è sbagliato o superato, usa forget. La scheda si aggiorna con update_core.",
       "- Ogni notte riordini la memoria e scrivi il diario: non serve salvare le chiacchiere.",
+    ].join("\n"));
+    // The owner edits cora in their own checkout. An agent working in it would fight them for
+    // the same files, and has already reverted work of theirs that was not committed yet.
+    sections.push([
+      "## Il codice di Cora",
+      "Se lavori sul codice di Cora, lavora **solo** nel clone degli agenti: `~/GIT/@agents/cora` sul computer del proprietario.",
+      "Non toccare mai `~/GIT/@turinglabs/@agentlab/cora`: è l'albero di lavoro del proprietario, ci sta scrivendo lui e le sue modifiche non sono ancora salvate.",
+      "Prima di cominciare allinea il tuo clone (`git -C ~/GIT/@agents/cora pull`), e lascia il tuo lavoro su un branch tuo: non fare `git checkout`, `git restore` o `git stash` su file che non hai scritto tu.",
     ].join("\n"));
     const personal = this.ownerInstructions().trim();
     if (personal) {
@@ -349,7 +357,7 @@ export class Brain {
   async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false }) {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
-    const tools = caps.tools ? TOOL_DEFS.filter((tool) => MEMORY_TOOLS.has(tool.name) || computer) : [];
+    const tools = caps.tools ? TOOL_DEFS.filter((tool) => OWN_TOOLS.has(tool.name) || computer) : [];
     const place = channel.place || "";
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
     // Every task carries a goal, and the goal travels with the prompt: whichever harness
