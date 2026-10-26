@@ -849,7 +849,7 @@ export class Orchestrator {
   }
 
   /** The owner writing from the panel: same flow as a Discord message from the owner. */
-  async onWebMessage({ room, text }) {
+  async onWebMessage({ room, text, user }) {
     const content = String(text || "").trim().slice(0, 3000);
     if (!content) return null;
     const state = this.state(room);
@@ -857,8 +857,8 @@ export class Orchestrator {
     const item = {
       id: `web_${randomBytes(8).toString("hex")}`,
       at: Date.now(),
-      authorId: "panel",
-      authorName: this.store.ownerName() || "Proprietario",
+      authorId: user?.id || "panel",
+      authorName: user?.name || user?.email || this.store.ownerName() || "Proprietario",
       kind: "owner",
       agentId: null,
       content,

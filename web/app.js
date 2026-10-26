@@ -243,7 +243,7 @@ async function api(path, { method = "GET", body } = {}) {
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
   if (response.status === 401 && path !== "/api/login") {
-    renderLogin();
+    if (!S.revoked) renderLogin();
     throw new Error("login richiesto");
   }
   const data = await response.json().catch(() => ({}));
@@ -272,6 +272,18 @@ async function guard(promise, okText) {
 function clearTimers() {
   S.timers.forEach((timer) => clearInterval(timer));
   S.timers = [];
+  S.settingsObserver?.disconnect();
+  S.settingsObserver = null;
+}
+
+function revealSelection(container) {
+  if (!container.isConnected || container.scrollWidth <= container.clientWidth) return;
+  const selected = container.querySelector(".active");
+  if (!selected) return;
+  const item = selected.getBoundingClientRect();
+  const bounds = container.getBoundingClientRect();
+  if (item.right > bounds.right) container.scrollLeft += item.right - bounds.right + 8;
+  else if (item.left < bounds.left) container.scrollLeft += item.left - bounds.left - 8;
 }
 
 /* ---------- formatting ---------- */
@@ -327,7 +339,9 @@ function shade(hex) {
 
 /* ---------- data and live events ---------- */
 async function loadState() {
-  S.data = await api("/api/state");
+  const data = await api("/api/state");
+  if (S.revoked) return null;
+  S.data = data;
   updateLamp();
   return S.data;
 }
@@ -346,6 +360,20 @@ function connectEvents() {
   S.events.onmessage = (event) => {
     let entry;
     try { entry = JSON.parse(event.data); } catch { return; }
+    if (entry.type === "access-revoked") {
+      S.revoked = true;
+      clearTimeout(S.refreshTimer);
+      clearTimers();
+      S.live = null;
+      S.events?.close();
+      S.events = null;
+      S.data = null;
+      app.replaceChildren(h("div", { class: "login" }, h("div", { class: "login-inner" },
+        h("span", { class: "panel-ico" }, icon("shield")), h("h1", {}, "Accesso revocato"),
+        h("p", { class: "login-sub" }, "L'owner ha modificato i tuoi permessi. Contattalo per accedere di nuovo."),
+        btn("Usa un altro account", { icon: "logout", cls: "primary", href: S.cloud?.logout || "/" }))));
+      return;
+    }
     if (entry.type === "subscriptions") return;
     if (["web-message", "web-typing", "trace"].includes(entry.type)) {
       S.live?.(entry);
@@ -409,6 +437,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     ["agenti", "Agenti", "users", ["agenti", "agent", "new"].includes(section)],
     ["", "Salotto", "chat", section === ""],
     ["banco", "Banco", "grid", section === "banco"],
+    ["contesto", "Contesto", "book", section === "contesto"],
     ["settings", "Impostazioni", "sliders", section === "settings"],
   ];
   const info = transportInfo();
@@ -424,6 +453,9 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
         h("span", { class: "label" }, "Agenti"),
         S.data.agents.map((agent) => h("a", { href: `#/agent/${agent.id}/chat`, class: section === "agent" && current === agent.id ? "active" : "" }, avatar(agent, "xs"), h("span", { class: "grow" }, raw(agent.name)), agentDot(agent))),
         h("a", { href: "#/new", class: section === "new" ? "active" : "" }, h("span", { class: "avatar xs add" }, icon("plus")), h("span", { class: "grow" }, "Nuovo agente"))),
+      S.data?.currentUser ? h("a", { class: "side-identity", href: "#/settings/accesso" }, icon("user"),
+        h("span", { class: "grow" }, h("b", {}, raw(S.data.currentUser.name || S.data.currentUser.email || "Owner")),
+          h("small", {}, raw(S.data.currentUser.email || tr("Owner"))))) : null,
       h("button", { class: "side-logout", type: "button", onclick: logout }, icon("logout"), h("span", {}, "Esci"))),
     h("header", { class: "appbar" },
       back ? h("a", { class: "icon-btn", href: back, "aria-label": "Indietro" }, icon("back")) : h("a", { class: "appbar-brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "Cora" })),
@@ -1507,7 +1539,7 @@ function linkedText(text) {
 
 function chatMessage(item, answer) {
   const agent = item.agentId ? S.data.agents.find((entry) => entry.id === item.agentId) : null;
-  const mine = item.kind === "owner";
+  const mine = item.kind === "owner" && (!S.data.currentUser || item.authorId === S.data.currentUser.id || item.authorId === "panel");
   const text = item.file ? item.content.replace(/\s*\[file: [^\]]*\]$/, "") : item.content;
   const choices = item.request && answer
     ? h("div", { class: "choices-row" }, (item.request.choices.length ? item.request.choices : []).map((choice) => btn(raw(choice), { cls: "sm", onclick: () => answer(choice) })), h("span", { class: "label" }, item.request.choices.length ? "oppure scrivi" : "rispondi qui sotto"))
@@ -1797,6 +1829,58 @@ async function enableNotifications() {
   }
 }
 
+/* ---------- shared instruction context ---------- */
+function renderContext() {
+  const body = h("div", { class: "context-browser" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  let selectedId = "owner";
+  const labels = { applied: "Applicato da Cora", detected: "Disponibile al CLI", excluded: "Escluso dal runtime", missing: "Non presente", unavailable: "Non leggibile" };
+  const scopes = { shared: "Comune a tutti gli agenti", resident: "Subscription residente", instance: "Cartella dell'istanza", account: "Account collegato" };
+  const load = async () => {
+    refresh.disabled = true;
+    try {
+      const data = await api("/api/context");
+      if (!body.isConnected) return;
+      const draw = () => {
+        const previousScroll = body.querySelector(".context-files")?.scrollLeft || 0;
+        const selected = data.sources.find((source) => source.id === selectedId) || data.sources[0];
+        selectedId = selected.id;
+        const list = h("nav", { class: "context-files", "aria-label": "File di contesto" }, data.sources.map((source) => h("button", {
+          type: "button", class: `context-file${source.id === selectedId ? " active" : ""}`, "aria-pressed": String(source.id === selectedId), onclick: () => { selectedId = source.id; draw(); },
+        }, icon(source.provider === "cora" ? "book" : "file"), h("span", { class: "grow" }, h("b", {}, source.id === "shared-memory" ? "Memoria condivisa" : raw(source.title)),
+          h("small", {}, raw(source.provider === "codex" ? "ChatGPT / Codex" : source.provider === "claude" ? "Claude" : "Cora"), raw(" · "), scopes[source.scope])),
+          h("i", { class: `context-file-dot ${source.status}`, "aria-label": labels[source.status] }))));
+        const explanation = selected.id === "owner" ? "Queste istruzioni vengono incluse da Cora nel contesto di tutti gli agenti."
+          : selected.provider === "codex" ? "Codex viene avviato con le istruzioni locali disabilitate. Riceve le istruzioni comuni già incluse da Cora."
+          : selected.provider === "claude" ? "File disponibile a Claude. Il caricamento dipende dal profilo e dal runtime del turno."
+          : "Questa memoria viene condivisa con tutti gli agenti dell'istanza.";
+        const copy = selected.content ? btn("Copia testo", { icon: "copy", cls: "ghost", onclick: async () => {
+          try { await navigator.clipboard.writeText(selected.content); toast("Copiato"); }
+          catch { toast("Non riesco a copiare: selezionalo a mano", true); }
+        } }) : null;
+        body.replaceChildren(list, h("section", { class: "context-document" },
+          h("header", {}, h("div", { class: "grow" }, h("h2", {}, selected.id === "shared-memory" ? "Memoria condivisa" : raw(selected.title)),
+            selected.path ? h("p", { class: "context-path" }, raw(selected.path)) : null), copy),
+          h("div", { class: "context-provenance" }, badge(labels[selected.status], selected.status === "applied" ? "on" : ""),
+            selected.updatedAt ? h("time", { datetime: selected.updatedAt }, raw(new Date(selected.updatedAt).toLocaleString(LOCALE, { dateStyle: "medium", timeStyle: "short" }))) : null),
+          h("p", { class: "context-explanation" }, explanation),
+          selected.accountLabel ? h("p", { class: "context-explanation" }, raw(selected.accountLabel)) : null,
+          selected.available && selected.content ? h("pre", { class: "context-text", tabindex: "0", "aria-label": "Testo delle istruzioni" }, raw(selected.content))
+            : h("div", { class: "context-empty" }, icon("file"), h("p", {}, selected.available ? "Questo contesto è vuoto." : selected.status === "missing" ? "Questo file non è presente sul server." : "Questo file non può essere mostrato.")),
+          selected.truncated ? h("small", { class: "context-limit" }, "Sono mostrati i primi 60.000 caratteri.") : null));
+        list.scrollLeft = previousScroll;
+        revealSelection(list);
+      };
+      draw();
+    } catch (error) {
+      body.replaceChildren(h("p", { class: "err-text", role: "alert" }, tr(error.message)), btn("Riprova", { icon: "refresh", onclick: load }));
+    } finally { refresh.disabled = false; }
+  };
+  const refresh = btn("Aggiorna", { icon: "refresh", onclick: load });
+  shell([pageHead("Contesto", "Le istruzioni del server e la memoria comune agli agenti.", refresh),
+    h("p", { class: "context-intro" }, "Il carattere e i ricordi di ogni agente si aggiungono a queste istruzioni. La provenienza indica cosa viene applicato e cosa è solo presente sul dispositivo."), body], { title: "Contesto" });
+  load();
+}
+
 /* ---------- settings ---------- */
 function transportChoice(kind) {
   const info = transportInfo(kind);
@@ -1829,6 +1913,75 @@ function transportChoice(kind) {
   return card;
 }
 
+function subscriptionPlanLabel(plan) {
+  return ({ free: "Free", pro: "Pro", plus: "Plus", max: "Max", team: "Team", enterprise: "Enterprise", business: "Business", self_serve_business_prolite: "Business" })[plan] || tr("Abbonamento attivo");
+}
+
+function instanceAccessPanel() {
+  const current = S.data.currentUser;
+  const identity = h("div", { class: "access-identity" }, icon("user"),
+    h("div", { class: "grow" }, h("b", {}, raw(current?.name || current?.email || "Owner")), current?.email ? h("small", {}, raw(current.email)) : null),
+    badge(current?.role === "member" ? "Utente" : "Owner", "on"));
+  if (!S.data.access?.canManage) return panel({ icon: "shield", title: "Accesso all'istanza", hint: "Il tuo account e i permessi di questa Cora." }, identity,
+    h("p", { class: "lead" }, "Puoi lavorare con gli agenti e usare tutte le funzioni operative. L'owner gestisce chi può entrare."));
+  const body = h("div", { class: "stack" }, identity, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  let data;
+  let busy = false;
+  const update = async (fn) => {
+    if (busy) return;
+    busy = true;
+    for (const button of body.querySelectorAll("button")) button.disabled = true;
+    try { await fn(); data = await api("/api/access"); draw(); toast("Accessi aggiornati"); }
+    catch (error) { toast(error.message, true); }
+    finally { busy = false; for (const button of body.querySelectorAll("button")) button.disabled = false; }
+  };
+  const rules = (kind, title, hint, placeholder) => {
+    const input = h("input", { type: kind === "emails" ? "email" : "text", "aria-label": kind === "emails" ? "Email da autorizzare" : "Dominio da autorizzare", placeholder, autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
+    const add = btn(kind === "emails" ? "Autorizza" : "Aggiungi", { icon: "plus", onclick: () => {
+      const value = input.value.trim();
+      if (!value) { input.focus(); return; }
+      update(() => api("/api/access", { method: "PUT", body: { [kind]: [...data[kind], value] } }));
+    } });
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); add.click(); } });
+    return h("section", { class: "access-rules" }, h("h3", {}, title), h("p", {}, hint),
+      h("div", { class: "access-add" }, input, add),
+      h("ul", {}, data[kind].length ? data[kind].map((value) => h("li", { class: "access-rule" }, icon(kind === "domains" ? "globe" : "user"), h("span", { class: "grow" }, raw((kind === "domains" ? "@" : "") + value)),
+        btn("", { icon: "close", cls: "ghost", title: tr("Rimuovi {value}", { value }), onclick: () => update(() => api("/api/access", { method: "PUT", body: { [kind]: data[kind].filter((entry) => entry !== value) } })) })))
+        : h("li", { class: "access-no-rules" }, kind === "domains" ? "Nessun dominio autorizzato." : "Nessun indirizzo aggiunto.")));
+  };
+  const actions = { "sign-in": "Accesso effettuato", settings: "Impostazioni aggiornate", agent: "Agente modificato", message: "Messaggio inviato", connections: "Collegamenti aggiornati", "access-policy": "Accessi aggiornati" };
+  function draw() {
+    const users = h("div", { class: "access-users" }, data.users.map((user) => h("div", { class: "access-user" },
+      h("span", { class: "access-user-mark", "aria-hidden": "true" }, icon(user.role === "owner" ? "shield" : "user")),
+      h("div", { class: "grow" }, h("b", {}, raw(user.name || user.email || "Owner")), user.email ? h("span", { class: "access-user-email" }, raw(user.email)) : null,
+        h("small", {}, tr("Prima visita: {date}", { date: new Date(user.createdAt).toLocaleDateString(LOCALE) }), raw(" · "),
+          tr("Ultima attività: {date}", { date: new Date(user.lastSeenAt).toLocaleString(LOCALE, { dateStyle: "short", timeStyle: "short" }) }))),
+      badge(user.role === "owner" ? "Owner" : user.blocked ? "Revocato" : user.allowed ? "Utente" : "Non autorizzato", user.allowed ? "on" : ""),
+      user.role === "owner" ? null : btn(user.blocked ? "Riabilita" : "Revoca accesso", { cls: user.blocked ? "ghost" : "ghost danger", onclick: () => update(() => api(`/api/access/users/${user.id}`, { method: "PUT", body: { blocked: !user.blocked } })) }))));
+    body.replaceChildren(identity,
+      h("p", { class: "lead" }, "Gli utenti ammessi hanno gli stessi permessi operativi. Solo l'owner può autorizzare o revocare gli accessi."),
+      h("div", { class: "connection-grid" },
+        rules("domains", "Domini autorizzati", "Ammetti tutti gli account con un indirizzo verificato di questi domini.", "es. azienda.it"),
+        rules("emails", "Singole persone", "Autorizza una persona senza aprire l'accesso a tutto il suo dominio.", "nome@azienda.it")),
+      h("p", { class: "access-note" }, icon("info"), "Quando un utente perde l'autorizzazione, si chiudono anche le sue sessioni aperte. L'owner conserva sempre l'accesso."),
+      h("section", { class: "access-people" }, h("h3", {}, "Utenti di questa istanza"),
+        h("p", {}, "Ogni persona mantiene la propria identità, anche nei messaggi agli agenti."), users),
+      h("details", { class: "access-history" }, h("summary", {}, icon("clock"), "Attività degli utenti"),
+        h("div", { class: "access-audit" }, data.audit.map((entry) => h("div", {}, h("span", { class: "grow" }, h("b", {}, raw(entry.name || entry.email || "Owner")), h("span", {}, actions[entry.action] || "Attività")),
+          h("time", { datetime: new Date(entry.at).toISOString() }, raw(new Date(entry.at).toLocaleString(LOCALE, { dateStyle: "short", timeStyle: "short" }))))))));
+  }
+  api("/api/access").then((value) => { data = value; if (body.isConnected) draw(); }).catch(() => {
+    body.replaceChildren(h("p", { class: "err-text" }, "Impossibile caricare gli accessi."), btn("Riprova", { icon: "refresh", onclick: () => { body.replaceChildren(h("p", { class: "muted", role: "status" }, "Caricamento…")); api("/api/access").then((value) => { data = value; draw(); }).catch(() => body.replaceChildren(h("p", { class: "err-text" }, "Impossibile caricare gli accessi."))); } }));
+  });
+  const refresh = btn("Aggiorna utenti", { icon: "refresh", cls: "ghost", onclick: async () => {
+    refresh.disabled = true;
+    try { data = await api("/api/access"); draw(); }
+    catch (error) { toast(error.message, true); }
+    finally { refresh.disabled = false; }
+  } });
+  return panel({ icon: "shield", title: "Accesso all'istanza", hint: "Scegli chi può entrare nella tua Cora.", actions: refresh }, body);
+}
+
 function connectionsPanel() {
   const residentToggle = switchInput("useResidentSubscriptions", "Usa subscription residenti", S.data.settings.useResidentSubscriptions,
     "Come impostazione predefinita, usa gli account già presenti sul dispositivo che ospita Cora.");
@@ -1851,7 +2004,7 @@ function connectionsPanel() {
         h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(provider === "claude" ? "spark" : "chip")),
         h("div", { class: "grow" }, h("b", {}, provider === "codex" ? "ChatGPT / Codex" : "Claude"),
           h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato")) : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
-          connected && record.plan ? h("small", {}, raw(record.plan)) : null),
+          connected && record.plan ? h("small", {}, raw(subscriptionPlanLabel(record.plan))) : null),
         h("span", { class: `subscription-status ${connected ? "ready" : "disconnected"}` }, h("i", { "aria-hidden": "true" }), connected ? "Disponibile" : "Da collegare"));
     }));
   };
@@ -1965,6 +2118,7 @@ function renderSettings() {
     panel({ icon: "book", title: "Memoria condivisa", hint: "Cose che tutti gli agenti sanno: chi sei, i progetti, le regole della casa." },
       h("textarea", { name: "sharedMemory", class: "tall" }, settings.sharedMemory))),
     h("div", { class: "settings-pane stack", "data-settings-tab": "accesso", role: "tabpanel" },
+    instanceAccessPanel(),
     panel({ icon: "key", title: "Chiavi SSH", hint: "Chi entra nei desktop via SSH passando dalla macchina host. Valgono già le chiavi che entrano nella macchina host; qui aggiungi le altre, una per riga." },
       h("textarea", { name: "sshKeys", class: "mono", placeholder: "ssh-ed25519 AAAA… telefono" }, settings.sshKeys.join("\n")))),
     h("div", { class: "savebar" }, h("span", { class: "spacer" }), btn("Salva impostazioni", { icon: "check", type: "submit", cls: "primary" })));
@@ -2002,6 +2156,7 @@ function renderSettings() {
     }
     form.querySelector(".savebar").hidden = ["collegamenti", "preferenze"].includes(id);
     if (updateRoute) history.replaceState(null, "", `#/settings/${id}`);
+    revealSelection(nav);
   };
   for (const [id, label, name] of tabs) nav.append(h("button", { type: "button", role: "tab", id: `settings-tab-${id}`, "aria-controls": `settings-pane-${id}`, "data-tab": id, onclick: () => showTab(id, true) }, icon(name), label));
   for (const pane of form.querySelectorAll(".settings-pane")) {
@@ -2020,6 +2175,11 @@ function renderSettings() {
   const initialTab = tabs.some(([id]) => id === route()[1]) ? route()[1] : "collegamenti";
   showTab(initialTab);
   shell([pageHead("Impostazioni", "Account, canali e preferenze della tua Cora."), nav, form], { title: "Impostazioni" });
+  requestAnimationFrame(() => revealSelection(nav));
+  if (typeof ResizeObserver !== "undefined") {
+    S.settingsObserver = new ResizeObserver(() => revealSelection(nav));
+    S.settingsObserver.observe(nav);
+  }
 }
 
 /* ---------- login ---------- */
@@ -2093,6 +2253,7 @@ async function render() {
   else if (page === "banco") await renderDashboard();
   else if (page === "agenti") renderAgents();
   else if (page === "new") renderNew();
+  else if (page === "contesto") renderContext();
   else if (page === "settings") renderSettings();
   else renderSalotto();
 }

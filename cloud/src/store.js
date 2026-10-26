@@ -74,6 +74,12 @@ export class CloudStore {
     this.db = new DatabaseSync(this.path);
     try { chmodSync(this.path, 0o600); } catch {}
     this.db.exec(SCHEMA);
+    try { this.db.exec("ALTER TABLE identities ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0"); } catch {}
+    this.db.exec(`CREATE TABLE IF NOT EXISTS space_members (
+      slug TEXT NOT NULL REFERENCES spaces(slug) ON DELETE CASCADE,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      last_entered INTEGER NOT NULL, PRIMARY KEY(slug,account_id)
+    )`);
     this.statements = new Map();
   }
 
@@ -129,12 +135,26 @@ export class CloudStore {
     } else {
       this.stmt("UPDATE identities SET email = ?, login = ?, last_login = ? WHERE provider = ? AND subject = ?").run(email, login, now, provider, String(subject));
     }
+    this.stmt("UPDATE identities SET email_verified = ? WHERE provider = ? AND subject = ?").run(emailVerified ? 1 : 0, provider, String(subject));
     const account = this.account(accountId);
     // Fill in what the account is missing from the identity just used.
     this.stmt("UPDATE accounts SET name = ?, email = ?, avatar = ? WHERE id = ?").run(
       account.name || name, account.email || (emailVerified ? email : ""), avatar || account.avatar, accountId,
     );
     return this.account(accountId);
+  }
+
+  verifiedEmailOf(accountId) {
+    const identity = this.stmt("SELECT email,email_verified FROM identities WHERE account_id = ? ORDER BY last_login DESC LIMIT 1").get(accountId);
+    return identity?.email_verified ? String(identity.email || "").toLowerCase() : "";
+  }
+
+  recordSpaceEntry(slug, accountId) {
+    this.stmt("INSERT INTO space_members(slug,account_id,last_entered) VALUES (?,?,?) ON CONFLICT(slug,account_id) DO UPDATE SET last_entered=excluded.last_entered").run(slug,accountId,Date.now());
+  }
+
+  accessibleSpacesOf(accountId) {
+    return this.stmt("SELECT slug FROM spaces WHERE account_id = ? UNION SELECT slug FROM space_members WHERE account_id = ?").all(accountId,accountId).map((row) => this.space(row.slug));
   }
 
   identities(accountId) {

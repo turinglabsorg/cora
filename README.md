@@ -108,6 +108,16 @@ Login sessions expire after ten minutes and are cancelled on restart. Runs shari
 
 These flows are intended for the customer's own Cora instance using official CLIs. They do not imply permission to broker subscription tokens or resell provider usage. Review [Claude's conditions](https://code.claude.com/docs/en/legal-and-compliance) and [OpenAI's supported integration models](https://developers.openai.com/siwc/token-sharing-open-source) before offering a hosted commercial service.
 
+### Instance access and users
+
+In **Settings → Access**, the owner can authorize verified email domains or individual addresses and see who has entered this Cora instance. Members keep separate accounts and sessions. For now, all admitted users share the same operational permissions; only the owner manages admission and revocation. Removing a domain or revoking a person invalidates their sessions and closes their open event streams and desktop connections. The owner always retains access.
+
+Google/GitHub sign-in remains on usecora.space. Membership is checked by the target instance using signed identity claims, and permissions never carry across instances. Messages to agents retain the authenticated person's name and identity. The user list records first visit and last activity, with a recent activity history for the owner.
+
+### Context
+
+Open **Context** in the main navigation to inspect server instruction files and shared memory. Each source shows its path, update time and whether Cora applies it, a CLI may load it, or the runtime excludes it. The common owner instructions match the text injected into agent prompts. Codex runs with automatic local instruction loading disabled; Claude files are shown as available because loading depends on the profile and turn runtime. The page is read-only and exposes a fixed instruction-file inventory, never arbitrary server files or credential stores.
+
 ## The Cora harness
 
 Agents on `ollama/` run on Cora's own agent loop, the Cora harness; agents on Claude Code or Codex get the same checks around their CLI.

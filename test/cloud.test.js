@@ -240,7 +240,7 @@ describe("usecora.space", () => {
     const { cookie } = await signIn("github", { id: 777, login: "newcomer", name: "New Comer", emails: [] });
     const page = await request("/account", { headers: { cookie } });
     assert.match(page.body, /No space yet/);
-    assert.equal((await request("/go/acme", { headers: { cookie } })).status, 404);
+    assert.equal((await request("/go/acme", { headers: { cookie } })).status, 403);
 
     const form = (body, headers = {}) => request("/account/request", { method: "POST", body, headers: { cookie, "content-type": "application/x-www-form-urlencoded", origin, ...headers } });
     assert.equal((await form("slug=new-co&note=ops")).headers.location, "/account?notice=requested");

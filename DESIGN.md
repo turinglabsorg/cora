@@ -88,6 +88,11 @@ The radio desk at night: the same details as the panel (teletype on perforated p
 - **Sign-in and account:** one centered card with the mark; provider buttons; spaces as rows with the ON AIR lamp and an Enter button; the space request as a name field with the `.usecora.space` suffix.
 - Every section is readable without JavaScript; the teletype starts complete and replays after a moment; `prefers-reduced-motion` stops all motion.
 
+## Instance access and context
+
+- **Access** stays in Settings. A compact identity row precedes two columns for authorized domains and individual emails. Each rule is a removable row; admission updates immediately. Users appear as readable rows with identity, first visit, last activity, role and revoke/restore actions. Members see their own identity and a read-only permissions explanation. Revocation replaces their panel with an explicit access-revoked screen; restoration is verified by a new sign-in. Email inputs use the same dark well, focus ring and mobile size as other text controls.
+- **Context** is a main navigation destination alongside Agents, Lounge and Desk. Use a compact source rail and a spacious document well: provider, file name, scope, provenance badge, path and update time. On phones the source rail scrolls horizontally inside its own bounds and the five-item bottom navigation stays within the viewport. Instruction text is read-only, selectable mono text with line wrapping and its own vertical scroll. Do not render raw Markdown as HTML. Applied, available, excluded and missing sources remain visibly distinct; never imply a detected file is necessarily loaded.
+
 ## Motion
 
 - Page load: strips rise in with staggered `animation-delay` (60ms steps).

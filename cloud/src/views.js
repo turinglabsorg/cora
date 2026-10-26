@@ -387,3 +387,8 @@ export function offline({ slug }) {
   const body = card(`<div class="card-mark dim">${MARK}</div><span class="lamp"><i></i>Off air</span><h1>Off air for a moment.</h1><p class="lead">${esc(slug)} is not answering right now. Try again in a minute.</p><a class="btn primary" href="">Try again</a>`, "status-card");
   return layout({ title: "Off air · Cora", body, page: "plain" });
 }
+
+export function accessDenied({ account, slug }) {
+  return layout({ title: "Access not granted · Cora", page: "plain", account,
+    body: card(`<div class="card-mark dim">${MARK}</div><h1>This space is private.</h1><p class="lead">Ask the owner of <b>${esc(slug)}</b> to authorize your email address or your company domain.</p><a class="btn ghost" href="${BASE}/account">Your account</a>`, "status-card") });
+}

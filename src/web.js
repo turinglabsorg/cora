@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -13,6 +13,7 @@ import { telegramBotEnvName } from "./telegram-bots.js";
 import { isWebRoom, roomAgentId } from "./rooms.js";
 import { nextRuns } from "./scheduler.js";
 import { SHARED } from "./store.js";
+import { contextSources } from "./context.js";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
 const COOKIE = "cora_session";
@@ -115,20 +116,41 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
   } : null;
   const firstUse = passLedger();
 
-  const sessionCookie = () => {
+  const localOwner = () => store.panelUser("local-owner") || store.registerPanelUser({ id: "local-owner", name: "Owner", email: "", role: "owner", source: "local" });
+  const sessionHash = (token) => createHash("sha256").update(token).digest("hex");
+  const sessionCookie = (identity = localOwner()) => {
+    const user = store.registerPanelUser(identity);
     const expires = Date.now() + SESSION_DAYS * 86400000;
-    const value = `${expires}.${sign(sessionKey, `session.${expires}`)}`;
+    const token = randomBytes(32).toString("base64url");
+    store.createPanelSession(sessionHash(token), user.id, expires);
+    const value = `v2.${token}.${sign(sessionKey, `session.v2.${token}`)}`;
+    store.auditAccess(user.id, "sign-in");
     return `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_DAYS * 86400}${config.insecureCookies ? "" : "; Secure"}`;
   };
 
-  const authed = (req) => {
-    if (!sessionKey) return false;
+  const sessionUser = (req) => {
+    if (!sessionKey) return null;
     const value = parseCookies(req.headers.cookie)[COOKIE];
-    if (!value) return false;
-    const [expires, mac] = value.split(".");
-    if (!expires || !mac || Number(expires) < Date.now()) return false;
-    return safeEqual(mac, sign(sessionKey, `session.${expires}`));
+    if (!value) return null;
+    const parts = value.split(".");
+    if (parts[0] === "v2") {
+      const [, token, signature, extra] = parts;
+      if (!token || !signature || extra || !safeEqual(signature, sign(sessionKey, `session.v2.${token}`))) return null;
+      return store.panelSession(sessionHash(token));
+    }
+    const [expires, signature, extra] = parts;
+    if (extra || !expires || !signature || Number(expires) < Date.now() || !safeEqual(signature, sign(sessionKey, `session.${expires}`))) return null;
+    return localOwner();
   };
+  const authed = (req) => Boolean(sessionUser(req));
+  const accessConnections = new Set();
+  const invalidateConnections = () => {
+    for (const connection of accessConnections) {
+      if (!store.allowsPanelUser({ ...connection.user, emailVerified: true })) connection.close();
+    }
+  };
+  const cloudIdentity = (fields) => ({ id: fields.sub, name: fields.name || "", email: fields.email || "", avatar: fields.avatar || "",
+    role: fields.role === undefined || fields.role === "owner" ? "owner" : "member", emailVerified: fields.emailVerified === true, source: "cloud" });
 
   const send = (res, status, body, headers = {}) => {
     const payload = typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body);
@@ -172,7 +194,10 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
   async function api(req, res, url) {
     const path = url.pathname;
     const method = req.method;
-    if (path === "/api/me" && method === "GET") return send(res, 200, { authed: authed(req), cloud: cloud ? { login: cloud.login, logout: cloud.logout } : null });
+    if (path === "/api/me" && method === "GET") {
+      const user = sessionUser(req);
+      return send(res, 200, { authed: Boolean(user), ...(user ? { user } : {}), cloud: cloud ? { login: cloud.login, logout: cloud.logout } : null });
+    }
     if (path === "/api/login" && method === "POST") {
       if (cloud) throw new HttpError(403, "si entra da usecora.space");
       const now = Date.now();
@@ -185,11 +210,39 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       }
       return send(res, 200, { ok: true }, { "Set-Cookie": sessionCookie() });
     }
-    if (!authed(req)) throw new HttpError(401, "login richiesto");
+    const user = sessionUser(req);
+    if (!user) throw new HttpError(401, "login richiesto");
+    if (!["GET", "HEAD"].includes(method) && path !== "/api/logout") {
+      const action = path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
+      res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
+    }
     if (path === "/api/logout" && method === "POST") {
+      const token = parseCookies(req.headers.cookie)[COOKIE]?.split(".")[1];
+      if (token) store.deletePanelSession(sessionHash(token));
       return send(res, 200, { ok: true }, { "Set-Cookie": `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${config.insecureCookies ? "" : "; Secure"}` });
     }
 
+    if (path === "/api/context" && method === "GET") return send(res, 200, contextSources({ config, store, subscriptions, brain }));
+    if (path === "/api/access" || path.startsWith("/api/access/")) {
+      if (user.role !== "owner") throw new HttpError(403, "solo l'owner può gestire gli accessi");
+      if (path === "/api/access" && method === "GET") return send(res, 200, {
+        ...store.accessPolicy(), users: store.panelUsers().map((entry) => ({ ...entry, allowed: store.allowsPanelUser({ ...entry, emailVerified: true }) })), audit: store.accessAudit(),
+      });
+      if (path === "/api/access" && method === "PUT") {
+        const policy = store.updateAccessPolicy(await readJson(req, 16384));
+        invalidateConnections();
+        return send(res, 200, policy);
+      }
+      const member = /^\/api\/access\/users\/([a-zA-Z0-9_-]{1,160})$/.exec(path);
+      if (member && method === "PUT") {
+        const body = await readJson(req, 1024);
+        if (typeof body.blocked !== "boolean") throw new HttpError(400, "stato accesso non valido");
+        const updated = store.blockPanelUser(member[1], body.blocked);
+        invalidateConnections();
+        return send(res, 200, updated);
+      }
+      throw new HttpError(404, "not found");
+    }
     if (path === "/api/state" && method === "GET") {
       const [agents, models, imageReady] = await Promise.all([
         Promise.all(store.agents().map(publicAgent)),
@@ -198,6 +251,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       ]);
       return send(res, 200, {
         settings: store.settings,
+        currentUser: user,
+        access: { hosted: Boolean(cloud), canManage: user.role === "owner" },
         transport: channels.active,
         discord: discord.status(),
         telegram: telegram.status(),
@@ -423,7 +478,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
         if (!text) throw new HttpError(400, "messaggio vuoto");
         if (text.length > 3000) throw new HttpError(400, "messaggio troppo lungo (max 3000 caratteri)");
         if (agentId && !store.agent(agentId).enabled) throw new HttpError(409, "l'agente è muto: accendilo dal profilo");
-        return send(res, 201, await orchestrator.onWebMessage({ room, text }));
+        return send(res, 201, await orchestrator.onWebMessage({ room, text, user }));
       }
     }
 
@@ -585,9 +640,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
   /** A pass from usecora.space, or a one-time link made on the host, becomes this panel's usual session. */
   function signInFrom(req, res, url) {
     let ok = false;
+    let identity;
     if (url.pathname === "/auth/cloud" && cloud) {
       const fields = verifyPass(cloud.key, url.searchParams.get("pass"), { audience: cloud.audience });
-      ok = Boolean(fields && firstUse(fields));
+      identity = fields?.sub ? cloudIdentity(fields) : null;
+      ok = Boolean(identity && store.allowsPanelUser(identity) && firstUse(fields));
       activity({ type: ok ? "settings" : "warning", text: ok ? `accesso da usecora.space (${fields.email || fields.sub})` : "pass di usecora.space rifiutato" });
     }
     if (url.pathname === "/auth/link" && sessionKey) {
@@ -600,8 +657,16 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       res.writeHead(302, { Location: "/?signin=refused", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
       return res.end();
     }
-    res.writeHead(302, { Location: safeNext(url.searchParams.get("next")), "Set-Cookie": sessionCookie(), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+    res.writeHead(302, { Location: safeNext(url.searchParams.get("next")), "Set-Cookie": sessionCookie(identity), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
     res.end();
+  }
+
+  async function cloudAccess(req, res) {
+    if (!cloud) throw new HttpError(404, "not found");
+    const body = await readJson(req, 8192);
+    const fields = verifyPass(cloud.key, body.pass, { audience: `access:${cloud.audience}` });
+    if (!fields?.sub || !firstUse(fields)) throw new HttpError(403, "accesso non autorizzato a questa istanza");
+    return send(res, 200, { allowed: store.allowsPanelUser(cloudIdentity(fields)) });
   }
 
   const clients = new Set();
@@ -615,10 +680,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive", "X-Accel-Buffering": "no" });
     res.write("retry: 3000\n\n");
     clients.add(res);
+    const connection = { user: sessionUser(req), close: () => { clients.delete(res); res.write(`data: ${JSON.stringify({ type: "access-revoked" })}\n\n`); res.end(); accessConnections.delete(connection); } };
+    accessConnections.add(connection);
     const ping = setInterval(() => res.write(": ping\n\n"), 25000);
     req.on("close", () => {
       clearInterval(ping);
       clients.delete(res);
+      accessConnections.delete(connection);
     });
   }
 
@@ -659,6 +727,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       }
       if (url.pathname === "/healthz") return send(res, 200, "ok");
       if (url.pathname === "/auth/cloud" || url.pathname === "/auth/link") return signInFrom(req, res, url);
+      if (url.pathname === "/api/cloud/access" && req.method === "POST") return await cloudAccess(req, res);
       if (url.pathname === "/api/cloud/notice" && req.method === "POST") return await cloudNotice(req, res);
       if (url.pathname === "/api/events") return events(req, res);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
@@ -691,6 +760,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       const origin = req.headers.origin;
       if (origin && new URL(origin).host !== req.headers.host) return reject(403, "Forbidden");
       const target = await boxTarget(req);
+      const user = sessionUser(req);
+      if (!user) return reject(401, "Unauthorized");
       if (!target) return reject(404, "Not Found");
       const upstream = net.connect(target.port, "127.0.0.1", () => {
         const lines = [`${req.method} ${target.path} HTTP/1.1`];
@@ -706,7 +777,10 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
         upstream.pipe(socket);
         socket.pipe(upstream);
       });
-      const close = () => { socket.destroy(); upstream.destroy(); };
+      const connection = { user, close: () => { socket.destroy(); upstream.destroy(); accessConnections.delete(connection); } };
+      accessConnections.add(connection);
+      socket.on("close", () => { upstream.destroy(); accessConnections.delete(connection); });
+      const close = connection.close;
       upstream.on("error", close);
       socket.on("error", close);
     } catch (error) {

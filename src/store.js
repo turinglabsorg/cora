@@ -64,6 +64,21 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, provider TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS panel_users (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL, source TEXT NOT NULL, blocked INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS panel_sessions (
+  hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES panel_users(id), expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS panel_sessions_user ON panel_sessions(user_id);
+CREATE TABLE IF NOT EXISTS access_domains (domain TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS access_emails (email TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS access_audit (
+  id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, action TEXT NOT NULL, at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS access_audit_at ON access_audit(at);
 CREATE TABLE IF NOT EXISTS routines (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
@@ -376,6 +391,105 @@ export class Store {
     this.stmt("INSERT INTO settings(key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(JSON.stringify(this.cachedSettings));
     return this.cachedSettings;
+  }
+
+  /* ---------- instance membership and individual panel sessions ---------- */
+  accessPolicy() {
+    return {
+      domains: this.stmt("SELECT domain FROM access_domains ORDER BY domain").all().map((row) => row.domain),
+      emails: this.stmt("SELECT email FROM access_emails ORDER BY email").all().map((row) => row.email),
+    };
+  }
+
+  updateAccessPolicy(input) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("elenco accessi non valido");
+    const { domains, emails } = input;
+    const previous = this.accessPolicy();
+    const normalize = (values, type) => {
+      if (!Array.isArray(values) || values.length > (type === "domain" ? 30 : 100)) throw new ValidationError("elenco accessi non valido");
+      return [...new Set(values.map((value) => {
+        const clean = String(value).trim().toLowerCase().replace(type === "domain" ? /^@/ : /^$/, "");
+        const pattern = type === "domain" ? /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$/ : /^[^\s@]{1,64}@[a-z0-9.-]+\.[a-z]{2,63}$/;
+        if (clean.length > 254 || !pattern.test(clean)) throw new ValidationError(type === "domain" ? "dominio non valido" : "indirizzo email non valido");
+        return clean;
+      }))];
+    };
+    const next = { domains: normalize(domains ?? previous.domains, "domain"), emails: normalize(emails ?? previous.emails, "email") };
+    this.tx(() => {
+      this.stmt("DELETE FROM access_domains").run();
+      for (const domain of next.domains) this.stmt("INSERT INTO access_domains VALUES (?)").run(domain);
+      this.stmt("DELETE FROM access_emails").run();
+      for (const email of next.emails) this.stmt("INSERT INTO access_emails VALUES (?)").run(email);
+      for (const user of this.panelUsers()) {
+        if (!this.allowsPanelUser({ ...user, emailVerified: true })) this.stmt("DELETE FROM panel_sessions WHERE user_id = ?").run(user.id);
+      }
+    });
+    return this.accessPolicy();
+  }
+
+  panelUser(id) {
+    const row = this.stmt("SELECT * FROM panel_users WHERE id = ?").get(String(id || ""));
+    return row ? { id: row.id, name: row.name, email: row.email, avatar: row.avatar, role: row.role, source: row.source,
+      blocked: Boolean(row.blocked), createdAt: row.created_at, lastSeenAt: row.last_seen_at } : null;
+  }
+
+  panelUsers() {
+    return this.stmt("SELECT id FROM panel_users ORDER BY role DESC, last_seen_at DESC").all().map((row) => this.panelUser(row.id));
+  }
+
+  allowsPanelUser(identity) {
+    if (!identity?.id || this.panelUser(identity.id)?.blocked) return false;
+    if (identity.role === "owner") return true;
+    if (!identity.emailVerified) return false;
+    const email = String(identity.email || "").toLowerCase();
+    const domain = email.split("@")[1];
+    if (!domain || email.split("@").length !== 2) return false;
+    return Boolean(this.stmt("SELECT 1 FROM access_domains WHERE domain = ?").get(domain) || this.stmt("SELECT 1 FROM access_emails WHERE email = ?").get(email));
+  }
+
+  registerPanelUser(identity) {
+    if (!this.allowsPanelUser(identity)) throw new ValidationError("accesso non autorizzato a questa istanza");
+    const now = Date.now();
+    this.stmt(`INSERT INTO panel_users (id,name,email,avatar,role,source,created_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,email=excluded.email,avatar=excluded.avatar,role=excluded.role,source=excluded.source,last_seen_at=excluded.last_seen_at`)
+      .run(cleanText(identity.id,160), cleanText(identity.name,120), cleanText(identity.email,254).toLowerCase(), cleanText(identity.avatar,1000), identity.role === "owner" ? "owner" : "member", identity.source === "cloud" ? "cloud" : "local", now, now);
+    return this.panelUser(identity.id);
+  }
+
+  createPanelSession(hash, userId, expiresAt) {
+    this.stmt("DELETE FROM panel_sessions WHERE expires_at < ?").run(Date.now());
+    this.stmt("INSERT INTO panel_sessions (hash,user_id,expires_at) VALUES (?,?,?)").run(hash, userId, expiresAt);
+  }
+
+  panelSession(hash) {
+    const session = this.stmt("SELECT user_id,expires_at FROM panel_sessions WHERE hash = ?").get(hash);
+    if (!session || session.expires_at < Date.now()) return null;
+    const user = this.panelUser(session.user_id);
+    if (!user || !this.allowsPanelUser({ ...user, emailVerified: true })) return null;
+    if (Date.now() - user.lastSeenAt > 60000) this.stmt("UPDATE panel_users SET last_seen_at = ? WHERE id = ?").run(Date.now(), user.id);
+    return user;
+  }
+
+  deletePanelSession(hash) {
+    this.stmt("DELETE FROM panel_sessions WHERE hash = ?").run(hash);
+  }
+
+  blockPanelUser(id, blocked) {
+    const user = this.panelUser(id);
+    if (!user) throw new ValidationError("utente non trovato");
+    if (user.role === "owner") throw new ValidationError("non puoi revocare l'accesso dell'owner");
+    this.stmt("UPDATE panel_users SET blocked = ? WHERE id = ?").run(blocked ? 1 : 0, id);
+    if (blocked) this.stmt("DELETE FROM panel_sessions WHERE user_id = ?").run(id);
+    return this.panelUser(id);
+  }
+
+  auditAccess(userId, action) {
+    this.stmt("INSERT INTO access_audit(user_id,action,at) VALUES (?,?,?)").run(userId, action, Date.now());
+  }
+
+  accessAudit() {
+    return this.stmt(`SELECT a.*,u.name,u.email FROM access_audit a LEFT JOIN panel_users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 40`).all()
+      .map((row) => ({ id: row.id, userId: row.user_id, name: row.name || "", email: row.email || "", action: row.action, at: row.at }));
   }
 
   /* ---------- subscription identities; credentials belong to the official CLIs ---------- */

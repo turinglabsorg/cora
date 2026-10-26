@@ -263,7 +263,7 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
 
     if (method === "GET" && path === "/account") {
       return html(res, 200, views.account({
-        ...page, identities: store.identities(account.id), spaces: store.spacesOf(account.id).map((space) => ({ ...space, url: spaceOrigin(space.slug) })),
+        ...page, identities: store.identities(account.id), spaces: store.accessibleSpacesOf(account.id).map((space) => ({ ...space, url: spaceOrigin(space.slug) })),
         request: store.requestOf(account.id), notice: url.searchParams.get("notice") || "", error: url.searchParams.get("error") || "",
       }));
     }
@@ -293,10 +293,24 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
     const go = /^\/go\/([a-z0-9-]+)$/.exec(path);
     if (method === "GET" && go) {
       const space = store.space(go[1]);
-      if (!space || space.accountId !== account.id) return html(res, 404, views.notFound({ ...page, slug: go[1] }));
-      const pass = signPass(keys.privateKey, {
-        aud: `${space.slug}.${domain}`, sub: account.id, name: account.name, email: account.email,
-      });
+      if (!space) return html(res, 404, views.notFound({ ...page, slug: go[1] }));
+      const owner = space.accountId === account.id;
+      const email = store.verifiedEmailOf(account.id);
+      const identity = { sub: account.id, name: account.name, email: owner ? account.email : email, emailVerified: Boolean(email) && (!owner || email === account.email), avatar: account.avatar, role: owner ? "owner" : "member" };
+      if (!owner) {
+        let allowed = false;
+        try {
+          const response = await fetch(`${space.upstream}/api/cloud/access`, {
+            method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" },
+            body: JSON.stringify({ pass: signPass(keys.privateKey, { aud: `access:${space.slug}.${domain}`, ...identity }) }),
+            signal: AbortSignal.timeout(10000), redirect: "error",
+          });
+          allowed = response.ok && (await response.json()).allowed === true;
+        } catch {}
+        if (!allowed) return html(res, 403, views.accessDenied({ ...page, slug: space.slug }));
+      }
+      const pass = signPass(keys.privateKey, { aud: `${space.slug}.${domain}`, ...identity });
+      store.recordSpaceEntry(space.slug, account.id);
       log({ type: "enter", accountId: account.id, space: space.slug });
       const next = safeNext(url.searchParams.get("next"), "/");
       return redirect(res, `${spaceOrigin(space.slug)}/auth/cloud?${new URLSearchParams({ pass, next })}`);
