@@ -842,6 +842,8 @@ describe("talking with the agents", () => {
       if (calls === 21) return { content: "Sto preparando il resoconto, ti aggiorno appena è pronto." };
       if (calls === 22) return { tool_calls: [{ function: { name: "list_routines", arguments: { pass: calls } } }] };
       if (calls === 23) return { content: "Fatto: 22 controlli, tutto in ordine." };
+      // Asked to confirm, it does one more check before replying DONE: the real answer must survive it.
+      if (calls === 24) return { tool_calls: [{ function: { name: "list_routines", arguments: { recheck: true } } }] };
       return { content: "DONE" };
     });
     discord.say({ content: "Olga, controlla le routine finché non è tutto a posto" });
@@ -849,7 +851,8 @@ describe("talking with the agents", () => {
     await quiet();
     const said = posts("Olga");
     assert.ok(said.indexOf("Sto preparando il resoconto, ti aggiorno appena è pronto.") < said.indexOf("Fatto: 22 controlli, tutto in ordine."), "the announcement reached the chat as an update");
-    assert.ok(!said.includes("DONE"));
+    assert.ok(!said.includes("DONE"), "the word DONE is never posted as the result");
+    assert.equal(said.filter((text) => text === "Fatto: 22 controlli, tutto in ordine.").length, 1, "the real answer is posted once, even after a check between confirm and DONE");
     assert.deepEqual(nudges, ["[Cora] Non hai finito: quello che hai scritto è un aggiornamento, non il risultato. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare", "[Cora] Prima di chiudere: il compito che ti hanno dato è finito davvero e verificato? Se manca qualcosa, continua adesso con gli strumenti. Se è tutto fatto, rispondi solo DONE."]);
     const [trace] = (await call(`/api/agents/${olga.id}/traces`)).data;
     assert.ok(trace.stepCount > 22, `worked through ${trace.stepCount} steps`);

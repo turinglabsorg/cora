@@ -402,7 +402,8 @@ export class Brain {
         for (const text of [result.thinking, ...inline]) if (String(text || "").trim()) trace.add({ type: "thinking", text });
       };
       let steps = 0;
-      let pendingFinal = null;
+      // The last real answer the agent gave: a final "DONE" (confirming it is finished) posts this, not the word "DONE".
+      let lastAnswer = "";
       const size = () => messages.reduce((total, message) => total + String(message.content || "").length + JSON.stringify(message.toolCalls || "").length, 0);
       for (; steps < maxSteps && Date.now() < deadline; steps += 1) {
         if (steps > 0) {
@@ -425,23 +426,22 @@ export class Brain {
         const result = await this.llm.chat({ model, messages, tools, effort: effortOf(agent) });
         think(result);
         if (!result.toolCalls.length) {
-          if (pendingFinal !== null && isDone(result.text)) return done(pendingFinal, steps);
+          // It confirmed it is done: post the real answer it gave, never the bare "DONE".
+          if (isDone(result.text) && lastAnswer) return done(lastAnswer, steps);
           const next = verdict(result.text);
           if (!next) return done(result.text, steps);
           nudges += 1;
           if (next.kind === "confirm") {
             confirmed = true;
-            pendingFinal = result.text;
-          } else {
-            pendingFinal = null;
-            if (next.kind === "unfinished" && sayTracked) await sayTracked(next.text).catch(() => {});
+            lastAnswer = cleanReply(result.text, agent) || lastAnswer;
+          } else if (next.kind === "unfinished" && sayTracked) {
+            await sayTracked(next.text).catch(() => {});
           }
           trace.add({ type: "note", text: `Cora harness: ${next.kind === "confirm" ? "chiedo conferma che sia finito" : "lo rimando al lavoro"}.` });
           messages.push({ role: "assistant", content: result.text || "" });
           messages.push({ role: "user", content: next.prompt });
           continue;
         }
-        pendingFinal = null;
         const said = String(result.text || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
         if (said) trace.add({ type: "text", text: said });
         messages.push({ role: "assistant", content: result.text, toolCalls: result.toolCalls });
@@ -450,7 +450,7 @@ export class Brain {
           messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: output.text, image: output.image });
         }
       }
-      if (pendingFinal !== null) return done(pendingFinal, steps);
+      if (lastAnswer) return done(lastAnswer, steps);
       trace.add({ type: "note", text: "Lavora da troppo: chiedo il messaggio finale." });
       messages.push({ role: "user", content: "[Cora] Ci stai lavorando da molto: fermati qui e scrivi cosa hai fatto, cosa manca e cosa ti blocca." });
       const final = await this.llm.chat({ model, messages, tools: [], effort: "low" });
