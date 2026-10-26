@@ -96,8 +96,8 @@ function textSteps(onStep) {
 }
 
 /** One agent turn on Claude Code with the owner's subscription; cora's tools arrive over MCP. */
-export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", goal = "", authEnv, signal }) {
-  if (!authEnv?.CLAUDE_CONFIG_DIR) throw new Error("subscription da collegare");
+export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", goal = "", authEnv, residentAuth = false, signal }) {
+  if (!authEnv || (!authEnv.CLAUDE_CONFIG_DIR && !residentAuth)) throw new Error("subscription da collegare");
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const mcpFile = join(workDir, `mcp-${id}.json`);
@@ -217,8 +217,8 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
 }
 
 /** One agent turn on the Codex CLI with the owner's ChatGPT subscription; its own shell and browser tools are off. */
-export async function runCodex({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", authEnv, signal }) {
-  if (!authEnv?.CODEX_HOME) throw new Error("subscription da collegare");
+export async function runCodex({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", authEnv, residentAuth = false, signal }) {
+  if (!authEnv || (!authEnv.CODEX_HOME && !residentAuth)) throw new Error("subscription da collegare");
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const outFile = join(workDir, `codex-${id}.txt`);
@@ -226,7 +226,7 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--color", "never",
     "-s", "read-only", "-C", workDir, "-m", model, "-o", outFile, "--json",
     "-c", "approval_policy=\"never\"", "-c", "model_reasoning_summary=\"detailed\"",
-    ...(authEnv ? ["-c", 'cli_auth_credentials_store="file"', "-c", 'forced_login_method="chatgpt"'] : []),
+    "-c", `cli_auth_credentials_store="${residentAuth ? "auto" : "file"}"`, "-c", 'forced_login_method="chatgpt"',
     ...(effort ? ["-c", `model_reasoning_effort=${tomlString(effort)}`] : []),
   ];
   for (const feature of CODEX_DISABLED_FEATURES) args.push("--disable", feature);

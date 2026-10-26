@@ -238,10 +238,29 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       if (action === "cancel" && method === "POST") return send(res, 200, await subscriptions.cancel(id));
       if (action === "check" && method === "POST") return send(res, 200, await subscriptions.check(id));
     }
+    const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter)\/key$/.exec(path);
+    if (providerKeyMatch && method === "PUT") {
+      const body = await readJson(req, 4096);
+      const key = String(body.key || "").trim();
+      if (!key || key.length > 2048 || /[\r\n\x00]/.test(key)) throw new HttpError(400, "chiave API non valida");
+      const provider = providerKeyMatch[1];
+      try { await storeSecret(provider === "ollama" ? "CORA_OLLAMA_API_KEY" : "CORA_ORCAROUTER_API_KEY", key); }
+      catch { throw new HttpError(502, "impossibile salvare la chiave in modo sicuro"); }
+      if (provider === "ollama") llm.ollamaKey = key;
+      else llm.routers.orcarouter.key = key;
+      llm.cache = { at: 0, models: [] };
+      return send(res, 200, { provider, configured: true });
+    }
+    if (path === "/api/subscriptions/resident/check" && method === "POST") {
+      await subscriptions.discoverResidents();
+      return send(res, 200, subscriptions.list().filter((record) => record.resident));
+    }
     if (path === "/api/settings" && method === "PUT") {
       const before = channels.active;
+      const residentsBefore = store.settings.useResidentSubscriptions;
       const keysBefore = store.settings.sshKeys.join("\n");
       const settings = store.updateSettings(await readJson(req));
+      if (settings.useResidentSubscriptions && !residentsBefore) await subscriptions.discoverResidents();
       if (settings.sshKeys.join("\n") !== keysBefore) {
         for (const agent of store.agents()) {
           boxes.inspect(agent.id).then((state) => state.running && boxes.syncAccess(agent)).catch(() => {});

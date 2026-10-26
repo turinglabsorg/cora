@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = {
   defaultModel: "ollama/deepseek-v4.1-flash",
   // Goal mode is off until it yields to the owner: a goal it cannot drop fights whoever asked for it.
   goalMode: false,
+  useResidentSubscriptions: true,
   sleepHour: 4,
   transport: "discord",
   telegramChatIds: [],
@@ -213,6 +214,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     sharedMemory: cleanText(merged.sharedMemory, 12000),
     defaultModel: checkModel(merged.defaultModel) || DEFAULT_SETTINGS.defaultModel,
     goalMode: Boolean(merged.goalMode),
+    useResidentSubscriptions: Boolean(merged.useResidentSubscriptions),
     sleepHour: Math.round(clampNumber(merged.sleepHour, 0, 23, 4)),
     transport: TRANSPORTS.includes(merged.transport) ? merged.transport : "discord",
     telegramChatIds: cleanIds(merged.telegramChatIds, /^-?\d{1,20}$/),
@@ -386,6 +388,19 @@ export class Store {
     return row ? JSON.parse(row.data) : null;
   }
 
+  residentSubscription(provider) {
+    return this.subscriptions().find((record) => record.provider === provider && record.resident) || null;
+  }
+
+  ensureResidentSubscriptions() {
+    for (const provider of ["claude", "codex"]) {
+      if (this.residentSubscription(provider)) continue;
+      const record = this.createSubscription({ provider, label: provider === "claude" ? "Claude" : "ChatGPT" });
+      record.resident = true;
+      this.stmt("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(record), record.id);
+    }
+  }
+
   createSubscription({ provider, label }) {
     if (!["claude", "codex"].includes(provider)) throw new ValidationError("provider subscription non valido");
     const name = cleanText(label, 80).replace(/[\r\n]/g, " ").trim();
@@ -420,11 +435,12 @@ export class Store {
     const provider = (agent.model || this.settings.defaultModel).split("/")[0];
     const needsSubscription = ["claude", "codex"].includes(provider);
     if (!agent.subscriptionId) {
-      if (needsSubscription && !unchanged) throw new ValidationError("scegli una subscription collegata per questo modello");
+      const resident = this.settings.useResidentSubscriptions && this.residentSubscription(provider);
+      if (needsSubscription && !unchanged && resident?.status !== "ready") throw new ValidationError("scegli una subscription collegata per questo modello");
       return;
     }
     const subscription = this.subscription(agent.subscriptionId);
-    if (!subscription || subscription.provider !== provider) throw new ValidationError("subscription incompatibile con il modello");
+    if (!subscription || subscription.provider !== provider || (subscription.resident && !this.settings.useResidentSubscriptions)) throw new ValidationError("subscription incompatibile con il modello");
     if (subscription.status !== "ready" && !unchanged) throw new ValidationError("collega la subscription prima di usarla");
   }
 

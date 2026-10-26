@@ -40,7 +40,7 @@ async function subscriptionApp(t, existing) {
   const identity = existing?.identity || identityCli();
   const directory = existing?.home || tempHome();
   const instance = startCora({ home: directory, host: "127.0.0.1", port: 0, insecureCookies: true,
-    adminPassword: PASSWORD, sessionKey: "subscription-fixture-session", discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
+    adminPassword: PASSWORD, sessionKey: "subscription-fixture-session", useResidentSubscriptions: false, discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
     claudeBin: identity.claude, codexBin: identity.codex, hermesBin: "/not-installed/hermes", botTokenFor: () => "",
     docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/not-installed/AGENTS.md", sshAuthorizedKeys: "/not-installed/keys",
   });
@@ -335,7 +335,7 @@ describe("per-agent subscription authentication", () => {
     assert.equal(fixture.app.store.subscription(record.id), null);
   });
 
-  test("older agents have no automatic account and cannot call a CLI until browser onboarding", async (t) => {
+  test("with resident defaults disabled, older agents require browser onboarding", async (t) => {
     const fixture = await subscriptionApp(t);
     const agent = fixture.app.store.createAgent({ name: "Existing", model: "ollama/test-model", tools: false });
     const old = { ...agent, model: "claude/claude-sonnet-5-5" };
@@ -349,7 +349,7 @@ describe("per-agent subscription authentication", () => {
     assert.equal(restarted.identity.calls().length, 0);
   });
 
-  test("previous host links are disconnected permanently and only fresh isolated login restores an agent", async (t) => {
+  test("retired host links remain isolated when resident defaults are disabled", async (t) => {
     const fixture = await subscriptionApp(t);
     const oldIds = [];
     for (const provider of ["claude", "codex"]) {

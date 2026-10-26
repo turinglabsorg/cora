@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { resolve as resolvePath, join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ValidationError } from "./store.js";
 
@@ -41,10 +42,10 @@ function allowedLoginUrl(value, provider) {
 }
 
 class CodexAccount {
-  constructor(bin, env, cwd, onEvent, onExit) {
+  constructor(bin, env, cwd, onEvent, onExit, resident = false) {
     this.pending = new Map();
     this.id = 0;
-    this.child = spawn(bin, ["-c", 'cli_auth_credentials_store="file"', "-c", 'forced_login_method="chatgpt"', "app-server"], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
+    this.child = spawn(bin, [...(!resident ? ["-c", 'cli_auth_credentials_store="file"'] : []), "-c", 'forced_login_method="chatgpt"', "app-server"], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
     this.closed = false;
     this.child.stdin.on("error", () => {});
     this.child.stderr.resume();
@@ -106,8 +107,13 @@ class CodexAccount {
 
 /** The database selects an identity; the official CLI owns its protected credentials. */
 export class Subscriptions {
-  constructor({ store, claudeBin, codexBin, emit = () => {} }) {
+  constructor({ store, claudeBin, codexBin, residentDirectories = {}, emit = () => {} }) {
     this.store = store;
+    this.residentOverrides = residentDirectories;
+    this.residentDirectories = {
+      claude: residentDirectories.claude || process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+      codex: residentDirectories.codex || process.env.CODEX_HOME || join(homedir(), ".codex"),
+    };
     this.bins = { claude: claudeBin, codex: codexBin };
     this.emit = emit;
     this.logins = new Map();
@@ -120,7 +126,20 @@ export class Subscriptions {
     }
   }
 
+  defaultId(provider) {
+    return this.store.settings.useResidentSubscriptions ? this.store.residentSubscription(provider)?.id || "" : "";
+  }
+
+  async discoverResidents() {
+    this.store.ensureResidentSubscriptions();
+    await Promise.all(["claude", "codex"].map((provider) => {
+      const id = this.store.residentSubscription(provider).id;
+      return this.busy.has(id) || this.queues.has(id) ? this.view(id) : this.check(id);
+    }));
+  }
+
   directory(record) {
+    if (record.resident) return resolvePath(this.residentDirectories[record.provider]);
     if (!/^sub_[a-f0-9]{12}$/.test(record.id)) throw new ValidationError("subscription non valida");
     const directory = resolvePath(this.store.home, "subscriptions", record.id);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -135,7 +154,10 @@ export class Subscriptions {
   }
 
   environment(record) {
-    return subscriptionEnvironment(record.provider, this.directory(record));
+    const env = subscriptionEnvironment(record.provider, this.directory(record));
+    const variable = record.provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+    if (record.resident && !this.residentOverrides[record.provider] && !process.env[variable]) delete env[variable];
+    return env;
   }
 
   view(id) {
@@ -168,6 +190,7 @@ export class Subscriptions {
   async start(id) {
     await this.stopping.get(id);
     const record = this.require(id);
+    if (record.resident) throw new ValidationError("le subscription residenti si gestiscono sul server");
     if (this.closed) throw new ValidationError("Cora si sta fermando");
     if (this.busy.has(id) || this.queues.has(id)) throw new ValidationError("subscription in uso: attendi la fine del lavoro");
     if (this.logins.has(id)) return this.view(id);
@@ -265,7 +288,7 @@ export class Subscriptions {
   readClaude(record, signal) {
     return new Promise((resolve, reject) => {
       const directory = this.directory(record);
-      const child = spawn(this.bins.claude, ["auth", "status", "--json"], { env: this.environment(record), cwd: directory, stdio: ["ignore", "pipe", "ignore"], signal: signal || undefined });
+      const child = spawn(this.bins.claude, ["auth", "status", "--json"], { env: this.environment(record), cwd: record.resident ? this.store.home : directory, stdio: ["ignore", "pipe", "ignore"], signal: signal || undefined });
       let output = "";
       const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("provider timeout")); }, 12000);
       child.stdout.on("data", (chunk) => { if (output.length < 32000) output += chunk; });
@@ -274,7 +297,7 @@ export class Subscriptions {
         clearTimeout(timer);
         try {
           const data = JSON.parse(output);
-          if (typeof data.configDirectory !== "string" || resolvePath(data.configDirectory) !== directory) {
+          if (!record.resident && (typeof data.configDirectory !== "string" || resolvePath(data.configDirectory) !== directory)) {
             const error = new Error("Claude Code non conferma il profilo isolato");
             error.code = "ISOLATION_UNAVAILABLE";
             reject(error);
@@ -302,11 +325,11 @@ export class Subscriptions {
       if (record.provider === "claude") details = await this.readClaude(record);
       else {
         const directory = this.directory(record);
-        rpc = new CodexAccount(this.bins.codex, this.environment(record), directory);
+        rpc = new CodexAccount(this.bins.codex, this.environment(record), record.resident ? this.store.home : directory, undefined, undefined, Boolean(record.resident));
         await rpc.initialize();
         details = await this.readCodex(rpc);
       }
-      this.changed(id, { status: details ? "ready" : "disconnected", ...(details || {}) });
+      this.changed(id, { status: details ? "ready" : "disconnected", email: "", plan: "", ...(details || {}) });
     } catch (error) {
       this.changed(id, { status: "error", issue: error.code === "ISOLATION_UNAVAILABLE" ? "isolation" : "" });
     } finally { await rpc?.close(); this.busy.delete(id); }
@@ -315,6 +338,7 @@ export class Subscriptions {
 
   async remove(id) {
     const record = this.require(id);
+    if (record.resident) throw new ValidationError("le subscription residenti si gestiscono sul server");
     if (this.busy.has(id) || this.queues.has(id)) throw new ValidationError("subscription in uso: attendi la fine del lavoro");
     if (this.store.agents().some((agent) => agent.subscriptionId === id)) throw new ValidationError("subscription usata da un agente");
     this.busy.add(id);
@@ -337,7 +361,7 @@ export class Subscriptions {
   async run(id, provider, signal, execute) {
     await this.stopping.get(id);
     const record = this.require(id || "");
-    if (record.provider !== provider || record.status !== "ready") throw new ValidationError("subscription da collegare");
+    if (record.provider !== provider || record.status !== "ready" || (record.resident && !this.store.settings.useResidentSubscriptions)) throw new ValidationError("subscription da collegare");
     if (this.closed || this.logins.has(id) || this.busy.has(id)) throw new ValidationError("subscription in aggiornamento, riprova");
     const previous = this.queues.get(id) || Promise.resolve();
     let release;
@@ -353,10 +377,10 @@ export class Subscriptions {
       })]);
       signal?.throwIfAborted();
       const current = this.require(id);
-      if (this.closed || current.status !== "ready") throw new ValidationError("subscription da ricollegare");
+      if (this.closed || current.status !== "ready" || (current.resident && !this.store.settings.useResidentSubscriptions)) throw new ValidationError("subscription da ricollegare");
       if (provider === "claude" && !await this.readClaude(current, signal)) throw new Error("Claude: not logged in, collega la subscription");
       signal?.throwIfAborted();
-      return await execute(this.environment(current));
+      return await execute(this.environment(current), Boolean(current.resident));
     } catch (error) {
       if (AUTH_FAILURE.test(error.message || "")) this.changed(id, { status: "disconnected" });
       if (error.code === "ISOLATION_UNAVAILABLE") this.changed(id, { status: "error", issue: "isolation" });

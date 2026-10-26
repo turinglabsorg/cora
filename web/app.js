@@ -766,35 +766,36 @@ function pickedModel(data, name) {
 
 const SUBSCRIPTION_STATES = { disconnected: "Da collegare", connecting: "Accesso in corso", ready: "Collegata", error: "Accesso non riuscito" };
 
-function subscriptionPicker(currentId) {
+function subscriptionPicker(currentId, { manage = false } = {}) {
   let provider = "";
   let selectedId = currentId || "";
+  let choosing = !selectedId;
   let requestBusy = false;
+  let actionError = "";
   let snapshot = "";
-  const select = h("select", { name: "subscriptionId", "aria-label": "Subscription" });
-  const details = h("div", { class: "stack-sm", "aria-live": "polite" });
-  const labelInput = h("input", { type: "text", maxlength: 80, placeholder: "es. Account del team", "aria-label": "Nome subscription", autocomplete: "off" });
-  const newButton = btn("Collega una nuova subscription", { icon: "plus", onclick: async () => {
-    if (!labelInput.value.trim()) { labelInput.focus(); return; }
-    await action(async () => {
-      const record = await api("/api/subscriptions", { method: "POST", body: { provider, label: labelInput.value.trim() } });
-      selectedId = record.id;
-      labelInput.value = "";
-      await api(`/api/subscriptions/${record.id}/login`, { method: "POST" });
-    });
-  } });
-  const root = h("div", { class: "subscription-picker stack-sm" },
-    field("Subscription", select, "Scegli un account già collegato oppure aggiungine uno."),
-    details,
-    h("div", { class: "subscription-new stack-sm" }, field("Nome della nuova subscription", labelInput), newButton),
-    h("small", {}, "Il collegamento viene salvato su questa istanza Cora. Puoi autorizzarlo anche dal tuo browser remoto."));
+  const selections = new Map();
+  const input = h("input", { type: "hidden", name: "subscriptionId" });
+  const content = h("div", { class: "subscription-content" });
+  const root = h("section", { class: "subscription-picker", "aria-label": "Account del modello" }, input, content);
+  const authCode = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Codice di autorizzazione", placeholder: "Incolla il codice di Claude" });
+  authCode.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      content.querySelector(".subscription-complete")?.click();
+    }
+  });
 
   async function action(fn) {
     if (requestBusy) return;
     requestBusy = true;
-    newButton.disabled = true;
-    try { await fn(); await refresh(); } catch (error) { toast(error.message, true); }
-    finally { requestBusy = false; newButton.disabled = false; }
+    actionError = "";
+    draw();
+    try { await fn(); }
+    catch (error) { actionError = error.message; }
+    try { await refresh(); }
+    catch { actionError ||= "Impossibile aggiornare il collegamento. Riprova."; }
+    requestBusy = false;
+    draw();
   }
 
   async function refresh() {
@@ -802,50 +803,145 @@ function subscriptionPicker(currentId) {
     draw();
   }
 
-  function draw(force = false) {
-    const records = (S.data.subscriptions || []).filter((record) => record.provider === provider);
-    const record = records.find((item) => item.id === selectedId);
-    const next = JSON.stringify({ provider, selectedId, records });
-    if (!force && next === snapshot) return;
-    snapshot = next;
-    select.replaceChildren(h("option", { value: "" }, "Scegli una subscription"), ...records.map((item) => h("option", { value: item.id, selected: item.id === selectedId }, raw(`${item.label} · ${item.email || tr(SUBSCRIPTION_STATES[item.status])}`))));
-    select.value = record?.id || "";
-    details.replaceChildren();
-    if (!record) return;
-    const status = h("span", { class: `badge ${record.status === "ready" ? "on" : record.status === "error" ? "err" : ""}` }, SUBSCRIPTION_STATES[record.status]);
-    const actions = h("div", { class: "actions" });
-    details.append(status, actions);
-    if (record.status === "connecting") {
-      if (record.login?.url) {
-        actions.append(btn("Apri il login nel browser", { icon: "share", cls: "primary", href: record.login.url, target: "_blank" }));
-        if (record.login.userCode) details.append(h("div", { class: "subscription-code" }, h("small", {}, "Inserisci questo codice nella pagina del provider"), h("strong", {}, raw(record.login.userCode))));
-        if (record.login.manualCode) {
-          const code = h("input", { type: "password", autocomplete: "off", "aria-label": "Codice di autorizzazione", placeholder: "Codice restituito dal provider" });
-          details.append(field("Codice di autorizzazione", code), btn("Completa collegamento", { icon: "check", onclick: () => action(async () => {
-            const value = code.value;
-            code.value = "";
-            await api(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code: value } });
-          }) }));
-        }
-      }
-      details.append(h("small", {}, "Completa l'accesso nella pagina ufficiale. Questa schermata si aggiorna automaticamente."));
-      actions.append(btn("Annulla accesso", { onclick: () => action(() => api(`/api/subscriptions/${record.id}/cancel`, { method: "POST" })) }));
-    } else {
-      if (record.status === "ready") actions.append(btn("Verifica collegamento", { icon: "refresh", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) }));
-      else actions.append(btn("Collega nel browser", { icon: "share", onclick: () => action(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) }));
-      if (record.status === "error") details.append(h("small", {}, record.issue === "isolation" ? "Aggiorna Claude Code e configura il CLI ufficiale su questa istanza: il profilo separato non è supportato." : "Il collegamento non è riuscito o è scaduto. Puoi riprovare."));
-      if (!(S.data.agents || []).some((agent) => agent.subscriptionId === record.id)) actions.append(btn("Rimuovi", { icon: "trash", onclick: () => action(async () => {
-        await api(`/api/subscriptions/${record.id}`, { method: "DELETE" });
-        selectedId = "";
-      }) }));
-    }
+  function connectNew() {
+    const nextProvider = provider;
+    return action(async () => {
+      const record = await api("/api/subscriptions", { method: "POST", body: { provider: nextProvider, label: PROVIDER_SHORT[nextProvider] } });
+      selections.set(nextProvider, record.id);
+      if (provider === nextProvider) { selectedId = record.id; choosing = false; }
+      await api(`/api/subscriptions/${record.id}/login`, { method: "POST" });
+    });
   }
 
-  select.addEventListener("change", () => { selectedId = select.value; draw(true); });
+  function changeAccount() {
+    choosing = !choosing;
+    actionError = "";
+    draw();
+  }
+
+  function deviceHelp() {
+    return h("details", { class: "subscription-help" },
+      h("summary", {}, icon("info"), "Problemi con il codice dispositivo?"),
+      h("p", {}, "Abilita l'accesso con codice dispositivo nelle impostazioni Sicurezza di ChatGPT. Per un account aziendale deve abilitarlo un amministratore nei permessi del workspace."),
+      h("a", { href: "https://learn.chatgpt.com/docs/auth#preferred-device-code-authentication-beta", target: "_blank", rel: "noopener" }, "Guida ufficiale OpenAI", icon("external")));
+  }
+
+  function draw(force = false) {
+    const all = (S.data.subscriptions || []).filter((record) => record.provider === provider);
+    const records = all.filter((record) => !record.resident);
+    const resident = !manage && S.data.settings.useResidentSubscriptions && all.find((record) => record.resident);
+    const record = all.find((item) => item.id === selectedId) || (!selectedId && !choosing ? resident : null);
+    const next = JSON.stringify({ provider, selectedId, choosing, records, requestBusy, actionError });
+    if (!force && next === snapshot) return;
+    snapshot = next;
+    input.value = record?.resident ? "" : record?.id || "";
+    root.setAttribute("aria-busy", String(requestBusy));
+    root.setAttribute("data-state", record?.status || "empty");
+    content.replaceChildren();
+    if (root.hidden) return;
+    const name = PROVIDER_SHORT[provider];
+    const state = record?.status || "disconnected";
+    const status = h("span", { class: `subscription-status ${state}`, role: "status" }, h("i", { "aria-hidden": "true" }), SUBSCRIPTION_STATES[state]);
+    content.append(h("header", { class: "subscription-head" },
+      h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(provider === "claude" ? "spark" : "chip")),
+      h("div", { class: "grow" }, h("span", { class: "label" }, "Abbonamento"), h("h3", {}, raw(name))),
+      record && !choosing ? status : null));
+    if (actionError) content.append(h("p", { class: "subscription-error", role: "alert" }, icon("alert"), tr(actionError)));
+
+    if (choosing && (records.length || resident)) {
+      content.append(h("p", { class: "subscription-description" }, "Scegli l'account da usare per questo agente."));
+      const list = h("div", { class: "subscription-accounts", "aria-label": "Account disponibili" });
+      for (const item of [...(resident ? [resident] : []), ...records]) {
+        const count = (S.data.agents || []).filter((agent) => agent.subscriptionId === item.id).length;
+        const option = h("button", { type: "button", class: "subscription-option", "aria-pressed": String(item.resident ? !selectedId : item.id === selectedId), onclick: () => {
+          selectedId = item.resident ? "" : item.id;
+          selections.set(provider, selectedId);
+          choosing = false;
+          actionError = "";
+          authCode.value = "";
+          draw();
+        } },
+        h("span", { class: `subscription-option-dot ${item.status}`, "aria-hidden": "true" }),
+        h("span", { class: "grow" }, h("b", {}, item.resident ? "Subscription residente" : raw(item.email || item.label)), h("small", {}, item.resident && item.email ? raw(`${item.email} · `) : null, SUBSCRIPTION_STATES[item.status], count ? raw(` · ${count === 1 ? tr("Usato da un agente") : tr("Usato da {count} agenti", { count })}`) : null)),
+        icon(item.id === selectedId ? "check" : "next"));
+        list.append(option);
+      }
+      content.append(list, h("div", { class: "subscription-footer" },
+        btn("Collega un altro account", { icon: "plus", onclick: connectNew }),
+        record ? btn("Indietro", { cls: "ghost", onclick: changeAccount }) : null));
+    } else if (record?.status === "ready") {
+      authCode.value = "";
+      if (record.resident) content.append(h("span", { class: "subscription-source" }, "Subscription residente · predefinita"));
+      content.append(h("div", { class: "subscription-identity" },
+        h("span", { class: "subscription-connected", "aria-hidden": "true" }, icon("check")),
+        h("div", { class: "grow" }, h("b", {}, raw(record.email || record.label)),
+          h("p", {}, manage ? "Disponibile per gli agenti di questa istanza." : "Questo agente userà il tuo abbonamento."))));
+      content.append(h("div", { class: "subscription-footer" },
+        btn("Cambia account", { cls: "ghost", onclick: changeAccount }),
+        btn("", { icon: "refresh", cls: "ghost", title: "Verifica collegamento", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) })));
+    } else if (record?.status === "connecting") {
+      const step = (number, title, ...children) => h("li", {}, h("span", { class: "subscription-step", "aria-hidden": "true" }, number), h("div", { class: "subscription-step-body" }, h("b", {}, title), ...children));
+      if (record.login?.url) {
+        const open = btn(tr("Apri {provider}", { provider: name }), { icon: "external", cls: "primary", href: record.login.url, target: "_blank" });
+        const steps = h("ol", { class: "subscription-steps" });
+        if (record.login.userCode) {
+          steps.append(step("1", "Copia il codice", h("div", { class: "subscription-code" },
+            h("strong", { tabindex: "0", "aria-label": "Codice dispositivo" }, raw(record.login.userCode)),
+            btn("", { icon: "copy", cls: "ghost", title: "Copia codice", onclick: async () => {
+              try { await navigator.clipboard.writeText(record.login.userCode); toast("Copiato"); }
+              catch { toast("Non riesco a copiare: selezionalo a mano", true); }
+            } }))),
+          step("2", tr("Accedi a {provider}", { provider: name }), h("p", {}, "Incolla il codice nella pagina ufficiale e autorizza il collegamento."), open));
+        } else {
+          steps.append(step("1", tr("Accedi a {provider}", { provider: name }), h("p", {}, "Apri la pagina ufficiale e autorizza il collegamento."), open));
+          if (record.login.manualCode) steps.append(step("2", "Torna qui con il codice", field("Codice di autorizzazione", authCode),
+            btn("Completa collegamento", { icon: "check", cls: "subscription-complete", onclick: () => {
+              if (!authCode.value.trim()) { authCode.focus(); return; }
+              const code = authCode.value;
+              authCode.value = "";
+              action(() => api(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code } }));
+            } })));
+        }
+        content.append(steps);
+      } else content.append(h("p", { class: "subscription-description" }, "Preparazione dell'accesso…"));
+      content.append(h("div", { class: "subscription-footer" },
+        h("span", { class: "subscription-wait" }, icon("clock"), "In attesa di autorizzazione"),
+        btn("Annulla", { cls: "ghost", onclick: () => action(() => api(`/api/subscriptions/${record.id}/cancel`, { method: "POST" })) })));
+      if (provider === "codex") content.append(deviceHelp());
+    } else {
+      authCode.value = "";
+      content.append(h("div", { class: "subscription-intro" }, h("h4", {}, tr("Collega il tuo account {provider}", { provider: name })),
+        h("p", {}, manage ? "Accedi dal browser per aggiungere un account alla tua Cora." : "Accedi dal browser per usare il tuo abbonamento con questo agente.")));
+      if (record?.status === "error") content.append(h("p", { class: "subscription-error", role: "alert" }, icon("alert"), record.issue === "isolation"
+        ? "Questa istanza non supporta ancora il collegamento. Aggiorna Claude Code sul server e riprova."
+        : "L'accesso non è stato completato. Riprova quando vuoi."));
+      if (record?.resident) {
+        content.append(h("p", { class: "subscription-description" }, "Nessun account residente disponibile. Collega un altro account oppure controlla i collegamenti nelle impostazioni."),
+          h("div", { class: "subscription-footer" }, btn(tr("Collega {provider}", { provider: name }), { icon: "external", cls: "primary", onclick: connectNew }),
+            btn("Impostazioni", { cls: "ghost", href: "#/settings/collegamenti" })));
+      } else content.append(h("div", { class: "subscription-footer" },
+        btn(requestBusy ? "Preparazione dell'accesso…" : tr("Collega {provider}", { provider: name }), { icon: requestBusy ? "refresh" : "external", cls: "primary", onclick: record
+          ? () => action(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) : connectNew }),
+        records.length ? btn("Cambia account", { cls: "ghost", onclick: changeAccount }) : null));
+      if (provider === "codex") content.append(deviceHelp());
+    }
+    if (choosing && record && !record.resident && !(S.data.agents || []).some((agent) => agent.subscriptionId === record.id)) {
+      content.append(btn("Rimuovi account", { icon: "trash", cls: "ghost danger subscription-remove", onclick: () => action(async () => {
+        await api(`/api/subscriptions/${record.id}`, { method: "DELETE" });
+        selectedId = "";
+        selections.delete(provider);
+        choosing = true;
+      }) }));
+    }
+    for (const button of content.querySelectorAll("button")) button.disabled = requestBusy;
+  }
+
   const poll = async () => {
     if (!root.isConnected) return;
-    if (!root.hidden && !requestBusy && S.data.subscriptions?.some((item) => item.provider === provider && item.status === "connecting")) {
-      try { await refresh(); } catch {}
+    if (!root.hidden && !requestBusy) {
+      if (S.data.subscriptions?.some((item) => item.provider === provider && item.status === "connecting")) {
+        try { await refresh(); } catch {}
+      }
     }
     setTimeout(poll, 1500);
   };
@@ -853,14 +949,32 @@ function subscriptionPicker(currentId) {
   return {
     node: root,
     setProvider(value) {
+      if (provider) selections.set(provider, selectedId);
+      const previous = provider;
       provider = value;
       const needs = provider === "claude" || provider === "codex";
       root.hidden = !needs;
-      select.disabled = !needs;
-      select.required = needs;
+      input.disabled = !needs;
+      if (previous !== provider) {
+        selectedId = selections.has(provider) ? selections.get(provider) : ((S.data.subscriptions || []).find((item) => item.id === currentId && item.provider === provider)?.id) || "";
+        choosing = !selectedId && (manage || !S.data.settings.useResidentSubscriptions);
+        actionError = "";
+        authCode.value = "";
+      }
       draw();
     },
-    value() { return root.hidden ? "" : select.value; },
+    validate() {
+      if (root.hidden) return true;
+      const record = (S.data.subscriptions || []).find((item) => item.provider === provider && (input.value ? item.id === input.value : item.resident && S.data.settings.useResidentSubscriptions));
+      if (record && (record.status === "ready" || record.id === currentId)) return true;
+      choosing = !record;
+      actionError = "Collega un account per continuare.";
+      draw();
+      root.scrollIntoView({ block: "center", behavior: "smooth" });
+      content.querySelector("button")?.focus({ preventScroll: true });
+      return false;
+    },
+    value() { return root.hidden ? "" : input.value; },
   };
 }
 
@@ -949,6 +1063,7 @@ function agentForm(agent) {
       btn(isNew ? "Crea agente" : "Salva", { icon: "check", type: "submit", cls: "primary" })));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (!subscription.validate()) return;
     const data = new FormData(form);
     const body = {
       name: data.get("name"),
@@ -1714,6 +1829,77 @@ function transportChoice(kind) {
   return card;
 }
 
+function connectionsPanel() {
+  const residentToggle = switchInput("useResidentSubscriptions", "Usa subscription residenti", S.data.settings.useResidentSubscriptions,
+    "Come impostazione predefinita, usa gli account già presenti sul dispositivo che ospita Cora.");
+  const toggle = residentToggle.querySelector("input");
+  toggle.addEventListener("change", async () => {
+    toggle.disabled = true;
+    const enabled = toggle.checked;
+    const saved = await guard(api("/api/settings", { method: "PUT", body: { useResidentSubscriptions: enabled } }), "Impostazioni salvate");
+    if (saved) {
+      await loadState();
+      renderSettings();
+    } else { toggle.checked = !enabled; toggle.disabled = false; }
+  });
+  const residentList = h("div", { class: "resident-accounts" });
+  const drawResidents = () => {
+    residentList.replaceChildren(...["claude", "codex"].map((provider) => {
+      const record = S.data.subscriptions?.find((item) => item.resident && item.provider === provider);
+      const connected = record?.status === "ready";
+      return h("div", { class: "resident-account" },
+        h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(provider === "claude" ? "spark" : "chip")),
+        h("div", { class: "grow" }, h("b", {}, provider === "codex" ? "ChatGPT / Codex" : "Claude"),
+          h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato")) : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
+          connected && record.plan ? h("small", {}, raw(record.plan)) : null),
+        h("span", { class: `subscription-status ${connected ? "ready" : "disconnected"}` }, h("i", { "aria-hidden": "true" }), connected ? "Disponibile" : "Da collegare"));
+    }));
+  };
+  drawResidents();
+  const scan = btn("Rileva account", { icon: "refresh", cls: "ghost", onclick: async () => {
+    scan.disabled = true;
+    const result = await guard(api("/api/subscriptions/resident/check", { method: "POST" }));
+    if (result) {
+      S.data.subscriptions = await api("/api/subscriptions");
+      drawResidents();
+    }
+    scan.disabled = false;
+  } });
+  const managed = ["claude", "codex"].map((provider) => {
+    const existing = S.data.subscriptions?.find((item) => !item.resident && item.provider === provider);
+    const picker = subscriptionPicker(existing?.id, { manage: true });
+    picker.setProvider(provider);
+    return picker.node;
+  });
+  const keyPanel = (provider, name) => {
+    const configured = S.data.providers?.[provider];
+    const key = h("input", { type: "password", autocomplete: "new-password", autocapitalize: "off", spellcheck: "false", "aria-label": tr("Chiave API {provider}", { provider: name }), placeholder: configured ? "Incolla una nuova chiave per sostituirla" : "Incolla la chiave API" });
+    const save = btn(configured ? "Aggiorna chiave" : "Salva chiave", { icon: "check", cls: "primary", onclick: async () => {
+      if (!key.value.trim()) { key.focus(); return; }
+      save.disabled = true;
+      const value = key.value;
+      key.value = "";
+      const result = await guard(api(`/api/providers/${provider}/key`, { method: "PUT", body: { key: value } }), "Chiave salvata");
+      if (result) {
+        S.data.providers[provider] = true;
+        status.replaceChildren(icon("check"), tr("Configurata"));
+        status.className = "badge on";
+        key.placeholder = tr("Incolla una nuova chiave per sostituirla");
+        save.lastChild.textContent = tr("Aggiorna chiave");
+      }
+      save.disabled = false;
+    } });
+    const status = badge(configured ? "Configurata" : "Da configurare", configured ? "on" : "", configured ? "check" : "key");
+    key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
+    return h("div", { class: "provider-key" }, h("div", { class: "provider-key-head" }, h("h3", {}, raw(name)), status),
+      h("p", {}, "La chiave vale per tutti gli agenti di questa istanza."), field("Chiave API", key), save);
+  };
+  return h("div", { class: "stack" },
+    panel({ icon: "monitor", title: "Subscription del dispositivo", hint: "Gli account trovati sul server Cora.", actions: scan }, residentToggle, residentList),
+    panel({ icon: "link", title: "Altri account", hint: "Collegali dal browser e scegli quale usare nel profilo di ogni agente." }, h("div", { class: "connection-grid" }, managed)),
+    panel({ icon: "key", title: "Chiavi API", hint: "Ollama e OrcaRouter. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"))));
+}
+
 function renderSettings() {
   const settings = S.data.settings;
   const discord = S.data.discord;
@@ -1759,11 +1945,13 @@ function renderSettings() {
     field("Proprietari (ID utente Telegram)", h("input", { type: "text", name: "telegramOwnerIds", class: "mono", value: settings.telegramOwnerIds.join(", "), autocomplete: "off" }), "Se è vuoto diventa proprietario chi ha creato il gruppo, o chi scrive al bot in privato."));
 
   const form = h("form", { class: "stack" },
-    languagePanel(),
-    notificationsPanel(),
+    h("div", { class: "settings-pane stack", "data-settings-tab": "preferenze", role: "tabpanel" }, languagePanel(), notificationsPanel()),
+    h("div", { class: "settings-pane stack", "data-settings-tab": "collegamenti", role: "tabpanel" }, connectionsPanel()),
+    h("div", { class: "settings-pane stack", "data-settings-tab": "canali", role: "tabpanel" },
     panel({ icon: "radio", title: "Dove vive Cora", hint: "Un canale alla volta: quando ne accendi uno, l'altro si spegne. Il salotto del pannello c'è sempre." },
       h("div", { class: "choices" }, transportChoice("discord"), transportChoice("telegram"))),
-    h("div", { class: "split" }, discordPanel, telegramPanel),
+    h("div", { class: "split" }, discordPanel, telegramPanel)),
+    h("div", { class: "settings-pane stack", "data-settings-tab": "agenti", role: "tabpanel" },
     panel({ icon: "sliders", title: "Regia", hint: "Quanto possono parlarsi tra loro prima di fermarsi ad aspettare un umano." },
       h("div", { class: "grid3" },
         field("Messaggi tra agenti", h("input", { type: "number", name: "maxAgentTurns", min: 0, max: 40, value: settings.maxAgentTurns, inputmode: "numeric" }), "dopo ogni messaggio umano"),
@@ -1775,9 +1963,10 @@ function renderSettings() {
         field("Ora del sonno", h("input", { type: "number", name: "sleepHour", min: 0, max: 23, value: settings.sleepHour, inputmode: "numeric" }), "consolidamento notturno della memoria"),
         h("div", { class: "field full" }, h("span", { class: "label" }, "Provider"), providers))),
     panel({ icon: "book", title: "Memoria condivisa", hint: "Cose che tutti gli agenti sanno: chi sei, i progetti, le regole della casa." },
-      h("textarea", { name: "sharedMemory", class: "tall" }, settings.sharedMemory)),
+      h("textarea", { name: "sharedMemory", class: "tall" }, settings.sharedMemory))),
+    h("div", { class: "settings-pane stack", "data-settings-tab": "accesso", role: "tabpanel" },
     panel({ icon: "key", title: "Chiavi SSH", hint: "Chi entra nei desktop via SSH passando dalla macchina host. Valgono già le chiavi che entrano nella macchina host; qui aggiungi le altre, una per riga." },
-      h("textarea", { name: "sshKeys", class: "mono", placeholder: "ssh-ed25519 AAAA… telefono" }, settings.sshKeys.join("\n"))),
+      h("textarea", { name: "sshKeys", class: "mono", placeholder: "ssh-ed25519 AAAA… telefono" }, settings.sshKeys.join("\n")))),
     h("div", { class: "savebar" }, h("span", { class: "spacer" }), btn("Salva impostazioni", { icon: "check", type: "submit", cls: "primary" })));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1801,7 +1990,36 @@ function renderSettings() {
       renderSettings();
     }
   });
-  shell([pageHead("Impostazioni", "Dove vive Cora e le regole del palco."), form], { title: "Impostazioni" });
+  const tabs = [["collegamenti", "Collegamenti", "link"], ["canali", "Canali", "radio"], ["agenti", "Agenti", "users"], ["preferenze", "Preferenze", "sliders"], ["accesso", "Accesso", "key"]];
+  const nav = h("div", { class: "tabs settings-tabs", role: "tablist", "aria-label": "Sezioni impostazioni" });
+  const showTab = (id, updateRoute = false) => {
+    for (const pane of form.querySelectorAll(".settings-pane")) pane.hidden = pane.dataset.settingsTab !== id;
+    for (const button of nav.querySelectorAll("button")) {
+      const active = button.dataset.tab === id;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    }
+    form.querySelector(".savebar").hidden = ["collegamenti", "preferenze"].includes(id);
+    if (updateRoute) history.replaceState(null, "", `#/settings/${id}`);
+  };
+  for (const [id, label, name] of tabs) nav.append(h("button", { type: "button", role: "tab", id: `settings-tab-${id}`, "aria-controls": `settings-pane-${id}`, "data-tab": id, onclick: () => showTab(id, true) }, icon(name), label));
+  for (const pane of form.querySelectorAll(".settings-pane")) {
+    pane.id = `settings-pane-${pane.dataset.settingsTab}`;
+    pane.setAttribute("aria-labelledby", `settings-tab-${pane.dataset.settingsTab}`);
+  }
+  nav.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = [...nav.querySelectorAll("button")];
+    let index = buttons.indexOf(document.activeElement);
+    index = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[index].click();
+    buttons[index].focus();
+  });
+  const initialTab = tabs.some(([id]) => id === route()[1]) ? route()[1] : "collegamenti";
+  showTab(initialTab);
+  shell([pageHead("Impostazioni", "Account, canali e preferenze della tua Cora."), nav, form], { title: "Impostazioni" });
 }
 
 /* ---------- login ---------- */

@@ -184,6 +184,7 @@ export class LLM {
    */
   async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal }) {
     const { provider, name } = splitModel(model);
+    subscriptionId ||= this.subscriptions?.defaultId(provider);
     if (["claude", "codex"].includes(provider) && (!this.subscriptions || !subscriptionId)) throw new Error("subscription da collegare");
     const runSignal = timeoutMs ? AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]) : signal;
     // A failed attempt is only retried when the agent had not started working: re-running a
@@ -200,7 +201,7 @@ export class LLM {
       };
       try {
         if (provider === "claude" || provider === "codex") {
-          const invoke = (authEnv) => (provider === "claude" ? runClaude : runCodex)({ bin: provider === "claude" ? this.claudeBin : this.codexBin, ...options, authEnv,
+          const invoke = (authEnv, residentAuth) => (provider === "claude" ? runClaude : runCodex)({ bin: provider === "claude" ? this.claudeBin : this.codexBin, ...options, authEnv, residentAuth,
             workDir: authEnv ? join(this.cliWorkDir, subscriptionId) : this.cliWorkDir });
           return await this.subscriptions.run(subscriptionId, provider, runSignal, invoke);
         }

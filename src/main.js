@@ -24,6 +24,7 @@ import { createWeb } from "./web.js";
 export function startCora(overrides = {}) {
   const cfg = { ...config, ...overrides };
   const store = new Store(cfg.home);
+  if (cfg.useResidentSubscriptions !== undefined) store.updateSettings({ useResidentSubscriptions: cfg.useResidentSubscriptions });
   let web = null;
   const activity = (entry) => {
     const record = { at: new Date().toISOString(), ...entry };
@@ -38,7 +39,7 @@ export function startCora(overrides = {}) {
   const discord = new Discord({ token: listenerToken, apiBase: cfg.discordApi, gatewayUrl: cfg.discordGateway });
   const telegram = new Telegram({ token: cfg.telegramToken, apiBase: cfg.telegramApi, pollTimeout: cfg.telegramPollTimeout, chats: store.value("telegramChats", []) });
   const bridge = new ToolBridge();
-  const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, emit: (event) => web?.broadcast(event) });
+  const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, residentDirectories: cfg.residentDirectories, emit: (event) => web?.broadcast(event) });
   const llm = new LLM({
     ollamaUrl: cfg.ollamaUrl,
     ollamaKey: cfg.ollamaKey,
@@ -127,7 +128,7 @@ export function startCora(overrides = {}) {
     }
   });
 
-  const ready = bridge.start().then(() => new Promise((resolve) => web.server.listen(cfg.port, cfg.host, resolve)));
+  const ready = Promise.all([bridge.start(), store.settings.useResidentSubscriptions ? subscriptions.discoverResidents() : Promise.resolve()]).then(() => new Promise((resolve) => web.server.listen(cfg.port, cfg.host, resolve)));
   ready.then(() => {
     console.log(`> cora on http://${cfg.host}:${web.server.address().port}`);
     if (!cfg.adminPassword) console.error("! CORA_ADMIN_PASSWORD is not set: the panel refuses every login");
