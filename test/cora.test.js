@@ -387,6 +387,32 @@ describe("agents in Discord", () => {
     assert.ok(app.store.memories(SHARED).length >= 1);
   });
 
+  test("a routine says what it is going to check before it starts working", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Lina", model: "ollama/test-model", chattiness: 0, tools: true, channelIds: [CHANNEL] } });
+    assert.equal(created.status, 201);
+    const routine = await call(`/api/agents/${created.data.id}/routines`, { method: "POST", body: { name: "Coda social", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Controlla la coda dei post e i follower" } });
+    assert.equal(routine.status, 201);
+    let brief = "";
+    let calls = 0;
+    replies.set("Lina", (body) => {
+      calls += 1;
+      if (calls === 1) {
+        brief = lastUserText(body);
+        return { tool_calls: [{ function: { name: "say", arguments: { text: "Routine «Coda social»: guardo la coda dei post e poi i follower." } } }] };
+      }
+      return { content: "Coda vuota, follower stabili." };
+    });
+    assert.equal((await call(`/api/routines/${routine.data.id}/run`, { method: "POST" })).status, 202);
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Lina" && item.content === "Coda vuota, follower stabili."), { what: "the routine result", timeout: 20000 });
+    await quiet();
+    // The owner is told what is being checked, not just that something is happening.
+    assert.match(brief, /manda con say una riga che dice quale routine è partita e cosa vai a controllare/);
+    assert.match(brief, /non basta "ci guardo"/);
+    const said = discord.state.webhookPosts.filter((item) => item.username === "Lina").map((item) => item.content);
+    assert.ok(said.indexOf("Routine «Coda social»: guardo la coda dei post e poi i follower.") < said.indexOf("Coda vuota, follower stabili."), "the briefing comes before the result");
+    await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
+  });
+
   test("a routine runs on demand and posts in its channel", async () => {
     const bad = await call(`/api/agents/${bea.id}/routines`, { method: "POST", body: { name: "x", schedule: "61 * * * *", channelId: CHANNEL, prompt: "x" } });
     assert.equal(bad.status, 400);

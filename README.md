@@ -35,6 +35,7 @@ web panel (password, PWA) ──► REST API + live events (SSE) + noVNC proxy +
 - **Threads and DMs.** In a Discord thread agents only speak when summoned by name. A direct message to an agent's own bot is a private conversation that only that agent answers, even if it is assigned to no channel.
 - **Shared listening.** Every agent bot listens to the channels it can see — each one switches on Discord's limited Message Content intent for its own app — so a private channel is heard as long as one agent is in it, and the same message arriving from several bots is answered once. In a channel the main bot cannot see, only the agents whose bot is really in it answer.
 - **One voice at a time.** A message that names agents is answered by them; a message that names nobody gets a single answer, never a chorus.
+- **A routine says what it is checking** the moment it starts, naming the routine and the actual checks, instead of a vague "on it".
 - **No repeated "got it".** The automatic acknowledgement answers silence: an agent that has spoken in the channel in the last five minutes never sends it again to someone it is already talking to.
 
 ## Their computers

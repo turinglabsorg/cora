@@ -246,6 +246,7 @@ export class Brain {
       this.elsewhere(agent, channel.id),
       `È il momento della tua routine "${routine.name}" (pianificazione: ${routine.schedule}).`,
       `Compito:\n${routine.prompt}`,
+      'Come prima cosa manda con say una riga che dice quale routine è partita e cosa vai a controllare di preciso: chi legge deve capire cosa stai facendo, non basta "ci guardo" o "ci penso io". Poi mettiti al lavoro.',
       `Usa il tuo computer se serve. Alla fine scrivi il messaggio da pubblicare ${channel.where || `in #${channel.name}`}: è quello che vedrà il proprietario. Se non c'è niente da segnalare rispondi solo PASS.`,
       transcript ? `Contesto recente del canale:\n<chat>\n${transcript}\n</chat>` : "",
     ].filter(Boolean).join("\n\n");

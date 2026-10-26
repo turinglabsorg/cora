@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb x11vnc novnc python3-websockify supervisor dbus-x11 \
       xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfce4-settings thunar mousepad \
       chromium fonts-noto fonts-noto-cjk fonts-noto-color-emoji fonts-dejavu \
-      xdotool imagemagick xclip \
+      xdotool imagemagick xclip autocutsel \
       curl wget git jq python3 python3-pip python3-venv ca-certificates sudo locales tzdata procps less nano unzip \
     && sed -i 's/# it_IT.UTF-8/it_IT.UTF-8/; s/# en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen \
     && rm -rf /var/lib/apt/lists/*
@@ -35,7 +35,7 @@ COPY sshd.conf /etc/ssh/sshd_config.d/cora.conf
 
 # Tools every agent gets: hush, so it can use a secret by name without ever seeing it,
 # and ambox, its own end-to-end encrypted mailbox. Pinned, and the install is checked.
-ARG HUSH_VERSION=v0.7.0
+ARG HUSH_VERSION=v0.7.1
 ARG AMBOX_VERSION=1.2.0
 RUN curl -fsSL https://raw.githubusercontent.com/turinglabsorg/hush/${HUSH_VERSION}/install.sh \
       | sh -s -- --version ${HUSH_VERSION} --install-dir /usr/local/bin \
