@@ -135,9 +135,7 @@ export class Subscriptions {
   }
 
   environment(record) {
-    const env = subscriptionEnvironment(record.provider, this.directory(record));
-    if (record.legacyHost) delete env[record.provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"];
-    return env;
+    return subscriptionEnvironment(record.provider, this.directory(record));
   }
 
   view(id) {
@@ -170,7 +168,6 @@ export class Subscriptions {
   async start(id) {
     await this.stopping.get(id);
     const record = this.require(id);
-    if (record.legacyHost) throw new ValidationError("per sostituire l'account del server collega una nuova subscription");
     if (this.closed) throw new ValidationError("Cora si sta fermando");
     if (this.busy.has(id) || this.queues.has(id)) throw new ValidationError("subscription in uso: attendi la fine del lavoro");
     if (this.logins.has(id)) return this.view(id);
@@ -277,7 +274,7 @@ export class Subscriptions {
         clearTimeout(timer);
         try {
           const data = JSON.parse(output);
-          if (!record.legacyHost && (typeof data.configDirectory !== "string" || resolvePath(data.configDirectory) !== directory)) {
+          if (typeof data.configDirectory !== "string" || resolvePath(data.configDirectory) !== directory) {
             const error = new Error("Claude Code non conferma il profilo isolato");
             error.code = "ISOLATION_UNAVAILABLE";
             reject(error);
@@ -325,7 +322,7 @@ export class Subscriptions {
     try {
       await this.cancel(id);
       const directory = this.directory(record);
-      if (!record.legacyHost) await new Promise((resolve, reject) => {
+      await new Promise((resolve, reject) => {
         const child = spawn(this.bins[record.provider], record.provider === "claude" ? ["auth", "logout"] : ["-c", 'cli_auth_credentials_store="file"', "logout"], { env: subscriptionEnvironment(record.provider, directory), cwd: directory, stdio: "ignore" });
         const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new ValidationError("rimozione non riuscita: riprova")); }, 12000);
         child.on("error", () => { clearTimeout(timer); reject(new ValidationError("rimozione non riuscita: riprova")); });
@@ -340,7 +337,7 @@ export class Subscriptions {
   async run(id, provider, signal, execute) {
     await this.stopping.get(id);
     const record = this.require(id || "");
-    if (record.provider !== provider || record.status !== "ready") throw new ValidationError("collega una subscription compatibile prima di avviare l'agente");
+    if (record.provider !== provider || record.status !== "ready") throw new ValidationError("subscription da collegare");
     if (this.closed || this.logins.has(id) || this.busy.has(id)) throw new ValidationError("subscription in aggiornamento, riprova");
     const previous = this.queues.get(id) || Promise.resolve();
     let release;

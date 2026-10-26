@@ -97,6 +97,7 @@ function textSteps(onStep) {
 
 /** One agent turn on Claude Code with the owner's subscription; cora's tools arrive over MCP. */
 export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", goal = "", authEnv, signal }) {
+  if (!authEnv?.CLAUDE_CONFIG_DIR) throw new Error("subscription da collegare");
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const mcpFile = join(workDir, `mcp-${id}.json`);
@@ -217,6 +218,7 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
 
 /** One agent turn on the Codex CLI with the owner's ChatGPT subscription; its own shell and browser tools are off. */
 export async function runCodex({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", authEnv, signal }) {
+  if (!authEnv?.CODEX_HOME) throw new Error("subscription da collegare");
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const outFile = join(workDir, `codex-${id}.txt`);

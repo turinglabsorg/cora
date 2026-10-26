@@ -184,6 +184,7 @@ export class LLM {
    */
   async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal }) {
     const { provider, name } = splitModel(model);
+    if (["claude", "codex"].includes(provider) && (!this.subscriptions || !subscriptionId)) throw new Error("subscription da collegare");
     const runSignal = timeoutMs ? AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]) : signal;
     // A failed attempt is only retried when the agent had not started working: re-running a
     // turn that already used a tool would do its side effects twice.
@@ -201,8 +202,7 @@ export class LLM {
         if (provider === "claude" || provider === "codex") {
           const invoke = (authEnv) => (provider === "claude" ? runClaude : runCodex)({ bin: provider === "claude" ? this.claudeBin : this.codexBin, ...options, authEnv,
             workDir: authEnv ? join(this.cliWorkDir, subscriptionId) : this.cliWorkDir });
-          if (this.subscriptions) return await this.subscriptions.run(subscriptionId, provider, runSignal, invoke);
-          return await invoke();
+          return await this.subscriptions.run(subscriptionId, provider, runSignal, invoke);
         }
         if (provider === "hermes") return await runHermes({ bin: this.hermes.bin, home: this.hermes.home, baseUrl: this.hermes.baseUrl, ...options });
         throw new Error(`${provider} is not a CLI provider`);

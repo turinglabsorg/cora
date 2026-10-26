@@ -318,20 +318,19 @@ export class Store {
     this.cachedSettings = sanitizeSettings(settingsRow ? JSON.parse(settingsRow.value) : {}, DEFAULT_SETTINGS);
     this.cachedAgents = this.db.prepare("SELECT data FROM agents ORDER BY position").all().map((row) => JSON.parse(row.data));
     this.cachedRoutines = this.db.prepare("SELECT data FROM routines ORDER BY rowid").all().map((row) => JSON.parse(row.data));
-    // Existing agents keep their already-used server account as an explicit database identity.
-    // New agents always select an identity; no credential material is copied or imported.
-    for (const agent of this.cachedAgents) {
-      if (Object.hasOwn(agent, "subscriptionId")) continue;
-      const provider = (agent.model || this.cachedSettings.defaultModel).split("/")[0];
-      if (!["claude", "codex"].includes(provider)) continue;
-      let record = this.subscriptions().find((item) => item.provider === provider && item.legacyHost);
-      if (!record) {
-        record = { ...this.createSubscription({ provider, label: `${provider === "claude" ? "Claude" : "ChatGPT"} · Server` }), status: "ready", legacyHost: true };
+    this.tx(() => {
+      for (const record of this.subscriptions()) {
+        if (!record.legacyHost) continue;
+        delete record.legacyHost;
+        Object.assign(record, { status: "disconnected", email: "", plan: "", issue: "", label: record.provider === "claude" ? "Claude" : "ChatGPT", updatedAt: new Date().toISOString() });
         this.stmt("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(record), record.id);
       }
-      agent.subscriptionId = record.id;
-      this.writeAgent(agent);
-    }
+      for (const agent of this.cachedAgents) {
+        if (Object.hasOwn(agent, "subscriptionId")) continue;
+        agent.subscriptionId = "";
+        this.writeAgent(agent);
+      }
+    });
   }
 
   stmt(sql) {

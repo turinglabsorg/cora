@@ -1,6 +1,7 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "subscription da collegare": "Subscription connection required",
   "Subscription": "Subscription",
   "Da collegare": "Not connected",
   "Accesso in corso": "Signing in",
@@ -22,8 +23,6 @@ export const EN = {
   "Annulla accesso": "Cancel sign-in",
   "Verifica collegamento": "Check connection",
   "Collega nel browser": "Connect in browser",
-  "Account già usato dagli agenti su questo server. Per cambiarlo, collega una nuova subscription dal browser.": "Account already used by agents on this server. To change it, connect a new subscription in your browser.",
-  "per sostituire l'account del server collega una nuova subscription": "Connect a new subscription to replace the server account",
   "Il collegamento non è riuscito o è scaduto. Puoi riprovare.": "The connection failed or expired. You can try again.",
   "Aggiorna Claude Code e configura il CLI ufficiale su questa istanza: il profilo separato non è supportato.": "Update Claude Code and configure the official CLI on this instance: isolated profiles are not supported.",
   "provider subscription non valido": "Invalid subscription provider",

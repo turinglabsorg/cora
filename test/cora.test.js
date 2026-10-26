@@ -10,6 +10,8 @@ import { loginLinkToken } from "../src/web.js";
 import { SHARED, Store } from "../src/store.js";
 import { identityCli } from "./subscription-fixtures.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
+import { LLM } from "../src/llm.js";
+import { runClaude, runCodex } from "../src/cli.js";
 import { readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDocker, fakeOllama, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
@@ -333,7 +335,7 @@ describe("per-agent subscription authentication", () => {
     assert.equal(fixture.app.store.subscription(record.id), null);
   });
 
-  test("older agents gain explicit server-account records without importing credentials or changing accounts", async (t) => {
+  test("older agents have no automatic account and cannot call a CLI until browser onboarding", async (t) => {
     const fixture = await subscriptionApp(t);
     const agent = fixture.app.store.createAgent({ name: "Existing", model: "ollama/test-model", tools: false });
     const old = { ...agent, model: "claude/claude-sonnet-5-5" };
@@ -341,16 +343,54 @@ describe("per-agent subscription authentication", () => {
     fixture.app.store.db.prepare("UPDATE agents SET data = ? WHERE id = ?").run(JSON.stringify(old), agent.id);
     await fixture.stop();
     const restarted = await subscriptionApp(t, fixture);
-    const migrated = restarted.app.store.agent(agent.id);
-    const record = restarted.app.store.subscription(migrated.subscriptionId);
-    assert.equal(record.legacyHost, true);
-    assert.equal(record.provider, "claude");
-    assert.equal(record.status, "ready");
-    assert.equal(restarted.app.subscriptions.environment(record).CLAUDE_CONFIG_DIR, undefined);
-    assert.equal((await restarted.request(`/api/subscriptions/${record.id}/login`, { method: "POST" })).status, 400);
-    restarted.app.store.updateSubscription(record.id, { status: "disconnected" });
-    assert.equal((await restarted.request(`/api/agents/${agent.id}`, { method: "PUT", body: { enabled: false } })).status, 200);
-    assert.equal((await restarted.request("/api/agents", { method: "POST", body: { name: "Another", model: migrated.model, subscriptionId: record.id } })).status, 400);
+    assert.equal(restarted.app.store.agent(agent.id).subscriptionId, "");
+    assert.equal(restarted.app.store.subscriptions().length, 0);
+    await assert.rejects(restarted.app.llm.runAgent({ model: old.model, tools: [], timeoutMs: 5000 }), /subscription da collegare/);
+    assert.equal(restarted.identity.calls().length, 0);
+  });
+
+  test("previous host links are disconnected permanently and only fresh isolated login restores an agent", async (t) => {
+    const fixture = await subscriptionApp(t);
+    const oldIds = [];
+    for (const provider of ["claude", "codex"]) {
+      const record = fixture.app.store.createSubscription({ provider, label: `${provider} · Server` });
+      const old = { ...record, status: "ready", email: "old-host@example.test", plan: "old-plan", legacyHost: true };
+      fixture.app.store.db.prepare("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(old), record.id);
+      fixture.app.store.createAgent({ name: provider, model: provider === "claude" ? "claude/claude-sonnet-5-5" : "codex/gpt-6-sol", subscriptionId: record.id, tools: false });
+      oldIds.push(record.id);
+    }
+    await fixture.stop();
+    const restarted = await subscriptionApp(t, fixture);
+    for (const id of oldIds) {
+      const record = restarted.app.store.subscription(id);
+      assert.equal(record.legacyHost, undefined);
+      assert.equal(record.status, "disconnected");
+      assert.equal(record.email, "");
+      assert.equal(record.plan, "");
+      assert.doesNotMatch(record.label, /Server/);
+      const env = restarted.app.subscriptions.environment(record);
+      assert.equal(env[record.provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"], join(restarted.home, "subscriptions", id));
+      assert.equal((await restarted.request(`/api/subscriptions/${id}/check`, { method: "POST" })).data.status, "disconnected");
+      await assert.rejects(restarted.app.llm.runAgent({ model: `${record.provider}/test-model`, subscriptionId: id, tools: [], timeoutMs: 5000 }), /subscription da collegare/);
+    }
+    assert.equal(restarted.identity.calls().length, 0, "old agents launch no inference against host logins");
+    const id = oldIds[0];
+    await restarted.request(`/api/subscriptions/${id}/login`, { method: "POST" });
+    await restarted.request(`/api/subscriptions/${id}/code`, { method: "POST", body: { code: "fixture-authorization-code" } });
+    await waitFor(() => restarted.app.store.subscription(id).status === "ready");
+    const run = await restarted.app.llm.runAgent({ model: "claude/claude-sonnet-5-5", subscriptionId: id, system: "Reply", prompt: "Which identity?", tools: [], timeoutMs: 5000 });
+    assert.match(run.text, /Identity: sub_/);
+    assert.equal(restarted.identity.calls()[0].directory, join(restarted.home, "subscriptions", id));
+    assert.equal(restarted.app.store.subscription(oldIds[1]).status, "disconnected");
+  });
+
+  test("the LLM and both CLI runners refuse implicit global authentication", async () => {
+    const llm = new LLM({ cliWorkDir: "/unused", claudeBin: cli.claude, codexBin: cli.codex });
+    const before = cli.calls().length;
+    for (const provider of ["claude", "codex"]) await assert.rejects(llm.runAgent({ model: `${provider}/test-model`, tools: [], subscriptionId: "sub_000000000000" }), /subscription da collegare/);
+    await assert.rejects(runClaude({}), /subscription da collegare/);
+    await assert.rejects(runCodex({}), /subscription da collegare/);
+    assert.equal(cli.calls().length, before);
   });
 });
 

@@ -831,9 +831,8 @@ function subscriptionPicker(currentId) {
       details.append(h("small", {}, "Completa l'accesso nella pagina ufficiale. Questa schermata si aggiorna automaticamente."));
       actions.append(btn("Annulla accesso", { onclick: () => action(() => api(`/api/subscriptions/${record.id}/cancel`, { method: "POST" })) }));
     } else {
-      if (record.status === "ready" || record.legacyHost) actions.append(btn("Verifica collegamento", { icon: "refresh", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) }));
+      if (record.status === "ready") actions.append(btn("Verifica collegamento", { icon: "refresh", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) }));
       else actions.append(btn("Collega nel browser", { icon: "share", onclick: () => action(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) }));
-      if (record.legacyHost) details.append(h("small", {}, "Account già usato dagli agenti su questo server. Per cambiarlo, collega una nuova subscription dal browser."));
       if (record.status === "error") details.append(h("small", {}, record.issue === "isolation" ? "Aggiorna Claude Code e configura il CLI ufficiale su questa istanza: il profilo separato non è supportato." : "Il collegamento non è riuscito o è scaduto. Puoi riprovare."));
       if (!(S.data.agents || []).some((agent) => agent.subscriptionId === record.id)) actions.append(btn("Rimuovi", { icon: "trash", onclick: () => action(async () => {
         await api(`/api/subscriptions/${record.id}`, { method: "DELETE" });
