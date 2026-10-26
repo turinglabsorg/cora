@@ -346,6 +346,7 @@ function connectEvents() {
   S.events.onmessage = (event) => {
     let entry;
     try { entry = JSON.parse(event.data); } catch { return; }
+    if (entry.type === "subscriptions") return;
     if (["web-message", "web-typing", "trace"].includes(entry.type)) {
       S.live?.(entry);
       return;
@@ -763,6 +764,107 @@ function pickedModel(data, name) {
   return String(data.get(`${name}Custom`) || "").trim() || data.get(name) || "";
 }
 
+const SUBSCRIPTION_STATES = { disconnected: "Da collegare", connecting: "Accesso in corso", ready: "Collegata", error: "Accesso non riuscito" };
+
+function subscriptionPicker(currentId) {
+  let provider = "";
+  let selectedId = currentId || "";
+  let requestBusy = false;
+  let snapshot = "";
+  const select = h("select", { name: "subscriptionId", "aria-label": "Subscription" });
+  const details = h("div", { class: "stack-sm", "aria-live": "polite" });
+  const labelInput = h("input", { type: "text", maxlength: 80, placeholder: "es. Account del team", "aria-label": "Nome subscription", autocomplete: "off" });
+  const newButton = btn("Collega una nuova subscription", { icon: "plus", onclick: async () => {
+    if (!labelInput.value.trim()) { labelInput.focus(); return; }
+    await action(async () => {
+      const record = await api("/api/subscriptions", { method: "POST", body: { provider, label: labelInput.value.trim() } });
+      selectedId = record.id;
+      labelInput.value = "";
+      await api(`/api/subscriptions/${record.id}/login`, { method: "POST" });
+    });
+  } });
+  const root = h("div", { class: "subscription-picker stack-sm" },
+    field("Subscription", select, "Scegli un account già collegato oppure aggiungine uno."),
+    details,
+    h("div", { class: "subscription-new stack-sm" }, field("Nome della nuova subscription", labelInput), newButton),
+    h("small", {}, "Il collegamento viene salvato su questa istanza Cora. Puoi autorizzarlo anche dal tuo browser remoto."));
+
+  async function action(fn) {
+    if (requestBusy) return;
+    requestBusy = true;
+    newButton.disabled = true;
+    try { await fn(); await refresh(); } catch (error) { toast(error.message, true); }
+    finally { requestBusy = false; newButton.disabled = false; }
+  }
+
+  async function refresh() {
+    S.data.subscriptions = await api("/api/subscriptions");
+    draw();
+  }
+
+  function draw(force = false) {
+    const records = (S.data.subscriptions || []).filter((record) => record.provider === provider);
+    const record = records.find((item) => item.id === selectedId);
+    const next = JSON.stringify({ provider, selectedId, records });
+    if (!force && next === snapshot) return;
+    snapshot = next;
+    select.replaceChildren(h("option", { value: "" }, "Scegli una subscription"), ...records.map((item) => h("option", { value: item.id, selected: item.id === selectedId }, raw(`${item.label} · ${item.email || tr(SUBSCRIPTION_STATES[item.status])}`))));
+    select.value = record?.id || "";
+    details.replaceChildren();
+    if (!record) return;
+    const status = h("span", { class: `badge ${record.status === "ready" ? "on" : record.status === "error" ? "err" : ""}` }, SUBSCRIPTION_STATES[record.status]);
+    const actions = h("div", { class: "actions" });
+    details.append(status, actions);
+    if (record.status === "connecting") {
+      if (record.login?.url) {
+        actions.append(btn("Apri il login nel browser", { icon: "share", cls: "primary", href: record.login.url, target: "_blank" }));
+        if (record.login.userCode) details.append(h("div", { class: "subscription-code" }, h("small", {}, "Inserisci questo codice nella pagina del provider"), h("strong", {}, raw(record.login.userCode))));
+        if (record.login.manualCode) {
+          const code = h("input", { type: "password", autocomplete: "off", "aria-label": "Codice di autorizzazione", placeholder: "Codice restituito dal provider" });
+          details.append(field("Codice di autorizzazione", code), btn("Completa collegamento", { icon: "check", onclick: () => action(async () => {
+            const value = code.value;
+            code.value = "";
+            await api(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code: value } });
+          }) }));
+        }
+      }
+      details.append(h("small", {}, "Completa l'accesso nella pagina ufficiale. Questa schermata si aggiorna automaticamente."));
+      actions.append(btn("Annulla accesso", { onclick: () => action(() => api(`/api/subscriptions/${record.id}/cancel`, { method: "POST" })) }));
+    } else {
+      if (record.status === "ready" || record.legacyHost) actions.append(btn("Verifica collegamento", { icon: "refresh", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) }));
+      else actions.append(btn("Collega nel browser", { icon: "share", onclick: () => action(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) }));
+      if (record.legacyHost) details.append(h("small", {}, "Account già usato dagli agenti su questo server. Per cambiarlo, collega una nuova subscription dal browser."));
+      if (record.status === "error") details.append(h("small", {}, record.issue === "isolation" ? "Aggiorna Claude Code e configura il CLI ufficiale su questa istanza: il profilo separato non è supportato." : "Il collegamento non è riuscito o è scaduto. Puoi riprovare."));
+      if (!(S.data.agents || []).some((agent) => agent.subscriptionId === record.id)) actions.append(btn("Rimuovi", { icon: "trash", onclick: () => action(async () => {
+        await api(`/api/subscriptions/${record.id}`, { method: "DELETE" });
+        selectedId = "";
+      }) }));
+    }
+  }
+
+  select.addEventListener("change", () => { selectedId = select.value; draw(true); });
+  const poll = async () => {
+    if (!root.isConnected) return;
+    if (!root.hidden && !requestBusy && S.data.subscriptions?.some((item) => item.provider === provider && item.status === "connecting")) {
+      try { await refresh(); } catch {}
+    }
+    setTimeout(poll, 1500);
+  };
+  setTimeout(poll, 1500);
+  return {
+    node: root,
+    setProvider(value) {
+      provider = value;
+      const needs = provider === "claude" || provider === "codex";
+      root.hidden = !needs;
+      select.disabled = !needs;
+      select.required = needs;
+      draw();
+    },
+    value() { return root.hidden ? "" : select.value; },
+  };
+}
+
 function channelChips(selected) {
   const chosen = new Set(selected);
   const wrap = h("div", { class: "chips", "data-channels": "" });
@@ -799,6 +901,16 @@ function agentForm(agent) {
   const faderValue = h("b", { class: "fader-value" }, fader.value);
   fader.addEventListener("input", () => { faderValue.textContent = fader.value; });
   const hidden = (agent.channelIds || []).filter((id) => !S.data.channels.some((channel) => channel.id === id));
+  const model = modelPicker("model", agent.model || "");
+  const subscription = subscriptionPicker(agent.subscriptionId);
+  const syncSubscription = () => {
+    const select = model.querySelector("select");
+    const custom = model.querySelector("input");
+    subscription.setProvider((custom.value.trim() || select.value || S.data.settings.defaultModel).split("/")[0]);
+  };
+  model.addEventListener("change", syncSubscription);
+  model.addEventListener("input", syncSubscription);
+  subscription.setProvider((agent.model || S.data.settings.defaultModel).split("/")[0]);
   const form = h("form", { class: "stack" },
     panel({ icon: "user", title: "Identità", hint: "Come si chiama e come appare." },
       h("div", { class: "grid2" },
@@ -812,7 +924,8 @@ function agentForm(agent) {
             } }))))),
     panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
       h("div", { class: "stack-sm" },
-        field("Modello", modelPicker("model", agent.model || "")),
+        field("Modello", model),
+        subscription.node,
         field("Ragionamento: livello", h("select", { name: "effort" },
           [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) => h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label))),
         "Quanto pensa prima di rispondere: più alto è più accurato ma più lento."),
@@ -842,6 +955,7 @@ function agentForm(agent) {
       name: data.get("name"),
       avatarUrl: data.get("avatarUrl"),
       model: pickedModel(data, "model"),
+      subscriptionId: subscription.value(),
       color: data.get("color"),
       chattiness: Number(data.get("chattiness")) / 100,
       channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],

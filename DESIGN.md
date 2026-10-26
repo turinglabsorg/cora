@@ -69,6 +69,7 @@ The panel behaves like an installed app (web manifest, apple-touch-icon, no pinc
 - **Buttons**: `.btn` (panel-2, line border), `.btn.primary` (amber fill, ink text), `.btn.danger` (red outline), `.btn.ghost`. 36px tall, 44px on touch.
 - **Toggle** (`.switch`): small rocker switch with LED.
 - **Model picker** (`.model-pick`): the model list grouped by provider, and under it a mono text box for any `provider/model` id; when the box is filled it wins and the list dims.
+- **Subscription picker** (`.subscription-picker`): an inset panel below a Claude or Codex model. An explicit account selector, connection state and browser sign-in actions precede a separate new-account field. Device codes appear in the black mono well; returned authorization codes use a password input and are cleared on submission. Provider changes filter accounts without losing the rest of the agent form. The same picker serves creation and profile editing.
 - **Chips** (`.chip`): channel selection, `# name`, toggled amber when selected.
 - **Desktop frame** (`.monitor-frame`): the noVNC iframe inside a bezel with the agent's name plate.
 

@@ -17,10 +17,10 @@ function childEnv() {
   return env;
 }
 
-function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, signal }) {
+function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, signal }) {
   signal?.throwIfAborted();
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, env: { ...childEnv(), ...env }, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(bin, args, { cwd, env: { ...(authEnv || childEnv()), ...env }, stdio: ["pipe", "pipe", "pipe"] });
     const stdout = [];
     const stderr = [];
     let partial = "";
@@ -96,7 +96,7 @@ function textSteps(onStep) {
 }
 
 /** One agent turn on Claude Code with the owner's subscription; cora's tools arrive over MCP. */
-export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", goal = "", signal }) {
+export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", goal = "", authEnv, signal }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const mcpFile = join(workDir, `mcp-${id}.json`);
@@ -131,7 +131,7 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
     }
   };
   try {
-    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine, signal });
+    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine, authEnv, signal });
     signal?.throwIfAborted();
     if (out.timedOut) throw new Error(`claude: no answer within ${Math.round(timeoutMs / 1000)}s`);
     if (!data) throw new Error(`claude: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`);
@@ -216,7 +216,7 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
 }
 
 /** One agent turn on the Codex CLI with the owner's ChatGPT subscription; its own shell and browser tools are off. */
-export async function runCodex({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", signal }) {
+export async function runCodex({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", authEnv, signal }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const outFile = join(workDir, `codex-${id}.txt`);
@@ -224,6 +224,7 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--color", "never",
     "-s", "read-only", "-C", workDir, "-m", model, "-o", outFile, "--json",
     "-c", "approval_policy=\"never\"", "-c", "model_reasoning_summary=\"detailed\"",
+    ...(authEnv ? ["-c", 'cli_auth_credentials_store="file"', "-c", 'forced_login_method="chatgpt"'] : []),
     ...(effort ? ["-c", `model_reasoning_effort=${tomlString(effort)}`] : []),
   ];
   for (const feature of CODEX_DISABLED_FEATURES) args.push("--disable", feature);
@@ -262,7 +263,7 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     }
   };
   try {
-    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine, signal });
+    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine, authEnv, signal });
     signal?.throwIfAborted();
     if (out.timedOut) throw new Error(`codex: no answer within ${Math.round(timeoutMs / 1000)}s`);
     let text = "";

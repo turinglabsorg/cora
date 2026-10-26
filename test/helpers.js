@@ -366,6 +366,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const argv = process.argv.slice(2);
 const flavor = path.basename(process.argv[1]);
+if (flavor === "claude" && argv[0] === "auth" && argv[1] === "status") {
+  process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", configDirectory: process.env.CLAUDE_CONFIG_DIR, email: "fixture@example.test" }));
+  process.exit(0);
+}
 const countCalls = (file, kind) => {
   try {
     return fs.readFileSync(file, "utf8").split("\\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.flavor === kind).length;

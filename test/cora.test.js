@@ -8,6 +8,8 @@ import { passKeys, signPass } from "../src/pass.js";
 import { LISTENING_INTENTS } from "../src/discord.js";
 import { loginLinkToken } from "../src/web.js";
 import { SHARED, Store } from "../src/store.js";
+import { identityCli } from "./subscription-fixtures.js";
+import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDocker, fakeOllama, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
@@ -28,8 +30,41 @@ let intentions;
 let cli;
 let home;
 let orca;
+const subscriptionIds = {};
 const botTokens = {};
 const hushVault = {};
+
+async function subscriptionApp(t, existing) {
+  const identity = existing?.identity || identityCli();
+  const directory = existing?.home || tempHome();
+  const instance = startCora({ home: directory, host: "127.0.0.1", port: 0, insecureCookies: true,
+    adminPassword: PASSWORD, sessionKey: "subscription-fixture-session", discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
+    claudeBin: identity.claude, codexBin: identity.codex, hermesBin: "/not-installed/hermes", botTokenFor: () => "",
+    docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/not-installed/AGENTS.md", sshAuthorizedKeys: "/not-installed/keys",
+  });
+  await instance.ready;
+  let stopped = false;
+  const stop = async () => { if (!stopped) { stopped = true; await instance.stop(); } };
+  t.after(stop);
+  const root = `http://127.0.0.1:${instance.server.address().port}`;
+  const login = await fetch(`${root}/api/login`, { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" }, body: JSON.stringify({ password: PASSWORD }) });
+  const session = login.headers.get("set-cookie").split(";")[0];
+  const request = async (path, { method = "GET", body, headers = {} } = {}) => {
+    const response = await fetch(`${root}${path}`, { method, headers: { Cookie: session, "X-Cora": "1", "Content-Type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, data: await response.json() };
+  };
+  return { app: instance, identity, home: directory, request, root, stop };
+}
+
+async function connectIdentity(fixture, provider, label = provider) {
+  const created = await fixture.request("/api/subscriptions", { method: "POST", body: { provider, label } });
+  assert.equal(created.status, 201);
+  const started = await fixture.request(`/api/subscriptions/${created.data.id}/login`, { method: "POST" });
+  assert.equal(started.status, 202);
+  if (provider === "claude") await fixture.request(`/api/subscriptions/${created.data.id}/code`, { method: "POST", body: { code: "fixture-authorization-code" } });
+  else fixture.identity.set({ complete: true });
+  return waitFor(() => { const record = fixture.app.store.subscription(created.data.id); return record.status === "ready" && record; });
+}
 
 function lastUserText(body) {
   const users = body.messages.filter((message) => message.role === "user");
@@ -153,6 +188,11 @@ before(async () => {
     startBoxes: false,
   });
   await app.ready;
+  for (const provider of ["claude", "codex"]) {
+    const identity = app.store.createSubscription({ provider, label: `Fixture ${provider}` });
+    app.store.updateSubscription(identity.id, { status: "ready" });
+    subscriptionIds[provider] = identity.id;
+  }
   base = `http://127.0.0.1:${app.server.address().port}`;
   await waitFor(() => app.discord.state === "ready" && app.discord.guilds.size === 2, { what: "gateway ready" });
 });
@@ -173,6 +213,145 @@ beforeEach(async () => {
   intentions = null;
   discord.state.webhookPosts.length = 0;
   discord.state.botPosts.length = 0;
+});
+
+describe("per-agent subscription authentication", () => {
+  test("connects both official login shapes, exposes metadata only and validates assignments", async (t) => {
+    const fixture = await subscriptionApp(t);
+    const claude = await connectIdentity(fixture, "claude", "Design team");
+    const codex = await connectIdentity(fixture, "codex", "Engineering team");
+    assert.match(claude.email, /@example.test$/);
+    assert.equal(codex.plan, "pro");
+    const list = await fixture.request("/api/subscriptions");
+    assert.equal(list.data.length, 2);
+    assert.doesNotMatch(JSON.stringify(list.data), /access_token|refresh_token|fixture-authorization-code|TEST-ONLY|state=fixture/);
+    assert.doesNotMatch(JSON.stringify(fixture.app.store.subscriptions()), /access_token|refresh_token|login|directory/);
+    const missing = await fixture.request("/api/agents", { method: "POST", body: { name: "Missing", model: "codex/gpt-6-sol" } });
+    assert.equal(missing.status, 400);
+    const wrong = await fixture.request("/api/agents", { method: "POST", body: { name: "Wrong", model: "codex/gpt-6-sol", subscriptionId: claude.id } });
+    assert.equal(wrong.status, 400);
+    const created = await fixture.request("/api/agents", { method: "POST", body: { name: "Ada", model: "codex/gpt-6-sol", subscriptionId: codex.id, tools: false } });
+    assert.equal(created.status, 201);
+    assert.equal(created.data.subscriptionId, codex.id);
+    const second = await fixture.request("/api/agents", { method: "POST", body: { name: "Bob", model: "codex/gpt-6-sol", subscriptionId: codex.id, tools: false } });
+    assert.equal(second.status, 201, "several agents can select an existing subscription");
+    assert.equal((await fixture.request(`/api/subscriptions/${codex.id}`, { method: "DELETE" })).status, 400);
+    assert.equal((await fixture.request(`/api/subscriptions/${claude.id}/check`, { method: "POST" })).data.status, "ready");
+    assert.equal((await fixture.request(`/api/subscriptions/${codex.id}/check`, { method: "POST" })).data.status, "ready");
+    const changed = await fixture.request(`/api/agents/${created.data.id}`, { method: "PUT", body: { model: "claude/claude-sonnet-5-5", subscriptionId: claude.id } });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.data.subscriptionId, claude.id);
+  });
+
+  test("the Brain routes different agents to different local accounts without host credential overrides", async (t) => {
+    const fixture = await subscriptionApp(t);
+    const first = await connectIdentity(fixture, "codex", "First account");
+    const second = await connectIdentity(fixture, "codex", "Second account");
+    const third = await connectIdentity(fixture, "claude", "Third account");
+    const agents = [first, second, third].map((record, index) => fixture.app.store.createAgent({ name: `Agent ${index}`, model: record.provider === "codex" ? "codex/gpt-6-sol" : "claude/claude-sonnet-5-5", subscriptionId: record.id, tools: false }));
+    const results = await Promise.all(agents.map((agent) => fixture.app.brain.chatTurn({ agent, history: [{ id: `m-${agent.id}`, kind: "owner", at: Date.now(), content: "Which identity?", authorName: "Owner" }], channel: { id: "web", name: "test" }, forced: true, computer: false })));
+    for (const [index, record] of [first, second, third].entries()) assert.match(results[index].text, new RegExp(record.email.replaceAll(".", "\\.")));
+    const runs = fixture.identity.calls();
+    assert.equal(new Set(runs.map((run) => run.directory)).size, 3);
+    assert.ok(runs.every((run) => run.directory.startsWith(join(fixture.home, "subscriptions"))));
+    assert.ok(runs.every((run) => run.inheritedKeys.length === 0));
+    const env = subscriptionEnvironment("codex", "/fixture/account", { HOME: "/fixture/user", PATH: "/bin", ANTHROPIC_API_KEY: "fixture-host-key", OPENAI_API_KEY: "fixture-host-key", CODEX_HOME: "/other-account", CLAUDE_CODE_USE_VERTEX: "1", CORA_BOT_PRIVATE: "fixture-bot-key", CLOUDSDK_CONFIG: "/other-project" });
+    assert.deepEqual(env, { HOME: "/fixture/user", PATH: "/bin", CODEX_HOME: "/fixture/account" });
+  });
+
+  test("rejects unauthenticated and cross-origin login control; cancellation and failed login can recover", async (t) => {
+    const fixture = await subscriptionApp(t);
+    assert.equal((await fetch(`${fixture.root}/api/subscriptions`)).status, 401);
+    const created = await fixture.request("/api/subscriptions", { method: "POST", body: { provider: "codex", label: "Pending" } });
+    const id = created.data.id;
+    const path = `/api/subscriptions/${id}/login`;
+    assert.equal((await fixture.request(path, { method: "POST", headers: { Origin: "https://elsewhere.example" } })).status, 403);
+    fixture.identity.set({ evilUrl: "https://elsewhere.example/steal" });
+    const failed = await fixture.request(path, { method: "POST" });
+    assert.equal(failed.data.status, "error");
+    assert.equal(failed.data.login, undefined);
+    fixture.identity.set({ complete: false });
+    const retry = await fixture.request(path, { method: "POST" });
+    assert.equal(retry.data.status, "connecting");
+    assert.equal(retry.data.login.url, "https://auth.openai.com/codex/device");
+    assert.equal((await fixture.request(`/api/subscriptions/${id}/cancel`, { method: "POST" })).data.status, "disconnected");
+    assert.equal((await fixture.request(`/api/subscriptions/${id}/code`, { method: "POST", body: { code: "not-a-claude-flow" } })).status, 400);
+    fixture.identity.set({ complete: true });
+    await fixture.request(path, { method: "POST" });
+    await waitFor(() => fixture.app.store.subscription(id).status === "ready");
+    assert.doesNotMatch(JSON.stringify(fixture.app.store.recentActivity(100)), /TEST-ONLY|state=fixture|private provider detail/);
+  });
+
+  test("a restart retains selected accounts and clears an interrupted sign-in without importing host authentication", async (t) => {
+    const fixture = await subscriptionApp(t);
+    const connected = await connectIdentity(fixture, "claude");
+    const agent = fixture.app.store.createAgent({ name: "Persistent", model: "claude/claude-sonnet-5-5", subscriptionId: connected.id, tools: false });
+    const pending = (await fixture.request("/api/subscriptions", { method: "POST", body: { provider: "claude", label: "Incomplete" } })).data;
+    await fixture.request(`/api/subscriptions/${pending.id}/login`, { method: "POST" });
+    await fixture.stop();
+    const restarted = await subscriptionApp(t, fixture);
+    assert.equal(restarted.app.store.agent(agent.id).subscriptionId, connected.id);
+    assert.equal(restarted.app.store.subscription(pending.id).status, "disconnected");
+    assert.equal((await restarted.request(`/api/subscriptions/${connected.id}/check`, { method: "POST" })).data.status, "ready");
+    assert.equal(restarted.app.store.subscriptions().length, 2);
+  });
+
+  test("shared subscriptions serialize work, queued cancellation is prompt and login cannot race a running account", async (t) => {
+    const fixture = await subscriptionApp(t);
+    const record = await connectIdentity(fixture, "claude");
+    let release;
+    const hold = new Promise((resolve) => { release = resolve; });
+    let entered = false;
+    const first = fixture.app.subscriptions.run(record.id, "claude", null, async () => { entered = true; await hold; return "first"; });
+    await waitFor(() => entered);
+    let secondEntered = false;
+    const controller = new AbortController();
+    const second = fixture.app.subscriptions.run(record.id, "claude", controller.signal, async () => { secondEntered = true; });
+    const stopped = assert.rejects(second, /cancelled/);
+    controller.abort(new Error("cancelled"));
+    await stopped;
+    assert.equal(secondEntered, false);
+    assert.equal((await fixture.request(`/api/subscriptions/${record.id}/login`, { method: "POST" })).status, 400);
+    release();
+    assert.equal(await first, "first");
+  });
+
+  test("refuses a Claude CLI that ignores its profile; a successful retry and unused-account removal recover", async (t) => {
+    const fixture = await subscriptionApp(t);
+    const record = (await fixture.request("/api/subscriptions", { method: "POST", body: { provider: "claude", label: "Isolation", legacyHost: true } })).data;
+    assert.equal(record.legacyHost, undefined, "a browser cannot designate the host's account");
+    fixture.identity.set({ wrongDirectory: true });
+    const refused = await fixture.request(`/api/subscriptions/${record.id}/login`, { method: "POST" });
+    assert.equal(refused.data.status, "error");
+    assert.equal(refused.data.issue, "isolation");
+    assert.equal(refused.data.login, undefined);
+    fixture.identity.set({});
+    await fixture.request(`/api/subscriptions/${record.id}/login`, { method: "POST" });
+    await fixture.request(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code: "fixture-authorization-code" } });
+    await waitFor(() => fixture.app.store.subscription(record.id).status === "ready");
+    assert.equal((await fixture.request(`/api/subscriptions/${record.id}`, { method: "DELETE" })).status, 200);
+    assert.equal(fixture.app.store.subscription(record.id), null);
+  });
+
+  test("older agents gain explicit server-account records without importing credentials or changing accounts", async (t) => {
+    const fixture = await subscriptionApp(t);
+    const agent = fixture.app.store.createAgent({ name: "Existing", model: "ollama/test-model", tools: false });
+    const old = { ...agent, model: "claude/claude-sonnet-5-5" };
+    delete old.subscriptionId;
+    fixture.app.store.db.prepare("UPDATE agents SET data = ? WHERE id = ?").run(JSON.stringify(old), agent.id);
+    await fixture.stop();
+    const restarted = await subscriptionApp(t, fixture);
+    const migrated = restarted.app.store.agent(agent.id);
+    const record = restarted.app.store.subscription(migrated.subscriptionId);
+    assert.equal(record.legacyHost, true);
+    assert.equal(record.provider, "claude");
+    assert.equal(record.status, "ready");
+    assert.equal(restarted.app.subscriptions.environment(record).CLAUDE_CONFIG_DIR, undefined);
+    assert.equal((await restarted.request(`/api/subscriptions/${record.id}/login`, { method: "POST" })).status, 400);
+    restarted.app.store.updateSubscription(record.id, { status: "disconnected" });
+    assert.equal((await restarted.request(`/api/agents/${agent.id}`, { method: "PUT", body: { enabled: false } })).status, 200);
+    assert.equal((await restarted.request("/api/agents", { method: "POST", body: { name: "Another", model: migrated.model, subscriptionId: record.id } })).status, 400);
+  });
 });
 
 describe("panel auth", () => {
@@ -497,7 +676,7 @@ describe("agents in Discord", () => {
   test("Claude Code follows the thread's current goal under Cora's verifier", async (t) => {
     await call("/api/settings", { method: "PUT", body: { goalMode: true } });
     t.after(() => call("/api/settings", { method: "PUT", body: { goalMode: false } }));
-    const created = await call("/api/agents", { method: "POST", body: { name: "Nora", model: "claude/claude-sonnet-5-5", chattiness: 0, tools: true } });
+    const created = await call("/api/agents", { method: "POST", body: { name: "Nora", model: "claude/claude-sonnet-5-5", subscriptionId: subscriptionIds.claude, chattiness: 0, tools: true } });
     assert.equal(created.status, 201);
     const goal = "la pagina è online e risponde 200";
     goals = () => goal;
@@ -518,7 +697,7 @@ describe("agents in Discord", () => {
   });
 
   test("a model at capacity is tried again on its own, and the owner only sees the answer", async () => {
-    const created = await call("/api/agents", { method: "POST", body: { name: "Rea", model: "codex/gpt-6-sol", chattiness: 0, tools: false } });
+    const created = await call("/api/agents", { method: "POST", body: { name: "Rea", model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex, chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
     const before = cli.calls().length;
     // The first run fails the way Codex does when the model is busy; the second works.
@@ -536,7 +715,7 @@ describe("agents in Discord", () => {
   });
 
   test("when the Codex CLI dies after the agent has answered, the answer is kept and no JSON is reported", async () => {
-    const created = await call("/api/agents", { method: "POST", body: { name: "Gaia", model: "codex/gpt-6-sol", chattiness: 0, tools: false } });
+    const created = await call("/api/agents", { method: "POST", body: { name: "Gaia", model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex, chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
     cli.set({ reply: "Ho finito: tutto a posto.", crash: true });
     discord.say({ content: "Gaia, com'è andata?" });
@@ -549,7 +728,7 @@ describe("agents in Discord", () => {
   });
 
   test("an agent on Claude Code (subscription) uses cora's memory tools over MCP", async () => {
-    const created = await call("/api/agents", { method: "POST", body: { name: "Clara", model: "claude/claude-sonnet-5-5", chattiness: 0, tools: false } });
+    const created = await call("/api/agents", { method: "POST", body: { name: "Clara", model: "claude/claude-sonnet-5-5", subscriptionId: subscriptionIds.claude, chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
     cli.set({ tool: "remember", args: { fact: "Il colore preferito di Sam è il verde" }, reply: "Me lo segno." });
     process.env.CORA_BOT_LEAK = "not-for-the-cli";
@@ -590,7 +769,7 @@ describe("agents in Discord", () => {
   });
 
   test("an agent on Codex (ChatGPT subscription) gets cora's desktop tools from the owner, never Codex's shell", async () => {
-    const created = await call("/api/agents", { method: "POST", body: { name: "Gino", model: "codex/gpt-6-sol", chattiness: 0, tools: true } });
+    const created = await call("/api/agents", { method: "POST", body: { name: "Gino", model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex, chattiness: 0, tools: true } });
     cli.set({ tool: "shell", args: { command: "date" }, reply: "Ecco la data.", thinking: "**Controllo l'ora** sul mio computer con date." });
     discord.say({ content: "Gino, che ore sono sul tuo computer?" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Gino"), { what: "Gino's reply" });
@@ -1416,7 +1595,7 @@ describe("talking with the agents", () => {
   });
 
   test("the reasoning level reaches Claude Code and Codex", async () => {
-    const created = await call("/api/agents", { method: "POST", body: { name: "Ugo2", model: "claude/claude-sonnet-5-5", effort: "high", chattiness: 0, tools: false, channelIds: [CHANNEL] } });
+    const created = await call("/api/agents", { method: "POST", body: { name: "Ugo2", model: "claude/claude-sonnet-5-5", subscriptionId: subscriptionIds.claude, effort: "high", chattiness: 0, tools: false, channelIds: [CHANNEL] } });
     assert.equal(created.data.effort, "high");
     cli.set({ reply: "Ok." });
     discord.say({ content: "Ugo2, pensaci bene" });
@@ -1424,7 +1603,7 @@ describe("talking with the agents", () => {
     const claude = cli.calls().reverse().find((item) => item.flavor === "claude");
     assert.equal(claude.argv[claude.argv.indexOf("--effort") + 1], "high");
     await quiet();
-    await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { model: "codex/gpt-6-sol", effort: "low" } });
+    await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex, effort: "low" } });
     discord.say({ content: "Ugo2, e adesso?" });
     await waitFor(() => posts("Ugo2").length === 2, { what: "Ugo2 on Codex" });
     const codex = cli.calls().reverse().find((item) => item.flavor === "codex");
@@ -1990,7 +2169,7 @@ describe("thread goal lifecycle", () => {
   });
 
   test("a Codex goal retry retains tool evidence and the owner's replacement goal", async () => {
-    app.store.updateAgent(iris.id, { model: "codex/gpt-6-sol" });
+    app.store.updateAgent(iris.id, { model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex });
     const before = cli.calls().length;
     goals = (body) => /Poi il proprietario ha detto/.test(body.messages[1].content) ? "il report è su Telegram" : "il report è via email";
     let judged = 0;
@@ -2010,11 +2189,11 @@ describe("thread goal lifecycle", () => {
       assert.match(runs[1].stdin, /Azioni già eseguite[\s\S]*list_routines[\s\S]*Verifica attuale/);
       assert.match(runs[1].stdin, /unica condizione attuale[^\n]*il report è su Telegram/);
       assert.match(runs[1].stdin, /Messaggi successivi del proprietario[\s\S]*Telegram/);
-    } finally { app.store.updateAgent(iris.id, { model: "ollama/test-model" }); }
+    } finally { app.store.updateAgent(iris.id, { model: "ollama/test-model", subscriptionId: "" }); }
   });
 
   test("stoppa tutto terminates a running CLI and never invokes the goal verifier", async () => {
-    app.store.updateAgent(iris.id, { model: "codex/gpt-6-sol" });
+    app.store.updateAgent(iris.id, { model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex });
     goals = () => "tutti i post sono pubblicati";
     let judged = 0;
     checks = () => { judged += 1; return JSON.stringify({ met: false }); };
@@ -2029,6 +2208,6 @@ describe("thread goal lifecycle", () => {
       assert.equal(judged, 0);
       await quiet();
       assert.equal(cli.calls().slice(before).length, 1, "a stopped goal starts no replacement CLI");
-    } finally { app.store.updateAgent(iris.id, { model: "ollama/test-model" }); cli.set({ reply: "PASS" }); }
+    } finally { app.store.updateAgent(iris.id, { model: "ollama/test-model", subscriptionId: "" }); cli.set({ reply: "PASS" }); }
   });
 });

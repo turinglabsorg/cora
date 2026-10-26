@@ -18,6 +18,7 @@ import { LLM } from "./llm.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
 import { Store } from "./store.js";
+import { Subscriptions } from "./subscriptions.js";
 import { createWeb } from "./web.js";
 
 export function startCora(overrides = {}) {
@@ -37,6 +38,7 @@ export function startCora(overrides = {}) {
   const discord = new Discord({ token: listenerToken, apiBase: cfg.discordApi, gatewayUrl: cfg.discordGateway });
   const telegram = new Telegram({ token: cfg.telegramToken, apiBase: cfg.telegramApi, pollTimeout: cfg.telegramPollTimeout, chats: store.value("telegramChats", []) });
   const bridge = new ToolBridge();
+  const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, emit: (event) => web?.broadcast(event) });
   const llm = new LLM({
     ollamaUrl: cfg.ollamaUrl,
     ollamaKey: cfg.ollamaKey,
@@ -50,6 +52,7 @@ export function startCora(overrides = {}) {
     codexModelsFile: cfg.codexModelsFile,
     cliWorkDir: join(cfg.home, "cli-work"),
     bridge,
+    subscriptions,
   });
   // SSH into a desktop: the keys that already open this machine, plus the ones added in the panel.
   const sshKeys = () => {
@@ -84,7 +87,7 @@ export function startCora(overrides = {}) {
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
   const scheduler = new Scheduler({ store, orchestrator, brain, timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
-  web = createWeb({ config: { ...cfg, filesDir }, store, discord, telegram, channels, boxes, llm, orchestrator, brain, bots, tgBots, activity, storeSecret, traces, push });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, channels, boxes, llm, orchestrator, brain, bots, tgBots, activity, storeSecret, traces, push });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -147,6 +150,7 @@ export function startCora(overrides = {}) {
     clearTimeout(resumeFallback);
     clearInterval(botTimer);
     scheduler.stop();
+    await subscriptions.close();
     discord.stop();
     bots.stop();
     telegram.stop();
@@ -157,7 +161,7 @@ export function startCora(overrides = {}) {
     await bridge.stop();
     store.close();
   };
-  return { ready, stop, store, discord, telegram, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, traces, push, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, traces, push, server: web.server };
 }
 
 const isMain = (() => {

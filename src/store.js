@@ -46,6 +46,7 @@ const AGENT_DEFAULTS = {
   personality: "",
   core: "",
   model: "",
+  subscriptionId: "",
   chattiness: 0.5,
   channelIds: [],
   enabled: true,
@@ -61,6 +62,7 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, provider TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS routines (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
@@ -186,6 +188,7 @@ export function sanitizeAgent(input, previous = {}) {
     personality: cleanText(merged.personality, 8000),
     core: cleanText(merged.core, 4000),
     model: checkModel(merged.model),
+    subscriptionId: cleanText(merged.subscriptionId, 80).trim(),
     chattiness: clampNumber(merged.chattiness, 0, 1, 0.5),
     channelIds: cleanIds(merged.channelIds, CHANNEL_ID),
     enabled: Boolean(merged.enabled),
@@ -315,6 +318,20 @@ export class Store {
     this.cachedSettings = sanitizeSettings(settingsRow ? JSON.parse(settingsRow.value) : {}, DEFAULT_SETTINGS);
     this.cachedAgents = this.db.prepare("SELECT data FROM agents ORDER BY position").all().map((row) => JSON.parse(row.data));
     this.cachedRoutines = this.db.prepare("SELECT data FROM routines ORDER BY rowid").all().map((row) => JSON.parse(row.data));
+    // Existing agents keep their already-used server account as an explicit database identity.
+    // New agents always select an identity; no credential material is copied or imported.
+    for (const agent of this.cachedAgents) {
+      if (Object.hasOwn(agent, "subscriptionId")) continue;
+      const provider = (agent.model || this.cachedSettings.defaultModel).split("/")[0];
+      if (!["claude", "codex"].includes(provider)) continue;
+      let record = this.subscriptions().find((item) => item.provider === provider && item.legacyHost);
+      if (!record) {
+        record = { ...this.createSubscription({ provider, label: `${provider === "claude" ? "Claude" : "ChatGPT"} · Server` }), status: "ready", legacyHost: true };
+        this.stmt("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(record), record.id);
+      }
+      agent.subscriptionId = record.id;
+      this.writeAgent(agent);
+    }
   }
 
   stmt(sql) {
@@ -360,6 +377,58 @@ export class Store {
     return this.cachedSettings;
   }
 
+  /* ---------- subscription identities; credentials belong to the official CLIs ---------- */
+  subscriptions() {
+    return this.stmt("SELECT data FROM subscriptions ORDER BY rowid").all().map((row) => JSON.parse(row.data));
+  }
+
+  subscription(id) {
+    const row = this.stmt("SELECT data FROM subscriptions WHERE id = ?").get(id);
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  createSubscription({ provider, label }) {
+    if (!["claude", "codex"].includes(provider)) throw new ValidationError("provider subscription non valido");
+    const name = cleanText(label, 80).replace(/[\r\n]/g, " ").trim();
+    if (!name) throw new ValidationError("nome subscription richiesto");
+    const at = new Date().toISOString();
+    const record = { id: newId("sub"), provider, label: name, status: "disconnected", email: "", plan: "", createdAt: at, updatedAt: at };
+    this.stmt("INSERT INTO subscriptions(id, provider, data) VALUES (?, ?, ?)").run(record.id, provider, JSON.stringify(record));
+    return record;
+  }
+
+  updateSubscription(id, input) {
+    const record = this.subscription(id);
+    if (!record) return null;
+    const next = { ...record, updatedAt: new Date().toISOString() };
+    if (input.status !== undefined) {
+      if (!["disconnected", "connecting", "ready", "error"].includes(input.status)) throw new ValidationError("stato subscription non valido");
+      next.status = input.status;
+    }
+    for (const key of ["email", "plan"]) if (input[key] !== undefined) next[key] = cleanText(input[key], key === "email" ? 254 : 80);
+    if (input.issue !== undefined) next.issue = input.issue === "isolation" ? "isolation" : "";
+    if (input.status === "ready" || input.status === "connecting") next.issue = "";
+    this.stmt("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(next), id);
+    return next;
+  }
+
+  deleteSubscription(id) {
+    if (this.agents().some((agent) => agent.subscriptionId === id)) throw new ValidationError("subscription usata da un agente");
+    return this.stmt("DELETE FROM subscriptions WHERE id = ?").run(id).changes > 0;
+  }
+
+  checkAgentSubscription(agent, { unchanged = false } = {}) {
+    const provider = (agent.model || this.settings.defaultModel).split("/")[0];
+    const needsSubscription = ["claude", "codex"].includes(provider);
+    if (!agent.subscriptionId) {
+      if (needsSubscription && !unchanged) throw new ValidationError("scegli una subscription collegata per questo modello");
+      return;
+    }
+    const subscription = this.subscription(agent.subscriptionId);
+    if (!subscription || subscription.provider !== provider) throw new ValidationError("subscription incompatibile con il modello");
+    if (subscription.status !== "ready" && !unchanged) throw new ValidationError("collega la subscription prima di usarla");
+  }
+
   /* ---------- agents ---------- */
   agents() { return this.cachedAgents; }
 
@@ -373,6 +442,7 @@ export class Store {
 
   createAgent(input) {
     const agent = sanitizeAgent(input);
+    this.checkAgentSubscription(agent);
     if (this.cachedAgents.some((other) => other.name.toLowerCase() === agent.name.toLowerCase())) {
       throw new ValidationError("an agent with this name already exists");
     }
@@ -385,6 +455,8 @@ export class Store {
     const index = this.cachedAgents.findIndex((agent) => agent.id === id);
     if (index < 0) return null;
     const agent = sanitizeAgent(input, this.cachedAgents[index]);
+    const previous = this.cachedAgents[index];
+    this.checkAgentSubscription(agent, { unchanged: (agent.subscriptionId || "") === (previous.subscriptionId || "") && (agent.model || this.settings.defaultModel).split("/")[0] === (previous.model || this.settings.defaultModel).split("/")[0] });
     if (this.cachedAgents.some((other) => other.id !== id && other.name.toLowerCase() === agent.name.toLowerCase())) {
       throw new ValidationError("an agent with this name already exists");
     }

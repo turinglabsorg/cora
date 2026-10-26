@@ -62,7 +62,7 @@ function onPath(bin) {
 }
 
 export class LLM {
-  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", cliWorkDir, bridge, codexModelsFile }) {
+  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
     this.hermes = { bin: hermesBin, home: hermesHome || join(homedir(), ".cora", "hermes-home"), baseUrl: String(hermesBaseUrl).replace(/\/$/, "") };
     this.ollamaUrl = ollamaUrl;
     this.ollamaKey = ollamaKey;
@@ -71,6 +71,7 @@ export class LLM {
     this.codexBin = codexBin;
     this.cliWorkDir = cliWorkDir;
     this.bridge = bridge;
+    this.subscriptions = subscriptions;
     this.codexModelsFile = codexModelsFile || join(homedir(), ".codex", "models_cache.json");
     this.cache = { at: 0, models: [] };
   }
@@ -181,8 +182,9 @@ export class LLM {
    * A full agent turn on a subscription CLI. `tools` are cora's tool definitions,
    * `execute(name, args)` runs one of them; both reach the CLI through MCP.
    */
-  async runAgent({ model, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal }) {
+  async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal }) {
     const { provider, name } = splitModel(model);
+    const runSignal = timeoutMs ? AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]) : signal;
     // A failed attempt is only retried when the agent had not started working: re-running a
     // turn that already used a tool would do its side effects twice.
     let used = 0;
@@ -193,11 +195,15 @@ export class LLM {
       };
       const run = tools.length ? this.bridge.register({ tools, execute: watched, ttlMs: timeoutMs + 60000 }) : null;
       const options = {
-        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal, signal,
+        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal, signal: runSignal,
       };
       try {
-        if (provider === "claude") return await runClaude({ bin: this.claudeBin, ...options });
-        if (provider === "codex") return await runCodex({ bin: this.codexBin, ...options });
+        if (provider === "claude" || provider === "codex") {
+          const invoke = (authEnv) => (provider === "claude" ? runClaude : runCodex)({ bin: provider === "claude" ? this.claudeBin : this.codexBin, ...options, authEnv,
+            workDir: authEnv ? join(this.cliWorkDir, subscriptionId) : this.cliWorkDir });
+          if (this.subscriptions) return await this.subscriptions.run(subscriptionId, provider, runSignal, invoke);
+          return await invoke();
+        }
         if (provider === "hermes") return await runHermes({ bin: this.hermes.bin, home: this.hermes.home, baseUrl: this.hermes.baseUrl, ...options });
         throw new Error(`${provider} is not a CLI provider`);
       } finally {
@@ -208,7 +214,7 @@ export class LLM {
       try {
         return await once();
       } catch (error) {
-        signal?.throwIfAborted();
+        runSignal?.throwIfAborted();
         if (attempt >= RETRIES || used || !TRANSIENT.test(String(error.message || ""))) throw error;
         onStep?.({ type: "note", text: `${error.message} — riprovo (${attempt + 1}/${RETRIES}).` });
         await wait(RETRY_WAIT_MS * (attempt + 1));

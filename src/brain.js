@@ -595,7 +595,7 @@ export class Brain {
       controller.signal.throwIfAborted();
       if (this.llm.isAgentic(model)) {
         const run = (input) => this.llm.runAgent({
-          model, system, prompt: input, tools, execute: runTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
+          model, subscriptionId: agent.subscriptionId, system, prompt: input, tools, execute: runTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
           signal: controller.signal,
         });
         let result = await run(prompt);
@@ -735,7 +735,7 @@ export class Brain {
       let summary;
       try {
         const result = this.llm.isAgentic(model)
-          ? await this.llm.runAgent({ model, system, prompt, tools: [], execute: null, timeoutMs: 5 * 60 * 1000, onStep: (step) => trace.add(step), effort: effortOf(agent) })
+          ? await this.llm.runAgent({ model, subscriptionId: agent.subscriptionId, system, prompt, tools: [], execute: null, timeoutMs: 5 * 60 * 1000, onStep: (step) => trace.add(step), effort: effortOf(agent) })
           : await this.llm.chat({ model, messages: [{ role: "system", content: system }, { role: "user", content: prompt }], tools: [], effort: effortOf(agent) });
         if (result.thinking) trace.add({ type: "thinking", text: result.thinking });
         summary = this.applySleep(agent, parseJsonObject(result.text));

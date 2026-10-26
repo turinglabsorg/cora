@@ -1,3 +1,10 @@
+.subscription-picker { padding: 16px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--panel-2); }
+.subscription-picker[hidden] { display: none; }
+.subscription-new { padding-top: 12px; border-top: 1px solid var(--line); }
+.subscription-code { display: grid; gap: 8px; padding: 12px; border-radius: var(--r-sm); background: var(--well); }
+.subscription-code strong { font: 500 22px "DM Mono", monospace; letter-spacing: .12em; color: var(--amber); overflow-wrap: anywhere; }
+.subscription-picker .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.subscription-picker .badge { align-self: flex-start; }
 :root {
   color-scheme: dark;
   --bg: #050505;

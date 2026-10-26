@@ -102,7 +102,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, discord, telegram, channels, boxes, llm, orchestrator, brain, bots, tgBots, activity, storeSecret, traces, push = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, channels, boxes, llm, orchestrator, brain, bots, tgBots, activity, storeSecret, traces, push = null }) {
   const sessionKey = config.sessionKey || config.adminPassword;
   const failures = [];
   // On usecora.space the cloud signs people in; this panel only checks the pass it hands over.
@@ -210,9 +210,33 @@ export function createWeb({ config, store, discord, telegram, channels, boxes, l
         routines: store.routines().map(routineView),
         models,
         providers: llm.providers(),
+        subscriptions: subscriptions.list(),
         boxImage: { name: config.boxImage, ready: imageReady },
         timezone: config.timezone,
       });
+    }
+    if (path === "/api/subscriptions" && method === "GET") return send(res, 200, subscriptions.list());
+    if (path === "/api/subscriptions" && method === "POST") {
+      const body = await readJson(req, 4096);
+      if (store.subscriptions().length >= 50) throw new HttpError(409, "troppe subscription: rimuovi quelle inutilizzate");
+      return send(res, 201, store.createSubscription({ provider: body.provider, label: body.label }));
+    }
+    const subscriptionMatch = /^\/api\/subscriptions\/(sub_[a-f0-9]{12})(?:\/(login|code|cancel|check))?$/.exec(path);
+    if (subscriptionMatch) {
+      const [, id, action] = subscriptionMatch;
+      if (!store.subscription(id)) throw new HttpError(404, "subscription non trovata");
+      if (!action && method === "GET") return send(res, 200, subscriptions.view(id));
+      if (!action && method === "DELETE") {
+        await subscriptions.remove(id);
+        return send(res, 200, { ok: true });
+      }
+      if (action === "login" && method === "POST") return send(res, 202, await subscriptions.start(id));
+      if (action === "code" && method === "POST") {
+        const body = await readJson(req, 8192);
+        return send(res, 202, subscriptions.submitCode(id, body.code));
+      }
+      if (action === "cancel" && method === "POST") return send(res, 200, await subscriptions.cancel(id));
+      if (action === "check" && method === "POST") return send(res, 200, await subscriptions.check(id));
     }
     if (path === "/api/settings" && method === "PUT") {
       const before = channels.active;

@@ -63,7 +63,7 @@ Everything lives in one SQLite file, `~/.cora/cora.db` (Node's built-in `node:sq
 
 ## Models
 
-Each agent picks its model and a reasoning level (automatic, low, medium, high); providers are interchangeable and use the owner's existing subscriptions:
+Each agent picks its model, subscription and reasoning level (automatic, low, medium, high). Several agents can reuse one subscription, or select separate accounts:
 
 | Prefix | Provider | How |
 |---|---|---|
@@ -77,7 +77,7 @@ The MCP server (`src/mcp-server.js`) forwards tool calls to a loopback bridge (`
 
 ## Run
 
-Requirements: Node ≥ 22.13, Docker, `hush` (agent-blind secrets CLI), and the `claude` / `codex` CLIs logged in for the subscription providers. No npm dependencies.
+Requirements: Node ≥ 22.13, Docker, `hush` (agent-blind secrets CLI), and the official `claude` / `codex` CLIs installed on the server for the subscription providers. Connect their accounts from the panel. No npm dependencies.
 
 ```bash
 docker build -t cora-box:latest box     # the agents' desktop image
@@ -89,6 +89,20 @@ Secrets come only from hush: `CORA_ADMIN_PASSWORD` (panel password), `CORA_SESSI
 Environment: `PORT` (default 4370), `CORA_LISTEN_HOST` (default 127.0.0.1), `CORA_HOME` (default `~/.cora`), `CORA_PUBLIC_URL` (the VAPID subject), `OLLAMA_URL`, `CORA_CLAUDE_BIN`, `CORA_CODEX_BIN`, `CORA_TZ` (default Europe/Rome).
 
 `deploy/macos.sh` deploys to a Mac over SSH (`CORA_DEPLOY_HOST=user@host`) as the LaunchAgent in `deploy/org.turinglabs.cora.plist`; put the panel behind your own HTTPS tunnel or reverse proxy.
+
+### Subscription accounts and remote sign-in
+
+When creating or editing an agent with a Claude or Codex model, select a connected subscription or name a new one and choose **Connect a new subscription**. The official authorization page opens in the browser of the person using the panel; no browser or interactive desktop is needed on the server. Codex uses its device-code flow (enable device-code sign-in in ChatGPT security/workspace settings if required). For Claude, complete the official page and enter its returned authorization code in the panel when the browser cannot reach the server's loopback callback.
+
+The local SQLite `subscriptions` table stores account labels, provider, connection status, email and plan; each agent stores its `subscriptionId`. Tokens are never returned by the panel API or stored in that table. The official CLIs keep and renew their credentials in separate, private profiles under `$CORA_HOME/subscriptions/<id>`: `CLAUDE_CONFIG_DIR` for Claude and `CODEX_HOME` for Codex. Claude may use its profile-specific macOS Keychain entry instead of a file. Back up these profiles securely together with the database; restore the corresponding Keychain separately when applicable. Old rotated tokens can still require sign-in again after a restore.
+
+Use Claude Code 2.1.268 or newer: Cora checks `auth status --json` and refuses login/execution when the CLI cannot confirm the requested profile directory. Configure `CORA_CLAUDE_BIN` / `CORA_CODEX_BIN` to the official executables. Wrappers must preserve profile isolation; a wrapper that silently uses the host's global Claude profile is refused. Provider/API-key environment variables from the host cannot override a selected account.
+
+Existing agents are migrated to explicit **Claude · Server** / **ChatGPT · Server** records for their already-used host account, preserving service without copying credentials or changing that account. Those records cannot launch a new global login: to replace one, connect a separate account from your browser and assign it to the agents. New agents must explicitly select a compatible connected subscription. Removing an agent keeps its subscription available for reuse; removing an unused managed subscription logs its CLI out and deletes its private local profile. Removing an unused legacy server record leaves the global account untouched.
+
+Login sessions expire after ten minutes and are cancelled on restart. Runs sharing one subscription are serialized so rotating credentials cannot race; different subscriptions can work concurrently. Cancellation and task deadlines also apply while waiting for that account. A lost/revoked login is reported as disconnected and requires a new provider sign-in.
+
+These flows are intended for the customer's own Cora instance using official CLIs. They do not imply permission to broker subscription tokens or resell provider usage. Review [Claude's conditions](https://code.claude.com/docs/en/legal-and-compliance) and [OpenAI's supported integration models](https://developers.openai.com/siwc/token-sharing-open-source) before offering a hosted commercial service.
 
 ## The Cora harness
 
