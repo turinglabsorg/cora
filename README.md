@@ -35,6 +35,7 @@ web panel (password, PWA) ──► REST API + live events (SSE) + noVNC proxy +
 - **Threads and DMs.** In a Discord thread agents only speak when summoned by name. A direct message to an agent's own bot is a private conversation that only that agent answers, even if it is assigned to no channel.
 - **Shared listening.** Every agent bot listens to the channels it can see — each one switches on Discord's limited Message Content intent for its own app — so a private channel is heard as long as one agent is in it, and the same message arriving from several bots is answered once. In a channel the main bot cannot see, only the agents whose bot is really in it answer.
 - **One voice at a time.** A message that names agents is answered by them; a message that names nobody gets a single answer, never a chorus.
+- **No repeated "got it".** The automatic acknowledgement answers silence: an agent that has spoken in the channel in the last five minutes never sends it again to someone it is already talking to.
 
 ## Their computers
 
@@ -88,8 +89,10 @@ Environment: `PORT` (default 4370), `CORA_LISTEN_HOST` (default 127.0.0.1), `COR
 
 Agents on `ollama/` run on Cora's own agent loop, the Cora harness; agents on Claude Code or Codex get the same checks around their CLI.
 
+- **Every task has a goal**: one line saying what must be *true* for it to be finished, written from the request by a model that is not the one working — an agent never sets its own finish line. The goal travels in the prompt, so whichever harness runs the agent sees the condition it has to meet.
+- **Who checks the goal depends on the harness.** Claude Code has a goal mode of its own: Cora hands it `/goal <condition>` as the first streamed message and the task as the second, and Claude iterates inside one session, keeping its context. Everywhere else the Cora harness checks: each time the agent stops, a separate cheap call reads the condition, what the agent really did (the tools it ran and how they went, not what it promises) and what it wrote, and answers met or not-met with a reason. Not met means back to work with that reason in hand, up to 12 rounds.
 - A task (a turn where the agent has its computer, or a routine) runs until it is done, for hours if needed: no fixed number of steps per turn.
-- An agent that stops with nothing, with "shall I continue?", or with what it is about to do instead of doing it is sent back to work; its announcement still reaches the chat as an update. A finished agent confirms once before its result is posted.
+- Without a goal (the writer is unavailable, or the request is not a task) an agent that stops with nothing, with "shall I continue?", or with what it is about to do instead of doing it is sent back to work; its announcement still reaches the chat as an update. A finished agent confirms once before its result is posted.
 - The same tool call with the same arguments over and over is a loop: the call is refused and the agent writes what blocks it.
 - New messages reach a working agent with its next tool result; the channel stays open to the other agents meanwhile.
 - Long conversations are summarised by the agent and carried on; a silent agent is reminded to send an update every 15 minutes.

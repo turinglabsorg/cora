@@ -20,6 +20,9 @@ const COMPACT_CHARS = 180_000;
 const UPDATE_EVERY_MS = 15 * 60 * 1000;
 /** Times the Cora harness sends an agent back to work when it stops before the task is done. */
 const NUDGES = 4;
+/** A task's goal: one line, and how many times the agent may be sent back to meet it. */
+const GOAL_CHARS = 300;
+const GOAL_ROUNDS = 12;
 /** The same tool call with the same arguments this many times in a short window is a loop. */
 const LOOP_REPEATS = 4;
 const LOOP_WINDOW = 10;
@@ -277,19 +280,77 @@ export class Brain {
     return this.traces ? this.traces.start(fields) : NO_TRACE;
   }
 
+  /**
+   * The goal of a task: one line saying what must be **true** for it to be
+   * finished, not the steps to get there. A model that is not the one working
+   * writes it, so an agent never sets its own finish line. Empty when it
+   * cannot be written: the task then runs on the plain harness rules.
+   */
+  async goalFor(request) {
+    const model = this.store.settings.defaultModel;
+    if (!model || this.llm.isAgentic(model)) return "";
+    try {
+      const out = await this.llm.chat({
+        model, tools: [], effort: "low",
+        messages: [
+          { role: "system", content: "Scrivi la condizione di completamento di un compito: cosa deve essere vero e verificato perché sia finito, non i passi per arrivarci. Una riga sola, nella lingua della richiesta, senza preamboli. Se la richiesta non è un compito ma una chiacchiera, rispondi NESSUNO." },
+          { role: "user", content: `Richiesta:\n${String(request).slice(0, 4000)}\n\nCondizione di completamento (una riga):` },
+        ],
+      });
+      const text = String(out.text || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim().split("\n")[0].trim();
+      if (!text || /^nessuno\b/i.test(text)) return "";
+      return text.slice(0, GOAL_CHARS);
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Is the goal met? A separate, cheap call reads the condition, what the agent
+   * really did and what it wrote, and answers with a verdict and a reason. A
+   * check that fails lets the task through: a broken judge must never keep an
+   * agent working for ever.
+   */
+  async goalCheck(goal, { answer, work }) {
+    const model = this.store.settings.defaultModel;
+    try {
+      const out = await this.llm.chat({
+        model, tools: [], effort: "low",
+        messages: [
+          { role: "system", content: 'Giudichi se un compito è finito. Rispondi SOLO con JSON: {"met": true|false, "reason": "una frase"}. met=true soltanto se la condizione risulta soddisfatta da quello che l\'agente ha davvero fatto, non da quello che promette di fare. La reason va nella lingua della condizione.' },
+          { role: "user", content: `Condizione:\n${goal}\n\nCosa ha fatto l'agente:\n${work || "(niente)"}\n\nCosa ha scritto come risultato:\n${answer || "(niente)"}` },
+        ],
+      });
+      const data = parseJsonObject(String(out.text || ""));
+      if (!data || typeof data.met !== "boolean") return { met: true, reason: "" };
+      return { met: data.met, reason: String(data.reason || "").trim().slice(0, 300) };
+    } catch {
+      return { met: true, reason: "" };
+    }
+  }
+
   async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false }) {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
     const tools = caps.tools ? TOOL_DEFS.filter((tool) => MEMORY_TOOLS.has(tool.name) || computer) : [];
     const place = channel.place || "";
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
-    const prompt = `Ora: ${formatNow(this.timezone)}.\n\n${user}`;
+    // Every task carries a goal, and the goal travels with the prompt: whichever harness
+    // runs the agent sees the condition it has to meet, in its own words.
+    const goal = task ? await this.goalFor(user) : "";
+    // Claude Code checks a goal itself, inside one session: hand it the condition and stand back.
+    const nativeGoal = Boolean(goal) && this.llm.hasGoalMode(model);
+    const contract = goal && !nativeGoal ? `\n\n[Obiettivo] Il compito è finito solo quando è vero e verificato questo: ${goal}\nLavoraci fino a lì senza chiedere se andare avanti. Ogni volta che ti fermi un controllo separato verifica la condizione: se non è soddisfatta torni al lavoro.` : "";
+    const prompt = `Ora: ${formatNow(this.timezone)}.\n\n${user}${contract}`;
     const trace = this.startTrace({ agentId: agent.id, kind: mode, channelId: channel.id, model, system, prompt });
+    if (goal) trace.add({ type: "note", text: `Obiettivo: ${goal}` });
     let asked = false;
     // What the Cora harness watches while an agent works: real work done, and calls repeated without progress.
     let worked = 0;
     let looping = false;
     const recent = [];
+    // What the agent really did, in one line each: the goal check reads this, not its promises.
+    const did = [];
     let lastUpdate = Date.now();
     const sayTracked = say ? async (text) => {
       lastUpdate = Date.now();
@@ -336,6 +397,7 @@ export class Brain {
         args: summarizeArgs(name, args || {}), ok, ms: Date.now() - started, traceId: trace.id,
       });
       trace.add({ type: "tool", name, args: args || {}, result: output.text, ok, ms: Date.now() - started, image: Boolean(output.image) });
+      if (allowed) did.push(`${name} ${summarizeArgs(name, args || {})} → ${ok ? "ok" : output.text.slice(0, 160)}`);
       const steer = news();
       return steer ? { ...output, text: `${output.text}\n\n${steer}` } : output;
     };
@@ -376,16 +438,37 @@ export class Brain {
       return null;
     };
     const isDone = (raw) => /^\W*done\W*$/i.test(String(raw || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim());
+    /**
+     * The goal check: when a task has a goal, this replaces the harness'
+     * guesswork. A separate model decides whether the condition is met and
+     * says why not; the agent goes back to work with that reason in hand.
+     */
+    let goalRounds = 0;
+    const goalVerdict = async (raw) => {
+      if (!worked || looping || asked || goalRounds >= GOAL_ROUNDS || Date.now() > deadline - 20000) return null;
+      const text = cleanReply(raw, agent);
+      const { met, reason } = await this.goalCheck(goal, { answer: text, work: did.slice(-40).join("\n") });
+      trace.add({ type: "note", text: `Controllo obiettivo: ${met ? "raggiunto" : "non ancora"}${reason ? ` — ${reason}` : ""}` });
+      if (met) return null;
+      goalRounds += 1;
+      return {
+        kind: "goal", text,
+        prompt: `[Cora] L'obiettivo non è ancora raggiunto: ${reason || "manca la verifica"}. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare cosa farai. Quando la condizione è vera e verificata, scrivi il risultato.`,
+      };
+    };
+    /** With a goal it is the goal that decides; without one, the harness' own reading of the answer. */
+    const nextStep = async (raw) => (nativeGoal ? null : goal ? goalVerdict(raw) : verdict(raw));
 
     try {
       if (this.llm.isAgentic(model)) {
         const run = (input) => this.llm.runAgent({
           model, system, prompt: input, tools, execute: runTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
+          goal: nativeGoal ? goal : "",
         });
         let result = await run(prompt);
         let final = result.text;
-        for (let next = verdict(final); next; next = verdict(result.text)) {
-          nudges += 1;
+        for (let next = await nextStep(final); next; next = await nextStep(result.text)) {
+          if (next.kind !== "goal") nudges += 1;
           if (next.kind === "confirm") confirmed = true;
           if (next.kind === "unfinished" && sayTracked) await sayTracked(next.text).catch(() => {});
           trace.add({ type: "note", text: `Cora harness: ${next.kind === "confirm" ? "chiedo conferma che sia finito" : "lo rimando al lavoro"}.` });
@@ -428,10 +511,12 @@ export class Brain {
         if (!result.toolCalls.length) {
           // It confirmed it is done: post the real answer it gave, never the bare "DONE".
           if (isDone(result.text) && lastAnswer) return done(lastAnswer, steps);
-          const next = verdict(result.text);
+          const next = await nextStep(result.text);
           if (!next) return done(result.text, steps);
-          nudges += 1;
-          if (next.kind === "confirm") {
+          if (next.kind !== "goal") nudges += 1;
+          if (next.kind === "goal") {
+            lastAnswer = cleanReply(result.text, agent) || lastAnswer;
+          } else if (next.kind === "confirm") {
             confirmed = true;
             lastAnswer = cleanReply(result.text, agent) || lastAnswer;
           } else if (next.kind === "unfinished" && sayTracked) {

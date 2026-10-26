@@ -85,11 +85,17 @@ function textSteps(onStep) {
 }
 
 /** One agent turn on Claude Code with the owner's subscription; cora's tools arrive over MCP. */
-export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "" }) {
+export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", goal = "" }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const mcpFile = join(workDir, `mcp-${id}.json`);
   const args = ["-p", "--output-format", "stream-json", "--verbose", ...(effort ? ["--effort", effort] : []), "--model", model, "--system-prompt", system, "--tools", "", "--no-session-persistence", "--strict-mcp-config"];
+  // Claude Code has a goal mode of its own: `/goal <condition>` makes it check after each
+  // turn whether the condition holds and go back to work until it does, inside one session.
+  // Sent as two streamed messages, the goal first, so the task keeps all its context.
+  if (goal) args.push("--input-format", "stream-json");
+  const message = (text) => `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`;
+  const input = goal ? `${message(`/goal ${goal}`)}${message(prompt)}` : prompt;
   if (mcp && toolNames.length) {
     writeFileSync(mcpFile, JSON.stringify({
       mcpServers: { cora: { command: process.execPath, args: [MCP_SCRIPT], env: { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } } },
@@ -114,7 +120,7 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
     }
   };
   try {
-    const out = await run(bin, args, { input: prompt, cwd: workDir, timeoutMs, onLine });
+    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine });
     if (out.timedOut) throw new Error(`claude: no answer within ${Math.round(timeoutMs / 1000)}s`);
     if (!data) throw new Error(`claude: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`);
     if (data.is_error) throw new Error(`claude: ${String(data.result || data.subtype || "error").slice(0, 240)}`);

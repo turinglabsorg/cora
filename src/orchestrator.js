@@ -14,6 +14,8 @@ const FOCUS_MS = 5 * 60 * 1000;
 const CATCH_UP_MS = 15 * 60 * 1000;
 // Someone called an agent and it has said nothing yet: it acknowledges on its own after this long.
 const ACK_AFTER_MS = 15000;
+/** The acknowledgement answers silence: an agent that has just spoken here does not repeat it. */
+const ACK_QUIET_MS = 5 * 60 * 1000;
 /** How long a round holds its channel before the agents still working carry on in the background. */
 const RELEASE_AFTER_MS = 20000;
 const ACK_TEXT = { it: "Ricevuto, ci lavoro: ti aggiorno qui.", en: "Got it, working on it: I'll keep you posted here." };
@@ -74,6 +76,7 @@ export class Orchestrator {
     this.dmAgent = new Map();
     this.routineRuns = new Set();
     this.ackAfterMs = ACK_AFTER_MS;
+    this.ackQuietMs = ACK_QUIET_MS;
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
     this.releaseAfterMs = RELEASE_AFTER_MS;
     this.ackText = null;
@@ -536,7 +539,10 @@ export class Orchestrator {
         spoke = true;
         return this.postAs(agent, state, text);
       };
-      const ack = isForced ? setTimeout(() => {
+      // "Ricevuto, ci lavoro" tells the owner an agent is there when nothing else does. In a live
+      // conversation it says nothing they cannot already see, so it is sent only after a silence.
+      const quiet = started - this.spokeHereAt(state, agent.id) > this.ackQuietMs;
+      const ack = isForced && quiet ? setTimeout(() => {
         if (spoke || (state.request?.agentId === agent.id && state.request.at >= started)) return;
         say(this.ackText || ACK_TEXT[this.store.settings.language] || ACK_TEXT.it).catch(() => {});
         this.log({ type: "say", agentId: agent.id, channelId: state.id, text: "(conferma automatica: sta ancora lavorando)" });
@@ -678,6 +684,15 @@ export class Orchestrator {
       else shared = true;
     }
     if (shared) this.discord.typing(channelId);
+  }
+
+  /** When this agent last said something in this channel, 0 when it has not. */
+  spokeHereAt(state, agentId) {
+    for (let index = state.history.length - 1; index >= 0; index -= 1) {
+      const item = state.history[index];
+      if (item.kind === "agent" && item.agentId === agentId) return item.at || 0;
+    }
+    return 0;
   }
 
   async postAs(agent, state, text, file, traceId, { ping = "", request } = {}) {

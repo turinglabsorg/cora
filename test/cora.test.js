@@ -21,6 +21,9 @@ let app;
 let base;
 let cookie = "";
 let replies;
+// The goal calls do not belong to any agent: tests set `goals`/`checks` to drive them.
+let goals;
+let checks;
 let cli;
 let home;
 let orca;
@@ -91,7 +94,12 @@ before(async () => {
   discord = await fakeDiscord();
   telegram = await fakeTelegram();
   replies = new Map();
+  goals = null;
+  checks = null;
   ollama = await fakeOllama(async (body) => {
+    const system = String(body.messages[0]?.content || "");
+    if (/^Scrivi la condizione di completamento/.test(system)) return { content: goals ? goals(body) : "NESSUNO" };
+    if (/^Giudichi se un compito è finito/.test(system)) return { content: checks ? checks(body) : JSON.stringify({ met: true, reason: "" }) };
     const name = whoAmI(body);
     const handler = replies.get(name) || replies.get("*");
     return handler ? handler(body) : { content: "PASS" };
@@ -155,6 +163,8 @@ after(async () => {
 beforeEach(async () => {
   if (app) await quiet();
   replies.clear();
+  goals = null;
+  checks = null;
   discord.state.webhookPosts.length = 0;
   discord.state.botPosts.length = 0;
 });
@@ -397,6 +407,30 @@ describe("agents in Discord", () => {
     assert.ok(state);
   });
 
+  test("a task on Claude Code is handed to its own goal mode: /goal first, the task after, in one session", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Nora", model: "claude/claude-sonnet-5-5", chattiness: 0, tools: true } });
+    assert.equal(created.status, 201);
+    const goal = "la pagina è online e risponde 200";
+    goals = () => goal;
+    let judged = false;
+    checks = () => { judged = true; return JSON.stringify({ met: true, reason: "" }); };
+    const before = cli.calls().length;
+    cli.set({ reply: "Online, risponde 200." });
+    discord.say({ content: "Nora, pubblica la pagina e controlla che risponda" });
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Nora" && item.content.startsWith("Online, risponde 200.")), { what: "Nora's answer" });
+    await quiet();
+    const run = cli.calls().slice(before).find((item) => item.flavor === "claude");
+    assert.ok(run.argv.includes("--input-format"), "the prompt is streamed, so the goal can come as its own message");
+    assert.equal(run.argv[run.argv.indexOf("--input-format") + 1], "stream-json");
+    const messages = run.stdin.trim().split("\n").map((line) => JSON.parse(line).message.content[0].text);
+    assert.equal(messages[0], `/goal ${goal}`, "Claude Code's own goal mode gets the condition");
+    assert.match(messages[1], /Nora, pubblica la pagina e controlla che risponda/, "the task keeps all its context");
+    assert.ok(!messages[1].includes("[Obiettivo]"), "no second copy of the goal: the harness owns it now");
+    assert.equal(cli.calls().slice(before).filter((item) => item.flavor === "claude").length, 1, "one session, not one run per round");
+    assert.ok(!judged, "Cora does not second-guess a harness that checks the goal itself");
+    await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
+  });
+
   test("an agent on Claude Code (subscription) uses cora's memory tools over MCP", async () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Clara", model: "claude/claude-sonnet-5-5", chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
@@ -406,7 +440,8 @@ describe("agents in Discord", () => {
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Clara"), { what: "Clara's reply" });
     delete process.env.CORA_BOT_LEAK;
     assert.match(post.content, /^Me lo segno\. \[saved \[mem_/);
-    const run = cli.calls().find((item) => item.flavor === "claude");
+    // Other agents run Claude Code too, and the tests share the log: take Clara's own run.
+    const run = cli.calls().find((item) => item.flavor === "claude" && /^Sei Clara\./.test(item.argv[item.argv.indexOf("--system-prompt") + 1] || ""));
     assert.equal(run.argv[run.argv.indexOf("--model") + 1], "claude-sonnet-5-5");
     assert.equal(run.argv[run.argv.indexOf("--tools") + 1], "", "Claude Code's own tools are off");
     assert.ok(run.argv.includes("--no-session-persistence"));
@@ -772,8 +807,32 @@ describe("talking with the agents", () => {
     assert.ok(!app.store.recentMessages(CHANNEL, 10).some((item) => item.content === "(messaggio vuoto)"), "system messages are not archived");
   });
 
+  test("in a live conversation an agent does not keep saying it is on it", async (t) => {
+    app.orchestrator.ackAfterMs = 300;
+    t.after(() => { app.orchestrator.ackAfterMs = 15000; });
+    const ack = "Ricevuto, ci lavoro: ti aggiorno qui.";
+    let turn = 0;
+    replies.set("Olga", async () => {
+      turn += 1;
+      if (turn === 1) return { content: "Eccomi, dimmi." };
+      await sleep(900);
+      return { content: "Fatto, guardato." };
+    });
+    // It answers at once, so nobody needs telling it is there.
+    discord.say({ content: "Olga, ci sei?" });
+    await waitFor(() => posts("Olga").includes("Eccomi, dimmi."), { what: "Olga's quick answer" });
+    await quiet();
+    // The next request takes longer, but the conversation is live: no second "ricevuto".
+    discord.say({ content: "Olga, allora guarda quella cosa" });
+    await waitFor(() => posts("Olga").includes("Fatto, guardato."), { what: "Olga's slower answer", timeout: 20000 });
+    await quiet();
+    assert.ok(!posts("Olga").includes(ack), "it never repeats the acknowledgement to someone it is already talking to");
+  });
+
   test("a busy agent says it is on it, gets the new messages while it works, and a named agent that passes is asked again", async () => {
     app.orchestrator.ackAfterMs = 300;
+    // The acknowledgement is for silence; this test is about a busy agent, so allow it either way.
+    app.orchestrator.ackQuietMs = 0;
     let steered = "";
     replies.set("Olga", async (body) => {
       const last = body.messages[body.messages.length - 1];
@@ -791,6 +850,7 @@ describe("talking with the agents", () => {
     assert.ok(posts("Olga").includes("Ricevuto, ci lavoro: ti aggiorno qui."), "the automatic acknowledgement came first");
     await quiet();
     app.orchestrator.ackAfterMs = 15000;
+    app.orchestrator.ackQuietMs = 5 * 60 * 1000;
 
     let asked = 0;
     replies.set("Pino", (body) => {
@@ -891,6 +951,43 @@ describe("talking with the agents", () => {
     assert.deepEqual(nudges, ["[Cora] Non hai finito: quello che hai scritto è un aggiornamento, non il risultato. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare", "[Cora] Prima di chiudere: il compito che ti hanno dato è finito davvero e verificato? Se manca qualcosa, continua adesso con gli strumenti. Se è tutto fatto, rispondi solo DONE."]);
     const [trace] = (await call(`/api/agents/${olga.id}/traces`)).data;
     assert.ok(trace.stepCount > 22, `worked through ${trace.stepCount} steps`);
+  });
+
+  test("goal mode: a task gets a goal, a separate check sends the agent back with the reason, and nothing is posted until it is met", async () => {
+    const goal = "il deploy è in produzione e verificato dall'esterno";
+    let askedFrom = "";
+    goals = (body) => { askedFrom = String(body.messages[1].content); return goal; };
+    const judged = [];
+    checks = (body) => {
+      judged.push(String(body.messages[1].content));
+      return JSON.stringify(judged.length === 1 ? { met: false, reason: "il deploy non risulta verificato" } : { met: true, reason: "verificato" });
+    };
+    let calls = 0;
+    const sent = [];
+    let sawContract = false;
+    replies.set("Olga", (body) => {
+      calls += 1;
+      const last = body.messages[body.messages.length - 1];
+      if (String(body.messages[1]?.content || "").includes(`[Obiettivo]`)) sawContract = true;
+      if (last.role === "user" && String(last.content).startsWith("[Cora]")) sent.push(String(last.content));
+      if (calls === 1) return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
+      if (calls === 2) return { content: "Fatto, deployato." };
+      if (calls === 3) return { tool_calls: [{ function: { name: "list_routines", arguments: { verify: true } } }] };
+      return { content: "Deploy in produzione, verificato dall'esterno." };
+    });
+    discord.say({ content: "Olga, fai il deploy e verificalo" });
+    await waitFor(() => posts("Olga").includes("Deploy in produzione, verificato dall'esterno."), { what: "the task finished on its goal", timeout: 20000 });
+    await quiet();
+    assert.match(askedFrom, /fai il deploy e verificalo/, "the goal is written from what was asked");
+    assert.ok(sawContract, "the goal travels in the prompt, so the harness running the agent sees it");
+    assert.equal(sent.length, 1, "sent back once, by the check and not by guesswork");
+    assert.match(sent[0], /obiettivo non è ancora raggiunto: il deploy non risulta verificato/i);
+    assert.ok(!posts("Olga").includes("Fatto, deployato."), "the answer the goal refused is never posted");
+    assert.match(judged[0], /list_routines/, "the check reads what the agent really did, not only what it says");
+    const [trace] = (await call(`/api/agents/${olga.id}/traces`)).data;
+    const notes = (await call(`/api/traces/${trace.id}`)).data.steps.filter((step) => step.type === "note").map((step) => step.text);
+    assert.ok(notes.some((text) => text === `Obiettivo: ${goal}`), "the goal is on the record");
+    assert.ok(notes.some((text) => /Controllo obiettivo: raggiunto/.test(text)));
   });
 
   test("Cora harness: an agent that works and says nothing is asked for the result, and one that repeats itself is stopped", async () => {
@@ -1122,10 +1219,12 @@ describe("talking with the agents", () => {
 });
 
 describe("listening without a dedicated bot", () => {
-  test("cora listens through the first agent bot whose app has Message Content, and is deaf until one has it", async () => {
+  test("an agent bot without Message Content asks Discord for it and becomes the listener; refused, cora stays deaf", async (t) => {
     const fake = await fakeDiscord();
     const ZENO = "600000000000000010";
     fake.state.botUsers.set("zeno-token", { id: ZENO, username: "Zeno", appFlags: 0 });
+    // Discord refuses the intent at first (an app over 100 servers cannot switch it on itself).
+    fake.state.refuseIntent.add("zeno-token");
     const otherHome = tempHome();
     const seed = new Store(otherHome);
     seed.updateSettings({ guildIds: [GUILD] });
@@ -1138,13 +1237,18 @@ describe("listening without a dedicated bot", () => {
       botTokenFor: (name) => (name === "CORA_BOT_ZENO" ? "zeno-token" : ""), storeSecret: async () => {},
       docker: docker.path, schedulerTickMs: 3600000, startBoxes: false,
     });
+    t.after(async () => { await other.stop(); await fake.close(); });
     await other.ready;
     await waitFor(() => other.bots.client(zeno.id), { what: "Zeno's own bot online" });
+    await waitFor(() => fake.state.intentPatches.some((patch) => patch.token === "zeno-token"), { what: "Zeno asking for the intent" });
     await sleep(300);
-    assert.equal(other.discord.state, "missing-token", "without Message Content nobody listens");
+    assert.equal(other.discord.state, "missing-token", "refused the intent, nobody listens");
+    assert.equal(fake.state.botUsers.get("zeno-token").appFlags, 0, "and the app keeps no content flag");
 
-    fake.state.botUsers.get("zeno-token").appFlags = 1 << 19;
+    // Discord grants it on the next try: the bot switches itself to listening.
+    fake.state.refuseIntent.delete("zeno-token");
     await other.bots.readFlags(zeno.id);
+    assert.ok(fake.state.botUsers.get("zeno-token").appFlags & (1 << 19), "it turned Message Content on for its own app");
     await waitFor(() => other.discord.state === "ready" && other.discord.user?.id === ZENO, { what: "listening as Zeno" });
     replies.set("Zeno", () => ({ content: "Ti sento." }));
     fake.say({ content: "Zeno, mi senti?" });
@@ -1152,8 +1256,6 @@ describe("listening without a dedicated bot", () => {
     assert.equal(post.token, "zeno-token");
     await sleep(1500);
     assert.equal(fake.state.botPosts.filter((item) => item.content === "Ti sento.").length, 1, "its own message is not heard as new");
-    await other.stop();
-    await fake.close();
   });
 });
 
@@ -1214,7 +1316,7 @@ describe("shared listening", () => {
 });
 
 describe("direct messages", () => {
-  test("a DM to an agent's own bot is answered by that agent alone, in the DM, even with no channel assigned", async () => {
+  test("a DM to an agent's own bot is answered by that agent alone, in the DM, even with no channel assigned", async (t) => {
     const fake = await fakeDiscord();
     const DINA = "600000000000000020";
     fake.state.botUsers.set("dina-token", { id: DINA, username: "Dina", appFlags: 0 });
@@ -1231,8 +1333,14 @@ describe("direct messages", () => {
       botTokenFor: (name) => (name === "CORA_BOT_DINA" ? "dina-token" : ""), storeSecret: async () => {},
       docker: docker.path, schedulerTickMs: 3600000, startBoxes: false,
     });
+    t.after(async () => { await other.stop(); await fake.close(); });
     await other.ready;
     await waitFor(() => other.bots.client(dina.id), { what: "Dina's own bot online" });
+    // Her app had no Message Content: she asks Discord for the limited intent herself, then listens.
+    await waitFor(() => fake.state.intentPatches.some((patch) => patch.token === "dina-token" && (patch.flags & (1 << 19))), { what: "Dina switching Message Content on" });
+    await waitFor(() => other.bots.client(dina.id)?.intents === LISTENING_INTENTS, { what: "Dina listening once she may read content" });
+    // Switching intents reconnects her bot: wait for the socket to be back before writing to her.
+    await waitFor(() => other.bots.client(dina.id)?.state === "ready", { what: "Dina's bot back online" });
 
     let prompt = "";
     replies.set("Dina", (body) => {
@@ -1246,8 +1354,6 @@ describe("direct messages", () => {
     assert.match(prompt, /in privato con te|messaggio privato/, "the agent knows it is a private message");
     await sleep(1200);
     assert.equal(fake.state.botPosts.filter((item) => item.content === "Ciao! Dimmi pure.").length, 1, "her own reply is not heard as a new DM");
-    await other.stop();
-    await fake.close();
   });
 });
 

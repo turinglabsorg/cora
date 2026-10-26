@@ -33,6 +33,16 @@ RUN curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg -o 
     && ln -s /var/lib/cora/tailscale /var/lib/tailscale
 COPY sshd.conf /etc/ssh/sshd_config.d/cora.conf
 
+# Tools every agent gets: hush, so it can use a secret by name without ever seeing it,
+# and ambox, its own end-to-end encrypted mailbox. Pinned, and the install is checked.
+ARG HUSH_VERSION=v0.7.0
+ARG AMBOX_VERSION=1.2.0
+RUN curl -fsSL https://raw.githubusercontent.com/turinglabsorg/hush/${HUSH_VERSION}/install.sh \
+      | sh -s -- --version ${HUSH_VERSION} --install-dir /usr/local/bin \
+    && npm install -g ambox@${AMBOX_VERSION} \
+    && npm cache clean --force \
+    && hush --version && ambox --version
+
 COPY supervisord.conf /etc/supervisor/cora.conf
 COPY start.sh /usr/local/bin/cora-box-start
 RUN chmod 755 /usr/local/bin/cora-box-start

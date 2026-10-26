@@ -74,6 +74,11 @@ export class LLM {
     };
   }
 
+  /** Harnesses with a goal mode of their own: Cora hands them the condition and lets them iterate. */
+  hasGoalMode(model) {
+    return splitModel(model).provider === "claude";
+  }
+
   /** Claude Code, Codex and Hermes run the whole tool loop themselves; Ollama and the routers go through the Cora harness. */
   isAgentic(model) {
     const { provider } = splitModel(model);
@@ -165,11 +170,11 @@ export class LLM {
    * A full agent turn on a subscription CLI. `tools` are cora's tool definitions,
    * `execute(name, args)` runs one of them; both reach the CLI through MCP.
    */
-  async runAgent({ model, system, prompt, tools, execute, timeoutMs, onStep, effort = "" }) {
+  async runAgent({ model, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "" }) {
     const { provider, name } = splitModel(model);
     const run = tools.length ? this.bridge.register({ tools, execute, ttlMs: timeoutMs + 60000 }) : null;
     const options = {
-      model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort,
+      model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal,
     };
     try {
       if (provider === "claude") return await runClaude({ bin: this.claudeBin, ...options });

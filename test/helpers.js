@@ -96,6 +96,8 @@ export async function fakeDiscord() {
     // channel id -> the only bot token allowed to read it (a private channel).
     privateTo: new Map(),
     botUsers: new Map(),
+    intentPatches: [],
+    refuseIntent: new Set(),
     profilePatches: [],
     nextId: 900000000000000000n,
   };
@@ -142,6 +144,15 @@ export async function fakeDiscord() {
     const caller = state.botUsers.get(token) || { id: BOT, username: "GROG" };
     if (url.pathname === "/applications/@me" && req.method === "GET") {
       return json(res, 200, { id: caller.id, name: caller.username, flags: caller.appFlags || 0 });
+    }
+    // An app under 100 servers may switch its own limited gateway intents on.
+    if (url.pathname === "/applications/@me" && req.method === "PATCH") {
+      if (!state.botUsers.has(token)) return json(res, 404, { message: "404: not found", code: 0 });
+      const patch = JSON.parse(body.toString("utf8"));
+      state.intentPatches.push({ token, flags: Number(patch.flags) || 0 });
+      if (state.refuseIntent.has(token)) return json(res, 403, { message: "403: Missing Permissions", code: 0 });
+      caller.appFlags = Number(patch.flags) || 0;
+      return json(res, 200, { id: caller.id, name: caller.username, flags: caller.appFlags });
     }
     if (url.pathname === "/users/@me" && req.method === "GET") {
       if (!state.botUsers.has(token) && token !== MAIN_TOKEN) return json(res, 401, { message: "401: Unauthorized", code: 0 });
@@ -276,7 +287,14 @@ export async function fakeOllama(reply) {
       const body = JSON.parse((await readBody(req)).toString("utf8"));
       calls.push(body);
       fakeOllama.lastAuth = req.headers.authorization;
-      const message = await fakeOllama.current(body, calls);
+      let message;
+      try {
+        message = await fakeOllama.current(body, calls);
+      } catch (error) {
+        // A throwing test handler must fail its own test, never hang every request after it.
+        res.writeHead(500, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: String(error.message || error) }));
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ message: { role: "assistant", content: "", ...message }, done: true }));
     }
