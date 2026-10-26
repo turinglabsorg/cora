@@ -70,6 +70,8 @@ export class Orchestrator {
     this.brain = brain;
     this.log = log;
     this.states = new Map();
+    // Discord DM channels, each owned by the one agent whose bot received the message.
+    this.dmAgent = new Map();
     this.routineRuns = new Set();
     this.ackAfterMs = ACK_AFTER_MS;
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
@@ -91,13 +93,25 @@ export class Orchestrator {
   }
 
   channelMeta(channelId) {
+    if (this.dmAgentId(channelId)) {
+      return { id: channelId, kind: "discord", name: "DM", guildId: null, guildName: "", parentId: null, where: "in privato con te", place: "in un messaggio privato", note: "messaggio privato" };
+    }
     return this.channels.info(channelId);
+  }
+
+  dmAgentId(channelId) {
+    return this.dmAgent.get(channelId) || null;
   }
 
   agentsFor(channelId) {
     if (isWebRoom(channelId)) {
       const only = roomAgentId(channelId);
       return this.store.agents().filter((agent) => agent.enabled && (!only || agent.id === only));
+    }
+    const dm = this.dmAgentId(channelId);
+    if (dm) {
+      const agent = this.store.agent(dm);
+      return agent?.enabled ? [agent] : [];
     }
     const telegram = isTelegramChannel(channelId);
     const info = telegram ? null : this.discord.channelInfo(channelId);
@@ -176,7 +190,7 @@ export class Orchestrator {
   /** Load the channel's recent messages once; `exclude` keeps out the message being handled, which Discord may already list. */
   async ensureHistory(state, { exclude = null } = {}) {
     if (state.loaded) return;
-    if (isWebRoom(state.id) || isTelegramChannel(state.id)) {
+    if (isWebRoom(state.id) || isTelegramChannel(state.id) || this.dmAgentId(state.id)) {
       const existing = state.history;
       state.history = [];
       state.seen = new Set();
@@ -226,6 +240,27 @@ export class Orchestrator {
     await this.ensureHistory(state, { exclude: raw.id });
     const item = this.toItem(raw);
     if (item.kind === "owner" || item.kind === "human") await this.attachImages(item, raw);
+    this.ingest(state, item);
+  }
+
+  /**
+   * A direct message to an agent's own bot: that one agent answers, in the DM,
+   * as a private conversation. DMs need no server, so they are heard even where
+   * the agent listens to no channel.
+   */
+  async onDirectMessage(agentId, raw) {
+    const agent = this.store.agent(agentId);
+    if (!agent?.enabled) return;
+    if (raw.type !== undefined && raw.type !== 0 && raw.type !== 19) return;
+    if (!raw.content && !raw.attachments?.length && !raw.embeds?.length && !raw.sticker_items?.length) return;
+    // Ignore bots and anything our own agents posted (the DM echoes the agent's own reply back).
+    if (raw.author?.bot || this.bots?.agentIdForUser(raw.author?.id) || this.discord.isOwnMessage(raw)) return;
+    this.dmAgent.set(raw.channel_id, agentId);
+    const state = this.state(raw.channel_id);
+    await this.ensureHistory(state);
+    const item = this.toItem(raw);
+    if (item.kind !== "owner" && item.kind !== "human") return;
+    await this.attachImages(item, raw);
     this.ingest(state, item);
   }
 
@@ -416,15 +451,20 @@ export class Orchestrator {
     }
   }
 
-  pickCandidates(state, last, agents) {
+  pickCandidates(state, last, agents, { summonedOnly = false } = {}) {
     const fromHuman = last.kind === "owner" || last.kind === "human";
     const pool = agents.filter((agent) => agent.id !== last.agentId);
+    // In a thread agents stay out unless someone summons them by name (or they are mid-conversation with that name).
+    if (summonedOnly) {
+      const forced = pool.filter((agent) => mentions(last.content, agent.name) || (fromHuman && last.addressed?.includes(agent.id)));
+      return { forced, optional: [] };
+    }
     if (last.kind === "bot") {
       const called = pool.filter((agent) => mentions(last.content, agent.name));
       if (called.length) return { forced: called, optional: [] };
     }
     if (!fromHuman && state.budget <= 0) return { forced: [], optional: [] };
-    if (fromHuman && roomAgentId(state.id)) return { forced: pool, optional: [] };
+    if (fromHuman && (roomAgentId(state.id) || this.dmAgentId(state.id))) return { forced: pool, optional: [] };
     const forced = pool.filter((agent) => mentions(last.content, agent.name) || (fromHuman && last.addressed?.includes(agent.id)));
     if (fromHuman && forced.length) return { forced, optional: [] };
     if (fromHuman && last.toOthers) return { forced: [], optional: [] };
@@ -448,7 +488,8 @@ export class Orchestrator {
     // An agent still on a task gets new messages through its inbox, never a second turn.
     const agents = this.agentsFor(state.id).filter((agent) => !state.working.has(agent.id));
     if (!agents.length) return;
-    const { forced, optional } = this.pickCandidates(state, last, agents);
+    const summonedOnly = Boolean(this.channelMeta(state.id).parentId);
+    const { forced, optional } = this.pickCandidates(state, last, agents, { summonedOnly });
     if (!forced.length && !optional.length) return;
 
     const generation = state.generation;

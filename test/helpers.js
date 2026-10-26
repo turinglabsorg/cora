@@ -89,6 +89,7 @@ export async function fakeDiscord() {
     botPosts: [],
     typing: 0,
     sockets: new Set(),
+    socketUser: new Map(),
     identifies: 0,
     history: new Map(),
     webhookAllowed: true,
@@ -189,6 +190,7 @@ export async function fakeDiscord() {
         if (payload.op === 2) {
           state.identifies += 1;
           const own = state.botUsers.get(payload.d.token);
+          state.socketUser.set(socket, own || { id: BOT, username: "GROG" });
           seq += 1;
           send(socket, { op: 0, t: "READY", s: seq, d: { user: own || { id: BOT, username: "GROG" }, session_id: "sess", resume_gateway_url: `ws://127.0.0.1:${server.address().port}/gateway` } });
           if (own) {
@@ -203,7 +205,7 @@ export async function fakeDiscord() {
         }
       }
     });
-    socket.on("close", () => state.sockets.delete(socket));
+    socket.on("close", () => { state.sockets.delete(socket); state.socketUser.delete(socket); });
     socket.on("error", () => state.sockets.delete(socket));
   });
 
@@ -213,6 +215,16 @@ export async function fakeDiscord() {
     state,
     url: `http://127.0.0.1:${port}`,
     dispatch,
+    /** A person DMs one bot (by its user id). Only that bot's connection receives it, with no server. */
+    dm({ content, botUserId, author = OWNER, username = "Sam", channel = "7" + botUserId }) {
+      counter += 1;
+      const message = {
+        id: id(), type: 0, channel_id: channel, content, attachments: [], embeds: [], mentions: [],
+        author: { id: author, username, global_name: username, bot: false }, timestamp: new Date(Date.now() + counter).toISOString(),
+      };
+      for (const [socket, user] of state.socketUser) if (user?.id === botUserId) send(socket, { op: 0, t: "MESSAGE_CREATE", s: ++seq, d: message });
+      return message;
+    },
     /** A human (or bot) writes in a channel. */
     say({ content, author = OWNER, username = "Sam", channel = CHANNEL, guild = GUILD, bot = false, attachments = [], mentions = [], type = 0 }) {
       counter += 1;

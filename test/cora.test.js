@@ -715,6 +715,26 @@ describe("talking with the agents", () => {
     }
   });
 
+  test("in a thread agents stay out unless summoned by name", async () => {
+    const THREAD = "1599000000000000701";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "triage" });
+    await sleep(120);
+    replies.set("Olga", () => ({ content: "Nel thread ci sono." }));
+    replies.set("Pino", () => ({ content: "Anche io!" }));
+    // Nobody named: no agent works in the thread.
+    discord.say({ content: "qualcuno sa come si risolve?", channel: THREAD });
+    await sleep(2500);
+    await quiet();
+    assert.deepEqual(posts("Olga"), [], "Olga stays out of the thread uncalled");
+    assert.deepEqual(posts("Pino"), [], "Pino too, even though he is chatty");
+    // Named: only that agent answers, in the thread.
+    discord.say({ content: "Olga, ci pensi tu?", channel: THREAD });
+    const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Olga" && item.content === "Nel thread ci sono."), { what: "Olga summoned in the thread" });
+    assert.equal(post.channelId, THREAD, "the answer lands in the thread");
+    await quiet();
+    assert.deepEqual(posts("Pino"), []);
+  });
+
   test("only the agent you name answers, a follow-up without names goes to it again, and a mention of someone else keeps them quiet", async () => {
     replies.set("Olga", () => ({ content: "Sono Olga, dimmi." }));
     replies.set("Pino", () => ({ content: "Anche io!" }));
@@ -1103,6 +1123,44 @@ describe("listening without a dedicated bot", () => {
     assert.equal(post.token, "zeno-token");
     await sleep(1500);
     assert.equal(fake.state.botPosts.filter((item) => item.content === "Ti sento.").length, 1, "its own message is not heard as new");
+    await other.stop();
+    await fake.close();
+  });
+});
+
+describe("direct messages", () => {
+  test("a DM to an agent's own bot is answered by that agent alone, in the DM, even with no channel assigned", async () => {
+    const fake = await fakeDiscord();
+    const DINA = "600000000000000020";
+    fake.state.botUsers.set("dina-token", { id: DINA, username: "Dina", appFlags: 0 });
+    const otherHome = tempHome();
+    const seed = new Store(otherHome);
+    seed.updateSettings({ guildIds: [GUILD] });
+    // No channels assigned: Dina hears nothing in the servers, but still answers her DMs.
+    const dina = seed.createAgent({ name: "Dina", model: "ollama/test-model", chattiness: 0, tools: false });
+    seed.close();
+    const other = startCora({
+      home: otherHome, host: "127.0.0.1", port: 0, adminPassword: "x", sessionKey: "y", insecureCookies: true,
+      discordToken: "", discordApi: fake.url, telegramApi: telegram.url, telegramPollTimeout: 1, ollamaUrl: ollama.url, ollamaKey: "k",
+      claudeBin: cli.claude, codexBin: cli.codex, codexModelsFile: cli.models, ownerInstructions: join(home, "owner-AGENTS.md"),
+      botTokenFor: (name) => (name === "CORA_BOT_DINA" ? "dina-token" : ""), storeSecret: async () => {},
+      docker: docker.path, schedulerTickMs: 3600000, startBoxes: false,
+    });
+    await other.ready;
+    await waitFor(() => other.bots.client(dina.id), { what: "Dina's own bot online" });
+
+    let prompt = "";
+    replies.set("Dina", (body) => {
+      prompt = lastUserText(body);
+      return { content: "Ciao! Dimmi pure." };
+    });
+    const room = `7${DINA}`;
+    fake.dm({ botUserId: DINA, content: "Ciao Dina, ci sei?" });
+    const post = await waitFor(() => fake.state.botPosts.find((item) => item.content === "Ciao! Dimmi pure." && item.channelId === room), { what: "Dina's DM reply" });
+    assert.equal(post.token, "dina-token", "she answers with her own bot, in the DM");
+    assert.match(prompt, /in privato con te|messaggio privato/, "the agent knows it is a private message");
+    await sleep(1200);
+    assert.equal(fake.state.botPosts.filter((item) => item.content === "Ciao! Dimmi pure.").length, 1, "her own reply is not heard as a new DM");
     await other.stop();
     await fake.close();
   });

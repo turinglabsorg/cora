@@ -1,4 +1,8 @@
 import { Discord, PRESENCE_INTENTS } from "./discord.js";
+
+// Each agent's own bot also hears its direct messages (DM content needs no privileged intent).
+const DIRECT_MESSAGES = 1 << 12;
+const AGENT_INTENTS = PRESENCE_INTENTS | DIRECT_MESSAGES;
 import { ValidationError } from "./store.js";
 
 // Application flags meaning the Message Content intent is on (the limited one is for unverified apps).
@@ -32,7 +36,8 @@ export function inviteUrl(applicationId, guildId) {
  * main connection, so every message is handled once.
  */
 export class AgentBots {
-  constructor({ store, apiBase, gatewayUrl = "", tokenFor = (name) => process.env[name] || "", log }) {
+  constructor({ store, apiBase, gatewayUrl = "", tokenFor = (name) => process.env[name] || "", log, onDirect = null }) {
+    this.onDirect = onDirect;
     this.store = store;
     this.apiBase = apiBase;
     this.gatewayUrl = gatewayUrl;
@@ -134,7 +139,9 @@ export class AgentBots {
         if (!this.clients.get(agentId).messageContent) this.readFlags(agentId);
         continue;
       }
-      const client = new Discord({ token, apiBase: this.apiBase, gatewayUrl: this.gatewayUrl, intents: PRESENCE_INTENTS });
+      const client = new Discord({ token, apiBase: this.apiBase, gatewayUrl: this.gatewayUrl, intents: AGENT_INTENTS });
+      // A message with no server is a DM to this bot: the agent answers it.
+      client.on("message", (raw) => { if (!raw.guild_id) this.onDirect?.(agentId, raw); });
       client.on("ready", () => {
         this.log?.({ type: "discord", agentId, text: `bot collegato come ${client.user?.username}` });
         this.syncProfile(this.store.agent(agentId));

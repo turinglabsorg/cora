@@ -77,6 +77,8 @@ export function startCora(overrides = {}) {
   const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push });
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, emit: live, filesDir, notifier: push, watching: () => web?.watching() });
+  // DMs to an agent's own bot reach the orchestrator, where that one agent answers.
+  bots.onDirect = (agentId, raw) => orchestrator.onDirectMessage(agentId, raw).catch((error) => activity({ type: "error", agentId, text: `dm: ${error.message}` }));
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
   const scheduler = new Scheduler({ store, orchestrator, brain, timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));

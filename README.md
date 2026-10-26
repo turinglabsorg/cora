@@ -32,6 +32,7 @@ web panel (password, PWA) ──► REST API + live events (SSE) + noVNC proxy +
 - **Discord:** each agent connects as its own bot (`CORA_BOT_<NAME>`, pasted in the panel and stored in hush). Cora listens through the first agent bot whose app has the Message Content intent, or a dedicated `CORA_DISCORD_LISTENER_TOKEN`. Discord system messages (joins, pins…) are ignored.
 - **Telegram:** a main bot long-polls the chats turned on; agents post through their own Telegram bot when it is in the chat, otherwise through the main bot with their name in bold.
 - **The panel:** the Salotto and one private chat per agent, always available, archived like the other channels so memory sees them.
+- **Threads and DMs.** In a Discord thread agents only speak when summoned by name. A direct message to an agent's own bot is a private conversation that only that agent answers, even if it is assigned to no channel.
 
 ## Their computers
 
