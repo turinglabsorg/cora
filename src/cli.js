@@ -154,6 +154,9 @@ export function hermesConfig({ baseUrl, model }) {
   ].join("\n");
 }
 
+/** Hermes' own banner when the model answered with nothing at all. */
+const NO_REPLY = /^\s*\W{0,4}No reply\b/i;
+
 /**
  * One agent turn on Hermes Agent, one-shot: only Cora's tools (the cora
  * toolset: no terminal, files or computer use on the host), no personal rules
@@ -179,6 +182,9 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   if (out.code !== 0 || /^hermes -z: agent failed/m.test(text) || /^hermes -z: agent failed/m.test(out.stderr)) {
     throw new Error(`hermes: ${(out.stderr || text).trim().slice(-240) || `exit ${out.code}`}`);
   }
+  // Hermes exits 0 and prints a banner when the model gave it nothing: that is a
+  // failed turn, never something to say in the agent's name.
+  if (NO_REPLY.test(text)) throw new Error(`hermes: ${model} returned no content`);
   return { text };
 }
 

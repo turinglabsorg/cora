@@ -3,6 +3,9 @@ import { ValidationError } from "./store.js";
 
 // Application flags meaning the Message Content intent is on (the limited one is for unverified apps).
 const MESSAGE_CONTENT_FLAGS = (1 << 18) | (1 << 19);
+// The limited intents an app under 100 servers may switch on for itself, and the whole gateway set to preserve.
+const LIMITED_MESSAGE_CONTENT = 1 << 19;
+const GATEWAY_FLAGS = (1 << 12) | (1 << 13) | (1 << 14) | (1 << 15) | MESSAGE_CONTENT_FLAGS;
 
 // View channels, send messages, embed links, attach files, read history, add reactions.
 const INVITE_PERMISSIONS = 1024 + 2048 + 16384 + 32768 + 65536 + 64;
@@ -64,7 +67,17 @@ export class AgentBots {
     const entry = this.clients.get(agentId);
     if (!entry) return;
     try {
-      const app = await entry.client.request("GET", "/applications/@me");
+      let app = await entry.client.request("GET", "/applications/@me");
+      // Without it the bot is deaf in every channel, so ask for the limited intent, which an app
+      // under 100 servers grants itself. Shared listening needs it on every agent, not just one.
+      if (!((app?.flags || 0) & MESSAGE_CONTENT_FLAGS)) {
+        try {
+          app = await entry.client.request("PATCH", "/applications/@me", { body: { flags: ((app?.flags || 0) & GATEWAY_FLAGS) | LIMITED_MESSAGE_CONTENT } });
+          this.log?.({ type: "discord", agentId, text: "intent Message Content attivato sulla sua app" });
+        } catch (error) {
+          this.log?.({ type: "error", agentId, text: `Message Content non attivabile: ${error.message}` });
+        }
+      }
       const on = Boolean((app?.flags || 0) & MESSAGE_CONTENT_FLAGS);
       // Only a bot allowed to read content asks to hear channels: asking without it closes the gateway for good.
       entry.client.useIntents(on ? LISTENING_INTENTS : DIRECT_MESSAGE_INTENTS);
@@ -141,7 +154,7 @@ export class AgentBots {
       const client = new Discord({ token, apiBase: this.apiBase, gatewayUrl: this.gatewayUrl, intents: DIRECT_MESSAGE_INTENTS });
       // No server means a DM to this bot, answered by its agent; anything else is a channel this bot can see,
       // so a private channel is heard as long as one agent's bot is in it. Repeats are dropped by message id.
-      client.on("message", (raw) => { if (raw.guild_id) this.onGuild?.(raw); else this.onDirect?.(agentId, raw); });
+      client.on("message", (raw) => { if (raw.guild_id) this.onGuild?.(raw, agentId); else this.onDirect?.(agentId, raw); });
       client.on("ready", () => {
         this.log?.({ type: "discord", agentId, text: `bot collegato come ${client.user?.username}` });
         this.syncProfile(this.store.agent(agentId));

@@ -82,7 +82,7 @@ export class Orchestrator {
   state(channelId) {
     let state = this.states.get(channelId);
     if (!state) {
-      state = { id: channelId, history: [], seen: new Set(), generation: 0, budget: 0, ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
+      state = { id: channelId, history: [], seen: new Set(), heardFrom: new Set(), mainBlind: false, generation: 0, budget: 0, ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
       this.states.set(channelId, state);
     }
     return state;
@@ -201,7 +201,9 @@ export class Orchestrator {
     if (!state.loading) {
       state.loading = this.discord.fetchMessages(state.id, this.store.settings.historySize)
         .catch(async (error) => {
-          // A private channel the main bot cannot read: another agent's bot may be in it.
+          // A private channel the main bot cannot read: another agent's bot may be in it, and
+          // only the agents whose bots are in it can speak there. A passing network error is not that.
+          if (/\b40[13]\b/.test(error.message)) state.mainBlind = true;
           const viaBot = await this.bots?.fetchMessages(state.id, this.store.settings.historySize);
           if (viaBot) return viaBot;
           throw error;
@@ -233,7 +235,7 @@ export class Orchestrator {
     if (images.length) item.images = images;
   }
 
-  async onMessage(raw) {
+  async onMessage(raw, viaAgentId = null) {
     const guildId = raw.guild_id || this.discord.channelInfo(raw.channel_id)?.guildId;
     if (!guildId || !this.allowedGuild(guildId)) return;
     // Only real messages and replies: joins, pins, boosts and the like have no text for the agents.
@@ -243,6 +245,8 @@ export class Orchestrator {
     // What an agent's own bot posts is already in the history (Cora posted it); the gateway echo can arrive first.
     if (raw.author?.id && this.bots?.agentIdForUser(raw.author.id)) return;
     const state = this.state(raw.channel_id);
+    // Who delivered it is who is in the channel: in a private one, only they can answer.
+    if (viaAgentId) state.heardFrom.add(viaAgentId);
     // Several bots may hear the same channel: the first delivery wins, the rest are the same message.
     if (state.seen.has(raw.id) || this.store.hasMessage(raw.id)) return;
     await this.ensureHistory(state, { exclude: raw.id });
@@ -478,14 +482,17 @@ export class Orchestrator {
     if (fromHuman && last.toOthers) return { forced: [], optional: [] };
     // While the human is talking to someone, the others join only when called by name.
     if (!fromHuman && state.focus && Date.now() - state.focus.at < FOCUS_MS) return { forced, optional: [] };
-    const factor = fromHuman ? 1 : 0.6;
-    let optional = pool.filter((agent) => !forced.includes(agent) && Math.random() < agent.chattiness * factor);
-    // A human always gets an answer: when chattiness picks nobody, the chattiest agent must reply.
-    if (fromHuman && !optional.length && pool.length) {
-      const ranked = [...pool].sort((a, b) => (b.chattiness - a.chattiness) || (Math.random() - 0.5));
-      return { forced: [ranked[0]], optional: [] };
+    // Nobody was named: one message from a human gets exactly one answer, never a chorus.
+    // Chattiness decides who feels like speaking; the chattiest answers when nobody does.
+    if (fromHuman) {
+      const willing = pool.filter((agent) => Math.random() < agent.chattiness);
+      const one = willing.length
+        ? willing[Math.floor(Math.random() * willing.length)]
+        : [...pool].sort((a, b) => (b.chattiness - a.chattiness) || (Math.random() - 0.5))[0];
+      return { forced: one ? [one] : [], optional: [] };
     }
-    optional = optional.sort(() => Math.random() - 0.5).slice(0, Math.max(0, MAX_PARALLEL_AGENTS - forced.length));
+    const optional = pool.filter((agent) => !forced.includes(agent) && Math.random() < agent.chattiness * 0.6)
+      .sort(() => Math.random() - 0.5).slice(0, Math.max(0, MAX_PARALLEL_AGENTS - forced.length));
     return { forced, optional };
   }
 
@@ -494,7 +501,9 @@ export class Orchestrator {
     if (!last) return;
     state.working ??= new Set();
     // An agent still on a task gets new messages through its inbox, never a second turn.
-    const agents = this.agentsFor(state.id).filter((agent) => !state.working.has(agent.id));
+    let agents = this.agentsFor(state.id).filter((agent) => !state.working.has(agent.id));
+    // A channel the main bot cannot see is private: only the agents whose own bot is in it can read or post there.
+    if (state.mainBlind && state.heardFrom.size) agents = agents.filter((agent) => state.heardFrom.has(agent.id));
     if (!agents.length) return;
     const summonedOnly = Boolean(this.channelMeta(state.id).parentId);
     const { forced, optional } = this.pickCandidates(state, last, agents, { summonedOnly });

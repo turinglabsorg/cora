@@ -716,6 +716,20 @@ describe("talking with the agents", () => {
     }
   });
 
+  test("a message that names nobody gets one answer, not a chorus", async () => {
+    replies.set("Olga", () => ({ content: "Dico la mia." }));
+    replies.set("Pino", () => ({ content: "Dico la mia anche io." }));
+    const before = posts("Olga").length + posts("Pino").length;
+    // Both are as chatty as can be and both are in the channel: still, one voice answers.
+    for (let round = 0; round < 4; round += 1) {
+      discord.say({ content: `ragazzi, che si fa oggi? (${round})` });
+      await sleep(1800);
+      await quiet();
+    }
+    const after = posts("Olga").length + posts("Pino").length;
+    assert.equal(after - before, 4, "four messages, four answers, never two voices on the same one");
+  });
+
   test("in a thread agents stay out unless summoned by name", async () => {
     const THREAD = "1599000000000000701";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "triage" });
@@ -1028,6 +1042,20 @@ describe("talking with the agents", () => {
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } });
   });
 
+  test("when Hermes answers that the model gave it no content, the agent fails openly instead of saying that banner", async (t) => {
+    await call("/api/state");
+    assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/test-model" } })).status, 200);
+    t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
+    cli.set({ reply: "⚠️ No reply: the model returned empty content after retries and any fallback providers. Try `continue`, switch model/provider, or inspect the tool output above." });
+    discord.say({ content: "Olga, a che punto sei?" });
+    await waitFor(() => posts("Olga").some((text) => text.includes("non riesco a rispondere")), { what: "Olga reporting the failure" });
+    await quiet();
+    assert.ok(!posts("Olga").some((text) => /No reply/i.test(text)), "Hermes' banner is never posted as the agent's own words");
+    const trace = (await call(`/api/agents/${olga.id}/traces`)).data.find((item) => item.status === "error");
+    assert.equal(trace.status, "error");
+    assert.match(trace.error, /test-model returned no content/);
+  });
+
   test("an agent without its computer is told to ask the owner instead of passing when someone else wants work done", async () => {
     let system = "";
     replies.set("Olga", (body) => {
@@ -1174,6 +1202,14 @@ describe("shared listening", () => {
     await sleep(1500);
     const inChannel = fake.state.botPosts.filter((item) => item.channelId === CHANNEL && item.content === "Ci sono, nel canale privato.");
     assert.equal(inChannel.length, 1, "heard by several bots, answered once");
+
+    // Nobody named, in a channel only Vale's bot is in: Pia is not even a candidate there.
+    replies.set("Pia", () => ({ content: "Parlo io." }));
+    replies.set("Vale", () => ({ content: "Rispondo io, che sono dentro." }));
+    fake.sayTo({ botUserId: VALE, channel: PRIVATE, content: "allora, come procede?" });
+    await waitFor(() => fake.state.botPosts.some((item) => item.channelId === PRIVATE && item.content === "Rispondo io, che sono dentro."), { what: "the agent inside the channel answering" });
+    await sleep(800);
+    assert.ok(!fake.state.botPosts.some((item) => item.channelId === PRIVATE && item.token === "pia-token"), "an agent whose bot is not in the channel never speaks there");
   });
 });
 
