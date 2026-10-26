@@ -17,7 +17,8 @@ function childEnv() {
   return env;
 }
 
-function run(bin, args, { input, cwd, timeoutMs, onLine, env = {} }) {
+function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, signal }) {
+  signal?.throwIfAborted();
   return new Promise((resolve) => {
     const child = spawn(bin, args, { cwd, env: { ...childEnv(), ...env }, stdio: ["pipe", "pipe", "pipe"] });
     const stdout = [];
@@ -34,10 +35,16 @@ function run(bin, args, { input, cwd, timeoutMs, onLine, env = {} }) {
       }
     };
     let timedOut = false;
+    let killTimer;
+    const terminate = () => {
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+      killTimer.unref();
+    };
+    signal?.addEventListener("abort", terminate, { once: true });
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000);
+      terminate();
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout.push(chunk);
@@ -46,10 +53,14 @@ function run(bin, args, { input, cwd, timeoutMs, onLine, env = {} }) {
     child.stderr.on("data", (chunk) => { if (stderr.length < 200) stderr.push(chunk); });
     child.on("error", (error) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
+      signal?.removeEventListener("abort", terminate);
       resolve({ code: -1, stdout: "", stderr: error.message, timedOut });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
+      signal?.removeEventListener("abort", terminate);
       lines("", true);
       resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), timedOut });
     });
@@ -85,7 +96,7 @@ function textSteps(onStep) {
 }
 
 /** One agent turn on Claude Code with the owner's subscription; cora's tools arrive over MCP. */
-export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", goal = "" }) {
+export async function runClaude({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", goal = "", signal }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const mcpFile = join(workDir, `mcp-${id}.json`);
@@ -120,7 +131,8 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
     }
   };
   try {
-    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine });
+    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine, signal });
+    signal?.throwIfAborted();
     if (out.timedOut) throw new Error(`claude: no answer within ${Math.round(timeoutMs / 1000)}s`);
     if (!data) throw new Error(`claude: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`);
     if (data.is_error) throw new Error(`claude: ${String(data.result || data.subtype || "error").slice(0, 240)}`);
@@ -176,7 +188,7 @@ const NO_REPLY = /^\s*\W{0,4}No reply\b/i;
  * toolset: no terminal, files or computer use on the host), no personal rules
  * or memory of the owner's Hermes, the answer on stdout.
  */
-export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl }) {
+export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl, signal }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const configFile = join(home, "config.yaml");
@@ -190,7 +202,8 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   // In one-shot mode an MCP server's toolset is named after the server, and -t is the complete list.
   const args = ["-z", `${system}\n\n---\n\n${prompt}`, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify"];
   const env = { HERMES_HOME: home, ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
-  const out = await run(bin, args, { cwd: workDir, timeoutMs, env });
+  const out = await run(bin, args, { cwd: workDir, timeoutMs, env, signal });
+  signal?.throwIfAborted();
   if (out.timedOut) throw new Error(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`);
   const text = out.stdout.trim();
   if (out.code !== 0 || /^hermes -z: agent failed/m.test(text) || /^hermes -z: agent failed/m.test(out.stderr)) {
@@ -203,7 +216,7 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
 }
 
 /** One agent turn on the Codex CLI with the owner's ChatGPT subscription; its own shell and browser tools are off. */
-export async function runCodex({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "" }) {
+export async function runCodex({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", signal }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const outFile = join(workDir, `codex-${id}.txt`);
@@ -249,7 +262,8 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     }
   };
   try {
-    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine });
+    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine, signal });
+    signal?.throwIfAborted();
     if (out.timedOut) throw new Error(`codex: no answer within ${Math.round(timeoutMs / 1000)}s`);
     let text = "";
     try { text = readFileSync(outFile, "utf8"); } catch {}

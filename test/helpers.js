@@ -405,6 +405,11 @@ process.stdin.on("end", async () => {
     process.exit(1);
   }
   const record = { flavor, argv, stdin, tools: null, output: null, hermesConfig, secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
+  if (control.hang) {
+    fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ ...record, pid: process.pid }) + "\\n");
+    setInterval(() => {}, 1000);
+    return;
+  }
   if (server && control.tool) {
     const child = spawn(server.command, server.args, { env: { ...process.env, ...server.env }, stdio: ["pipe", "pipe", "inherit"] });
     let buffer = "";

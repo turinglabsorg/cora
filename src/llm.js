@@ -181,7 +181,7 @@ export class LLM {
    * A full agent turn on a subscription CLI. `tools` are cora's tool definitions,
    * `execute(name, args)` runs one of them; both reach the CLI through MCP.
    */
-  async runAgent({ model, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "" }) {
+  async runAgent({ model, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal }) {
     const { provider, name } = splitModel(model);
     // A failed attempt is only retried when the agent had not started working: re-running a
     // turn that already used a tool would do its side effects twice.
@@ -193,7 +193,7 @@ export class LLM {
       };
       const run = tools.length ? this.bridge.register({ tools, execute: watched, ttlMs: timeoutMs + 60000 }) : null;
       const options = {
-        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal,
+        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal, signal,
       };
       try {
         if (provider === "claude") return await runClaude({ bin: this.claudeBin, ...options });
@@ -208,6 +208,7 @@ export class LLM {
       try {
         return await once();
       } catch (error) {
+        signal?.throwIfAborted();
         if (attempt >= RETRIES || used || !TRANSIENT.test(String(error.message || ""))) throw error;
         onStep?.({ type: "note", text: `${error.message} — riprovo (${attempt + 1}/${RETRIES}).` });
         await wait(RETRY_WAIT_MS * (attempt + 1));
@@ -223,18 +224,20 @@ export class LLM {
   /** One model call, retried on a passing failure: it has no side effects, so trying again is free. */
   async chat(options) {
     for (let attempt = 0; ; attempt += 1) {
+      options.signal?.throwIfAborted();
       try {
         return await this.chatOnce(options);
       } catch (error) {
+        options.signal?.throwIfAborted();
         if (attempt >= RETRIES || !TRANSIENT.test(String(error.message || ""))) throw error;
         await wait(RETRY_WAIT_MS * (attempt + 1));
       }
     }
   }
 
-  async chatOnce({ model, messages, tools = [], effort = "" }) {
+  async chatOnce({ model, messages, tools = [], effort = "", signal }) {
     const { provider, name } = splitModel(model);
-    if (this.routers[provider]) return this.routerChat(provider, name, model, { messages, tools });
+    if (this.routers[provider]) return this.routerChat(provider, name, model, { messages, tools, signal });
     if (provider !== "ollama") throw new Error(`unknown model provider: ${provider}`);
     if (!this.ollamaKey) throw new Error("OLLAMA_API_KEY is not set");
     const caps = await this.capabilities(model);
@@ -263,7 +266,7 @@ export class LLM {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.ollamaKey}` },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data.error) throw new Error(`ollama ${name}: ${String(data.error || response.status).slice(0, 200)}`);
@@ -280,7 +283,7 @@ export class LLM {
    * One model call through a router that speaks the OpenAI chat format
    * (OrcaRouter): same messages and tools as Ollama, same {text, thinking, toolCalls}.
    */
-  async routerChat(provider, name, model, { messages, tools }) {
+  async routerChat(provider, name, model, { messages, tools, signal }) {
     const router = this.routers[provider];
     if (!router.key) throw new Error(`${ROUTERS[provider].label}: no API key (CORA_${provider.toUpperCase()}_API_KEY in hush)`);
     const caps = await this.capabilities(model);
@@ -311,7 +314,7 @@ export class LLM {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${router.key}` },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data.error) {

@@ -5,6 +5,7 @@ import { isTelegramChannel, telegramChannel, telegramChatId } from "./channels.j
 import { SALOTTO, isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { MEMORY_TOOLS } from "./tools.js";
 import { userName } from "./telegram.js";
+import { asksToStop } from "./brain.js";
 
 const MAX_PARALLEL_AGENTS = 4;
 const HUMAN_DEBOUNCE_MS = 1200;
@@ -78,6 +79,7 @@ export class Orchestrator {
     this.ackAfterMs = ACK_AFTER_MS;
     // An agent has one computer, so it runs one task at a time: what it is on, by agent id.
     this.atWork = new Map();
+    this.threadWork = new Map();
     this.ackQuietMs = ACK_QUIET_MS;
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
     this.releaseAfterMs = RELEASE_AFTER_MS;
@@ -446,7 +448,7 @@ export class Orchestrator {
 
   /** True when no channel has a round running or scheduled, and no agent is still working. */
   quiet() {
-    return [...this.states.values()].every((state) => !state.running && !state.nextRoundAt && !state.pending && !state.working?.size);
+    return !this.atWork.size && !this.threadWork.size && [...this.states.values()].every((state) => !state.running && !state.nextRoundAt && !state.pending && !state.working?.size);
   }
 
   async runRound(state) {
@@ -537,9 +539,10 @@ export class Orchestrator {
       // Already on a task elsewhere: it still answers, but it does not take its computer
       // for a second job at the same time.
       const busyWith = this.atWork.get(agent.id);
-      const computer = agent.tools && state.ownerOrigin && !busyWith;
+      const computer = agent.tools && state.ownerOrigin && !busyWith && !this.threadWork.has(state.id);
       const started = Date.now();
       if (computer) this.atWork.set(agent.id, `una richiesta ${this.channelMeta(state.id).where || "in chat"}`);
+      if (computer) this.threadWork.set(state.id, agent.id);
       let spoke = false;
       const say = (text) => {
         spoke = true;
@@ -569,6 +572,7 @@ export class Orchestrator {
       } finally {
         clearTimeout(ack);
         if (computer) this.atWork.delete(agent.id);
+        if (computer) this.threadWork.delete(state.id);
       }
       if (!result.text) {
         this.log({ type: "pass", agentId: agent.id, channelId: state.id, ms: Date.now() - started, traceId: result.traceId });
@@ -629,31 +633,46 @@ export class Orchestrator {
       const agent = this.store.agent(trace.agentId);
       if (!agent?.enabled || !agent.tools) continue;
       if (!isWebRoom(trace.channelId) && !this.channels?.isActive(trace.channelId)) continue;
+      const latest = this.store.recentMessages(trace.channelId, this.store.settings.historySize).findLast((item) =>
+        item.at > Date.parse(trace.startedAt) && item.kind === "owner" &&
+        (mentions(item.content, agent.name) || !this.store.agents().some((other) => mentions(item.content, other.name))));
+      if (latest && asksToStop(latest.content)) continue;
+      const routine = trace.kind === "routine" ? this.routineForTrace(trace) : null;
+      if (trace.kind === "routine" && !routine?.enabled) continue;
       resumed.push(trace.id);
-      this.resumeTask(agent, trace).catch((error) => this.log({ type: "error", agentId: agent.id, channelId: trace.channelId, text: `ripresa: ${error.message}` }));
+      this.resumeTask(agent, trace, routine).catch((error) => this.log({ type: "error", agentId: agent.id, channelId: trace.channelId, text: `ripresa: ${error.message}` }));
     }
     return resumed;
   }
 
-  async resumeTask(agent, trace) {
+  routineForTrace(trace) {
+    const name = /È il momento della tua routine "([^"]+)"/.exec(trace.prompt || "")?.[1];
+    return this.store.routines(trace.agentId).find((routine) => routine.channelId === trace.channelId && routine.name === name) || null;
+  }
+
+  async resumeTask(agent, trace, routine = null) {
+    if (this.atWork.has(agent.id) || this.threadWork.has(trace.channelId)) return;
+    this.atWork.set(agent.id, "il compito interrotto");
+    this.threadWork.set(trace.channelId, agent.id);
     const state = this.state(trace.channelId);
-    await this.ensureHistory(state);
     state.working ??= new Set();
-    if (state.working.has(agent.id)) return;
     state.working.add(agent.id);
     this.log({ type: "settings", agentId: agent.id, channelId: state.id, text: "riprende il lavoro interrotto dal riavvio" });
     try {
+      await this.ensureHistory(state);
       const english = this.store.settings.language === "en";
       await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.");
       const result = await this.brain.resumeTurn({
         agent, trace, channel: this.channelMeta(state.id),
         postFile: (file, caption) => this.postAs(agent, state, caption, file),
         say: (text) => this.postAs(agent, state, text),
-        inbox: this.inbox(state, state.history),
+        inbox: this.inbox(state, state.history), routine,
       });
       if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId);
     } finally {
       state.working.delete(agent.id);
+      this.atWork.delete(agent.id);
+      this.threadWork.delete(state.id);
     }
   }
 
@@ -862,7 +881,7 @@ export class Orchestrator {
     if (!agent) return { status: "missing-agent" };
     // One agent, one computer: a routine that lands on a busy agent waits for its next turn
     // instead of opening a second session on the same work.
-    const busyWith = this.atWork.get(agent.id);
+    const busyWith = this.atWork.get(agent.id) || (this.threadWork.has(routine.channelId) ? "un compito già attivo in questo thread" : null);
     if (busyWith) {
       this.store.recordRoutineRun(routine.id, "skipped", `saltata: stava già lavorando a ${busyWith}`);
       this.log({ type: "routine-skip", agentId: agent.id, channelId: routine.channelId, text: `${routine.name}: stava già lavorando` });
@@ -878,9 +897,13 @@ export class Orchestrator {
       return { status: "error" };
     }
     this.routineRuns.add(routine.id);
-    if (agent.tools) this.atWork.set(agent.id, `la routine «${routine.name}»`);
+    this.atWork.set(agent.id, `la routine «${routine.name}»`);
+    this.threadWork.set(routine.channelId, agent.id);
     this.log({ type: "routine-start", agentId: agent.id, channelId: routine.channelId, text: routine.name, manual });
     const state = this.state(routine.channelId);
+    state.working ??= new Set();
+    state.working.add(agent.id);
+    state.focus = { ids: [agent.id], at: Date.now() };
     const typing = setInterval(() => this.typing(routine.channelId, [agent]), 8000);
     try {
       await this.ensureHistory(state);
@@ -896,7 +919,7 @@ export class Orchestrator {
         state.budget = Math.max(state.budget, Math.ceil(this.store.settings.maxAgentTurns / 2));
         this.schedule(state, 3000);
       }
-      this.store.recordRoutineRun(routine.id, result.text ? "posted" : "nothing", result.text || "PASS");
+      this.store.recordRoutineRun(routine.id, result.stopped ? "stopped" : result.text ? "posted" : "nothing", result.text || "PASS");
       this.log({ type: "routine-end", agentId: agent.id, channelId: routine.channelId, text: routine.name, ok: true, steps: result.steps });
       return { status: result.text ? "posted" : "nothing" };
     } catch (error) {
@@ -906,7 +929,9 @@ export class Orchestrator {
     } finally {
       clearInterval(typing);
       this.routineRuns.delete(routine.id);
+      state.working.delete(agent.id);
       this.atWork.delete(agent.id);
+      this.threadWork.delete(routine.channelId);
     }
   }
 }

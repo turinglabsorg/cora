@@ -37,7 +37,7 @@ describe("cron", () => {
 
 describe("being told to stop", () => {
   test("reads an order to stop, and not a turn of phrase that only sounds like one", () => {
-    for (const text of ["fermati", "Primo, fermati", "ok basta", "stop", "lascia stare", "annulla tutto", "smettila", "non serve più"]) {
+    for (const text of ["fermati", "Primo, fermati", "ok basta", "stop", "stoppa tutto", "stoppate", "lascia stare", "annulla tutto", "smettila", "non serve più"]) {
       assert.ok(asksToStop(text), `«${text}» is an order to stop`);
     }
     // "basta che" means "just", not "stop"; the rest are ordinary instructions.

@@ -24,6 +24,7 @@ let replies;
 // The goal calls do not belong to any agent: tests set `goals`/`checks` to drive them.
 let goals;
 let checks;
+let intentions;
 let cli;
 let home;
 let orca;
@@ -100,6 +101,10 @@ before(async () => {
     const system = String(body.messages[0]?.content || "");
     if (/^Scrivi la condizione di completamento/.test(system)) return { content: goals ? goals(body) : "NESSUNO" };
     if (/^Giudichi se un compito è finito/.test(system)) return { content: checks ? checks(body) : JSON.stringify({ met: true, reason: "" }) };
+    if (/^Valuti l'intenzione/.test(system)) {
+      const latest = String(body.messages[1].content).split("Nuovi messaggi da valutare:\n")[1] || "";
+      return { content: intentions ? await intentions(body) : JSON.stringify({ intent: /fermati|stoppa tutto/.test(latest) ? "stop" : "update" }) };
+    }
     const name = whoAmI(body);
     const handler = replies.get(name) || replies.get("*");
     return handler ? handler(body) : { content: "PASS" };
@@ -165,6 +170,7 @@ beforeEach(async () => {
   replies.clear();
   goals = null;
   checks = null;
+  intentions = null;
   discord.state.webhookPosts.length = 0;
   discord.state.botPosts.length = 0;
 });
@@ -488,7 +494,7 @@ describe("agents in Discord", () => {
     assert.ok(state);
   });
 
-  test("a task on Claude Code is handed to its own goal mode: /goal first, the task after, in one session", async (t) => {
+  test("Claude Code follows the thread's current goal under Cora's verifier", async (t) => {
     await call("/api/settings", { method: "PUT", body: { goalMode: true } });
     t.after(() => call("/api/settings", { method: "PUT", body: { goalMode: false } }));
     const created = await call("/api/agents", { method: "POST", body: { name: "Nora", model: "claude/claude-sonnet-5-5", chattiness: 0, tools: true } });
@@ -503,14 +509,11 @@ describe("agents in Discord", () => {
     await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Nora" && item.content.startsWith("Online, risponde 200.")), { what: "Nora's answer" });
     await quiet();
     const run = cli.calls().slice(before).find((item) => item.flavor === "claude");
-    assert.ok(run.argv.includes("--input-format"), "the prompt is streamed, so the goal can come as its own message");
-    assert.equal(run.argv[run.argv.indexOf("--input-format") + 1], "stream-json");
-    const messages = run.stdin.trim().split("\n").map((line) => JSON.parse(line).message.content[0].text);
-    assert.equal(messages[0], `/goal ${goal}`, "Claude Code's own goal mode gets the condition");
-    assert.match(messages[1], /Nora, pubblica la pagina e controlla che risponda/, "the task keeps all its context");
-    assert.ok(!messages[1].includes("[Obiettivo]"), "no second copy of the goal: the harness owns it now");
+    assert.ok(!run.argv.includes("--input-format"), "no separate native goal can outlive the thread's current goal");
+    assert.match(run.stdin, /Nora, pubblica la pagina e controlla che risponda/, "the task keeps all its context");
+    assert.ok(run.stdin.includes(`[Obiettivo] Questa è l'unica condizione attuale; sostituisce gli obiettivi precedenti: ${goal}`));
     assert.equal(cli.calls().slice(before).filter((item) => item.flavor === "claude").length, 1, "one session, not one run per round");
-    assert.ok(!judged, "Cora does not second-guess a harness that checks the goal itself");
+    assert.ok(judged, "the same verifier controls every provider");
     await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
   });
 
@@ -1112,9 +1115,9 @@ describe("talking with the agents", () => {
       return { content: "Ero a metà: controllati 2 file su 10." };
     });
     discord.say({ content: "Olga, controlla tutti i file" });
-    await waitFor(() => posts("Olga").includes("Ero a metà: controllati 2 file su 10."), { what: "Olga stopping", timeout: 25000 });
+    await waitFor(() => posts("Olga").includes("Mi fermo qui."), { what: "Olga stopping", timeout: 25000 });
     await quiet();
-    assert.ok(refusals.length >= 1, "the tools it tried after the stop were refused");
+    assert.ok(calls <= 2 || refusals.length >= 1, "the turn is aborted or its subsequent tools are refused");
     assert.equal(checked, 0, "the goal never sends it back once it has been told to stop");
     assert.ok(calls < 6, `it stopped instead of going on (${calls} calls)`);
   });
@@ -1790,5 +1793,242 @@ describe("agents in Telegram", () => {
     await waitFor(() => app.discord.state === "ready", { what: "Discord back" });
     assert.equal(app.telegram.state, "stopped");
     await call(`/api/agents/${tina.id}`, { method: "DELETE" });
+  });
+});
+
+
+describe("thread goal lifecycle", () => {
+  let iris;
+  let ivo;
+  const routine = (agent, name, prompt = "Controlla una volta la coda, poi PASS se non ci sono errori") => app.store.createRoutine(agent.id, { name, prompt, schedule: "35 * * * *", channelId: CHANNEL });
+
+  before(async () => {
+    const login = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    cookie = login.headers.get("set-cookie").split(";")[0];
+    for (const agent of app.store.agents()) app.store.updateAgent(agent.id, { enabled: false });
+    await call("/api/settings", { method: "PUT", body: { transport: "discord" } });
+    iris = app.store.createAgent({ name: "Iris", model: "ollama/test-model", tools: true, chattiness: 0, channelIds: [CHANNEL] });
+    ivo = app.store.createAgent({ name: "Ivo", model: "ollama/test-model", tools: true, chattiness: 0, channelIds: [CHANNEL] });
+  });
+  beforeEach(() => app.store.updateSettings({ goalMode: true }));
+  after(() => app.store.updateSettings({ goalMode: false }));
+
+  test("a routine's goal comes from this invocation, never from memories or another task", async () => {
+    app.store.addMemory(iris.id, "OBSOLETE: tutti i post devono essere pubblicati e la routine altrui cancellata", "manual", { pinned: true });
+    app.brain.channelGoals.set(CHANNEL, "OBSOLETE: goal di un altro agente");
+    const inputs = [];
+    goals = (body) => { inputs.push(body.messages[1].content); return "il controllo attuale della coda è eseguito"; };
+    let checked = "";
+    checks = (body) => { checked = body.messages[1].content; return JSON.stringify({ met: true }); };
+    let step = 0;
+    replies.set("Iris", () => ++step === 1 ? { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] } : { content: "PASS" });
+    const r = routine(iris, "Verifica attuale");
+    const result = await app.orchestrator.runRoutine(r);
+    assert.equal(result.status, "nothing");
+    assert.equal(inputs.length, 1);
+    assert.match(inputs[0], /UN controllo adesso/);
+    assert.doesNotMatch(inputs[0], /OBSOLETE|Ti torna in mente|Contesto recente/);
+    assert.match(checked, /Verifica attuale.*35 \* \* \* \*/s, "the verifier sees the real tool output, including its schedule");
+    assert.ok(!app.brain.channelGoals.has(CHANNEL), "the goal is released with its invocation");
+  });
+
+  test("one thread admits one goal even when different agents have routines due together", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let entered = false;
+    goals = () => "il controllo corrente è completo";
+    replies.set("Iris", async () => { entered = true; await gate; return { content: "PASS" }; });
+    const first = routine(iris, "Primo controllo");
+    const second = routine(ivo, "Secondo controllo");
+    const pending = app.orchestrator.runRoutine(first);
+    try {
+      await waitFor(() => entered);
+      const overlap = await app.orchestrator.runRoutine(second);
+      assert.equal(overlap.status, "busy");
+      assert.equal(app.store.routine(second.id).lastStatus, "skipped");
+      assert.equal(app.orchestrator.threadWork.size, 1);
+      assert.equal(app.brain.channelGoals.size, 1);
+    } finally { release(); await pending; }
+    assert.equal(app.orchestrator.threadWork.size, 0);
+    assert.equal(app.brain.channelGoals.size, 0);
+    replies.set("Ivo", () => ({ content: "PASS" }));
+    assert.equal((await app.orchestrator.runRoutine(app.store.routine(second.id))).status, "nothing");
+  });
+
+  test("different threads can each hold their own goal", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let entered = 0;
+    goals = () => "controllo completato";
+    for (const name of ["Iris", "Ivo"]) replies.set(name, async () => { entered += 1; await gate; return { content: "PASS" }; });
+    const first = routine(iris, "Thread uno");
+    const second = app.store.createRoutine(ivo.id, { name: "Thread due", prompt: "Controlla", schedule: "35 * * * *", channelId: "web-" + ivo.id });
+    const pending = [app.orchestrator.runRoutine(first), app.orchestrator.runRoutine(second)];
+    try {
+      await waitFor(() => entered === 2);
+      assert.equal(app.orchestrator.threadWork.size, 2);
+      assert.equal(app.brain.channelGoals.size, 2);
+    } finally { release(); await Promise.all(pending); }
+  });
+
+  test("pausing, deleting or rescheduling a routine cancels its active turn before it can write again", async () => {
+    goals = () => "controllo completato";
+    for (const change of ["pause", "delete", "reschedule"]) {
+      const r = routine(iris, "Lifecycle " + change);
+      let entered = false;
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      replies.set("Iris", async () => {
+        entered = true;
+        await gate;
+        return { tool_calls: [{ function: { name: "set_routine", arguments: { id: r.id, enabled: true, schedule: "*/15 * * * *" } } }] };
+      });
+      const pending = app.orchestrator.runRoutine(r);
+      await waitFor(() => entered);
+      const changed = await call(`/api/routines/${r.id}`, change === "delete" ? { method: "DELETE" } : { method: "PUT", body: change === "pause" ? { enabled: false } : { schedule: "35 13-23 * * *" } });
+      assert.equal(changed.status, 200);
+      try {
+        await waitFor(() => !app.orchestrator.atWork.has(iris.id), { timeout: 2000, what: "active routine cancellation" });
+      } finally { release(); await pending; }
+      const trace = app.store.traces(iris.id, 1)[0];
+      assert.equal(trace.status, "stopped");
+      assert.ok(!app.store.trace(trace.id).steps.some((step) => step.name === "set_routine"), "no stale write gets executed");
+      if (change === "pause") assert.equal(app.store.routine(r.id).enabled, false);
+      if (change === "delete") assert.equal(app.store.routine(r.id), null);
+      if (change === "reschedule") assert.equal(app.store.routine(r.id).schedule, "35 13-23 * * *");
+    }
+  });
+
+  test("a restart ignores paused routines and stopped work even when another agent was addressed later", () => {
+    const at = Date.now();
+    const paused = routine(iris, "Paused before restart");
+    app.store.updateRoutine(paused.id, { enabled: false });
+    const traces = [
+      { id: "tr_paused_probe", kind: "routine", prompt: `È il momento della tua routine "${paused.name}".` },
+      { id: "tr_stopped_probe", kind: "chat", prompt: "Controlla la coda" },
+    ];
+    for (const trace of traces) app.store.saveTrace({ ...trace, agentId: iris.id, channelId: CHANNEL, model: iris.model, startedAt: new Date(at - 1000).toISOString(), endedAt: null, status: "interrupted", system: "", output: "", error: "", dropped: 0, steps: [{ at: at - 500, type: "tool", name: "list_routines", args: {}, result: "Nessuna routine", ok: true }] });
+    app.store.appendArchive(CHANNEL, { id: "stop-probe", at: at + 1, authorId: OWNER, authorName: "Sam", kind: "owner", content: "Iris, stoppa tutto" });
+    app.store.appendArchive(CHANNEL, { id: "other-probe", at: at + 2, authorId: OWNER, authorName: "Sam", kind: "owner", content: "Ivo, come va?" });
+    app.store.interruptedAtStart = traces.map((trace) => trace.id);
+    assert.deepEqual(app.orchestrator.resumeInterrupted(), []);
+  });
+
+  test("the evaluator answers a status question while preserving the goal and running task", async () => {
+    const expected = "la coda è verificata senza anticipare i post";
+    let written = 0;
+    goals = () => { written += 1; return expected; };
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let calls = 0;
+    replies.set("Iris", async () => { calls += 1; await gate; return { content: "PASS" }; });
+    const evaluated = [];
+    intentions = (body) => {
+      evaluated.push(body.messages[1].content);
+      return JSON.stringify({ intent: "status", reply: "Sto verificando la coda; non ho ancora un risultato definitivo." });
+    };
+    const pending = app.orchestrator.runRoutine(routine(iris, "Recap senza stop"));
+    try {
+      await waitFor(() => calls === 1);
+      discord.say({ content: 'Iris, senza interromperti, mi dici cosa hai già verificato? Non ti sto dicendo «fermati».' });
+      await waitFor(() => discord.state.webhookPosts.some((post) => post.username === "Iris" && post.content === "Sto verificando la coda; non ho ancora un risultato definitivo."));
+      assert.equal(app.brain.channelGoals.get(CHANNEL), expected);
+      assert.equal(app.orchestrator.threadWork.get(CHANNEL), iris.id);
+      assert.equal(calls, 1, "the recap starts no second worker");
+      assert.equal(written, 1, "the goal writer is not asked to replace a status question with a new goal");
+      assert.equal(evaluated.length, 1);
+      assert.match(evaluated[0], /Obiettivo attuale:[\s\S]*la coda è verificata/);
+    } finally { release(); await pending; }
+    assert.equal(written, 1);
+    assert.equal(app.store.traces(iris.id, 1)[0].status, "pass");
+  });
+
+  test("tools wait for semantic evaluation and cannot run after an evaluated stop", async () => {
+    const r = routine(iris, "Stop valutato");
+    goals = () => "controllo completato";
+    let releaseActor;
+    const actorGate = new Promise((resolve) => { releaseActor = resolve; });
+    let releaseEvaluation;
+    const evaluationGate = new Promise((resolve) => { releaseEvaluation = resolve; });
+    let actorStarted = false;
+    let evaluated = false;
+    replies.set("Iris", async () => {
+      actorStarted = true;
+      await actorGate;
+      return { tool_calls: [{ function: { name: "remember", arguments: { text: "MUST NOT BE WRITTEN" } } }] };
+    });
+    intentions = async () => {
+      evaluated = true;
+      await evaluationGate;
+      return JSON.stringify({ intent: "stop" });
+    };
+    const pending = app.orchestrator.runRoutine(r);
+    try {
+      await waitFor(() => actorStarted);
+      discord.say({ content: "Iris, abbandona quello che stai facendo, lo riprendiamo un altro giorno" });
+      await waitFor(() => evaluated);
+      releaseActor();
+      await sleep(150);
+      assert.ok(!app.store.memories(iris.id).some((memory) => memory.text === "MUST NOT BE WRITTEN"));
+      releaseEvaluation();
+      await waitFor(() => !app.orchestrator.atWork.has(iris.id));
+    } finally { releaseActor(); releaseEvaluation(); await pending; }
+    assert.equal(app.store.traces(iris.id, 1)[0].status, "stopped");
+    assert.equal(app.store.routine(r.id).enabled, false);
+    assert.ok(!app.store.memories(iris.id).some((memory) => memory.text === "MUST NOT BE WRITTEN"));
+  });
+
+  test("a future dependency ends this check instead of restarting it twelve times", async () => {
+    goals = () => "la coda è verificata e le pubblicazioni future restano programmate";
+    let judged = 0;
+    checks = () => { judged += 1; return JSON.stringify({ met: false, blocked: true, reason: "Le pubblicazioni sono previste stasera" }); };
+    let calls = 0;
+    replies.set("Iris", () => ++calls === 1 ? { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] } : { content: "I post restano in coda fino a stasera." });
+    await app.orchestrator.runRoutine(routine(iris, "Scadenze future"));
+    assert.equal(judged, 1);
+    assert.equal(calls, 2);
+  });
+
+  test("a Codex goal retry retains tool evidence and the owner's replacement goal", async () => {
+    app.store.updateAgent(iris.id, { model: "codex/gpt-6-sol" });
+    const before = cli.calls().length;
+    goals = (body) => /Poi il proprietario ha detto/.test(body.messages[1].content) ? "il report è su Telegram" : "il report è via email";
+    let judged = 0;
+    checks = () => {
+      judged += 1;
+      if (judged === 1) {
+        app.orchestrator.ingest(app.orchestrator.state(CHANNEL), { id: "retarget-" + Date.now(), at: Date.now(), authorId: OWNER, authorName: "Sam", kind: "owner", content: "Iris, mandalo su Telegram invece che via email" });
+      }
+      return JSON.stringify({ met: judged >= 3, reason: "manca la consegna" });
+    };
+    cli.set({ reply: "Report preparato.", tool: "list_routines" });
+    try {
+      discord.say({ content: "Iris, manda il report via email" });
+      await waitFor(() => cli.calls().slice(before).filter((item) => item.flavor === "codex").length >= 2, { timeout: 20000 });
+      await quiet();
+      const runs = cli.calls().slice(before).filter((item) => item.flavor === "codex");
+      assert.match(runs[1].stdin, /Azioni già eseguite[\s\S]*list_routines[\s\S]*Verifica attuale/);
+      assert.match(runs[1].stdin, /unica condizione attuale[^\n]*il report è su Telegram/);
+      assert.match(runs[1].stdin, /Messaggi successivi del proprietario[\s\S]*Telegram/);
+    } finally { app.store.updateAgent(iris.id, { model: "ollama/test-model" }); }
+  });
+
+  test("stoppa tutto terminates a running CLI and never invokes the goal verifier", async () => {
+    app.store.updateAgent(iris.id, { model: "codex/gpt-6-sol" });
+    goals = () => "tutti i post sono pubblicati";
+    let judged = 0;
+    checks = () => { judged += 1; return JSON.stringify({ met: false }); };
+    cli.set({ reply: "Non dovrebbe arrivare", hang: true });
+    const before = cli.calls().length;
+    try {
+      discord.say({ content: "Iris, controlla i post" });
+      const run = await waitFor(() => cli.calls().slice(before).find((item) => item.pid), { timeout: 15000 });
+      discord.say({ content: "Iris, stoppa tutto" });
+      await waitFor(() => app.store.traces(iris.id, 1)[0]?.status === "stopped", { timeout: 2500, what: "the CLI being killed" });
+      assert.throws(() => process.kill(run.pid, 0), { code: "ESRCH" });
+      assert.equal(judged, 0);
+      await quiet();
+      assert.equal(cli.calls().slice(before).length, 1, "a stopped goal starts no replacement CLI");
+    } finally { app.store.updateAgent(iris.id, { model: "ollama/test-model" }); cli.set({ reply: "PASS" }); }
   });
 });
