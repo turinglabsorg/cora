@@ -200,6 +200,12 @@ export class Orchestrator {
     }
     if (!state.loading) {
       state.loading = this.discord.fetchMessages(state.id, this.store.settings.historySize)
+        .catch(async (error) => {
+          // A private channel the main bot cannot read: another agent's bot may be in it.
+          const viaBot = await this.bots?.fetchMessages(state.id, this.store.settings.historySize);
+          if (viaBot) return viaBot;
+          throw error;
+        })
         .then((messages) => {
           const items = messages.filter((raw) => raw.id !== exclude).map((raw) => this.toItem(raw));
           const existing = state.history;
@@ -237,6 +243,8 @@ export class Orchestrator {
     // What an agent's own bot posts is already in the history (Cora posted it); the gateway echo can arrive first.
     if (raw.author?.id && this.bots?.agentIdForUser(raw.author.id)) return;
     const state = this.state(raw.channel_id);
+    // Several bots may hear the same channel: the first delivery wins, the rest are the same message.
+    if (state.seen.has(raw.id) || this.store.hasMessage(raw.id)) return;
     await this.ensureHistory(state, { exclude: raw.id });
     const item = this.toItem(raw);
     if (item.kind === "owner" || item.kind === "human") await this.attachImages(item, raw);

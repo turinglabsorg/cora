@@ -5,6 +5,7 @@ import http from "node:http";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { startCora } from "../src/main.js";
 import { passKeys, signPass } from "../src/pass.js";
+import { LISTENING_INTENTS } from "../src/discord.js";
 import { loginLinkToken } from "../src/web.js";
 import { SHARED, Store } from "../src/store.js";
 import { readdirSync, writeFileSync } from "node:fs";
@@ -1125,6 +1126,54 @@ describe("listening without a dedicated bot", () => {
     assert.equal(fake.state.botPosts.filter((item) => item.content === "Ti sento.").length, 1, "its own message is not heard as new");
     await other.stop();
     await fake.close();
+  });
+});
+
+describe("shared listening", () => {
+  test("a private channel the main bot cannot read is heard through the agent's bot that is in it, and one message gets one answer", async (t) => {
+    const fake = await fakeDiscord();
+    const PIA = "600000000000000030";
+    const VALE = "600000000000000031";
+    fake.state.botUsers.set("pia-token", { id: PIA, username: "Pia", appFlags: 1 << 19 });
+    fake.state.botUsers.set("vale-token", { id: VALE, username: "Vale", appFlags: 1 << 19 });
+    const PRIVATE = "1599000000000000900";
+    // Only Vale's bot may read that channel: the listener (Pia, the first agent) gets 403 there.
+    fake.state.privateTo.set(PRIVATE, "vale-token");
+    const otherHome = tempHome();
+    const seed = new Store(otherHome);
+    seed.updateSettings({ guildIds: [GUILD] });
+    const pia = seed.createAgent({ name: "Pia", model: "ollama/test-model", chattiness: 0, tools: false });
+    const vale = seed.createAgent({ name: "Vale", model: "ollama/test-model", chattiness: 0, tools: false });
+    seed.close();
+    const other = startCora({
+      home: otherHome, host: "127.0.0.1", port: 0, adminPassword: "x", sessionKey: "y", insecureCookies: true,
+      discordToken: "", discordApi: fake.url, telegramApi: telegram.url, telegramPollTimeout: 1, ollamaUrl: ollama.url, ollamaKey: "k",
+      claudeBin: cli.claude, codexBin: cli.codex, codexModelsFile: cli.models, ownerInstructions: join(home, "owner-AGENTS.md"),
+      botTokenFor: (name) => ({ CORA_BOT_PIA: "pia-token", CORA_BOT_VALE: "vale-token" })[name] || "",
+      storeSecret: async () => {}, docker: docker.path, schedulerTickMs: 3600000, startBoxes: false,
+    });
+    t.after(async () => { await other.stop(); await fake.close(); });
+    await other.ready;
+    await waitFor(() => other.discord.user?.id === PIA, { what: "Pia listening as the main bot" });
+    await waitFor(() => [pia.id, vale.id].every((id) => other.bots.client(id)?.intents === LISTENING_INTENTS), { what: "both bots listening to their channels" });
+    await sleep(300);
+
+    replies.set("Vale", () => ({ content: "Ci sono, nel canale privato." }));
+    replies.set("Pia", () => ({ content: "PASS" }));
+    // Delivered only to Vale's connection, as Discord does for a channel the others cannot see.
+    fake.sayTo({ botUserId: VALE, channel: PRIVATE, content: "Vale, ci sei?" });
+    const post = await waitFor(() => fake.state.botPosts.find((item) => item.content === "Ci sono, nel canale privato."), { what: "Vale answering in the private channel" });
+    assert.equal(post.channelId, PRIVATE);
+    assert.equal(post.token, "vale-token", "she answers with her own bot");
+    await sleep(800);
+    assert.equal(fake.state.botPosts.filter((item) => item.content === "Ci sono, nel canale privato.").length, 1);
+
+    // A public channel every bot hears: the same message must still get a single answer.
+    fake.say({ content: "Vale, e qui?", channel: CHANNEL });
+    await waitFor(() => fake.state.botPosts.some((item) => item.channelId === CHANNEL && item.content === "Ci sono, nel canale privato."), { what: "Vale answering in the shared channel" });
+    await sleep(1500);
+    const inChannel = fake.state.botPosts.filter((item) => item.channelId === CHANNEL && item.content === "Ci sono, nel canale privato.");
+    assert.equal(inChannel.length, 1, "heard by several bots, answered once");
   });
 });
 

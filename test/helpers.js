@@ -93,6 +93,8 @@ export async function fakeDiscord() {
     identifies: 0,
     history: new Map(),
     webhookAllowed: true,
+    // channel id -> the only bot token allowed to read it (a private channel).
+    privateTo: new Map(),
     botUsers: new Map(),
     profilePatches: [],
     nextId: 900000000000000000n,
@@ -108,7 +110,12 @@ export async function fakeDiscord() {
     const body = await readBody(req);
     let match;
     if (url.pathname === "/gateway/bot") return json(res, 200, { url: `ws://127.0.0.1:${server.address().port}/gateway`, session_start_limit: { remaining: 999 } });
-    if ((match = /^\/channels\/(\d+)\/messages$/.exec(url.pathname)) && req.method === "GET") return json(res, 200, [...(state.history.get(match[1]) || [])].reverse());
+    if ((match = /^\/channels\/(\d+)\/messages$/.exec(url.pathname)) && req.method === "GET") {
+      const only = state.privateTo.get(match[1]);
+      const asking = String(req.headers.authorization || "").replace(/^Bot /, "");
+      if (only && only !== asking) return json(res, 403, { message: "Missing Access", code: 50001 });
+      return json(res, 200, [...(state.history.get(match[1]) || [])].reverse());
+    }
     if ((match = /^\/channels\/(\d+)\/webhooks$/.exec(url.pathname))) {
       if (!state.webhookAllowed) return json(res, 403, { message: "Missing Permissions" });
       if (req.method === "GET") return json(res, 200, []);
@@ -215,6 +222,17 @@ export async function fakeDiscord() {
     state,
     url: `http://127.0.0.1:${port}`,
     dispatch,
+    /** A message in a channel only one bot can see: only that bot's connection receives it. */
+    sayTo({ content, botUserId, channel, author = OWNER, username = "Sam", guild = GUILD }) {
+      counter += 1;
+      const message = {
+        id: id(), type: 0, channel_id: channel, guild_id: guild, content, attachments: [], embeds: [], mentions: [],
+        author: { id: author, username, global_name: username, bot: false }, timestamp: new Date(Date.now() + counter).toISOString(),
+      };
+      state.history.set(channel, [...(state.history.get(channel) || []), message]);
+      for (const [socket, user] of state.socketUser) if (user?.id === botUserId) send(socket, { op: 0, t: "MESSAGE_CREATE", s: ++seq, d: message });
+      return message;
+    },
     /** A person DMs one bot (by its user id). Only that bot's connection receives it, with no server. */
     dm({ content, botUserId, author = OWNER, username = "Sam", channel = "7" + botUserId }) {
       counter += 1;

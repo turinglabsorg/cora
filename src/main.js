@@ -79,6 +79,8 @@ export function startCora(overrides = {}) {
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, emit: live, filesDir, notifier: push, watching: () => web?.watching() });
   // DMs to an agent's own bot reach the orchestrator, where that one agent answers.
   bots.onDirect = (agentId, raw) => orchestrator.onDirectMessage(agentId, raw).catch((error) => activity({ type: "error", agentId, text: `dm: ${error.message}` }));
+  // Every agent bot that may read content also listens: a private channel is heard if one of them is in it.
+  bots.onGuild = (raw) => orchestrator.onMessage(raw).catch((error) => activity({ type: "error", channelId: raw.channel_id, text: error.message }));
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
   const scheduler = new Scheduler({ store, orchestrator, brain, timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));

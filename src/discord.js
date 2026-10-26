@@ -2,6 +2,10 @@ import { EventEmitter } from "node:events";
 
 export const LISTENER_INTENTS = (1 << 0) | (1 << 9) | (1 << 15);
 export const PRESENCE_INTENTS = 1 << 0;
+/** Direct messages reach a bot without the privileged content intent. */
+export const DIRECT_MESSAGE_INTENTS = PRESENCE_INTENTS | (1 << 12);
+/** An agent bot that may read message content listens to its channels too, so private ones are heard. */
+export const LISTENING_INTENTS = LISTENER_INTENTS | (1 << 12);
 const FATAL_CLOSE_CODES = new Map([
   [4004, "the bot token was rejected"],
   [4010, "invalid shard"],
@@ -57,6 +61,15 @@ export class Discord extends EventEmitter {
   }
 
   /** Switch to another bot token (cora listening through an agent's own bot); call start() after. */
+  /** Change what the connection asks to hear, reconnecting when it is already running. */
+  useIntents(intents) {
+    if (this.intents === intents) return;
+    const running = !this.stopped;
+    if (running) this.stop();
+    this.intents = intents;
+    if (running) this.start();
+  }
+
   useToken(token) {
     this.stop();
     this.token = token || "";

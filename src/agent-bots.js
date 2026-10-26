@@ -1,8 +1,4 @@
-import { Discord, PRESENCE_INTENTS } from "./discord.js";
-
-// Each agent's own bot also hears its direct messages (DM content needs no privileged intent).
-const DIRECT_MESSAGES = 1 << 12;
-const AGENT_INTENTS = PRESENCE_INTENTS | DIRECT_MESSAGES;
+import { Discord, DIRECT_MESSAGE_INTENTS, LISTENING_INTENTS } from "./discord.js";
 import { ValidationError } from "./store.js";
 
 // Application flags meaning the Message Content intent is on (the limited one is for unverified apps).
@@ -36,8 +32,9 @@ export function inviteUrl(applicationId, guildId) {
  * main connection, so every message is handled once.
  */
 export class AgentBots {
-  constructor({ store, apiBase, gatewayUrl = "", tokenFor = (name) => process.env[name] || "", log, onDirect = null }) {
+  constructor({ store, apiBase, gatewayUrl = "", tokenFor = (name) => process.env[name] || "", log, onDirect = null, onGuild = null }) {
     this.onDirect = onDirect;
+    this.onGuild = onGuild;
     this.store = store;
     this.apiBase = apiBase;
     this.gatewayUrl = gatewayUrl;
@@ -69,6 +66,8 @@ export class AgentBots {
     try {
       const app = await entry.client.request("GET", "/applications/@me");
       const on = Boolean((app?.flags || 0) & MESSAGE_CONTENT_FLAGS);
+      // Only a bot allowed to read content asks to hear channels: asking without it closes the gateway for good.
+      entry.client.useIntents(on ? LISTENING_INTENTS : DIRECT_MESSAGE_INTENTS);
       if (on !== entry.messageContent) {
         entry.messageContent = on;
         this.onChange?.();
@@ -139,9 +138,10 @@ export class AgentBots {
         if (!this.clients.get(agentId).messageContent) this.readFlags(agentId);
         continue;
       }
-      const client = new Discord({ token, apiBase: this.apiBase, gatewayUrl: this.gatewayUrl, intents: AGENT_INTENTS });
-      // A message with no server is a DM to this bot: the agent answers it.
-      client.on("message", (raw) => { if (!raw.guild_id) this.onDirect?.(agentId, raw); });
+      const client = new Discord({ token, apiBase: this.apiBase, gatewayUrl: this.gatewayUrl, intents: DIRECT_MESSAGE_INTENTS });
+      // No server means a DM to this bot, answered by its agent; anything else is a channel this bot can see,
+      // so a private channel is heard as long as one agent's bot is in it. Repeats are dropped by message id.
+      client.on("message", (raw) => { if (raw.guild_id) this.onGuild?.(raw); else this.onDirect?.(agentId, raw); });
       client.on("ready", () => {
         this.log?.({ type: "discord", agentId, text: `bot collegato come ${client.user?.username}` });
         this.syncProfile(this.store.agent(agentId));
@@ -172,6 +172,17 @@ export class AgentBots {
     for (const { client } of this.clients.values()) client.stop();
     this.clients.clear();
     this.synced.clear();
+  }
+
+  /** Read a channel's recent messages with any bot that can see it (the main one may not). */
+  async fetchMessages(channelId, limit) {
+    for (const { client, messageContent } of this.clients.values()) {
+      if (!messageContent || !client.user) continue;
+      try {
+        return await client.fetchMessages(channelId, limit);
+      } catch {}
+    }
+    return null;
   }
 
   /** The agent's own client, once it is connected. */

@@ -33,6 +33,7 @@ web panel (password, PWA) ──► REST API + live events (SSE) + noVNC proxy +
 - **Telegram:** a main bot long-polls the chats turned on; agents post through their own Telegram bot when it is in the chat, otherwise through the main bot with their name in bold.
 - **The panel:** the Salotto and one private chat per agent, always available, archived like the other channels so memory sees them.
 - **Threads and DMs.** In a Discord thread agents only speak when summoned by name. A direct message to an agent's own bot is a private conversation that only that agent answers, even if it is assigned to no channel.
+- **Shared listening.** Every agent bot allowed to read message content also listens to the channels it can see, so a private channel is heard as long as one agent is in it; the same message arriving from several bots is answered once.
 
 ## Their computers
 

@@ -6,7 +6,7 @@ Always-on Discord agents with personalities, layered memory, routines and their 
 
 - `src/main.js` wires everything; `startCora(overrides)` is what the tests start.
 - `src/discord.js` persistent Gateway (heartbeat, resume, reconnect) + REST + per-channel `cora` webhooks; the same class runs each agent's own bot (presence-only intents, `say`, `syncProfile`).
-- `src/agent-bots.js` one connection per agent with a `CORA_BOT_<NAME>` token: posting, typing, mentions and profile sync as that agent; listening stays on the main bot.
+- `src/agent-bots.js` one connection per agent with a `CORA_BOT_<NAME>` token: posting, typing, mentions and profile sync as that agent. **Listening is shared**: a bot whose app has Message Content is switched to `LISTENING_INTENTS` (`useIntents`) and its channel messages go to `onGuild` → `Orchestrator.onMessage`, so a private channel is heard as long as one agent's bot is in it; repeats are dropped by message id (`state.seen` / `store.hasMessage`). Bots without Message Content keep `DIRECT_MESSAGE_INTENTS` (DMs only). `AgentBots.fetchMessages` reads history with a bot that can see the channel when the main one gets 403.
 - `src/channels.js` where the cora lives: Discord or Telegram (`settings.transport`), one at a time, plus the panel rooms; `info(id)` gives prompts the `where`/`place` of a channel. Telegram channel ids are `tg:<chat id>`.
 - `src/telegram.js` Bot API client (getUpdates long polling, HTML messages, files); `src/telegram-bots.js` agents' own Telegram bots (`CORA_TG_BOT_<NAME>`, send only).
 - `src/secrets.js` writes a token pasted in the panel into hush (`hush box seal` to the machine's own key piped into `hush box open`). The CLIs never inherit `CORA_BOT_*`.
