@@ -488,7 +488,9 @@ describe("agents in Discord", () => {
     assert.ok(state);
   });
 
-  test("a task on Claude Code is handed to its own goal mode: /goal first, the task after, in one session", async () => {
+  test("a task on Claude Code is handed to its own goal mode: /goal first, the task after, in one session", async (t) => {
+    await call("/api/settings", { method: "PUT", body: { goalMode: true } });
+    t.after(() => call("/api/settings", { method: "PUT", body: { goalMode: false } }));
     const created = await call("/api/agents", { method: "POST", body: { name: "Nora", model: "claude/claude-sonnet-5-5", chattiness: 0, tools: true } });
     assert.equal(created.status, 201);
     const goal = "la pagina è online e risponde 200";
@@ -1066,7 +1068,23 @@ describe("talking with the agents", () => {
     assert.ok(trace.stepCount > 22, `worked through ${trace.stepCount} steps`);
   });
 
-  test("goal mode: a task gets a goal, a separate check sends the agent back with the reason, and nothing is posted until it is met", async () => {
+  test("with goal mode off nobody writes a goal and nobody checks one", async () => {
+    let asked = false;
+    goals = () => { asked = true; return "una condizione qualsiasi"; };
+    checks = () => { asked = true; return JSON.stringify({ met: false, reason: "no" }); };
+    replies.set("Olga", () => ({ content: "Fatto e basta." }));
+    discord.say({ content: "Olga, guarda una cosa" });
+    await waitFor(() => posts("Olga").includes("Fatto e basta."), { what: "Olga's answer", timeout: 20000 });
+    await quiet();
+    assert.ok(!asked, "no goal is written and no check runs while the switch is off");
+    const [trace] = (await call(`/api/agents/${olga.id}/traces`)).data;
+    const steps = (await call(`/api/traces/${trace.id}`)).data.steps;
+    assert.ok(!steps.some((step) => /Obiettivo:|Controllo obiettivo/.test(step.text || "")), "and nothing about a goal reaches the record");
+  });
+
+  test("goal mode: a task gets a goal, a separate check sends the agent back with the reason, and nothing is posted until it is met", async (t) => {
+    await call("/api/settings", { method: "PUT", body: { goalMode: true } });
+    t.after(() => call("/api/settings", { method: "PUT", body: { goalMode: false } }));
     const goal = "il deploy è in produzione e verificato dall'esterno";
     let askedFrom = "";
     goals = (body) => { askedFrom = String(body.messages[1].content); return goal; };

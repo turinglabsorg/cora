@@ -26,6 +26,8 @@ const DEFAULT_SETTINGS = {
   historySize: 30,
   sharedMemory: "",
   defaultModel: "ollama/deepseek-v4.1-flash",
+  // Goal mode is off until it yields to the owner: a goal it cannot drop fights whoever asked for it.
+  goalMode: false,
   sleepHour: 4,
   transport: "discord",
   telegramChatIds: [],
@@ -207,6 +209,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     historySize: Math.round(clampNumber(merged.historySize, 5, 100, 30)),
     sharedMemory: cleanText(merged.sharedMemory, 12000),
     defaultModel: checkModel(merged.defaultModel) || DEFAULT_SETTINGS.defaultModel,
+    goalMode: Boolean(merged.goalMode),
     sleepHour: Math.round(clampNumber(merged.sleepHour, 0, 23, 4)),
     transport: TRANSPORTS.includes(merged.transport) ? merged.transport : "discord",
     telegramChatIds: cleanIds(merged.telegramChatIds, /^-?\d{1,20}$/),

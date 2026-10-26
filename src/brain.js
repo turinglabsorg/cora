@@ -287,15 +287,15 @@ export class Brain {
    * writes it, so an agent never sets its own finish line. Empty when it
    * cannot be written: the task then runs on the plain harness rules.
    */
-  async goalFor(request) {
+  async goalFor(request, since = "") {
     const model = this.store.settings.defaultModel;
-    if (!model || this.llm.isAgentic(model)) return { goal: "", usage: null };
+    if (!this.store.settings.goalMode || !model || this.llm.isAgentic(model)) return { goal: "", usage: null };
     try {
       const out = await this.llm.chat({
         model, tools: [], effort: "low",
         messages: [
           { role: "system", content: "Scrivi la condizione di completamento di un compito: cosa deve essere vero e verificato perché sia finito, non i passi per arrivarci. Una riga sola, nella lingua della richiesta, senza preamboli. Se la richiesta non è un compito ma una chiacchiera, rispondi NESSUNO." },
-          { role: "user", content: `Richiesta:\n${String(request).slice(0, 4000)}\n\nCondizione di completamento (una riga):` },
+          { role: "user", content: `Richiesta:\n${String(request).slice(0, 4000)}${since ? `\n\nPoi il proprietario ha detto:\n${since.slice(0, 2000)}\nSe cambia quello che chiede, la condizione è la nuova, non quella di prima.` : ""}\n\nCondizione di completamento (una riga):` },
         ],
       });
       const text = String(out.text || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim().split("\n")[0].trim();
@@ -353,6 +353,8 @@ export class Brain {
     const recent = [];
     // What the agent really did, in one line each: the goal check reads this, not its promises.
     const did = [];
+    // What the owner said after the task started: a goal they have moved past must not hold.
+    let steering = [];
     let lastUpdate = Date.now();
     const sayTracked = say ? async (text) => {
       lastUpdate = Date.now();
@@ -408,6 +410,7 @@ export class Brain {
       const parts = [];
       const fresh = inbox?.() || [];
       if (fresh.length) {
+        for (const item of fresh) if (item.kind === "owner" || item.kind === "human") steering.push(`${item.authorName}: ${item.content}`);
         trace.add({ type: "note", text: `Nuovi messaggi mentre lavora:\n${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}` });
         parts.push(`[Nel frattempo nella chat]\n${formatTranscript(fresh, agent, this.timezone)}\n(Se cambiano quello che ti chiedono, adatta il piano.)`);
       }
