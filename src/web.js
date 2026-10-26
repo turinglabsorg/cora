@@ -392,6 +392,11 @@ export function createWeb({ config, store, discord, telegram, channels, boxes, l
       return send(res, 200, [...live, ...store.traces(match[1], limit).filter((trace) => !live.some((item) => item.id === trace.id))]);
     }
 
+    if (path === "/api/usage" && method === "GET") {
+      const days = Math.min(366, Math.max(30, Number(url.searchParams.get("days")) || 365));
+      return send(res, 200, { days, today: new Intl.DateTimeFormat("en-CA", { timeZone: config.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()), usage: store.usageByDay(days, config.timezone) });
+    }
+
     if (path === "/api/traces" && method === "GET") {
       const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit")) || 12));
       const live = [...(traces?.live.values() || [])].map((trace) => trace.summary());

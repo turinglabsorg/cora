@@ -269,6 +269,7 @@ export class LLM {
     if (!response.ok || data.error) throw new Error(`ollama ${name}: ${String(data.error || response.status).slice(0, 200)}`);
     const message = data.message || {};
     return {
+      usage: { in: Number(data.prompt_eval_count) || 0, out: Number(data.eval_count) || 0 },
       text: message.content || "",
       thinking: message.thinking || "",
       toolCalls: (message.tool_calls || []).map((call) => ({ id: call.id || callId(), name: call.function?.name, args: parseArgs(call.function?.arguments) })),
@@ -320,6 +321,7 @@ export class LLM {
     const message = data.choices?.[0]?.message || {};
     const text = Array.isArray(message.content) ? message.content.map((part) => part.text || "").join("") : message.content || "";
     return {
+      usage: { in: Number(data.usage?.prompt_tokens) || 0, out: Number(data.usage?.completion_tokens) || 0 },
       text,
       thinking: message.reasoning_content || message.reasoning || "",
       toolCalls: (message.tool_calls || []).map((call) => ({ id: call.id || callId(), name: call.function?.name, args: parseArgs(call.function?.arguments) })),

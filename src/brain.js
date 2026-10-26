@@ -289,7 +289,7 @@ export class Brain {
    */
   async goalFor(request) {
     const model = this.store.settings.defaultModel;
-    if (!model || this.llm.isAgentic(model)) return "";
+    if (!model || this.llm.isAgentic(model)) return { goal: "", usage: null };
     try {
       const out = await this.llm.chat({
         model, tools: [], effort: "low",
@@ -299,10 +299,10 @@ export class Brain {
         ],
       });
       const text = String(out.text || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim().split("\n")[0].trim();
-      if (!text || /^nessuno\b/i.test(text)) return "";
-      return text.slice(0, GOAL_CHARS);
+      const goal = !text || /^nessuno\b/i.test(text) ? "" : text.slice(0, GOAL_CHARS);
+      return { goal, usage: out.usage };
     } catch {
-      return "";
+      return { goal: "", usage: null };
     }
   }
 
@@ -323,10 +323,10 @@ export class Brain {
         ],
       });
       const data = parseJsonObject(String(out.text || ""));
-      if (!data || typeof data.met !== "boolean") return { met: true, reason: "" };
-      return { met: data.met, reason: String(data.reason || "").trim().slice(0, 300) };
+      if (!data || typeof data.met !== "boolean") return { met: true, reason: "", usage: out.usage };
+      return { met: data.met, reason: String(data.reason || "").trim().slice(0, 300), usage: out.usage };
     } catch {
-      return { met: true, reason: "" };
+      return { met: true, reason: "", usage: null };
     }
   }
 
@@ -338,12 +338,13 @@ export class Brain {
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
     // Every task carries a goal, and the goal travels with the prompt: whichever harness
     // runs the agent sees the condition it has to meet, in its own words.
-    const goal = task ? await this.goalFor(user) : "";
+    const { goal, usage: goalCost } = task ? await this.goalFor(user) : { goal: "", usage: null };
     // Claude Code checks a goal itself, inside one session: hand it the condition and stand back.
     const nativeGoal = Boolean(goal) && this.llm.hasGoalMode(model);
     const contract = goal && !nativeGoal ? `\n\n[Obiettivo] Il compito è finito solo quando è vero e verificato questo: ${goal}\nLavoraci fino a lì senza chiedere se andare avanti. Ogni volta che ti fermi un controllo separato verifica la condizione: se non è soddisfatta torni al lavoro.` : "";
     const prompt = `Ora: ${formatNow(this.timezone)}.\n\n${user}${contract}`;
     const trace = this.startTrace({ agentId: agent.id, kind: mode, channelId: channel.id, model, system, prompt });
+    trace.spent(goalCost);
     if (goal) trace.add({ type: "note", text: `Obiettivo: ${goal}` });
     let asked = false;
     // What the Cora harness watches while an agent works: real work done, and calls repeated without progress.
@@ -448,7 +449,8 @@ export class Brain {
     const goalVerdict = async (raw) => {
       if (!worked || looping || asked || goalRounds >= GOAL_ROUNDS || Date.now() > deadline - 20000) return null;
       const text = cleanReply(raw, agent);
-      const { met, reason } = await this.goalCheck(goal, { answer: text, work: did.slice(-40).join("\n") });
+      const { met, reason, usage } = await this.goalCheck(goal, { answer: text, work: did.slice(-40).join("\n") });
+      trace.spent(usage);
       trace.add({ type: "note", text: `Controllo obiettivo: ${met ? "raggiunto" : "non ancora"}${reason ? ` — ${reason}` : ""}` });
       if (met) return null;
       goalRounds += 1;
@@ -467,6 +469,7 @@ export class Brain {
           goal: nativeGoal ? goal : "",
         });
         let result = await run(prompt);
+        trace.spent(result.usage);
         let final = result.text;
         for (let next = await nextStep(final); next; next = await nextStep(result.text)) {
           if (next.kind !== "goal") nudges += 1;
@@ -474,6 +477,7 @@ export class Brain {
           if (next.kind === "unfinished" && sayTracked) await sayTracked(next.text).catch(() => {});
           trace.add({ type: "note", text: `Cora harness: ${next.kind === "confirm" ? "chiedo conferma che sia finito" : "lo rimando al lavoro"}.` });
           result = await run(`${prompt}\n\n[Il tuo turno precedente si è chiuso con: «${cleanReply(result.text, agent) || "(niente)"}»]\n\n${next.prompt}`);
+          trace.spent(result.usage);
           if (next.kind === "confirm" && isDone(result.text)) break;
           final = result.text;
         }
@@ -500,6 +504,7 @@ export class Brain {
             model, effort: "low", tools: [],
             messages: [...messages, { role: "user", content: "[Cora] Il lavoro è lungo e la conversazione sta diventando troppo grande. Scrivi un riassunto per te stesso: l'obiettivo, cosa hai già fatto (comandi, file, link e risultati importanti), cosa manca e i prossimi passi. Solo il riassunto." }],
           });
+          trace.spent(summary.usage);
           const notes = String(summary.text || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim().slice(0, 12000);
           trace.add({ type: "note", text: `Cora harness: conversazione riassunta per continuare.\n${notes}` });
           messages.splice(0, messages.length,
@@ -508,6 +513,7 @@ export class Brain {
             { role: "user", content: `[Cora] Stai lavorando a questo compito da un po'. Il tuo riassunto di dove sei arrivato:\n${notes}\n\nContinua da qui.` });
         }
         const result = await this.llm.chat({ model, messages, tools, effort: effortOf(agent) });
+        trace.spent(result.usage);
         think(result);
         if (!result.toolCalls.length) {
           // It confirmed it is done: post the real answer it gave, never the bare "DONE".
@@ -540,6 +546,7 @@ export class Brain {
       trace.add({ type: "note", text: "Lavora da troppo: chiedo il messaggio finale." });
       messages.push({ role: "user", content: "[Cora] Ci stai lavorando da molto: fermati qui e scrivi cosa hai fatto, cosa manca e cosa ti blocca." });
       const final = await this.llm.chat({ model, messages, tools: [], effort: "low" });
+      trace.spent(final.usage);
       think(final);
       return done(final.text, steps);
     } catch (error) {

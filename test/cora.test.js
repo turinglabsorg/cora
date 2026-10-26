@@ -387,6 +387,28 @@ describe("agents in Discord", () => {
     assert.ok(app.store.memories(SHARED).length >= 1);
   });
 
+  test("what a turn spends is counted and served by day, for the heatmap", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Nuvola", model: "ollama/test-model", chattiness: 0, tools: false } });
+    assert.equal(created.status, 201);
+    replies.set("Nuvola", () => ({ content: "Eccomi." }));
+    discord.say({ content: "Nuvola, ci sei?" });
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Nuvola" && item.content === "Eccomi."), { what: "Nuvola's answer" });
+    await quiet();
+    const [trace] = (await call(`/api/agents/${created.data.id}/traces`)).data;
+    assert.equal(trace.tokensIn, 120, "the input tokens of the call are kept");
+    assert.equal(trace.tokensOut, 30);
+    const usage = await call("/api/usage");
+    assert.equal(usage.status, 200);
+    assert.match(usage.data.today, /^\d{4}-\d{2}-\d{2}$/);
+    const mine = usage.data.usage.find((row) => row.agentId === created.data.id);
+    assert.ok(mine, "the agent has a day of its own");
+    assert.equal(mine.day, usage.data.today);
+    assert.equal(mine.tokensIn, 120);
+    assert.equal(mine.tokensOut, 30);
+    assert.equal(mine.turns, 1);
+    await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
+  });
+
   test("a routine says what it is going to check before it starts working", async () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Lina", model: "ollama/test-model", chattiness: 0, tools: true, channelIds: [CHANNEL] } });
     assert.equal(created.status, 201);

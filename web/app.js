@@ -72,6 +72,7 @@ const STATE_LABEL = {
 
 const ICONS = {
   grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
+  chart: '<path d="M3.5 20.5h17"/><rect x="5" y="12" width="3.5" height="6" rx="1"/><rect x="10.2" y="7.5" width="3.5" height="10.5" rx="1"/><rect x="15.4" y="4" width="3.5" height="14" rx="1"/>',
   chat: '<path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3 21l1.9-5.3A8.5 8.5 0 1 1 21 11.5z"/>',
   users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14a6.5 6.5 0 0 1 3.5 6"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
@@ -599,6 +600,111 @@ async function renderDashboard() {
   S.timers.push(setInterval(() => scheduleRefresh(), 30000));
 }
 
+/* ---------- token heatmap ---------- */
+const MONTHS = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"];
+
+function shortTokens(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}k`;
+  return String(n);
+}
+
+/** The days to draw: whole weeks back from today, so every column is a week. */
+function heatDays(today, weeks) {
+  const end = new Date(`${today}T12:00:00Z`);
+  // Columns start on Monday: walk back to the Monday of this week, then back `weeks`.
+  const weekday = (end.getUTCDay() + 6) % 7;
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - weekday - (weeks - 1) * 7);
+  const days = [];
+  for (let at = new Date(start); at <= end; at.setUTCDate(at.getUTCDate() + 1)) {
+    days.push({ key: at.toISOString().slice(0, 10), date: new Date(at) });
+  }
+  return days;
+}
+
+/**
+ * A year of days, a square each, darker to brighter with what was spent. The
+ * scale is relative to the busiest day: providers count tokens so differently
+ * that an absolute scale would say nothing.
+ */
+function heatmap(byDay, { today, weeks = 27, label = "" } = {}) {
+  const days = heatDays(today, weeks);
+  const peak = Math.max(1, ...days.map((day) => byDay.get(day.key)?.tokens || 0));
+  const readout = h("p", { class: "heat-readout" }, label || "\u00a0");
+  const tell = (text) => { readout.textContent = text || label || "\u00a0"; };
+  const months = h("div", { class: "heat-months" });
+  const grid = h("div", { class: "heat-grid", vars: { "--weeks": String(Math.ceil(days.length / 7)) } });
+  let lastMonth = -1;
+  for (let index = 0; index < days.length; index += 1) {
+    const day = days[index];
+    if (index % 7 === 0) {
+      const month = day.date.getUTCMonth();
+      months.append(h("span", { class: "heat-month" }, month === lastMonth ? "" : MONTHS[month]));
+      lastMonth = month;
+    }
+    const spent = byDay.get(day.key);
+    const tokens = spent?.tokens || 0;
+    // Five steps, so a quiet day still shows against an empty one.
+    const level = !tokens ? 0 : Math.min(4, 1 + Math.floor((tokens / peak) * 3.999));
+    const when = `${day.date.getUTCDate()} ${MONTHS[day.date.getUTCMonth()]}`;
+    const text = tokens
+      ? `${when} · ${shortTokens(tokens)} token · ${spent.turns} ${spent.turns === 1 ? "turno" : "turni"}`
+      : `${when} · niente`;
+    grid.append(h("i", {
+      class: `heat-cell l${level}`, title: text,
+      onpointerenter: () => tell(text),
+      onclick: () => tell(text),
+    }));
+  }
+  const scroll = h("div", { class: "heat-scroll" }, h("div", { class: "heat-plot" }, months, grid));
+  // Today is at the right end, and that is the end worth seeing first.
+  requestAnimationFrame(() => { scroll.scrollLeft = scroll.scrollWidth; });
+  return h("div", { class: "heat" },
+    scroll,
+    h("div", { class: "heat-foot" }, readout,
+      h("span", { class: "heat-legend" }, h("small", {}, "meno"),
+        ...[0, 1, 2, 3, 4].map((level) => h("i", { class: `heat-cell l${level}` })), h("small", {}, "pi\u00f9"))));
+}
+
+/** Daily totals: one map for everyone, one per agent. */
+function foldUsage(rows) {
+  const all = new Map();
+  const byAgent = new Map();
+  for (const row of rows || []) {
+    const tokens = (row.tokensIn || 0) + (row.tokensOut || 0);
+    const total = all.get(row.day) || { tokens: 0, turns: 0 };
+    total.tokens += tokens;
+    total.turns += row.turns || 0;
+    all.set(row.day, total);
+    const mine = byAgent.get(row.agentId) || new Map();
+    mine.set(row.day, { tokens, turns: row.turns || 0 });
+    byAgent.set(row.agentId, mine);
+  }
+  return { all, byAgent };
+}
+
+function usagePanel() {
+  const body = h("div", { class: "heat-wrap" }, h("p", { class: "muted" }, tr("Carico i consumi\u2026")));
+  api("/api/usage").then((data) => {
+    const { all, byAgent } = foldUsage(data.usage);
+    const spent = [...all.values()].reduce((sum, day) => sum + day.tokens, 0);
+    body.replaceChildren(
+      h("div", { class: "heat-block" },
+        h("div", { class: "heat-head" }, h("b", {}, tr("Tutti insieme")), h("span", { class: "heat-total" }, `${shortTokens(spent)} token`)),
+        heatmap(all, { today: data.today, label: tr("Un quadrato per giorno: tocca per vedere quanto.") })),
+      ...S.data.agents.map((agent) => {
+        const mine = byAgent.get(agent.id) || new Map();
+        const total = [...mine.values()].reduce((sum, day) => sum + day.tokens, 0);
+        return h("div", { class: "heat-block" },
+          h("div", { class: "heat-head" }, avatar(agent), h("b", {}, agent.name), h("span", { class: "heat-total" }, `${shortTokens(total)} token`)),
+          heatmap(mine, { today: data.today, label: modelLabel(agent.model, { short: true }) }));
+      }));
+  }).catch(() => body.replaceChildren(h("p", { class: "muted" }, tr("Consumi non disponibili."))));
+  return body;
+}
+
 function renderAgents() {
   const agents = S.data.agents;
   shell([
@@ -613,6 +719,7 @@ function renderAgents() {
             h("span", { class: "row-meta" }, `${modelLabel(agent.model, { short: true })} · ${tr(agent.box?.running ? "desktop acceso" : "desktop spento")} · ${tr(account).toLowerCase()}`)),
           icon("next", "chev"));
       })) : empty("users", "Ancora nessun agente.", btn("Crea il primo", { icon: "plus", href: "#/new", cls: "primary" }))),
+    panel({ icon: "chart", title: tr("Consumi"), hint: tr("Quanti token spende ognuno, giorno per giorno.") }, usagePanel()),
   ], { title: "Agenti" });
 }
 

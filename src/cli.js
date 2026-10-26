@@ -125,7 +125,15 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
     if (!data) throw new Error(`claude: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`);
     if (data.is_error) throw new Error(`claude: ${String(data.result || data.subtype || "error").slice(0, 240)}`);
     texts.finish(data.result);
-    return { text: String(data.result || "") };
+    const used = data.usage || {};
+    return {
+      text: String(data.result || ""),
+      // Cached input was still read for this turn: it counts as what the turn cost.
+      usage: {
+        in: (Number(used.input_tokens) || 0) + (Number(used.cache_read_input_tokens) || 0) + (Number(used.cache_creation_input_tokens) || 0),
+        out: Number(used.output_tokens) || 0,
+      },
+    };
   } finally {
     rmSync(mcpFile, { force: true });
   }
@@ -220,8 +228,13 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
   let failure = "";
   // The last thing the agent actually said: if the CLI dies after saying it, that answer is not lost.
   let said = "";
+  const used = { in: 0, out: 0 };
   const onLine = (line) => {
     const event = JSON.parse(line);
+    if (event.type === "turn.completed" && event.usage) {
+      used.in += Number(event.usage.input_tokens) || 0;
+      used.out += (Number(event.usage.output_tokens) || 0) + (Number(event.usage.reasoning_output_tokens) || 0);
+    }
     if (event.type === "error" || event.type === "turn.failed") failure = String(event.message || event.error?.message || failure);
     if (event.type !== "item.completed") return;
     const item = event.item || {};
@@ -245,7 +258,7 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     // stdout is the event stream: dumping its last lines reports JSON, not a reason.
     if (out.code !== 0 && !text.trim()) throw new Error(`codex: ${(failure || out.stderr).trim().split("\n").slice(-3).join(" ").slice(0, 240) || `exited with ${out.code} and said nothing`}`);
     texts.finish(text);
-    return { text };
+    return { text, usage: used };
   } finally {
     rmSync(outFile, { force: true });
   }

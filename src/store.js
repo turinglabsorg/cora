@@ -119,7 +119,9 @@ CREATE TABLE IF NOT EXISTS traces (
   prompt TEXT NOT NULL DEFAULT '',
   steps TEXT NOT NULL DEFAULT '[]',
   output TEXT NOT NULL DEFAULT '',
-  error TEXT NOT NULL DEFAULT ''
+  error TEXT NOT NULL DEFAULT '',
+  tokens_in INTEGER NOT NULL DEFAULT 0,
+  tokens_out INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS traces_agent ON traces(agent_id, started_at);
 CREATE TABLE IF NOT EXISTS trace_systems (hash TEXT PRIMARY KEY, text TEXT NOT NULL);
@@ -279,6 +281,8 @@ function traceRow(row, full) {
     status: row.status,
     stepCount: row.step_count,
     tools: row.tools ? row.tools.split(",") : [],
+    tokensIn: row.tokens_in || 0,
+    tokensOut: row.tokens_out || 0,
     output: full ? row.output : row.output.slice(0, 240),
     error: row.error,
   };
@@ -296,6 +300,10 @@ export class Store {
     try { chmodSync(this.path, 0o600); } catch {}
     this.db.exec(SCHEMA);
     try { this.db.exec("ALTER TABLE messages ADD COLUMN meta TEXT"); } catch {}
+    // Older databases have no token counts: their traces simply read as zero.
+    for (const column of ["tokens_in", "tokens_out"]) {
+      try { this.db.exec(`ALTER TABLE traces ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`); } catch {}
+    }
     // Turns cut short by the restart: the long tasks among them are picked up again (Orchestrator.resumeInterrupted).
     this.interruptedAtStart = this.db.prepare("SELECT id FROM traces WHERE status = 'running'").all().map((row) => row.id);
     this.db.exec("UPDATE traces SET status = 'interrupted' WHERE status = 'running'");
@@ -632,10 +640,11 @@ export class Store {
       systemHash = createHash("sha256").update(trace.system).digest("hex");
       this.stmt("INSERT OR IGNORE INTO trace_systems(hash, text) VALUES (?, ?)").run(systemHash, trace.system);
     }
-    this.stmt(`INSERT OR REPLACE INTO traces(id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, system_hash, prompt, steps, output, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    this.stmt(`INSERT OR REPLACE INTO traces(id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, system_hash, prompt, steps, output, error, tokens_in, tokens_out)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       trace.id, trace.agentId, trace.kind, trace.channelId || null, trace.model || "", trace.startedAt, trace.endedAt || null, trace.status,
       trace.steps.length + (trace.dropped || 0), tools, systemHash, trace.prompt || "", JSON.stringify(trace.steps), trace.output || "", trace.error || "",
+      Number(trace.tokensIn) || 0, Number(trace.tokensOut) || 0,
     );
     if (trace.status !== "running" && Math.random() < 0.05) this.pruneTraces(trace.agentId);
   }
@@ -646,13 +655,33 @@ export class Store {
   }
 
   traces(agentId, limit = 50) {
-    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error FROM traces WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?")
+    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out FROM traces WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?")
       .all(agentId, limit).map((row) => traceRow(row, false));
   }
 
   recentTraces(limit = 12) {
-    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error FROM traces ORDER BY started_at DESC LIMIT ?")
+    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out FROM traces ORDER BY started_at DESC LIMIT ?")
       .all(limit).map((row) => traceRow(row, false));
+  }
+
+  /**
+   * What every agent spent, one row per agent per local day: the heatmap reads
+   * this straight. Days with nothing simply do not appear.
+   */
+  usageByDay(days = 365, timezone = "Europe/Rome") {
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const rows = this.stmt("SELECT agent_id, started_at, tokens_in, tokens_out FROM traces WHERE started_at >= ? AND (tokens_in > 0 OR tokens_out > 0)").all(since);
+    const day = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+    const totals = new Map();
+    for (const row of rows) {
+      const key = `${row.agent_id}|${day.format(new Date(row.started_at))}`;
+      const seen = totals.get(key) || { agentId: row.agent_id, day: key.split("|")[1], tokensIn: 0, tokensOut: 0, turns: 0 };
+      seen.tokensIn += row.tokens_in || 0;
+      seen.tokensOut += row.tokens_out || 0;
+      seen.turns += 1;
+      totals.set(key, seen);
+    }
+    return [...totals.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
   }
 
   trace(id) {

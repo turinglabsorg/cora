@@ -54,8 +54,17 @@ class Trace {
     this.output = "";
     this.error = "";
     this.dropped = 0;
+    // What the turn cost, added up over every model call it made.
+    this.tokensIn = 0;
+    this.tokensOut = 0;
     this.savedAt = Date.now();
     Object.assign(this, fields);
+  }
+
+  /** Count what a model call used. Harnesses that report nothing leave this at zero. */
+  spent(usage) {
+    this.tokensIn += Number(usage?.in) || 0;
+    this.tokensOut += Number(usage?.out) || 0;
   }
 
   add(step) {
@@ -92,6 +101,7 @@ class Trace {
     return {
       id: this.id, agentId: this.agentId, kind: this.kind, channelId: this.channelId, model: this.model,
       startedAt: this.startedAt, endedAt: this.endedAt, status: this.status, stepCount: this.steps.length + this.dropped,
+      tokensIn: this.tokensIn, tokensOut: this.tokensOut,
       tools: [...new Set(this.steps.filter((step) => step.type === "tool").map((step) => step.name))],
       output: this.output.slice(0, 240), error: this.error,
     };
@@ -103,4 +113,4 @@ class Trace {
 }
 
 /** Stand-in when nothing records traces. */
-export const NO_TRACE = { id: null, add() {}, finish() {} };
+export const NO_TRACE = { id: null, add() {}, finish() {}, spent() {} };

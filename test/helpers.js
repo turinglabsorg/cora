@@ -296,7 +296,8 @@ export async function fakeOllama(reply) {
         return res.end(JSON.stringify({ error: String(error.message || error) }));
       }
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ message: { role: "assistant", content: "", ...message }, done: true }));
+      // Ollama reports what the call used; the panel's heatmap is built from these.
+      return res.end(JSON.stringify({ message: { role: "assistant", content: "", ...message }, done: true, prompt_eval_count: 120, eval_count: 30 }));
     }
     res.writeHead(404);
     res.end();
