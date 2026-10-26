@@ -622,23 +622,25 @@ export class Orchestrator {
    * hours and used the agent's computer.
    */
   resumeInterrupted({ withinMs = 8 * 3600 * 1000 } = {}) {
-    const ids = this.store.interruptedAtStart || [];
+    const pendingRuns = this.store.pendingRoutineRuns();
+    const ids = [...new Set([...(this.store.interruptedAtStart || []), ...pendingRuns.map((run) => run.traceId).filter(Boolean)])];
     this.store.interruptedAtStart = [];
     const resumed = [];
     for (const id of ids) {
       const trace = this.store.trace(id);
-      if (!trace || !["chat", "routine"].includes(trace.kind) || !trace.channelId) continue;
-      if (Date.now() - Date.parse(trace.startedAt) > withinMs) continue;
-      if (!trace.tools.some((name) => !MEMORY_TOOLS.has(name))) continue;
+      if (!trace || !["chat", "routine", "reminder"].includes(trace.kind) || !trace.channelId) continue;
+      const pendingRun = pendingRuns.find((run) => run.traceId === trace.id);
+      if (!pendingRun && Date.now() - Date.parse(trace.startedAt) > withinMs) continue;
+      if (!pendingRun && !trace.tools.some((name) => !MEMORY_TOOLS.has(name))) continue;
       const agent = this.store.agent(trace.agentId);
-      if (!agent?.enabled || !agent.tools) continue;
+      if (!agent?.enabled || (!pendingRun && !agent.tools)) continue;
       if (!isWebRoom(trace.channelId) && !this.channels?.isActive(trace.channelId)) continue;
       const latest = this.store.recentMessages(trace.channelId, this.store.settings.historySize).findLast((item) =>
         item.at > Date.parse(trace.startedAt) && item.kind === "owner" &&
         (mentions(item.content, agent.name) || !this.store.agents().some((other) => mentions(item.content, other.name))));
       if (latest && asksToStop(latest.content)) continue;
-      const routine = trace.kind === "routine" ? this.routineForTrace(trace) : null;
-      if (trace.kind === "routine" && !routine?.enabled) continue;
+      const routine = ["routine", "reminder"].includes(trace.kind) ? this.routineForTrace(trace) : null;
+      if (["routine", "reminder"].includes(trace.kind) && (!routine?.enabled || (pendingRun && pendingRun.routineUpdatedAt !== routine.updatedAt))) continue;
       resumed.push(trace.id);
       this.resumeTask(agent, trace, routine).catch((error) => this.log({ type: "error", agentId: agent.id, channelId: trace.channelId, text: `ripresa: ${error.message}` }));
     }
@@ -646,11 +648,19 @@ export class Orchestrator {
   }
 
   routineForTrace(trace) {
+    const id = /\[Attività programmata: (rt_[a-f0-9]+)\]/.exec(trace.prompt || "")?.[1];
+    if (id) return this.store.routine(id);
+    const run = this.store.pendingRoutineRuns().find((item) => item.traceId === trace.id);
+    if (run) return this.store.routine(run.routineId);
     const name = /È il momento della tua routine "([^"]+)"/.exec(trace.prompt || "")?.[1];
     return this.store.routines(trace.agentId).find((routine) => routine.channelId === trace.channelId && routine.name === name) || null;
   }
 
   async resumeTask(agent, trace, routine = null) {
+    if (routine) {
+      const run = this.store.pendingRoutineRuns().find((item) => item.routineId === routine.id);
+      return this.runRoutine(routine, { resumeTrace: trace, resumeRunId: run?.id || "" });
+    }
     if (this.atWork.has(agent.id) || this.threadWork.has(trace.channelId)) return;
     this.atWork.set(agent.id, "il compito interrotto");
     this.threadWork.set(trace.channelId, agent.id);
@@ -875,10 +885,29 @@ export class Orchestrator {
     return item;
   }
 
-  async runRoutine(routine, { manual = false } = {}) {
+  async runRoutine(routine, { manual = false, resumeTrace = null, resumeRunId = "" } = {}) {
+    routine = this.store.routine(routine.id);
+    if (!routine) return { status: "archived" };
     if (this.routineRuns.has(routine.id)) return { status: "busy" };
     const agent = this.store.agent(routine.agentId);
     if (!agent) return { status: "missing-agent" };
+    const pendingRun = this.store.pendingRoutineRuns().find((run) => run.routineId === routine.id);
+    if (resumeTrace && !manual) {
+      const latest = this.store.recentMessages(routine.channelId, this.store.settings.historySize).findLast((item) => item.at > Date.parse(resumeTrace.startedAt) && item.kind === "owner"
+        && (mentions(item.content, agent.name) || !this.store.agents().some((other) => mentions(item.content, other.name))));
+      if (latest && asksToStop(latest.content)) {
+        this.store.updateRoutine(routine.id, { enabled: false });
+        this.store.recordRoutineRun(routine.id, "stopped", "Il proprietario ha chiesto di fermarsi prima della ripresa.", { runId: pendingRun?.id });
+        return { status: "stopped" };
+      }
+    }
+    if (pendingRun && !resumeRunId) {
+      if (pendingRun.status !== "interrupted" || !manual) return { status: "busy" };
+      if (pendingRun.traceId && pendingRun.routineUpdatedAt === routine.updatedAt) {
+        resumeTrace = this.store.trace(pendingRun.traceId);
+        resumeRunId = pendingRun.id;
+      } else this.store.recordRoutineRun(routine.id, "interrupted", "Esecuzione interrotta prima di registrare una traccia; nuova prova richiesta manualmente.", { runId: pendingRun.id });
+    }
     // One agent, one computer: a routine that lands on a busy agent waits for its next turn
     // instead of opening a second session on the same work.
     const busyWith = this.atWork.get(agent.id) || (this.threadWork.has(routine.channelId) ? "un compito già attivo in questo thread" : null);
@@ -889,13 +918,16 @@ export class Orchestrator {
     }
     const channel = this.channelMeta(routine.channelId);
     if (!this.channels.isActive(routine.channelId)) {
-      this.store.recordRoutineRun(routine.id, "error", `il canale è su ${isTelegramChannel(routine.channelId) ? "Telegram" : "Discord"}, ma ora Cora vive sull'altro`);
+      this.store.recordRoutineRun(routine.id, "error", `il canale è su ${isTelegramChannel(routine.channelId) ? "Telegram" : "Discord"}, ma ora Cora vive sull'altro`, { runId: pendingRun?.id });
       return { status: "error" };
     }
     if (channel.guildId && !this.allowedGuild(channel.guildId)) {
-      this.store.recordRoutineRun(routine.id, "error", "channel is in a server cora does not use");
+      this.store.recordRoutineRun(routine.id, "error", "channel is in a server cora does not use", { runId: pendingRun?.id });
       return { status: "error" };
     }
+    const snapshot = { ...routine };
+    const run = this.store.beginRoutineRun(routine, { manual, resumeRunId });
+    if (!run) return { status: "busy" };
     this.routineRuns.add(routine.id);
     this.atWork.set(agent.id, `la routine «${routine.name}»`);
     this.threadWork.set(routine.channelId, agent.id);
@@ -907,11 +939,12 @@ export class Orchestrator {
     const typing = setInterval(() => this.typing(routine.channelId, [agent]), 8000);
     try {
       await this.ensureHistory(state);
-      const result = await this.brain.routineTurn({
-        agent, routine, history: state.history, channel,
+      const result = await this.brain[resumeTrace ? "resumeTurn" : "routineTurn"]({
+        agent, routine: snapshot, history: state.history, channel, trace: resumeTrace,
         postFile: (file, caption) => this.postAs(agent, state, caption, file),
         say: (text) => this.postAs(agent, state, text),
         inbox: this.inbox(state, state.history),
+        onTrace: (traceId) => this.store.attachRoutineTrace(run.id, traceId),
       });
       if (result.text) {
         await this.postAs(agent, state, result.text);
@@ -919,11 +952,24 @@ export class Orchestrator {
         state.budget = Math.max(state.budget, Math.ceil(this.store.settings.maxAgentTurns / 2));
         this.schedule(state, 3000);
       }
-      this.store.recordRoutineRun(routine.id, result.stopped ? "stopped" : result.text ? "posted" : "nothing", result.text || "PASS");
-      this.log({ type: "routine-end", agentId: agent.id, channelId: routine.channelId, text: routine.name, ok: true, steps: result.steps });
-      return { status: result.text ? "posted" : "nothing" };
+      const current = this.store.routine(routine.id);
+      let verification = null;
+      let status = result.stopped || !current || current.updatedAt !== snapshot.updatedAt ? "stopped" : result.text ? "posted" : "nothing";
+      if (snapshot.kind === "reminder" && status !== "stopped") {
+        verification = await this.brain.verifyReminder({ agent, routine: snapshot, result, delivered: Boolean(result.text) });
+        const latest = this.store.routine(routine.id);
+        status = !latest || latest.updatedAt !== snapshot.updatedAt ? "stopped" : verification.met ? "completed" : verification.blocked ? "blocked" : "unverified";
+      }
+      this.store.tx(() => {
+        this.store.recordRoutineRun(routine.id, status, result.text || "PASS", { runId: run.id, snapshot, traceId: result.traceId, verification });
+        if (status === "completed") this.store.deleteRoutine(routine.id, "completed");
+      });
+      if (["blocked", "unverified"].includes(status) && !result.asked) await this.postAs(agent, state, this.store.settings.language === "en"
+        ? `Reminder kept open: ${verification.reason || "success has not been verified."}` : `Reminder non archiviato: ${verification.reason || "il successo non è stato verificato."}`);
+      this.log({ type: "routine-end", agentId: agent.id, channelId: routine.channelId, text: routine.name, kind: snapshot.kind || "routine", ok: !["stopped", "blocked", "unverified"].includes(status), steps: result.steps });
+      return { status, verification };
     } catch (error) {
-      this.store.recordRoutineRun(routine.id, "error", error.message);
+      this.store.recordRoutineRun(routine.id, "error", error.message, { runId: run.id, snapshot });
       this.log({ type: "routine-end", agentId: agent.id, channelId: routine.channelId, text: `${routine.name}: ${error.message}`, ok: false });
       return { status: "error", error: error.message };
     } finally {

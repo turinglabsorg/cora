@@ -53,13 +53,13 @@ const TABS = [
   ["profilo", "Profilo", "user"],
   ["chat", "Chat", "chat"],
   ["memoria", "Memoria", "book"],
-  ["routine", "Routine", "clock"],
+  ["routine", "Routine e reminder", "clock"],
   ["desktop", "Desktop", "monitor"],
   ["ragionamento", "Ragionamento", "bulb"],
   ["attivita", "Attività", "pulse"],
 ];
 const SALOTTO = "web";
-const TRACE_KIND = { chat: "conversazione", routine: "routine", sleep: "sonno" };
+const TRACE_KIND = { chat: "conversazione", routine: "routine", reminder: "reminder", verification: "verifica", sleep: "sonno" };
 const TRACE_STATUS = { running: ["in corso", "agent"], done: ["ha risposto", "ok"], pass: ["passa", ""], error: ["errore", "err"], interrupted: ["interrotto", "err"] };
 const TRANSPORTS = {
   discord: { label: "Discord", icon: "hash" },
@@ -350,6 +350,7 @@ function scheduleRefresh() {
   clearTimeout(S.refreshTimer);
   S.refreshTimer = setTimeout(async () => {
     await guard(loadState());
+    S.taskRefresh?.();
     if (route()[0] === "banco" && document.querySelector(".agent-grid")) renderDashboard();
   }, 900);
 }
@@ -612,14 +613,14 @@ async function renderDashboard() {
   if (route()[0] !== "banco") return;
   const who = info.user ? (info.kind === "telegram" ? `@${info.user.username}` : info.user.username) : "";
   shell([
-    pageHead(h("span", {}, "Co", h("em", {}, "ra")), tr("Vive su {transport}: {where}.", { transport: info.label, where: tr(info.where) }), [btn("Salotto", { icon: "chat", href: "#/" }), btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
+    pageHead(h("span", {}, "Co", h("em", {}, "ra")), tr("Vive su {transport}: {where}.", { transport: info.label, where: tr(info.where) }), [btn("Archivio", { icon: "book", href: "#/archivio" }), btn("Salotto", { icon: "chat", href: "#/" }), btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
     banners(),
     requestsStrip(),
     h("div", { class: "stats" },
       statCard({ icon: info.icon, value: info.label, label: STATE_LABEL[info.state] || info.state, sub: who ? tr("come {who}", { who }) : "", href: "#/settings" }),
       statCard({ icon: "radio", value: `${agents.filter((agent) => agent.enabled).length}/${agents.length}`, label: "agenti in onda", href: "#/agenti" }),
       statCard({ icon: "monitor", value: desktops, label: "desktop accesi" }),
-      statCard({ icon: "clock", value: active.length, label: "routine attive", sub: next ? tr("prossima {time} · {name}", { time: fmtTime(next.nextRunAt), name: agents.find((agent) => agent.id === next.agentId)?.name || "" }) : "" })),
+      statCard({ icon: "clock", value: active.length, label: "attività programmate", sub: next ? tr("prossima {time} · {name}", { time: fmtTime(next.nextRunAt), name: agents.find((agent) => agent.id === next.agentId)?.name || "" }) : "" })),
     panel({ icon: "users", title: "Agenti", hint: "Ognuno con il suo cervello, la sua memoria e il suo computer.", actions: btn("", { icon: "plus", href: "#/new", title: "Nuovo agente", cls: "sm" }) },
       agents.length ? h("div", { class: "agent-grid" }, agents.map(agentCard)) : empty("users", "Ancora nessun agente.", btn("Crea il primo", { icon: "plus", href: "#/new", cls: "primary" }))),
     h("div", { class: "split" },
@@ -1204,6 +1205,7 @@ function renderNew() {
 }
 
 async function renderAgent() {
+  const view = location.hash;
   S.live = null;
   const [, id, tab = "profilo", sub] = route();
   const agent = S.data.agents.find((item) => item.id === id);
@@ -1214,14 +1216,14 @@ async function renderAgent() {
   const routines = S.data.routines.filter((routine) => routine.agentId === agent.id);
   let body;
   if (tab === "memoria") body = await memoryTab(agent);
-  else if (tab === "routine") body = routineTab(agent, routines);
+  else if (tab === "routine") body = await routineTab(agent, routines);
   else if (tab === "desktop") body = await desktopTab(agent);
   else if (tab === "attivita") body = activityTab(agent);
   else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci." });
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub) : await tracesTab(agent);
   else body = [S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), agentForm(agent)];
   const now = route();
-  if (now[0] !== "agent" || now[1] !== id || (now[2] || "profilo") !== tab) return;
+  if (location.hash !== view || now[0] !== "agent" || now[1] !== id || (now[2] || "profilo") !== tab) return;
   const toggle = btn(agent.enabled ? "In onda" : "Muto", { icon: "power", cls: `sm toggle${agent.enabled ? " on" : ""}`, title: agent.enabled ? "Spegni" : "Accendi", onclick: async () => {
     if (await guard(api(`/api/agents/${agent.id}`, { method: "PUT", body: { enabled: !agent.enabled } }), agent.enabled ? `${agent.name} è muto` : `${agent.name} è in onda`)) {
       await loadState();
@@ -1345,6 +1347,9 @@ function memoryItem(agent, memory) {
 
 function routineForm(agent, routine = {}) {
   const isNew = !routine.id;
+  let kind = routine.kind || "routine";
+  const localDate = (date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const runAt = h("input", { type: "datetime-local", name: "runAt", value: localDate(routine.runAt ? new Date(routine.runAt) : new Date(Date.now() + 3600000)) });
   const schedule = h("input", { type: "text", name: "schedule", class: "mono", value: routine.schedule || "0 9 * * *", required: true, autocomplete: "off" });
   const preview = h("small", { class: "mono" });
   let timer;
@@ -1360,31 +1365,54 @@ function routineForm(agent, routine = {}) {
     }, 250);
   };
   schedule.addEventListener("input", updatePreview);
-  updatePreview();
+  const timing = h("div", { class: "field full task-timing" });
+  const submit = btn("Crea routine", { icon: "check", type: "submit", cls: "primary" });
+  const drawTiming = () => {
+    schedule.required = kind === "routine";
+    runAt.required = kind === "reminder";
+    submit.replaceChildren(icon("check"), h("span", {}, kind === "reminder" ? isNew ? "Crea reminder" : "Salva reminder" : isNew ? "Crea routine" : "Salva routine"));
+    timing.replaceChildren(h("span", { class: "label" }, kind === "reminder" ? "Una sola volta" : "Quando"), ...(kind === "reminder"
+      ? [runAt, h("small", {}, "Data e ora nel fuso del tuo dispositivo. Il reminder viene archiviato solo dopo un successo verificato.")]
+      : [h("div", { class: "chips" }, PRESETS.map(([label, expr]) => h("button", { type: "button", class: "chip", onclick: () => { schedule.value = expr; updatePreview(); } }, label))), schedule, preview,
+        h("small", {}, tr("Formato cron: minuto ora giorno mese giorno-settimana (fuso {zone}).", { zone: S.data.timezone }))]));
+    if (kind === "routine") updatePreview();
+  };
+  const kindPicker = h("div", { class: "task-kind-picker", role: "group", "aria-label": "Tipo di attività" });
+  for (const [value, title, hint] of [["routine", "Routine", "Si ripete a orari fissi"], ["reminder", "Reminder", "Una volta, poi in archivio"]]) {
+    kindPicker.append(h("button", { type: "button", class: `task-kind${kind === value ? " active" : ""}`, "aria-pressed": String(kind === value), onclick: (event) => {
+      kind = value;
+      for (const button of kindPicker.children) { const active = button === event.currentTarget; button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active)); }
+      drawTiming();
+    } }, icon("clock"), h("span", {}, h("b", {}, title), h("small", {}, hint))));
+  }
   const channelSelect = h("select", { name: "channelId", required: true },
     h("option", { value: "" }, "Scegli dove pubblicare…"),
+    h("option", { value: "web", selected: routine.channelId === "web" }, "Salotto dell'app"),
+    h("option", { value: `web-${agent.id}`, selected: routine.channelId === `web-${agent.id}` }, "Chat privata nell'app"),
     S.data.channels.map((channel) => h("option", { value: channel.id, selected: channel.id === routine.channelId }, raw(channelChipLabel(channel)))));
-  if (routine.channelId && !S.data.channels.some((channel) => channel.id === routine.channelId)) {
+  if (routine.channelId && !routine.channelId.startsWith("web") && !S.data.channels.some((channel) => channel.id === routine.channelId)) {
     channelSelect.append(h("option", { value: routine.channelId, selected: true }, tr("{channel} (non attivo)", { channel: channelName(routine.channelId) })));
   }
-  const form = panel({ tag: "form", icon: isNew ? "plus" : "edit", title: isNew ? "Nuova routine" : tr("Modifica «{name}»", { name: routine.name }), hint: "Un compito che svolge da solo, col suo computer, e poi racconta." },
+  const form = panel({ tag: "form", icon: isNew ? "plus" : "edit", title: isNew ? "Nuova attività" : tr("Modifica «{name}»", { name: routine.name }), hint: "Un compito, quando serve, con un risultato da ritrovare." },
+    isNew ? kindPicker : badge(kind === "reminder" ? "Reminder" : "Routine", "", "clock"),
     h("div", { class: "grid2" },
       field("Nome", h("input", { type: "text", name: "name", value: routine.name || "", required: true, placeholder: "es. Rassegna stampa" })),
       field(S.data.transport === "telegram" ? "Chat" : "Canale", channelSelect),
-      h("div", { class: "field full" }, h("span", { class: "label" }, "Quando"),
-        h("div", { class: "chips" }, PRESETS.map(([label, expr]) => h("button", { type: "button", class: "chip", onclick: () => { schedule.value = expr; updatePreview(); } }, label))),
-        schedule, preview,
-        h("small", {}, "Formato cron: minuto ora giorno mese giorno-settimana (fuso Europe/Rome).")),
+      timing,
       field("Compito", h("textarea", { name: "prompt", class: "tall", required: true, placeholder: "Cosa deve fare, dove guardare, cosa riportare. Se non c'è niente da dire può restare in silenzio." }, routine.prompt || ""), null, "full"),
       h("div", { class: "field full" }, switchInput("enabled", "Attiva", routine.enabled ?? true))),
     h("div", { class: "row end" },
       isNew ? null : btn("Annulla", { icon: "close", href: `#/agent/${agent.id}/routine`, cls: "ghost" }),
-      btn(isNew ? "Crea routine" : "Salva routine", { icon: "check", type: "submit", cls: "primary" })));
+      submit));
+  drawTiming();
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (submit.disabled) return;
     const data = new FormData(form);
-    const body = { name: data.get("name"), schedule: data.get("schedule"), channelId: data.get("channelId"), prompt: data.get("prompt"), enabled: form.elements.enabled.checked };
-    const saved = await guard(isNew ? api(`/api/agents/${agent.id}/routines`, { method: "POST", body }) : api(`/api/routines/${routine.id}`, { method: "PUT", body }), isNew ? "Routine creata" : "Routine salvata");
+    const body = { kind, name: data.get("name"), ...(kind === "reminder" ? { runAt: new Date(runAt.value).toISOString() } : { schedule: schedule.value }), channelId: data.get("channelId"), prompt: data.get("prompt"), enabled: form.elements.enabled.checked };
+    submit.disabled = true;
+    const saved = await guard(isNew ? api(`/api/agents/${agent.id}/routines`, { method: "POST", body }) : api(`/api/routines/${routine.id}`, { method: "PUT", body }), kind === "reminder" ? "Reminder salvato" : isNew ? "Routine creata" : "Routine salvata");
+    submit.disabled = false;
     if (!saved) return;
     await loadState();
     location.hash = `#/agent/${agent.id}/routine`;
@@ -1393,40 +1421,114 @@ function routineForm(agent, routine = {}) {
   return form;
 }
 
-function routineTab(agent, routines) {
-  const editing = new URLSearchParams(location.hash.split("?")[1] || "").get("edit");
+const RUN_STATUS = { running: ["in corso", "agent"], completed: ["successo verificato", "ok"], posted: ["pubblicata", "ok"], nothing: ["niente da dire", ""], error: ["errore", "err"], blocked: ["bloccato", "err"], unverified: ["da verificare", "err"], interrupted: ["interrotto", "err"], stopped: ["fermato", ""], skipped: ["in attesa", ""], unknown: ["esito non disponibile", ""] };
+function runStatus(status) { return tag(...(RUN_STATUS[status] || [status, ""])); }
+function taskTime(iso) {
+  return new Intl.DateTimeFormat(LOCALE, { timeZone: S.data.timezone, year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }).format(new Date(iso));
+}
+
+async function routineTab(agent, routines) {
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const editing = params.get("edit");
   if (editing) {
     const routine = routines.find((item) => item.id === editing);
     if (routine) return routineForm(agent, routine);
   }
-  const items = routines.map((routine) => {
+  const archived = params.get("view") === "archive";
+  const navigation = h("nav", { class: "tabs task-tabs", "aria-label": "Attività programmate" },
+    h("a", { href: `#/agent/${agent.id}/routine`, class: archived ? "" : "active" }, icon("clock"), "In programma"),
+    h("a", { href: `#/agent/${agent.id}/routine?view=archive`, class: archived ? "active" : "" }, icon("book"), "Archivio"));
+  if (archived) return [navigation, routineArchive(agent)];
+  const items = () => S.data.routines.filter((routine) => routine.agentId === agent.id).sort((a, b) => Date.parse(a.nextRunAt || "9999-01-01") - Date.parse(b.nextRunAt || "9999-01-01")).map((routine) => {
+    const reminder = routine.kind === "reminder";
     const status = routine.running ? tag("in corso", "agent")
-      : routine.lastStatus === "error" ? tag("errore", "err")
-      : routine.lastStatus ? tag(routine.lastStatus === "posted" ? "pubblicata" : "niente da dire", "ok") : null;
+      : routine.lastStatus ? runStatus(routine.lastStatus) : null;
     return h("div", { class: `routine${routine.enabled ? "" : " paused"}` },
       h("div", { class: "routine-head" },
         h("span", { class: "panel-ico" }, icon("clock")),
         h("span", { class: "grow" },
           h("b", {}, raw(routine.name), routine.enabled ? "" : " · in pausa"),
-          h("span", { class: "row-meta" }, h("code", {}, raw(routine.schedule)), "→", raw(channelName(routine.channelId)))),
+          h("span", { class: "row-meta" }, reminder ? "Reminder" : "Routine", h("code", {}, reminder ? taskTime(routine.runAt) : raw(routine.schedule)), "→", raw(channelName(routine.channelId)))),
         h("span", { class: "row-actions" },
-          btn("", { icon: "play", cls: "sm primary", title: "Esegui ora", disabled: routine.running, onclick: async () => {
-            if (await guard(api(`/api/routines/${routine.id}/run`, { method: "POST" }), "Routine avviata")) scheduleRefresh();
+          btn("", { icon: "play", cls: "sm primary", title: reminder && ["blocked", "unverified", "error", "interrupted", "stopped"].includes(routine.lastStatus) ? "Riprova" : "Esegui ora", disabled: routine.running, onclick: async () => {
+            if (await guard(api(`/api/routines/${routine.id}/run`, { method: "POST" }), "Attività avviata")) scheduleRefresh();
           } }),
           btn("", { icon: "edit", cls: "sm", title: "Modifica", href: `#/agent/${agent.id}/routine?edit=${routine.id}` }),
           btn("", { icon: routine.enabled ? "pause" : "play", cls: "sm ghost", title: routine.enabled ? "Metti in pausa" : "Riattiva", onclick: async () => {
-            if (await guard(api(`/api/routines/${routine.id}`, { method: "PUT", body: { enabled: !routine.enabled } }))) { await loadState(); renderAgent(); }
+            if (await guard(api(`/api/routines/${routine.id}`, { method: "PUT", body: { enabled: !routine.enabled } }))) { await loadState(); drawTasks(); }
           } }),
-          btn("", { icon: "trash", cls: "sm ghost danger", title: "Elimina", onclick: async () => {
-            if (await guard(api(`/api/routines/${routine.id}`, { method: "DELETE" }), "Routine eliminata")) { await loadState(); renderAgent(); }
+          armedButton("Archivia", "Conferma archiviazione", { onconfirm: async () => {
+            if (await guard(api(`/api/routines/${routine.id}`, { method: "DELETE" }), "Attività archiviata")) { await loadState(); drawTasks(); }
           } }))),
       h("div", { class: "row-meta" }, status, routine.nextRunAt && routine.enabled ? tr("prossima {time}", { time: fmtTime(routine.nextRunAt, true) }) : "", routine.lastRunAt ? tr(" · ultima {time}", { time: fmtTime(routine.lastRunAt, true) }) : ""),
+      routine.lastVerification?.reason ? h("p", { class: "task-verification" }, raw(routine.lastVerification.reason)) : null,
       h("details", {}, h("summary", {}, "Compito e ultimo risultato"), h("pre", {}, raw(routine.prompt)), routine.lastOutput ? h("pre", {}, raw(routine.lastOutput)) : null));
   });
+  const taskList = h("div", { class: "stack-sm" });
+  function drawTasks() {
+    const rows = items();
+    taskList.replaceChildren(...(rows.length ? rows : [empty("clock", "Nessuna attività in programma. Creane una qui sotto.")]));
+  }
+  drawTasks();
+  S.taskRefresh = () => { if (taskList.isConnected) drawTasks(); };
   return [
-    panel({ icon: "clock", title: "Routine", hint: "Compiti programmati che svolge da solo." }, items.length ? h("div", { class: "stack-sm" }, items) : empty("clock", "Nessuna routine. Creane una qui sotto.")),
+    navigation,
+    panel({ icon: "clock", title: "Routine e reminder", hint: "Le routine si ripetono. I reminder si archiviano dopo un successo verificato." }, taskList),
     routineForm(agent),
   ];
+}
+
+function routineArchive(agent = null) {
+  const results = h("div", { class: "task-history-results", role: "status" }, h("p", { class: "muted" }, "Caricamento…"));
+  const mode = h("select", { "aria-label": "Mostra" }, h("option", { value: "history" }, "Storico esecuzioni"), h("option", { value: "archive" }, "Attività archiviate"));
+  const kind = h("select", { "aria-label": "Tipo di attività" }, h("option", { value: "" }, "Routine e reminder"), h("option", { value: "routine" }, "Routine"), h("option", { value: "reminder" }, "Reminder"));
+  const search = h("input", { type: "search", "aria-label": "Cerca nell'archivio", placeholder: "Nome, compito o risultato", maxlength: 200 });
+  const agents = h("select", { "aria-label": "Agente" }, h("option", { value: "" }, "Tutti gli agenti"), S.data.agents.map((item) => h("option", { value: item.id }, raw(item.name))));
+  let offset = 0;
+  let generation = 0;
+  const root = panel({ icon: "book", title: "Archivio", hint: "Compiti, risultati e verifiche. Una storia che resta anche dopo l'archiviazione." },
+    h("form", { class: "task-history-filters", onsubmit: (event) => { event.preventDefault(); offset = 0; load(); } },
+      mode, kind, agent ? null : agents, h("div", { class: "task-history-search" }, search, btn("Cerca", { icon: "search", type: "submit" }))), results);
+  for (const select of [mode, kind, agents]) select.addEventListener("change", () => { offset = 0; load(); });
+  async function load() {
+    const current = ++generation;
+    const params = new URLSearchParams({ agentId: agent?.id || agents.value, kind: kind.value, query: search.value, limit: "20", offset: String(offset) });
+    results.setAttribute("aria-busy", "true");
+    try {
+      const data = await api(`/api/routines/${mode.value}?${params}`);
+      if (!root.isConnected || current !== generation) return;
+      const definitions = mode.value === "archive";
+      const items = data.items.map((item) => {
+        const owner = S.data.agents.find((entry) => entry.id === item.agentId);
+        const status = definitions ? item.archiveReason === "completed" ? runStatus("completed") : tag("archiviata", "") : runStatus(item.status);
+        return h("article", { class: "task-history-item" },
+          h("header", {}, h("span", { class: "panel-ico" }, icon(item.kind === "reminder" ? "check" : "clock")),
+            h("div", { class: "grow" }, h("h3", {}, raw(item.name)), h("div", { class: "row-meta" }, item.kind === "reminder" ? "Reminder" : "Routine", raw(" · "), raw(owner?.name || item.agentName || item.agentId), raw(" · "),
+              h("time", {}, taskTime(item.archivedAt || item.startedAt)))), status),
+          item.verification?.reason ? h("p", { class: "task-verification" }, icon(item.verification.met ? "check" : "alert"), raw(item.verification.reason)) : null,
+          item.historical ? h("small", { class: "muted" }, "Esito storico: verifica del successo non disponibile.") : null,
+          h("details", {}, h("summary", {}, "Compito e risultato"),
+            h("p", { class: "row-meta" }, raw(channelName(item.channelId)), raw(" · "), item.runAt ? taskTime(item.runAt) : raw(item.schedule || "")),
+            h("pre", {}, raw(item.prompt)), h("pre", {}, raw(item.output || item.lastOutput || tr("Nessun risultato registrato."))),
+            definitions ? h("p", { class: "muted" }, item.archiveReason === "completed" ? "Archiviato automaticamente dopo la verifica." : "Archiviato senza ulteriori esecuzioni.") : null),
+          !definitions && owner && (item.traceAvailable || item.verificationAvailable) ? h("div", { class: "row task-history-links" },
+            item.traceAvailable ? btn("Ragionamento", { icon: "bulb", cls: "sm ghost", href: `#/agent/${item.agentId}/ragionamento/${item.traceId}` }) : null,
+            item.verificationAvailable ? btn("Verifica", { icon: "check", cls: "sm ghost", href: `#/agent/${item.agentId}/ragionamento/${item.verification.traceId}` }) : null) : null);
+      });
+      results.replaceChildren(h("p", { class: "task-history-count" }, tr("{count} risultati", { count: data.total.toLocaleString(LOCALE) })),
+        items.length ? h("div", { class: "task-history-list" }, items) : empty("book", "Nessuna attività trovata."),
+        h("div", { class: "task-history-pagination" }, btn("Precedenti", { icon: "back", cls: "ghost", disabled: offset === 0, onclick: () => { offset = Math.max(0, offset - 20); load(); } }),
+          h("span", { class: "muted" }, tr("Pagina {page}", { page: Math.floor(offset / 20) + 1 })), btn("Successivi", { icon: "next", cls: "ghost", disabled: offset + data.items.length >= data.total, onclick: () => { offset += 20; load(); } })));
+    } catch (error) {
+      if (root.isConnected && current === generation) results.replaceChildren(h("p", { class: "err-text", role: "alert" }, tr(error.message)), btn("Riprova", { icon: "refresh", onclick: load }));
+    } finally { if (current === generation) results.setAttribute("aria-busy", "false"); }
+  }
+  load();
+  return root;
+}
+
+function renderRoutineArchive() {
+  shell([pageHead("Archivio", "La storia delle routine e dei reminder di tutti gli agenti."), routineArchive()], { title: "Archivio", back: "#/banco" });
 }
 
 async function desktopTab(agent) {
@@ -2347,6 +2449,7 @@ async function render() {
   else if (page === "banco") await renderDashboard();
   else if (page === "agenti") renderAgents();
   else if (page === "new") renderNew();
+  else if (page === "archivio") renderRoutineArchive();
   else if (page === "contesto") renderContext();
   else if (page === "settings") renderSettings();
   else renderSalotto();

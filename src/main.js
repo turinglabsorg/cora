@@ -97,17 +97,22 @@ export function startCora(overrides = {}) {
   discord.on("warning", (text) => activity({ type: "warning", text }));
   // Long tasks a restart cut short start again once: when Discord is up, or after a while if Cora lives elsewhere.
   let resumed = false;
+  let stopping = false;
+  let catchUpTimer = null;
   const resume = () => {
-    if (resumed) return;
+    if (stopping || resumed) return;
     resumed = true;
     const ids = orchestrator.resumeInterrupted();
     if (ids.length) activity({ type: "settings", text: `riprendo ${ids.length} lavori interrotti dal riavvio` });
   };
   const resumeFallback = setTimeout(resume, 20000);
   discord.on("ready", () => {
+    if (stopping) return;
     activity({ type: "discord", text: `connesso come ${discord.user?.username}` });
     // Give the gateway a moment to deliver the servers' channels, then answer what was missed.
-    setTimeout(() => {
+    clearTimeout(catchUpTimer);
+    catchUpTimer = setTimeout(() => {
+      if (stopping) return;
       orchestrator.catchUp().catch((error) => activity({ type: "error", text: `recupero messaggi: ${error.message}` }));
       resume();
     }, 3000);
@@ -148,6 +153,8 @@ export function startCora(overrides = {}) {
 
   let botTimer = null;
   const stop = async () => {
+    stopping = true;
+    clearTimeout(catchUpTimer);
     clearTimeout(resumeFallback);
     clearInterval(botTimer);
     scheduler.stop();

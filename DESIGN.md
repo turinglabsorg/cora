@@ -95,6 +95,12 @@ The radio desk at night: the same details as the panel (teletype on perforated p
 
 The landing’s harness section ends with a short **Your context, your rules.** note: an outlined document mark, one small display heading and a plain paragraph, separated by a hairline. It inherits the dark palette and wraps naturally on phones.
 
+## Scheduled tasks and archive
+
+Keep routines and one-time reminders together in the agent’s **Routines and reminders** tab. A second, compact text navigation switches between **Scheduled** and **Archive**. The creation form uses two quiet, selectable task-type cards; only the relevant cron or exact date/time controls appear. Date/time fields use the same dark well, border, height and focus ring as other inputs. State updates replace only the scheduled list and preserve creation drafts.
+
+The archive uses a compact filter bar and a vertical ledger of restrained black document cards: task name, type, agent, exact timestamp including year/timezone, explicit outcome, and verification reason. Task/output disclosures and reasoning/verification links sit below. Execution history and archived definitions are separate filter modes; search, type and agent filters are persistent while paginating. Verified success is green; blocked/unverified states remain explicit. Historical records state that verification is unavailable. On phones the mode selector spans the width, search has its own row, card metadata wraps, and the five main navigation items remain unchanged. The global archive is reached from Desk, with a clear back link.
+
 ## Motion
 
 - Page load: strips rise in with staggered `animation-delay` (60ms steps).

@@ -86,6 +86,13 @@ CREATE TABLE IF NOT EXISTS access_audit (
 );
 CREATE INDEX IF NOT EXISTS access_audit_at ON access_audit(at);
 CREATE TABLE IF NOT EXISTS routines (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS routine_runs (
+  id TEXT PRIMARY KEY, routine_id TEXT NOT NULL, agent_id TEXT NOT NULL, started_at TEXT NOT NULL,
+  ended_at TEXT, status TEXT NOT NULL, data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS routine_runs_agent_at ON routine_runs(agent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS routine_runs_at ON routine_runs(started_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS routine_runs_active ON routine_runs(routine_id) WHERE ended_at IS NULL;
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
   owner TEXT NOT NULL,
@@ -248,27 +255,38 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
 
 export function sanitizeRoutine(input, previous = {}) {
   const merged = { enabled: true, ...previous, ...input };
+  const kind = previous.id ? previous.kind || "routine" : merged.kind || "routine";
+  if (!["routine", "reminder"].includes(kind)) throw new ValidationError("tipo di attività non valido");
   const name = cleanText(merged.name, 80).trim();
   if (!name) throw new ValidationError("name is required");
-  const schedule = cleanText(merged.schedule, 80).trim();
-  if (!schedule) throw new ValidationError("schedule is required");
+  const schedule = kind === "routine" ? cleanText(merged.schedule, 80).trim() : "";
+  if (kind === "routine" && !schedule) throw new ValidationError("schedule is required");
+  const runAt = kind === "reminder" ? String(merged.runAt || "") : "";
+  if (kind === "reminder") {
+    const valid = /^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-]\d\d:\d\d)$/.test(runAt) && Number.isFinite(Date.parse(runAt));
+    if (!valid || new Date(runAt.slice(0, 10)).toISOString().slice(0, 10) !== runAt.slice(0, 10)) throw new ValidationError("indica data e ora del reminder con il fuso orario");
+  }
   const prompt = cleanText(merged.prompt, 8000).trim();
   if (!prompt) throw new ValidationError("prompt is required");
   const channelId = String(merged.channelId || "").trim();
   if (!CHANNEL_ID.test(channelId)) throw new ValidationError("channelId is required");
   return {
-    id: previous.id || newId("rt"),
+    id: previous.id || newId("rt"), kind,
     agentId: String(previous.agentId || merged.agentId),
     name,
     schedule,
+    runAt: runAt ? new Date(runAt).toISOString() : null,
     channelId,
     prompt,
     enabled: Boolean(merged.enabled),
     lastRunAt: previous.lastRunAt || null,
     lastStatus: previous.lastStatus || null,
     lastOutput: previous.lastOutput || "",
+    lastVerification: previous.lastVerification || null,
+    archivedAt: previous.archivedAt || null,
+    archiveReason: previous.archiveReason || "",
     createdAt: previous.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    updatedAt: new Date(Math.max(Date.now(), Date.parse(previous.updatedAt || "") + 1 || 0)).toISOString(),
   };
 }
 
@@ -341,6 +359,8 @@ export class Store {
     this.cachedSettings = sanitizeSettings(settingsRow ? JSON.parse(settingsRow.value) : {}, DEFAULT_SETTINGS);
     this.cachedAgents = this.db.prepare("SELECT data FROM agents ORDER BY position").all().map((row) => JSON.parse(row.data));
     this.cachedRoutines = this.db.prepare("SELECT data FROM routines ORDER BY rowid").all().map((row) => JSON.parse(row.data));
+    this.recoverRoutineRuns();
+    this.importRoutineHistory();
     this.tx(() => {
       for (const record of this.subscriptions()) {
         if (!record.legacyHost) continue;
@@ -647,14 +667,13 @@ export class Store {
 
   deleteAgent(id) {
     const before = this.cachedAgents.length;
+    for (const routine of this.routines(id)) this.deleteRoutine(routine.id);
     this.cachedAgents = this.cachedAgents.filter((agent) => agent.id !== id);
-    this.cachedRoutines = this.cachedRoutines.filter((routine) => routine.agentId !== id);
     this.tx(() => {
       this.stmt("DELETE FROM agents WHERE id = ?").run(id);
       this.stmt("DELETE FROM memories WHERE owner = ?").run(id);
       this.stmt("DELETE FROM diary WHERE agent_id = ?").run(id);
       this.stmt("DELETE FROM core_history WHERE agent_id = ?").run(id);
-      this.stmt("DELETE FROM routines WHERE agent_id = ?").run(id);
       this.stmt("DELETE FROM traces WHERE agent_id = ?").run(id);
       this.stmt("DELETE FROM trace_systems WHERE hash NOT IN (SELECT system_hash FROM traces WHERE system_hash IS NOT NULL)").run();
     });
@@ -845,10 +864,10 @@ export class Store {
 
   /* ---------- routines ---------- */
   routines(agentId) {
-    return agentId ? this.cachedRoutines.filter((routine) => routine.agentId === agentId) : this.cachedRoutines;
+    return this.cachedRoutines.filter((routine) => !routine.archivedAt && (!agentId || routine.agentId === agentId));
   }
 
-  routine(id) { return this.cachedRoutines.find((routine) => routine.id === id) || null; }
+  routine(id, { archived = false } = {}) { return this.cachedRoutines.find((routine) => routine.id === id && (archived || !routine.archivedAt)) || null; }
 
   writeRoutine(routine) {
     this.stmt("INSERT INTO routines(id, agent_id, data) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data")
@@ -864,26 +883,133 @@ export class Store {
 
   updateRoutine(id, input) {
     const index = this.cachedRoutines.findIndex((routine) => routine.id === id);
-    if (index < 0) return null;
+    if (index < 0 || this.cachedRoutines[index].archivedAt) return null;
     this.cachedRoutines[index] = sanitizeRoutine(input, this.cachedRoutines[index]);
+    if (this.cachedRoutines[index].kind === "reminder" && input.runAt !== undefined) {
+      Object.assign(this.cachedRoutines[index], { lastRunAt: null, lastStatus: null, lastOutput: "", lastVerification: null });
+    }
     this.writeRoutine(this.cachedRoutines[index]);
     return this.cachedRoutines[index];
   }
 
-  recordRoutineRun(id, status, output) {
-    const routine = this.routine(id);
-    if (!routine) return;
-    routine.lastRunAt = new Date().toISOString();
-    routine.lastStatus = status;
-    routine.lastOutput = cleanText(output, 4000);
-    this.writeRoutine(routine);
+  recordRoutineRun(id, status, output, { runId, snapshot, traceId, verification = null } = {}) {
+    const routine = this.routine(id, { archived: true });
+    const previous = runId ? this.routineRun(runId) : null;
+    const source = snapshot || routine;
+    if (!source && !previous) return null;
+    const at = new Date().toISOString();
+    const run = { ...(previous || this.routineRunSnapshot(source)), status, output: cleanText(output, 20000), endedAt: at, verification,
+      traceId: traceId || previous?.traceId || null };
+    this.writeRoutineRun(run);
+    if (routine && (!snapshot || routine.updatedAt === snapshot.updatedAt || (routine.lastStatus === "running" && routine.lastRunAt === run.startedAt))) {
+      Object.assign(routine, { lastRunAt: run.startedAt, lastStatus: status, lastOutput: cleanText(output, 4000), lastVerification: verification });
+      this.writeRoutine(routine);
+    }
+    return run;
   }
 
-  deleteRoutine(id) {
-    const before = this.cachedRoutines.length;
-    this.cachedRoutines = this.cachedRoutines.filter((routine) => routine.id !== id);
-    this.stmt("DELETE FROM routines WHERE id = ?").run(id);
-    return this.cachedRoutines.length !== before;
+  deleteRoutine(id, reason = "cancelled") {
+    const routine = this.routine(id);
+    if (!routine) return false;
+    Object.assign(routine, { enabled: false, archivedAt: new Date().toISOString(), archiveReason: reason, agentName: this.agent(routine.agentId)?.name || routine.agentName || "" });
+    this.writeRoutine(routine);
+    return true;
+  }
+
+  routineRunSnapshot(routine) {
+    return { id: newId("run"), routineId: routine.id, agentId: routine.agentId, agentName: this.agent(routine.agentId)?.name || "",
+      kind: routine.kind || "routine", name: routine.name, prompt: routine.prompt, schedule: routine.schedule, runAt: routine.runAt || null,
+      channelId: routine.channelId, routineUpdatedAt: routine.updatedAt, startedAt: new Date().toISOString(), endedAt: null,
+      status: "running", output: "", verification: null, traceId: null };
+  }
+
+  writeRoutineRun(run) {
+    this.stmt(`INSERT INTO routine_runs(id,routine_id,agent_id,started_at,ended_at,status,data) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET ended_at=excluded.ended_at,status=excluded.status,data=excluded.data`)
+      .run(run.id, run.routineId, run.agentId, run.startedAt, run.endedAt, run.status, JSON.stringify(run));
+  }
+
+  routineRun(id) {
+    const row = this.stmt("SELECT data FROM routine_runs WHERE id = ?").get(id);
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  pendingRoutineRuns() {
+    return this.stmt("SELECT data FROM routine_runs WHERE ended_at IS NULL").all().map((row) => JSON.parse(row.data));
+  }
+
+  beginRoutineRun(routine, { manual = false, resumeRunId = "" } = {}) {
+    const active = this.stmt("SELECT data FROM routine_runs WHERE routine_id = ? AND ended_at IS NULL").get(routine.id);
+    if (active && JSON.parse(active.data).id !== resumeRunId) return null;
+    const run = active ? JSON.parse(active.data) : this.routineRunSnapshot(routine);
+    Object.assign(run, { status: "running", manual: active ? run.manual : manual });
+    this.writeRoutineRun(run);
+    Object.assign(routine, { lastRunAt: run.startedAt, lastStatus: "running" });
+    this.writeRoutine(routine);
+    return run;
+  }
+
+  attachRoutineTrace(runId, traceId) {
+    const run = this.routineRun(runId);
+    if (!run || run.endedAt) return;
+    run.traceId = traceId;
+    this.writeRoutineRun(run);
+  }
+
+  recoverRoutineRuns() {
+    for (const run of this.pendingRoutineRuns()) {
+      run.status = "interrupted";
+      this.writeRoutineRun(run);
+      const routine = this.routine(run.routineId);
+      if (routine) { routine.lastStatus = "interrupted"; this.writeRoutine(routine); }
+    }
+  }
+
+  importRoutineHistory() {
+    if (this.value("routineHistoryImported", false)) return;
+    this.tx(() => {
+      for (const row of this.stmt("SELECT * FROM traces WHERE kind = 'routine' AND ended_at IS NOT NULL").all()) {
+        const name = /È il momento della tua routine "([^"]+)"/.exec(row.prompt)?.[1];
+        const routine = this.cachedRoutines.find((item) => item.agentId === row.agent_id && item.channelId === row.channel_id && item.name === name);
+        const source = routine || { id: "legacy_" + row.id, agentId: row.agent_id, name: name || "Routine", channelId: row.channel_id,
+          prompt: /Compito:\n([\s\S]*?)\n\n/.exec(row.prompt)?.[1] || "", schedule: "" };
+        this.writeRoutineRun({ ...this.routineRunSnapshot(source), id: "run_" + row.id, startedAt: row.started_at, endedAt: row.ended_at,
+          status: ["error", "stopped", "interrupted"].includes(row.status) ? row.status : row.output && !/^PASS\W*$/i.test(row.output) ? "posted" : "nothing",
+          output: cleanText(row.output || row.error, 20000), traceId: row.id, historical: true });
+      }
+      for (const routine of this.cachedRoutines) {
+        if (!routine.lastRunAt || this.stmt("SELECT 1 FROM routine_runs WHERE routine_id = ? LIMIT 1").get(routine.id)) continue;
+        this.writeRoutineRun({ ...this.routineRunSnapshot(routine), startedAt: routine.lastRunAt, endedAt: routine.lastRunAt,
+          status: routine.lastStatus || "unknown", output: routine.lastOutput || "", historical: true });
+      }
+      this.setValue("routineHistoryImported", true);
+    });
+  }
+
+  routineHistory({ agentId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
+    const conditions = [], args = [];
+    if (agentId) { conditions.push("agent_id = ?"); args.push(agentId); }
+    if (kind) { conditions.push("json_extract(data, '$.kind') = ?"); args.push(kind); }
+    if (query.trim()) { conditions.push("instr(lower(json_extract(data, '$.name') || ' ' || json_extract(data, '$.prompt') || ' ' || json_extract(data, '$.output')), lower(?)) > 0"); args.push(query.trim().slice(0, 200)); }
+    const where = conditions.length ? " WHERE " + conditions.join(" AND ") : "";
+    limit = Math.max(1, Math.min(50, Math.floor(Number(limit) || 20)));
+    offset = Math.max(0, Math.min(1000000, Math.floor(Number(offset) || 0)));
+    const total = this.stmt("SELECT count(*) AS n FROM routine_runs" + where).get(...args).n;
+    const items = this.stmt("SELECT data FROM routine_runs" + where + " ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?").all(...args, limit, offset).map((row) => {
+      const run = JSON.parse(row.data);
+      return { ...run, traceAvailable: Boolean(run.traceId && this.stmt("SELECT 1 FROM traces WHERE id = ?").get(run.traceId)),
+        verificationAvailable: Boolean(run.verification?.traceId && this.stmt("SELECT 1 FROM traces WHERE id = ?").get(run.verification.traceId)) };
+    });
+    return { items, total, limit, offset };
+  }
+
+  routineArchive({ agentId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
+    const matches = this.cachedRoutines.filter((routine) => routine.archivedAt && (!agentId || routine.agentId === agentId) && (!kind || (routine.kind || "routine") === kind)
+      && `${routine.name} ${routine.prompt} ${routine.lastOutput}`.toLowerCase().includes(query.trim().slice(0, 200).toLowerCase()))
+      .sort((a, b) => b.archivedAt.localeCompare(a.archivedAt));
+    limit = Math.max(1, Math.min(50, Math.floor(Number(limit) || 20)));
+    offset = Math.max(0, Math.min(1000000, Math.floor(Number(offset) || 0)));
+    return { items: matches.slice(offset, offset + limit), total: matches.length, limit, offset };
   }
 
   /* ---------- reasoning traces ---------- */

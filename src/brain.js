@@ -187,6 +187,7 @@ export class Brain {
     }
     const documents = this.store.contextDocuments().filter((document) => document.enabled);
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
+    sections.push("## Routine, reminder e storico\nGestisci i tuoi compiti ricorrenti con set_routine, quelli da fare una sola volta con set_reminder (run_at ISO 8601 con fuso). list_routines mostra ciò che è ancora in programma; routine_history consulta esecuzioni e attività archiviate, con risultati e verifiche. Prima di ripetere un'azione già richiesta, consulta lo storico. Un reminder viene archiviato da Cora solo dopo una verifica positiva: non ricrearlo se è già riuscito. Se è bloccato o interrotto, controlla prima gli effetti già prodotti e poi chiedi o prepara una nuova prova senza duplicarli.");
     if (withoutComputer) {
       sections.push("## Il tuo computer\nIn questa conversazione non hai il tuo computer: lo usi solo per chi ha il permesso del proprietario. Se ti chiedono un lavoro che lo richiede, non restare in silenzio: chiedi il via libera al proprietario con ask_owner, oppure spiega che serve il suo permesso.");
     }
@@ -265,26 +266,42 @@ export class Brain {
     return turn(`${user}\n\nHai risposto PASS, ma ${last?.authorName || "qualcuno"} ti ha chiamato per nome: scrivi una risposta vera, anche breve. Se ti chiede qualcosa che non puoi fare da solo, diglielo, oppure chiedi il via libera al proprietario con ask_owner.`);
   }
 
-  async routineTurn({ agent, routine, history, channel, postFile, say, inbox }) {
+  async routineTurn({ agent, routine, history, channel, postFile, say, inbox, onTrace }) {
     const transcript = formatTranscript(history.slice(-12), agent, this.timezone);
     const user = [
       this.memoryContext(agent, `${routine.name} ${routine.prompt}`),
       this.elsewhere(agent, channel.id),
-      `È il momento della tua routine "${routine.name}" (pianificazione: ${routine.schedule}).`,
+      routine.kind === "reminder" ? `È il momento del tuo reminder "${routine.name}" (una volta: ${routine.runAt}).` : `È il momento della tua routine "${routine.name}" (pianificazione: ${routine.schedule}).`,
+      `[Attività programmata: ${routine.id}]`,
       `Compito:\n${routine.prompt}`,
       'Come prima cosa manda con say una riga che dice quale routine è partita e cosa vai a controllare di preciso: chi legge deve capire cosa stai facendo, non basta "ci guardo" o "ci penso io". Se il compito richiede una verifica silenziosa, rispetta il silenzio e non inviare avvisi di avvio. Poi mettiti al lavoro.',
       `Usa il tuo computer se serve. Alla fine scrivi il messaggio da pubblicare ${channel.where || `in #${channel.name}`}: è quello che vedrà il proprietario. Se non c'è niente da segnalare rispondi solo PASS.`,
       transcript ? `Contesto recente del canale:\n<chat>\n${transcript}\n</chat>` : "",
     ].filter(Boolean).join("\n\n");
     return this.loop({
-      agent, mode: "routine", channel, user, computer: agent.tools, postFile, say, inbox,
+      agent, mode: routine.kind === "reminder" ? "reminder" : "routine", channel, user, computer: agent.tools, postFile, say, inbox, onTrace,
       maxSteps: ROUTINE_STEPS, deadline: Date.now() + ROUTINE_DEADLINE_MS, images: [], task: Boolean(agent.tools),
       goalRequest: this.routineGoal(routine), routine,
     });
   }
 
   routineGoal(routine) {
+    if (routine.kind === "reminder") return `Reminder "${routine.name}": ${routine.prompt}\n\nEsegui questo compito una sola volta e verifica il risultato con prove concrete. Prima di ripetere azioni con effetti esterni, controlla se sono già riuscite. Se serve un permesso o un intervento altrui, segnala il blocco. Cora conserverà il risultato e archivierà il reminder soltanto dopo la verifica.`;
     return `Routine "${routine.name}": ${routine.prompt}\n\nQuesta esecuzione deve svolgere UN controllo adesso e riportare l'esito (o PASS se previsto). Una pubblicazione prevista nel futuro resta in coda: non aspettare che avvenga, non anticiparla e non ripetere il controllo fino a quell'ora. Le esecuzioni successive spettano alla pianificazione. Un limite di accesso o un intervento di un altro agente va segnalato, non inseguito all'infinito.`;
+  }
+
+  async verifyReminder({ agent, routine, result, delivered = false }) {
+    if (result.stopped || result.asked) return { met: false, blocked: true, reason: result.stopped ? "Esecuzione interrotta." : "Serve una risposta del proprietario." };
+    const evidence = this.traces?.get(result.traceId);
+    const work = (evidence?.steps || []).filter((step) => step.type === "tool").slice(-40)
+      .map((step) => `${step.name} ${JSON.stringify(step.args || {}).slice(0, 500)} → ${String(step.result || "").slice(0, 2400)}`).join("\n");
+    const trace = this.startTrace({ agentId: agent.id, kind: "verification", channelId: routine.channelId, model: agent.model || this.store.settings.defaultModel,
+      prompt: this.routineGoal(routine) });
+    const verdict = await this.goalCheck(this.routineGoal(routine), { answer: result.text, work: `${work}\n${delivered ? `Messaggio finale effettivamente consegnato nel canale: ${result.text}` : "Nessun messaggio finale pubblicato."}`, strict: true, agent }, AbortSignal.timeout(120000));
+    trace.spent(verdict.usage);
+    const verification = { met: verdict.met, blocked: Boolean(verdict.blocked), reason: verdict.reason, traceId: trace.id };
+    trace.finish({ status: verdict.met ? "done" : "error", output: JSON.stringify(verification) });
+    return verification;
   }
 
   /**
@@ -292,7 +309,7 @@ export class Brain {
    * steps the agent had taken, and the request to check where things stand
    * and finish.
    */
-  async resumeTurn({ agent, trace, channel, postFile, say, inbox, routine = null }) {
+  async resumeTurn({ agent, trace, channel, postFile, say, inbox, routine = null, onTrace }) {
     const steps = (trace.steps || []).filter((step) => step.type === "tool" || step.type === "text").slice(-20).map((step) => step.type === "tool"
       ? `- ${step.name} ${JSON.stringify(step.args || {}).slice(0, 300)} → ${String(step.result || "").replace(/\s+/g, " ").slice(0, 300)}`
       : `- (scritto) ${String(step.text || "").replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
@@ -300,10 +317,11 @@ export class Brain {
     const user = [
       original,
       `[Cora] Cora si è riavviata mentre lavoravi a questo compito (iniziato ${formatWhen(Date.parse(trace.startedAt), this.timezone)}). Gli ultimi passi che avevi fatto:\n${steps || "- (nessuno registrato)"}`,
+      trace.output ? `Risultato già registrato prima del riavvio:\n${trace.output}` : "",
       "Riprendi da dove eri: controlla com'è la situazione adesso (qualcosa potrebbe essere già fatto), poi porta a termine il compito e scrivi il risultato.",
     ].join("\n\n");
     return this.loop({
-      agent, mode: trace.kind === "routine" ? "routine" : "chat", channel, user, computer: agent.tools, postFile, say, inbox,
+      agent, mode: routine?.kind === "reminder" ? "reminder" : trace.kind === "routine" ? "routine" : "chat", channel, user, computer: agent.tools, postFile, say, inbox, onTrace,
       maxSteps: TASK_STEPS, deadline: Date.now() + TASK_DEADLINE_MS, images: [], task: true,
       goalRequest: routine ? this.routineGoal(routine) : original.split("<chat>\n").pop().split("\n</chat>")[0].split("\n").filter((line) => line.includes(" ★:")).slice(-1).join("\n"), routine,
     });
@@ -344,22 +362,24 @@ export class Brain {
    * check that fails lets the task through: a broken judge must never keep an
    * agent working for ever.
    */
-  async goalCheck(goal, { answer, work }, signal) {
-    const model = this.store.settings.defaultModel;
+  async goalCheck(goal, { answer, work, strict = false, agent = null }, signal) {
+    const model = strict ? agent?.model || this.store.settings.defaultModel : this.store.settings.defaultModel;
     try {
-      const out = await this.llm.chat({
+      const options = {
         model, tools: [], effort: "low",
         messages: [
           { role: "system", content: 'Giudichi se un compito è finito. Rispondi SOLO con JSON: {"met": true|false, "blocked": true|false, "reason": "una frase"}. met=true soltanto se la condizione risulta soddisfatta dai risultati degli strumenti, non dalle promesse. Giudica solo il compito attuale: una routine esegue un controllo, non attende le pubblicazioni future. blocked=true quando per proseguire serve una scadenza futura, un permesso o un intervento altrui: riprovare subito non può risolverlo. La reason va nella lingua della condizione.' },
           { role: "user", content: `Condizione:\n${goal}\n\nCosa ha fatto l'agente:\n${work || "(niente)"}\n\nCosa ha scritto come risultato:\n${answer || "(niente)"}` },
         ],
         signal,
-      });
+      };
+      const out = strict && this.llm.isAgentic(model) ? await this.llm.runAgent({ model, subscriptionId: agent.subscriptionId,
+        system: options.messages[0].content, prompt: options.messages[1].content, tools: [], execute: async () => { throw new Error("verification has no tools"); }, timeoutMs: 120000, effort: "low", signal }) : await this.llm.chat(options);
       const data = parseJsonObject(String(out.text || ""));
-      if (!data || typeof data.met !== "boolean") return { met: true, reason: "", usage: out.usage };
-      return { met: data.met, blocked: data.blocked === true, reason: String(data.reason || "").trim().slice(0, 300), usage: out.usage };
+      if (!data || typeof data.met !== "boolean") return { met: !strict, blocked: strict, reason: strict ? "La verifica non ha restituito un esito valido." : "", usage: out.usage };
+      return { met: data.met && (!strict || data.blocked !== true), blocked: data.blocked === true, reason: String(data.reason || "").trim().slice(0, 300), usage: out.usage };
     } catch {
-      return { met: true, reason: "", usage: null };
+      return { met: !strict, blocked: strict, reason: strict ? "Verifica non disponibile: il reminder resta da controllare." : "", usage: null };
     }
   }
 
@@ -379,7 +399,7 @@ export class Brain {
     }
   }
 
-  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", routine = null }) {
+  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", routine = null, onTrace = null }) {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
     const tools = caps.tools ? TOOL_DEFS.filter((tool) => OWN_TOOLS.has(tool.name) || computer) : [];
@@ -390,6 +410,7 @@ export class Brain {
     const currentPrompt = () => `Ora: ${formatNow(this.timezone)}.\n\n${user}${goal ? `\n\n[Obiettivo] Questa è l'unica condizione attuale; sostituisce gli obiettivi precedenti: ${goal}` : ""}`;
     const prompt = currentPrompt();
     const trace = this.startTrace({ agentId: agent.id, kind: mode, channelId: channel.id, model, system, prompt });
+    onTrace?.(trace.id);
     trace.spent(goalCost);
     if (goal) trace.add({ type: "note", text: `Obiettivo: ${goal}` });
     let asked = false;

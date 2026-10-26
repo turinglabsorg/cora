@@ -114,6 +114,14 @@ In **Settings → Access**, the owner can authorize verified email domains or in
 
 Google/GitHub sign-in remains on usecora.space. Membership is checked by the target instance using signed identity claims, and permissions never carry across instances. Messages to agents retain the authenticated person's name and identity. The user list records first visit and last activity, with a recent activity history for the owner.
 
+### Reminders and history
+
+Open an agent’s **Routines and reminders** tab to create a recurring routine or a one-time reminder. A reminder uses an exact date/time rather than cron. It runs once when due; an independent, tool-free verification checks the actual tool results and delivered reply before Cora automatically archives it. This verification also works with Claude and Codex subscriptions and remains active when goal mode is off.
+
+A failed, blocked or interrupted reminder stays visible. Busy agents and threads defer due reminders; unsuccessful attempts are not automatically repeated. Use **Retry** or reschedule explicitly after checking any effects of the previous attempt. Pausing, archiving or rescheduling cancels stale work. After a restart, unfinished attempts resume from their saved evidence instead of starting a new occurrence.
+
+**Archive** shows searchable execution history and archived task definitions, with timestamps, output, verification and reasoning links. Find it within each agent or open the global archive from **Desk**. Archiving a task preserves its history. Existing routine traces and last results are imported as historical records without inventing a success verification. Agents can create reminders with `set_reminder` and consult their own past work with `routine_history`, even without computer tools.
+
 ### Context
 
 Open **Context** in the main navigation to inspect server instruction files and shared memory. Each source shows its path, update time and whether Cora applies it, a CLI may load it, or the runtime excludes it. The common owner instructions match the text injected into agent prompts. Codex runs with automatic local instruction loading disabled; Claude files are shown as available because loading depends on the profile and turn runtime. Server files remain read-only and come from a fixed instruction-file inventory, never arbitrary server paths or credential stores.

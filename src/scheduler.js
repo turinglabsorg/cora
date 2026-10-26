@@ -120,10 +120,25 @@ export class Scheduler {
         this.brain.sleep(agent).catch((error) => this.log({ type: "error", agentId: agent.id, text: `sonno: ${error.message}` }));
       }
     }
+    const pending = this.store.pendingRoutineRuns();
     for (const routine of this.store.routines()) {
       if (!routine.enabled) continue;
       const agent = this.store.agent(routine.agentId);
       if (!agent?.enabled) continue;
+      const interrupted = pending.find((run) => run.routineId === routine.id && run.status === "interrupted");
+      if (interrupted) {
+        const trace = interrupted.traceId && this.store.trace(interrupted.traceId);
+        if (trace && routine.updatedAt === interrupted.routineUpdatedAt && !this.orchestrator.atWork.has(agent.id) && !this.orchestrator.threadWork.has(routine.channelId)) {
+          this.orchestrator.runRoutine(routine, { resumeTrace: trace, resumeRunId: interrupted.id }).catch((error) => this.log({ type: "error", text: `ripresa ${routine.name}: ${error.message}` }));
+        }
+        continue;
+      }
+      if (routine.kind === "reminder") {
+        if (Date.parse(routine.runAt) > now.getTime() || (routine.lastRunAt && routine.lastStatus !== "skipped") || this.fired.get(routine.id) === key) continue;
+        this.fired.set(routine.id, key);
+        this.orchestrator.runRoutine(routine).catch((error) => this.log({ type: "error", text: `reminder ${routine.name}: ${error.message}` }));
+        continue;
+      }
       let cron;
       try { cron = parseCron(routine.schedule); } catch { continue; }
       if (!cronMatches(cron, parts) || this.fired.get(routine.id) === key) continue;

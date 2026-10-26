@@ -182,7 +182,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
 
   const routineView = (routine) => {
     let next = [];
-    try { next = nextRuns(routine.schedule, config.timezone, 1).map((date) => date.toISOString()); } catch {}
+    if (routine.kind === "reminder") {
+      if (!routine.lastRunAt || routine.lastStatus === "skipped") next = [routine.runAt];
+    } else try { next = nextRuns(routine.schedule, config.timezone, 1).map((date) => date.toISOString()); } catch {}
     return { ...routine, nextRunAt: next[0] || null, running: orchestrator.routineRuns.has(routine.id) };
   };
 
@@ -560,12 +562,18 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       return send(res, 200, await publicAgent(store.agent(agent.id)));
     }
 
+    if (["/api/routines/history", "/api/routines/archive"].includes(path) && method === "GET") {
+      const options = Object.fromEntries(["agentId", "kind", "query", "limit", "offset"].map((key) => [key, url.searchParams.get(key) || ""]));
+      if (options.kind && !["routine", "reminder"].includes(options.kind)) throw new HttpError(400, "tipo di attività non valido");
+      return send(res, 200, path.endsWith("/history") ? store.routineHistory(options) : store.routineArchive(options));
+    }
+
     match = /^\/api\/agents\/([\w-]+)\/routines$/.exec(path);
     if (match && method === "POST") {
       const agent = store.agent(match[1]);
       if (!agent) throw new HttpError(404, "agente non trovato");
       const body = await readJson(req);
-      try { nextRuns(body.schedule, config.timezone, 1); } catch (error) { throw new HttpError(400, error.message); }
+      if (body.kind !== "reminder") try { nextRuns(body.schedule, config.timezone, 1); } catch (error) { throw new HttpError(400, error.message); }
       return send(res, 201, routineView(store.createRoutine(agent.id, body)));
     }
 

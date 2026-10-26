@@ -301,7 +301,7 @@ a.stat:hover { border-color: var(--line-strong); }
 .field small { color: var(--faint); font-size: 12px; line-height: 1.4; }
 .field-row { display: flex; align-items: center; justify-content: space-between; }
 .fader-value { font: 600 20px/1 var(--display); color: var(--amber); }
-input[type=text], input[type=email], input[type=url], input[type=password], input[type=number], input[type=search], select, textarea {
+input[type=text], input[type=email], input[type=url], input[type=password], input[type=number], input[type=search], input[type=datetime-local], select, textarea {
   width: 100%; min-width: 0; height: 44px; padding: 0 12px; background: var(--well); border: 1px solid var(--line); border-radius: var(--r-md);
   outline: none; font-size: 15px; transition: border-color 0.15s, box-shadow 0.15s; -webkit-appearance: none; appearance: none;
 }
@@ -737,7 +737,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .hero .btn.toggle { width: 38px; padding: 0; }
   .tabs { margin: 0 -14px; padding: 2px 14px; }
 
-  input[type=text], input[type=email], input[type=url], input[type=password], input[type=number], input[type=search], select, textarea, .chat-compose .chat-input { font-size: 16px; }
+  input[type=text], input[type=email], input[type=url], input[type=password], input[type=number], input[type=search], input[type=datetime-local], select, textarea, .chat-compose .chat-input { font-size: 16px; }
   .input-row.token { flex-direction: column; align-items: stretch; }
   .input-row.token > input { flex: none; }
   .agent-card .monitor { aspect-ratio: 16 / 8; }
@@ -926,3 +926,43 @@ details.raw summary .ico { width: 15px; height: 15px; }
 }
 
 .context-document h2 { overflow-wrap: anywhere; }
+
+/* ---------- scheduled tasks and their history ---------- */
+.task-kind-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }
+.task-kind { display: flex; align-items: center; gap: 12px; padding: 16px; text-align: left; color: var(--muted); background: var(--well); border: 1px solid var(--line); border-radius: var(--r-md); cursor: pointer; }
+.task-kind.active { color: var(--amber); border-color: var(--amber-line); background: var(--amber-wash); }
+.task-kind b, .task-kind small { display: block; }
+.task-kind b { font: 600 17px/1.3 var(--display); }
+.task-kind small { margin-top: 4px; font-size: 11px; color: var(--muted); }
+.task-kind .ico { flex: none; }
+.task-tabs { margin: 0; }
+.task-timing > small { color: var(--muted); line-height: 1.6; }
+.task-verification { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.task-history-filters { display: flex; flex-wrap: wrap; gap: 12px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.task-history-filters > select { flex: 1 1 150px; width: auto; }
+.task-history-search { display: flex; gap: 8px; flex: 2 1 280px; min-width: 0; }
+.task-history-search input { min-width: 0; }
+.task-history-count { margin: 16px 0; font: 400 11px/1.6 var(--mono); color: var(--muted); }
+.task-history-list { display: flex; flex-direction: column; gap: 12px; }
+.task-history-item { padding: 20px; background: var(--well); border: 1px solid var(--line); border-radius: var(--r-md); min-width: 0; }
+.task-history-item > header { display: flex; gap: 12px; align-items: flex-start; }
+.task-history-item h3 { margin: 0 0 6px; font: 600 21px/1.25 var(--display); letter-spacing: -.02em; overflow-wrap: anywhere; }
+.task-history-item details { margin-top: 16px; }
+.task-history-item pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 400 12px/1.8 var(--mono); }
+.task-history-links { margin-top: 12px; }
+.task-history-pagination { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 20px; font-size: 11px; }
+@media (max-width: 600px) {
+  .task-kind-picker { gap: 8px; }
+  .task-kind { padding: 12px; gap: 8px; }
+  .task-kind small { font-size: 10px; }
+  .task-history-item { padding: 16px; }
+  .task-history-item > header { flex-wrap: wrap; }
+  .task-history-item > header .grow { flex-basis: calc(100% - 60px); }
+  .task-history-item > header > .tag { margin-left: 48px; }
+  .task-history-search { flex-basis: 100%; }
+  .routine-head { flex-wrap: wrap; }
+  .routine-head .row-actions { margin-left: 48px; flex-wrap: wrap; }
+  .task-timing input[type=datetime-local] { min-width: 0; width: 100%; }
+}
+
+@media (max-width: 600px) { .task-history-filters > select:first-child { flex-basis: 100%; } }

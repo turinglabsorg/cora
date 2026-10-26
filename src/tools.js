@@ -13,7 +13,7 @@ export const MEMORY_TOOLS = new Set(["say", "remember", "forget", "recall", "upd
  * changing, pausing or deleting one touches nothing else — so they are not
  * locked behind the computer, which only opens when the owner is the one asking.
  */
-export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "delete_routine"]);
+export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history"]);
 
 export const TOOL_DEFS = [
   {
@@ -111,7 +111,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "list_routines",
-    description: "List your routines (scheduled tasks you run on your own): id, name, schedule, where you post, whether it is on, next and last run.",
+    description: "List your active or paused routines and one-time reminders: id, kind, cron or due date, where you post, and last result. Use routine_history for past runs and archived tasks.",
     parameters: { type: "object", properties: {} },
   },
   {
@@ -130,8 +130,25 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: "set_reminder",
+    description: "Create or change your own one-time reminder. It runs once at run_at, verifies success and archives itself only on success. Failed or blocked attempts stay visible and are never blindly repeated. Use an ISO 8601 timestamp with timezone, e.g. 2026-12-10T09:00:00+01:00. Defaults to this conversation. Check routine_history before repeating an action that may already have succeeded.",
+    parameters: { type: "object", properties: {
+      id: { type: "string", description: "existing reminder id; omit to create" }, name: { type: "string" },
+      run_at: { type: "string", description: "one exact ISO 8601 date/time with timezone" }, prompt: { type: "string", description: "task and how to check success" },
+      channel_id: { type: "string" }, enabled: { type: "boolean" },
+    } },
+  },
+  {
+    name: "routine_history",
+    description: "Read your persistent routine/reminder execution history or archived task definitions. Includes results, verification, dates and trace ids, even after a task was archived. Search before repeating past work. Paginate with offset.",
+    parameters: { type: "object", properties: {
+      query: { type: "string" }, kind: { type: "string", enum: ["routine", "reminder"] }, archived: { type: "boolean", description: "true for archived definitions, false for execution history" },
+      limit: { type: "integer", minimum: 1, maximum: 50 }, offset: { type: "integer", minimum: 0 },
+    } },
+  },
+  {
     name: "delete_routine",
-    description: "Delete one of your routines by id.",
+    description: "Cancel and archive one of your routines or reminders by id, preserving its history.",
     parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
   },
   {
@@ -194,7 +211,8 @@ export function summarizeArgs(name, args) {
   if (name === "send_file") return String(args.path || "");
   if (name === "notify") return String(args.message || "").slice(0, 200);
   if (name === "say") return String(args.text || "").slice(0, 200);
-  if (name === "set_routine") return `${args.id ? `${args.id} ` : ""}${args.name || ""} ${args.schedule || ""}`.trim();
+  if (name === "set_routine" || name === "set_reminder") return `${args.id ? `${args.id} ` : ""}${args.name || ""} ${args.schedule || args.run_at || ""}`.trim();
+  if (name === "routine_history") return String(args.query || "").slice(0, 200);
   if (name === "delete_routine") return String(args.id || "");
   if (name === "ask_owner") return String(args.question || "").slice(0, 200);
   return "";
@@ -301,30 +319,39 @@ export async function executeTool(call, ctx) {
       case "list_routines": {
         const routines = store.routines(agent.id);
         if (!routines.length) return { text: "you have no routines" };
-        return { text: routines.map((routine) => `- [${routine.id}] ${routine.name} · ${routine.schedule} · ${ctx.channelLabel(routine.channelId)} · ${routine.enabled ? "on" : "paused"}${routine.lastRunAt ? ` · last ${ctx.formatWhen(Date.parse(routine.lastRunAt))} ${routine.lastStatus}` : ""}\n  ${routine.prompt.slice(0, 300)}`).join("\n") };
+        return { text: routines.map((routine) => `- [${routine.id}] ${routine.kind === "reminder" ? "reminder · " : ""}${routine.name} · ${routine.runAt || routine.schedule} · ${ctx.channelLabel(routine.channelId)} · ${routine.enabled ? "on" : "paused"}${routine.lastRunAt ? ` · last ${ctx.formatWhen(Date.parse(routine.lastRunAt))} ${routine.lastStatus}` : ""}\n  ${routine.prompt.slice(0, 300)}`).join("\n") };
       }
-      case "set_routine": {
+      case "routine_history": {
+        const options = { agentId: agent.id, kind: ["routine", "reminder"].includes(args.kind) ? args.kind : "", query: String(args.query || ""), limit: args.limit || 10, offset: args.offset || 0 };
+        const page = args.archived ? store.routineArchive(options) : store.routineHistory(options);
+        return { text: JSON.stringify({ ...page, items: page.items.map((item) => ({ ...item, prompt: item.prompt?.slice(0, 500), output: item.output?.slice(0, 2000), lastOutput: item.lastOutput?.slice(0, 2000) })) }) };
+      }
+      case "set_routine":
+      case "set_reminder": {
+        const kind = call.name === "set_reminder" ? "reminder" : "routine";
         const id = String(args.id || "").trim();
         const existing = id ? store.routine(id) : null;
         if (id && (!existing || existing.agentId !== agent.id)) return { text: "error: you have no routine with that id" };
-        const input = {};
+        if (existing && (existing.kind || "routine") !== kind) return { text: `error: use set_${existing.kind || "routine"} to change this task` };
+        const input = { kind };
         for (const key of ["name", "schedule", "prompt"]) if (args[key] !== undefined) input[key] = String(args[key]);
         if (args.enabled !== undefined) input.enabled = Boolean(args.enabled);
+        if (kind === "reminder" && args.run_at !== undefined) input.runAt = String(args.run_at);
         input.channelId = String(args.channel_id || existing?.channelId || channelId || "");
         if (input.schedule !== undefined) {
           const problem = ctx.checkSchedule?.(input.schedule);
           if (problem) return { text: `error: schedule: ${problem}` };
         }
         const routine = existing ? store.updateRoutine(existing.id, input) : store.createRoutine(agent.id, input);
-        ctx.log?.({ type: "routine", agentId: agent.id, text: `${existing ? "ha cambiato" : "ha creato"} la routine «${routine.name}» (${routine.schedule})` });
-        return { text: `${existing ? "updated" : "created"} [${routine.id}] ${routine.name} · ${routine.schedule} · ${ctx.channelLabel(routine.channelId)} · ${routine.enabled ? "on" : "paused"}` };
+        ctx.log?.({ type: "routine", agentId: agent.id, text: `${existing ? "ha cambiato" : "ha creato"} ${kind} «${routine.name}» (${routine.runAt || routine.schedule})` });
+        return { text: `${existing ? "updated" : "created"} [${routine.id}] ${routine.name} · ${routine.runAt || routine.schedule} · ${ctx.channelLabel(routine.channelId)} · ${routine.enabled ? "on" : "paused"}` };
       }
       case "delete_routine": {
         const routine = store.routine(String(args.id || ""));
         if (!routine || routine.agentId !== agent.id) return { text: "error: you have no routine with that id" };
         store.deleteRoutine(routine.id);
         ctx.log?.({ type: "routine", agentId: agent.id, text: `ha eliminato la routine «${routine.name}»` });
-        return { text: "deleted" };
+        return { text: "archived; its execution history remains available with routine_history" };
       }
       case "say": {
         const text = String(args.text || "").trim();

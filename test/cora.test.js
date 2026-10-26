@@ -440,6 +440,41 @@ describe("panel auth", () => {
       assert.doesNotMatch(app.brain.systemPrompt({ id: "ag_context_fixture", name: "Fixture", personality: "", core: "" }, { place: "test" }), /Fixture shared reference: ORBIT/);
     } finally { await call(`/api/context/documents/${created.data.id}`, { method: "DELETE", headers }); }
   });
+
+  test("one-time reminders are verified by the runtime and exposed in the persistent archive", async () => {
+    const signedIn = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    const headers = { Cookie: signedIn.headers.get("set-cookie").split(";")[0] };
+    const agent = app.store.createAgent({ name: "Rina Reminder", model: "ollama/test-model", tools: false, chattiness: 0 });
+    replies.set(agent.name, () => ({ content: "Promemoria consegnato." }));
+    try {
+      const created = await call(`/api/agents/${agent.id}/routines`, { method: "POST", headers, body: {
+        kind: "reminder", name: "Un solo avviso", runAt: "2050-01-01T09:00:00+01:00", channelId: `web-${agent.id}`, prompt: "Ricorda al proprietario di controllare la ricevuta." } });
+      assert.equal(created.status, 201);
+      await call(`/api/routines/${created.data.id}/run`, { method: "POST", headers });
+      await waitFor(() => app.store.routine(created.data.id, { archived: true }).archiveReason === "completed");
+      const history = await call(`/api/routines/history?agentId=${agent.id}`, { headers });
+      assert.equal(history.data.items[0].verification.met, true);
+      assert.equal(history.data.items[0].output, "Promemoria consegnato.");
+      assert.ok(!app.store.routines(agent.id).length);
+      assert.equal((await call(`/api/routines/${created.data.id}/run`, { method: "POST", headers })).status, 404);
+    } finally { app.store.deleteAgent(agent.id); replies.delete(agent.name); }
+  });
+
+  test("reminder verification uses Claude and Codex subscriptions without tools or a separate API provider", async () => {
+    for (const provider of ["claude", "codex"]) {
+      const agent = app.store.createAgent({ name: "Verifier " + provider, model: `${provider}/test-model`, subscriptionId: subscriptionIds[provider], tools: false, chattiness: 0 });
+      cli.set({ reply: JSON.stringify({ met: true, reason: "Fixture delivery verified." }) });
+      const firstCall = cli.calls().length;
+      try {
+        const reminder = app.store.createRoutine(agent.id, { kind: "reminder", name: "Native verification", runAt: "2050-01-01T00:00:00Z", channelId: `web-${agent.id}`, prompt: "Deliver this reminder once." });
+        assert.equal((await app.orchestrator.runRoutine(reminder)).status, "completed");
+        const check = cli.calls().slice(firstCall).find((run) => run.flavor === provider && run.stdin.includes("Condizione:"));
+        assert.ok(check, "the subscription runtime performed the verification");
+        assert.equal(check.tools, null, "the verifier has no tool bridge");
+        assert.equal(app.store.routineHistory({ agentId: agent.id }).items[0].verification.met, true);
+      } finally { app.store.deleteAgent(agent.id); }
+    }
+  });
 });
 
 describe("agents in Discord", () => {
@@ -800,7 +835,7 @@ describe("agents in Discord", () => {
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
     // Its own routines travel with it: they are the agent's own, not the owner's computer.
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner"]);
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);
