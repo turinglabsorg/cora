@@ -123,6 +123,29 @@ const ICONS = {
 };
 
 const app = document.getElementById("app");
+
+/**
+ * On iOS the standalone PWA's fixed layout is taller than what you can see, and
+ * the keyboard covers the bottom. Size the app to the real visible viewport, and
+ * while the keyboard is up (an input focused and the viewport much shorter) mark
+ * the root so the tab bar hides and the composer rests on the keyboard.
+ */
+function fitViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const apply = () => {
+    document.documentElement.style.setProperty("--app-h", `${Math.round(vv.height)}px`);
+    const typing = document.activeElement && document.activeElement.matches("input, textarea");
+    const kbd = Boolean(typing) && window.innerHeight - vv.height > 120;
+    document.documentElement.classList.toggle("kbd-open", kbd);
+  };
+  vv.addEventListener("resize", apply);
+  vv.addEventListener("scroll", apply);
+  document.addEventListener("focusin", apply);
+  document.addEventListener("focusout", () => setTimeout(apply, 50));
+  apply();
+}
+fitViewport();
 const S = { data: null, activity: [], events: null, timers: [], refreshTimer: null, live: null };
 
 /* ---------- dom ---------- */

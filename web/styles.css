@@ -66,7 +66,7 @@ code { font: 400 12px/1 var(--mono); color: var(--amber); background: var(--well
 
 /* ---------- app shell ---------- */
 /* The shell is pinned to the screen: only the content scrolls, never the page itself. */
-.app { position: fixed; inset: 0; display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr); }
+.app { position: fixed; top: 0; left: 0; right: 0; height: var(--app-h, 100%); display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr); }
 .appbar, .tabbar { display: none; }
 .content { grid-column: 2; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 32px 56px; display: flex; flex-direction: column; gap: 18px; }
@@ -586,7 +586,9 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .page-title p { margin: 0; font-size: 14px; }
   .page-head { align-items: center; }
   .mode-chat .page-head { display: none; }
-  .mode-chat .wrap { padding-bottom: 10px; gap: 10px; }
+  .mode-chat .wrap { padding-bottom: 8px; gap: 10px; }
+  .kbd-open .tabbar { display: none; }
+  .kbd-open .mode-chat .wrap { padding-bottom: 6px; }
 
   .panel-head { padding: 14px 16px; flex-wrap: wrap; }
   .panel-actions:has(.badge, .tag) { flex-basis: 100%; justify-content: flex-start; padding-left: 48px; }
