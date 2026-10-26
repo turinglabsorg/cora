@@ -433,7 +433,12 @@ export class Discord extends EventEmitter {
         if (avatarUrl) payload.avatar_url = avatarUrl;
         message = await this.sendPayload(`/webhooks/${hook.id}/${hook.token}?${query}`, payload, attach, false);
       } else {
-        const payload = { content: text ? `**${username}** · ${text}`.slice(0, 2000) : `**${username}**`, allowed_mentions: { parse: ["users"] } };
+        // The prefix says who is speaking when the message goes out under another identity.
+        // When this bot already carries that name — cora listens through an agent's own bot —
+        // it would only say it twice.
+        const mine = this.user?.username === username;
+        const body = text ? (mine ? text : `**${username}** · ${text}`) : (mine ? "" : `**${username}**`);
+        const payload = { content: body.slice(0, 2000), allowed_mentions: { parse: ["users"] } };
         message = await this.sendPayload(`/channels/${channelId}/messages`, payload, attach, true);
       }
       this.rememberOwn(message);

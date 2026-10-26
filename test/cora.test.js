@@ -387,6 +387,39 @@ describe("agents in Discord", () => {
     assert.ok(app.store.memories(SHARED).length >= 1);
   });
 
+  test("an agent runs one task at a time: a routine landing on a busy agent is skipped, not run beside it", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Tosca", model: "ollama/test-model", chattiness: 0, tools: true, channelIds: [CHANNEL] } });
+    assert.equal(created.status, 201);
+    const slow = await call(`/api/agents/${created.data.id}/routines`, { method: "POST", body: { name: "Lunga", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Controlla tutto" } });
+    const other = await call(`/api/agents/${created.data.id}/routines`, { method: "POST", body: { name: "Altra", schedule: "0 10 * * *", channelId: CHANNEL, prompt: "Controlla altro" } });
+    assert.equal(slow.status, 201);
+    assert.equal(other.status, 201);
+    let running = 0;
+    let together = 0;
+    replies.set("Tosca", async () => {
+      running += 1;
+      together = Math.max(together, running);
+      await sleep(1500);
+      running -= 1;
+      return { content: "Finito." };
+    });
+    // Both fire in the same instant, exactly as the scheduler did.
+    const [first, second] = await Promise.all([
+      call(`/api/routines/${slow.data.id}/run`, { method: "POST" }),
+      call(`/api/routines/${other.data.id}/run`, { method: "POST" }),
+    ]);
+    assert.equal(first.status, 202);
+    assert.equal(second.status, 202);
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Tosca" && item.content === "Finito."), { what: "the first routine finishing", timeout: 20000 });
+    await quiet();
+    assert.equal(together, 1, "never two sessions of the same agent at once");
+    const routines = (await call("/api/state")).data.routines.filter((r) => r.agentId === created.data.id);
+    assert.ok(routines.some((r) => r.lastStatus === "skipped"), "the one that landed on a busy agent says it was skipped");
+    const skipped = routines.find((r) => r.lastStatus === "skipped");
+    assert.match(skipped.lastOutput || "", /stava già lavorando/);
+    await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
+  });
+
   test("what a turn spends is counted and served by day, for the heatmap", async () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Nuvola", model: "ollama/test-model", chattiness: 0, tools: false } });
     assert.equal(created.status, 201);

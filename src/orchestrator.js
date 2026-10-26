@@ -76,6 +76,8 @@ export class Orchestrator {
     this.dmAgent = new Map();
     this.routineRuns = new Set();
     this.ackAfterMs = ACK_AFTER_MS;
+    // An agent has one computer, so it runs one task at a time: what it is on, by agent id.
+    this.atWork = new Map();
     this.ackQuietMs = ACK_QUIET_MS;
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
     this.releaseAfterMs = RELEASE_AFTER_MS;
@@ -532,8 +534,12 @@ export class Orchestrator {
       }
     };
     const work = async (agent, isForced) => {
-      const computer = agent.tools && state.ownerOrigin;
+      // Already on a task elsewhere: it still answers, but it does not take its computer
+      // for a second job at the same time.
+      const busyWith = this.atWork.get(agent.id);
+      const computer = agent.tools && state.ownerOrigin && !busyWith;
       const started = Date.now();
+      if (computer) this.atWork.set(agent.id, `una richiesta ${this.channelMeta(state.id).where || "in chat"}`);
       let spoke = false;
       const say = (text) => {
         spoke = true;
@@ -562,6 +568,7 @@ export class Orchestrator {
         else return;
       } finally {
         clearTimeout(ack);
+        if (computer) this.atWork.delete(agent.id);
       }
       if (!result.text) {
         this.log({ type: "pass", agentId: agent.id, channelId: state.id, ms: Date.now() - started, traceId: result.traceId });
@@ -853,6 +860,14 @@ export class Orchestrator {
     if (this.routineRuns.has(routine.id)) return { status: "busy" };
     const agent = this.store.agent(routine.agentId);
     if (!agent) return { status: "missing-agent" };
+    // One agent, one computer: a routine that lands on a busy agent waits for its next turn
+    // instead of opening a second session on the same work.
+    const busyWith = this.atWork.get(agent.id);
+    if (busyWith) {
+      this.store.recordRoutineRun(routine.id, "skipped", `saltata: stava già lavorando a ${busyWith}`);
+      this.log({ type: "routine-skip", agentId: agent.id, channelId: routine.channelId, text: `${routine.name}: stava già lavorando` });
+      return { status: "busy" };
+    }
     const channel = this.channelMeta(routine.channelId);
     if (!this.channels.isActive(routine.channelId)) {
       this.store.recordRoutineRun(routine.id, "error", `il canale è su ${isTelegramChannel(routine.channelId) ? "Telegram" : "Discord"}, ma ora Cora vive sull'altro`);
@@ -863,6 +878,7 @@ export class Orchestrator {
       return { status: "error" };
     }
     this.routineRuns.add(routine.id);
+    if (agent.tools) this.atWork.set(agent.id, `la routine «${routine.name}»`);
     this.log({ type: "routine-start", agentId: agent.id, channelId: routine.channelId, text: routine.name, manual });
     const state = this.state(routine.channelId);
     const typing = setInterval(() => this.typing(routine.channelId, [agent]), 8000);
@@ -890,6 +906,7 @@ export class Orchestrator {
     } finally {
       clearInterval(typing);
       this.routineRuns.delete(routine.id);
+      this.atWork.delete(agent.id);
     }
   }
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { cleanReply } from "../src/brain.js";
-import { splitMessage } from "../src/discord.js";
+import { Discord, splitMessage } from "../src/discord.js";
 import { mentions } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { SHARED, Store, ftsQuery } from "../src/store.js";
@@ -32,6 +32,26 @@ describe("cron", () => {
     assert.ok(cronMatches(cron, { minute: 0, hour: 12, day: 1, month: 3, weekday: 4 }));
     assert.ok(cronMatches(cron, { minute: 0, hour: 12, day: 9, month: 3, weekday: 1 }));
     assert.ok(!cronMatches(cron, { minute: 0, hour: 12, day: 9, month: 3, weekday: 2 }));
+  });
+});
+
+describe("posting as an agent through the plain bot", () => {
+  const posted = (botName, agentName) => {
+    const client = new Discord({ token: "t", apiBase: "http://x", gatewayUrl: "ws://x" });
+    client.user = { id: "1", username: botName };
+    client.channelInfo = () => null;
+    client.webhookFor = async () => null;
+    client.rememberOwn = () => {};
+    const sent = [];
+    client.sendPayload = async (path, payload) => { sent.push(payload); return { id: "m1" }; };
+    return client.post("9", { username: agentName, content: "Fatto." }).then(() => sent[0].content);
+  };
+
+  test("says who is speaking only when the bot is not that agent", async () => {
+    assert.equal(await posted("GROG", "Marta"), "**Marta** · Fatto.", "a shared bot names the agent it speaks for");
+    // Cora listens through an agent's own bot: the author already is Primo, so saying it again
+    // would print the name twice.
+    assert.equal(await posted("Primo", "Primo"), "Fatto.");
   });
 });
 

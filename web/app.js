@@ -629,19 +629,25 @@ function heatDays(today, weeks) {
  * scale is relative to the busiest day: providers count tokens so differently
  * that an absolute scale would say nothing.
  */
-function heatmap(byDay, { today, weeks = 27, label = "" } = {}) {
+function heatmap(byDay, { today, weeks = 53, label = "" } = {}) {
   const days = heatDays(today, weeks);
   const peak = Math.max(1, ...days.map((day) => byDay.get(day.key)?.tokens || 0));
   const readout = h("p", { class: "heat-readout" }, label || "\u00a0");
   const tell = (text) => { readout.textContent = text || label || "\u00a0"; };
-  const months = h("div", { class: "heat-months" });
-  const grid = h("div", { class: "heat-grid", vars: { "--weeks": String(Math.ceil(days.length / 7)) } });
+  const columns = Math.ceil(days.length / 7);
+  const months = h("div", { class: "heat-months", vars: { "--weeks": String(columns) } });
+  const grid = h("div", { class: "heat-grid", vars: { "--weeks": String(columns) } });
   let lastMonth = -1;
+  let labelled = -9;
   for (let index = 0; index < days.length; index += 1) {
     const day = days[index];
     if (index % 7 === 0) {
+      const column = index / 7;
       const month = day.date.getUTCMonth();
-      months.append(h("span", { class: "heat-month" }, month === lastMonth ? "" : MONTHS[month]));
+      // A label needs room: two months whose columns are close would print over each other.
+      const show = month !== lastMonth && column - labelled >= 3;
+      if (show) labelled = column;
+      months.append(h("span", { class: "heat-month" }, show ? MONTHS[month] : ""));
       lastMonth = month;
     }
     const spent = byDay.get(day.key);
@@ -661,11 +667,13 @@ function heatmap(byDay, { today, weeks = 27, label = "" } = {}) {
   const scroll = h("div", { class: "heat-scroll" }, h("div", { class: "heat-plot" }, months, grid));
   // Today is at the right end, and that is the end worth seeing first.
   requestAnimationFrame(() => { scroll.scrollLeft = scroll.scrollWidth; });
-  return h("div", { class: "heat" },
-    scroll,
-    h("div", { class: "heat-foot" }, readout,
-      h("span", { class: "heat-legend" }, h("small", {}, "meno"),
-        ...[0, 1, 2, 3, 4].map((level) => h("i", { class: `heat-cell l${level}` })), h("small", {}, "pi\u00f9"))));
+  return h("div", { class: "heat" }, scroll, readout);
+}
+
+/** The scale, said once for the whole panel instead of under every agent. */
+function heatLegend() {
+  return h("span", { class: "heat-legend" }, h("small", {}, tr("meno")),
+    ...[0, 1, 2, 3, 4].map((level) => h("i", { class: `heat-cell l${level}` })), h("small", {}, tr("pi\u00f9")));
 }
 
 /** Daily totals: one map for everyone, one per agent. */
@@ -719,7 +727,7 @@ function renderAgents() {
             h("span", { class: "row-meta" }, `${modelLabel(agent.model, { short: true })} · ${tr(agent.box?.running ? "desktop acceso" : "desktop spento")} · ${tr(account).toLowerCase()}`)),
           icon("next", "chev"));
       })) : empty("users", "Ancora nessun agente.", btn("Crea il primo", { icon: "plus", href: "#/new", cls: "primary" }))),
-    panel({ icon: "chart", title: tr("Consumi"), hint: tr("Quanti token spende ognuno, giorno per giorno.") }, usagePanel()),
+    panel({ icon: "chart", title: tr("Consumi"), hint: tr("Quanti token spende ognuno, giorno per giorno."), actions: heatLegend() }, usagePanel()),
   ], { title: "Agenti" });
 }
 
