@@ -105,7 +105,7 @@ export const EN = {
   "Nessun turno ancora.": "No turns yet.",
   "{on} in onda su {total}.": "{on} on air out of {total}.",
   "Gli agenti": "The agents",
-  "Tocca un agente per profilo, chat, memoria, routine, desktop e ragionamento.": "Tap an agent for profile, chat, memory, routines, desktop and reasoning.",
+  "Tocca un agente per aprire la chat; da lì profilo, memoria, routine e desktop.": "Tap an agent to open the chat; from there profile, memory, routines and desktop.",
   "desktop acceso": "desktop on",
   "desktop spento": "desktop off",
   "webhook": "webhook",

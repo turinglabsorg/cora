@@ -381,9 +381,9 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
   clearTimers();
   const [section, current] = route();
   const nav = [
+    ["agenti", "Agenti", "users", ["agenti", "agent", "new"].includes(section)],
     ["", "Salotto", "chat", section === ""],
     ["banco", "Banco", "grid", section === "banco"],
-    ["agenti", "Agenti", "users", ["agenti", "agent", "new"].includes(section)],
     ["settings", "Impostazioni", "sliders", section === "settings"],
   ];
   const info = transportInfo();
@@ -397,7 +397,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
       h("nav", { class: "side-nav" }, nav.map(([key, label, name, active]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label)))),
       h("div", { class: "side-agents" },
         h("span", { class: "label" }, "Agenti"),
-        S.data.agents.map((agent) => h("a", { href: `#/agent/${agent.id}/profilo`, class: section === "agent" && current === agent.id ? "active" : "" }, avatar(agent, "xs"), h("span", { class: "grow" }, raw(agent.name)), agentDot(agent))),
+        S.data.agents.map((agent) => h("a", { href: `#/agent/${agent.id}/chat`, class: section === "agent" && current === agent.id ? "active" : "" }, avatar(agent, "xs"), h("span", { class: "grow" }, raw(agent.name)), agentDot(agent))),
         h("a", { href: "#/new", class: section === "new" ? "active" : "" }, h("span", { class: "avatar xs add" }, icon("plus")), h("span", { class: "grow" }, "Nuovo agente"))),
       h("button", { class: "side-logout", type: "button", onclick: logout }, icon("logout"), h("span", {}, "Esci"))),
     h("header", { class: "appbar" },
@@ -513,7 +513,7 @@ function agentCard(agent, index) {
   const [account, accountOn] = agentAccount(agent);
   return h("article", { class: `agent-card${agent.enabled ? "" : " off"}`, vars: { "--ring": agent.color || "#f2a93b", "--delay": `${index * 50}ms` } },
     monitor,
-    h("a", { class: "agent-ident", href: `#/agent/${agent.id}/profilo` },
+    h("a", { class: "agent-ident", href: `#/agent/${agent.id}/chat` },
       avatar(agent),
       h("span", { class: "grow" }, h("b", {}, raw(agent.name)), h("small", { title: modelLabel(agent.model) }, modelLabel(agent.model, { short: true }))),
       icon("next", "chev")),
@@ -580,10 +580,10 @@ function renderAgents() {
   const agents = S.data.agents;
   shell([
     pageHead("Agenti", tr("{on} in onda su {total}.", { on: agents.filter((agent) => agent.enabled).length, total: agents.length }), [btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
-    panel({ icon: "users", title: "Gli agenti", hint: "Tocca un agente per profilo, chat, memoria, routine, desktop e ragionamento." },
+    panel({ icon: "users", title: "Gli agenti", hint: "Tocca un agente per aprire la chat; da lì profilo, memoria, routine e desktop." },
       agents.length ? h("div", { class: "rows" }, agents.map((agent) => {
         const [account] = agentAccount(agent);
-        return h("a", { class: "row-link", href: `#/agent/${agent.id}/profilo` },
+        return h("a", { class: "row-link", href: `#/agent/${agent.id}/chat` },
           avatar(agent),
           h("span", { class: "grow" },
             h("span", { class: "row-title" }, raw(agent.name), agentDot(agent)),
