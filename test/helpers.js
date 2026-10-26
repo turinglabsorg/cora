@@ -365,6 +365,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const argv = process.argv.slice(2);
 const flavor = path.basename(process.argv[1]);
+const countCalls = (file, kind) => {
+  try {
+    return fs.readFileSync(file, "utf8").split("\\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.flavor === kind).length;
+  } catch { return 0; }
+};
 const control = JSON.parse(fs.readFileSync(${JSON.stringify(control)}, "utf8"));
 let stdin = "";
 process.stdin.on("data", (d) => { stdin += d; });
@@ -392,6 +397,11 @@ process.stdin.on("end", async () => {
       for (const [, k, v] of value("env").matchAll(/(\\w+) = ("[^"]*")/g)) env[k] = JSON.parse(v);
       server = { command: JSON.parse(value("command")), args: JSON.parse(value("args")), env };
     }
+  }
+  if (control.failFirst && countCalls(${JSON.stringify(log)}, flavor) < control.failFirst) {
+    fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ flavor, argv, stdin, failed: true, tools: null, output: null, hermesConfig: null, secretEnv: [] }) + "\\n");
+    process.stderr.write("Selected model is at capacity. Please try a different model.\\n");
+    process.exit(1);
   }
   const record = { flavor, argv, stdin, tools: null, output: null, hermesConfig, secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
   if (server && control.tool) {
@@ -435,6 +445,8 @@ process.stdin.on("end", async () => {
     if (control.thinking) line({ type: "item.completed", item: { type: "reasoning", text: control.thinking } });
     if (control.tool) line({ type: "item.completed", item: { type: "mcp_tool_call", server: "cora", tool: control.tool } });
     line({ type: "item.completed", item: { type: "agent_message", text: answer } });
+    // control.crash: the CLI dies after the agent has answered, writing no output file.
+    if (control.crash) process.exit(1);
     fs.writeFileSync(argv[argv.indexOf("-o") + 1], answer);
   }
 });

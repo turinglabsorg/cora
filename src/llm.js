@@ -6,6 +6,17 @@ import { runClaude, runCodex, runHermes } from "./cli.js";
 
 const REQUEST_TIMEOUT_MS = 240000;
 
+/**
+ * Failures worth trying again: a model at capacity, a rate limit, a connection
+ * that broke, a CLI that answered nothing. Never a refusal or a bad request,
+ * which would fail the same way for ever.
+ */
+const TRANSIENT = /\b(at capacity|capacity|rate.?limit|too many requests|429|50[0234]|overloaded|unavailable|temporar\w*|try again)\b|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|socket hang up|fetch failed|network|timed out|no answer within|returned no content|exited with \d+ and said nothing/i;
+const RETRIES = 2;
+const RETRY_WAIT_MS = 4000;
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export const PROVIDERS = {
   claude: "Claude (abbonamento)",
   codex: "ChatGPT (abbonamento)",
@@ -172,17 +183,35 @@ export class LLM {
    */
   async runAgent({ model, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "" }) {
     const { provider, name } = splitModel(model);
-    const run = tools.length ? this.bridge.register({ tools, execute, ttlMs: timeoutMs + 60000 }) : null;
-    const options = {
-      model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal,
+    // A failed attempt is only retried when the agent had not started working: re-running a
+    // turn that already used a tool would do its side effects twice.
+    let used = 0;
+    const once = async () => {
+      const watched = async (toolName, args) => {
+        used += 1;
+        return execute(toolName, args);
+      };
+      const run = tools.length ? this.bridge.register({ tools, execute: watched, ttlMs: timeoutMs + 60000 }) : null;
+      const options = {
+        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal,
+      };
+      try {
+        if (provider === "claude") return await runClaude({ bin: this.claudeBin, ...options });
+        if (provider === "codex") return await runCodex({ bin: this.codexBin, ...options });
+        if (provider === "hermes") return await runHermes({ bin: this.hermes.bin, home: this.hermes.home, baseUrl: this.hermes.baseUrl, ...options });
+        throw new Error(`${provider} is not a CLI provider`);
+      } finally {
+        run?.dispose();
+      }
     };
-    try {
-      if (provider === "claude") return await runClaude({ bin: this.claudeBin, ...options });
-      if (provider === "codex") return await runCodex({ bin: this.codexBin, ...options });
-      if (provider === "hermes") return await runHermes({ bin: this.hermes.bin, home: this.hermes.home, baseUrl: this.hermes.baseUrl, ...options });
-      throw new Error(`${provider} is not a CLI provider`);
-    } finally {
-      run?.dispose();
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await once();
+      } catch (error) {
+        if (attempt >= RETRIES || used || !TRANSIENT.test(String(error.message || ""))) throw error;
+        onStep?.({ type: "note", text: `${error.message} — riprovo (${attempt + 1}/${RETRIES}).` });
+        await wait(RETRY_WAIT_MS * (attempt + 1));
+      }
     }
   }
 
@@ -191,7 +220,19 @@ export class LLM {
    * {role:"system"|"user", content, images?} · {role:"assistant", content, toolCalls?}
    * · {role:"tool", toolCallId, name, content, image?}. Returns {text, thinking, toolCalls}.
    */
-  async chat({ model, messages, tools = [], effort = "" }) {
+  /** One model call, retried on a passing failure: it has no side effects, so trying again is free. */
+  async chat(options) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.chatOnce(options);
+      } catch (error) {
+        if (attempt >= RETRIES || !TRANSIENT.test(String(error.message || ""))) throw error;
+        await wait(RETRY_WAIT_MS * (attempt + 1));
+      }
+    }
+  }
+
+  async chatOnce({ model, messages, tools = [], effort = "" }) {
     const { provider, name } = splitModel(model);
     if (this.routers[provider]) return this.routerChat(provider, name, model, { messages, tools });
     if (provider !== "ollama") throw new Error(`unknown model provider: ${provider}`);

@@ -218,6 +218,8 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
   const input = `<istruzioni_di_sistema>\n${system}\n</istruzioni_di_sistema>\n\n${prompt}`;
   const texts = textSteps(onStep);
   let failure = "";
+  // The last thing the agent actually said: if the CLI dies after saying it, that answer is not lost.
+  let said = "";
   const onLine = (line) => {
     const event = JSON.parse(line);
     if (event.type === "error" || event.type === "turn.failed") failure = String(event.message || event.error?.message || failure);
@@ -227,6 +229,7 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
       texts.flush();
       onStep?.({ type: "thinking", text: item.text });
     } else if (item.type === "agent_message" && item.text?.trim()) {
+      said = item.text;
       texts.text(item.text);
     } else if (item.type === "mcp_tool_call") {
       texts.flush();
@@ -237,7 +240,10 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     if (out.timedOut) throw new Error(`codex: no answer within ${Math.round(timeoutMs / 1000)}s`);
     let text = "";
     try { text = readFileSync(outFile, "utf8"); } catch {}
-    if (out.code !== 0 && !text.trim()) throw new Error(`codex: ${(failure || out.stderr || out.stdout).trim().split("\n").slice(-3).join(" ").slice(0, 240) || `exit ${out.code}`}`);
+    // A CLI that exits badly after the agent has answered still has an answer to give.
+    if (out.code !== 0 && !text.trim() && said.trim()) text = said;
+    // stdout is the event stream: dumping its last lines reports JSON, not a reason.
+    if (out.code !== 0 && !text.trim()) throw new Error(`codex: ${(failure || out.stderr).trim().split("\n").slice(-3).join(" ").slice(0, 240) || `exited with ${out.code} and said nothing`}`);
     texts.finish(text);
     return { text };
   } finally {

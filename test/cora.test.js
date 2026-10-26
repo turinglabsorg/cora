@@ -457,6 +457,37 @@ describe("agents in Discord", () => {
     await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
   });
 
+  test("a model at capacity is tried again on its own, and the owner only sees the answer", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Rea", model: "codex/gpt-6-sol", chattiness: 0, tools: false } });
+    assert.equal(created.status, 201);
+    const before = cli.calls().length;
+    // The first run fails the way Codex does when the model is busy; the second works.
+    cli.set({ reply: "Eccomi, tutto a posto.", failFirst: cli.calls().filter((item) => item.flavor === "codex").length + 1 });
+    discord.say({ content: "Rea, ci sei?" });
+    const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Rea"), { what: "Rea's answer", timeout: 30000 });
+    assert.equal(post.content, "Eccomi, tutto a posto.");
+    assert.ok(!/capacity|non riesco a rispondere/i.test(post.content), "the passing failure never reaches the chat");
+    const runs = cli.calls().slice(before).filter((item) => item.flavor === "codex");
+    assert.ok(runs.length >= 2, `tried again by itself (${runs.length} runs)`);
+    assert.equal(runs[0].failed, true);
+    await quiet();
+    cli.set({ reply: "ok" });
+    await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
+  });
+
+  test("when the Codex CLI dies after the agent has answered, the answer is kept and no JSON is reported", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Gaia", model: "codex/gpt-6-sol", chattiness: 0, tools: false } });
+    assert.equal(created.status, 201);
+    cli.set({ reply: "Ho finito: tutto a posto.", crash: true });
+    discord.say({ content: "Gaia, com'è andata?" });
+    const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Gaia"), { what: "Gaia's answer" });
+    assert.equal(post.content, "Ho finito: tutto a posto.", "the answer survives the crash");
+    assert.ok(!/item\.completed|mcp_tool_call|\{"type"/.test(post.content), "never the raw event stream");
+    await quiet();
+    cli.set({ reply: "ok" });
+    await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
+  });
+
   test("an agent on Claude Code (subscription) uses cora's memory tools over MCP", async () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Clara", model: "claude/claude-sonnet-5-5", chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
@@ -503,7 +534,8 @@ describe("agents in Discord", () => {
     discord.say({ content: "Gino, che ore sono sul tuo computer?" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Gino"), { what: "Gino's reply" });
     assert.match(post.content, /^Ecco la data\. \[\[exit 0\]/);
-    const run = cli.calls().find((item) => item.flavor === "codex");
+    // Other agents run Codex too, and the tests share the log: take Gino's own completed run.
+    const run = cli.calls().find((item) => item.flavor === "codex" && !item.failed && /Sei Gino\./.test(item.stdin || ""));
     assert.match(run.stdin, /ISTRUZIONI DI PROVA/);
     for (const feature of ["shell_tool", "unified_exec", "computer_use", "browser_use", "multi_agent"]) {
       assert.ok(run.argv.some((arg, index) => arg === feature && run.argv[index - 1] === "--disable"), `${feature} is disabled`);
