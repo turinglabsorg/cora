@@ -1,5 +1,6 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, extname, join } from "node:path";
+import { CONTEXT_LIMITS } from "./store.js";
 
 function instructionFile(path) {
   try {
@@ -39,5 +40,9 @@ export function contextSources({ config, store, subscriptions, brain }) {
     }
   }
   sources.push({ id: "shared-memory", title: "Memoria condivisa", path: "", provider: "cora", scope: "shared", status: "applied", available: true, content: store.settings.sharedMemory, truncated: false });
-  return { residentEnabled: store.settings.useResidentSubscriptions, sources };
+  for (const document of store.contextDocuments()) sources.push({
+    ...document, title: document.name, path: "", provider: "cora", scope: "database", storage: "database",
+    status: document.enabled ? "applied" : "disabled", available: true, truncated: false,
+  });
+  return { residentEnabled: store.settings.useResidentSubscriptions, sources, limits: CONTEXT_LIMITS };
 }

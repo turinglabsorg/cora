@@ -1832,52 +1832,146 @@ async function enableNotifications() {
 /* ---------- shared instruction context ---------- */
 function renderContext() {
   const body = h("div", { class: "context-browser" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
-  let selectedId = "owner";
-  const labels = { applied: "Applicato da Cora", detected: "Disponibile al CLI", excluded: "Escluso dal runtime", missing: "Non presente", unavailable: "Non leggibile" };
-  const scopes = { shared: "Comune a tutti gli agenti", resident: "Subscription residente", instance: "Cartella dell'istanza", account: "Account collegato" };
-  const load = async () => {
-    refresh.disabled = true;
-    try {
-      const data = await api("/api/context");
-      if (!body.isConnected) return;
-      const draw = () => {
-        const previousScroll = body.querySelector(".context-files")?.scrollLeft || 0;
-        const selected = data.sources.find((source) => source.id === selectedId) || data.sources[0];
-        selectedId = selected.id;
-        const list = h("nav", { class: "context-files", "aria-label": "File di contesto" }, data.sources.map((source) => h("button", {
-          type: "button", class: `context-file${source.id === selectedId ? " active" : ""}`, "aria-pressed": String(source.id === selectedId), onclick: () => { selectedId = source.id; draw(); },
-        }, icon(source.provider === "cora" ? "book" : "file"), h("span", { class: "grow" }, h("b", {}, source.id === "shared-memory" ? "Memoria condivisa" : raw(source.title)),
-          h("small", {}, raw(source.provider === "codex" ? "ChatGPT / Codex" : source.provider === "claude" ? "Claude" : "Cora"), raw(" · "), scopes[source.scope])),
-          h("i", { class: `context-file-dot ${source.status}`, "aria-label": labels[source.status] }))));
-        const explanation = selected.id === "owner" ? "Queste istruzioni vengono incluse da Cora nel contesto di tutti gli agenti."
-          : selected.provider === "codex" ? "Codex viene avviato con le istruzioni locali disabilitate. Riceve le istruzioni comuni già incluse da Cora."
-          : selected.provider === "claude" ? "File disponibile a Claude. Il caricamento dipende dal profilo e dal runtime del turno."
-          : "Questa memoria viene condivisa con tutti gli agenti dell'istanza.";
-        const copy = selected.content ? btn("Copia testo", { icon: "copy", cls: "ghost", onclick: async () => {
-          try { await navigator.clipboard.writeText(selected.content); toast("Copiato"); }
-          catch { toast("Non riesco a copiare: selezionalo a mano", true); }
-        } }) : null;
-        body.replaceChildren(list, h("section", { class: "context-document" },
-          h("header", {}, h("div", { class: "grow" }, h("h2", {}, selected.id === "shared-memory" ? "Memoria condivisa" : raw(selected.title)),
-            selected.path ? h("p", { class: "context-path" }, raw(selected.path)) : null), copy),
-          h("div", { class: "context-provenance" }, badge(labels[selected.status], selected.status === "applied" ? "on" : ""),
-            selected.updatedAt ? h("time", { datetime: selected.updatedAt }, raw(new Date(selected.updatedAt).toLocaleString(LOCALE, { dateStyle: "medium", timeStyle: "short" }))) : null),
-          h("p", { class: "context-explanation" }, explanation),
-          selected.accountLabel ? h("p", { class: "context-explanation" }, raw(selected.accountLabel)) : null,
-          selected.available && selected.content ? h("pre", { class: "context-text", tabindex: "0", "aria-label": "Testo delle istruzioni" }, raw(selected.content))
-            : h("div", { class: "context-empty" }, icon("file"), h("p", {}, selected.available ? "Questo contesto è vuoto." : selected.status === "missing" ? "Questo file non è presente sul server." : "Questo file non può essere mostrato.")),
-          selected.truncated ? h("small", { class: "context-limit" }, "Sono mostrati i primi 60.000 caratteri.") : null));
-        list.scrollLeft = previousScroll;
-        revealSelection(list);
-      };
-      draw();
-    } catch (error) {
-      body.replaceChildren(h("p", { class: "err-text", role: "alert" }, tr(error.message)), btn("Riprova", { icon: "refresh", onclick: load }));
-    } finally { refresh.disabled = false; }
+  let selectedId = route()[1] || "owner";
+  let data;
+  let editor = null;
+  let errorText = "";
+  let busy = false;
+  const labels = { applied: "Applicato da Cora", detected: "Disponibile al CLI", excluded: "Escluso dal runtime", missing: "Non presente", unavailable: "Non leggibile", disabled: "Disattivato" };
+  const scopes = { shared: "Comune a tutti gli agenti", resident: "Subscription residente", instance: "Cartella dell'istanza", account: "Account collegato", database: "Salvato nello spazio" };
+  const choose = (id) => {
+    if (editor) { toast("Salva o annulla le modifiche prima di cambiare file.", true); return; }
+    selectedId = id;
+    errorText = "";
+    history.replaceState(null, "", `#/contesto/${id}`);
+    draw();
   };
-  const refresh = btn("Aggiorna", { icon: "refresh", onclick: load });
-  shell([pageHead("Contesto", "Le istruzioni del server e la memoria comune agli agenti.", refresh),
-    h("p", { class: "context-intro" }, "Il carattere e i ricordi di ogni agente si aggiungono a queste istruzioni. La provenienza indica cosa viene applicato e cosa è solo presente sul dispositivo."), body], { title: "Contesto" });
+  const begin = (document = null) => {
+    if (editor || busy) return;
+    editor = document ? { id: document.id, name: document.name, content: document.content, enabled: document.enabled, expectedRevision: document.revision }
+      : { name: "", content: "", enabled: true };
+    errorText = "";
+    draw();
+    body.querySelector("input[type=text]")?.focus();
+  };
+  async function load() {
+    refresh.disabled = true;
+    try { data = await api("/api/context"); if (body.isConnected) draw(); }
+    catch (error) {
+      errorText = error.message;
+      if (body.isConnected) {
+        if (data) draw();
+        else body.replaceChildren(h("p", { class: "err-text", role: "alert" }, tr(error.message)), btn("Riprova", { icon: "refresh", onclick: load }));
+      }
+    }
+    finally { refresh.disabled = false; }
+  }
+  async function mutate(operation, message) {
+    if (busy) return;
+    busy = true;
+    errorText = "";
+    draw();
+    try {
+      const result = await operation();
+      editor = null;
+      selectedId = result?.id || "owner";
+      history.replaceState(null, "", `#/contesto/${selectedId}`);
+      await load();
+      toast(message);
+    } catch (error) {
+      errorText = error.message;
+      try { data = await api("/api/context"); } catch {}
+    }
+    finally { busy = false; if (body.isConnected) draw(); }
+  }
+  function draw() {
+    if (!data) return;
+    const previousScroll = body.querySelector(".context-files")?.scrollLeft || 0;
+    const selected = data.sources.find((source) => source.id === selectedId) || data.sources[0];
+    selectedId = selected.id;
+    const stored = data.sources.filter((source) => source.storage === "database");
+    const list = h("nav", { class: "context-files", "aria-label": "File di contesto" });
+    if (editor && !editor.id) list.append(h("span", { class: "context-draft" }, icon("edit"), "Nuovo file"));
+    if (stored.length) list.append(h("span", { class: "context-group label" }, "File dello spazio"));
+    for (const [index, source] of [...stored, ...data.sources.filter((source) => source.storage !== "database")].entries()) {
+      if (stored.length && index === stored.length) list.append(h("span", { class: "context-group label" }, "Istruzioni e memoria"));
+      list.append(h("button", { type: "button", class: `context-file${source.id === selectedId && (!editor || editor.id) ? " active" : ""}`, "aria-pressed": String(source.id === selectedId && (!editor || editor.id)), disabled: busy, onclick: () => choose(source.id) },
+        icon(source.storage === "database" ? "file" : source.provider === "cora" ? "book" : "file"),
+        h("span", { class: "grow" }, h("b", {}, source.id === "shared-memory" ? "Memoria condivisa" : raw(source.title)),
+          h("small", {}, source.storage === "database" ? labels[source.status] : raw(source.provider === "codex" ? "ChatGPT / Codex" : source.provider === "claude" ? "Claude" : "Cora"), raw(" · "), scopes[source.scope])),
+        h("i", { class: `context-file-dot ${source.status}`, "aria-label": labels[source.status] })));
+    }
+    const error = errorText ? h("p", { class: "context-error", role: "alert" }, icon("alert"), tr(errorText)) : null;
+    let document;
+    if (editor) {
+      const name = h("input", { type: "text", name: "contextName", value: editor.name, maxlength: 120, autocomplete: "off", placeholder: "es. istruzioni-team.md", oninput: (event) => { editor.name = event.target.value; } });
+      const text = h("textarea", { name: "contextContent", class: "context-editor-text", spellcheck: "false", placeholder: "Scrivi le istruzioni o incolla il testo di riferimento…", oninput: (event) => { editor.content = event.target.value; count.textContent = tr("{count} / {limit} caratteri", { count: editor.content.length.toLocaleString(LOCALE), limit: data.limits.fileChars.toLocaleString(LOCALE) }); } }, raw(editor.content));
+      const count = h("small", { class: "context-count" }, tr("{count} / {limit} caratteri", { count: editor.content.length.toLocaleString(LOCALE), limit: data.limits.fileChars.toLocaleString(LOCALE) }));
+      const enabled = switchInput("contextEnabled", "Usa negli agenti", editor.enabled, "Disponibile a tutti gli agenti dal prossimo turno.");
+      enabled.querySelector("input").addEventListener("change", (event) => { editor.enabled = event.target.checked; });
+      const form = h("form", { class: "context-editor" }, error, field("Nome del file", name), field("Contenuto", text), count, enabled,
+        h("div", { class: "context-editor-actions" }, btn("Annulla", { cls: "ghost", onclick: () => { editor = null; errorText = ""; draw(); } }), btn(busy ? "Salvataggio…" : "Salva file", { icon: "check", type: "submit", cls: "primary" })));
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const others = stored.filter((source) => source.enabled && source.id !== editor.id).reduce((total, source) => total + source.content.length, 0);
+        errorText = !/^[^\/\\\x00-\x1f]+\.(md|txt|markdown)$/i.test(editor.name.trim()) ? "usa un nome file .md o .txt senza percorsi"
+          : !editor.content.trim() ? "inserisci un file di testo non vuoto"
+          : editor.content.length > data.limits.fileChars ? "il file supera il limite di 30.000 caratteri"
+          : editor.enabled && others + editor.content.length > data.limits.totalChars ? "il contesto attivo supera il limite di 60.000 caratteri" : "";
+        if (errorText) { draw(); return; }
+        const draft = { ...editor };
+        mutate(() => api(draft.id ? `/api/context/documents/${draft.id}` : "/api/context/documents", { method: draft.id ? "PUT" : "POST", body: draft }), "File salvato");
+      });
+      document = h("section", { class: "context-document" }, h("header", {}, h("div", {}, h("h2", {}, editor.id ? "Modifica file" : "Nuovo file"), h("p", { class: "context-path" }, "Salvato nel database di questa istanza"))), form);
+      for (const control of form.querySelectorAll("input, textarea, button")) control.disabled = busy;
+    } else {
+      const custom = selected.storage === "database";
+      const explanation = custom ? selected.enabled ? "Questo file è incluso nel contesto di tutti gli agenti dal prossimo turno." : "Il file è conservato nello spazio e non viene inviato agli agenti."
+        : selected.id === "owner" ? "Queste istruzioni vengono incluse da Cora nel contesto di tutti gli agenti."
+        : selected.provider === "codex" ? "Codex viene avviato con le istruzioni locali disabilitate. Riceve le istruzioni comuni già incluse da Cora."
+        : selected.provider === "claude" ? "File disponibile a Claude. Il caricamento dipende dal profilo e dal runtime del turno." : "Questa memoria viene condivisa con tutti gli agenti dell'istanza.";
+      const copy = selected.content ? btn("Copia testo", { icon: "copy", cls: "ghost", onclick: async () => {
+        try { await navigator.clipboard.writeText(selected.content); toast("Copiato"); } catch { toast("Non riesco a copiare: selezionalo a mano", true); }
+      } }) : null;
+      document = h("section", { class: "context-document" },
+        h("header", {}, h("div", { class: "grow" }, h("h2", {}, selected.id === "shared-memory" ? "Memoria condivisa" : raw(selected.title)),
+          selected.path || custom ? h("p", { class: "context-path" }, custom ? "Salvato nel database di questa istanza" : raw(selected.path)) : null), copy), error,
+        h("div", { class: "context-provenance" }, badge(labels[selected.status], selected.status === "applied" ? "on" : ""), selected.updatedAt ? h("time", { datetime: selected.updatedAt }, raw(new Date(selected.updatedAt).toLocaleString(LOCALE, { dateStyle: "medium", timeStyle: "short" }))) : null),
+        h("p", { class: "context-explanation" }, explanation), selected.accountLabel ? h("p", { class: "context-explanation" }, raw(selected.accountLabel)) : null,
+        custom ? h("div", { class: "context-tools" }, btn("Modifica", { icon: "edit", onclick: () => begin(selected) }),
+          btn(selected.enabled ? "Disattiva" : "Attiva", { icon: "power", onclick: () => mutate(() => api(`/api/context/documents/${selected.id}`, { method: "PUT", body: { enabled: !selected.enabled, expectedRevision: selected.revision } }), "Contesto aggiornato") }),
+          armedButton("Elimina file", "Conferma eliminazione", { onconfirm: () => mutate(() => api(`/api/context/documents/${selected.id}`, { method: "DELETE" }), "File eliminato") })) : null,
+        selected.available && selected.content ? h("pre", { class: "context-text", tabindex: "0", "aria-label": "Testo delle istruzioni" }, raw(selected.content)) : h("div", { class: "context-empty" }, icon("file"), h("p", {}, selected.available ? "Questo contesto è vuoto." : selected.status === "missing" ? "Questo file non è presente sul server." : "Questo file non può essere mostrato.")),
+        selected.truncated ? h("small", { class: "context-limit" }, "Sono mostrati i primi 60.000 caratteri.") : null);
+    }
+    body.replaceChildren(list, document);
+    list.scrollLeft = previousScroll;
+    revealSelection(list);
+    for (const button of document.querySelectorAll("button")) button.disabled = busy;
+    newButton.disabled = upload.disabled = busy || Boolean(editor);
+  }
+  const fileInput = h("input", { type: "file", accept: ".md,.txt,.markdown,text/plain,text/markdown", hidden: true, "aria-label": "Carica file di contesto", onchange: async () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = "";
+    if (!file) return;
+    try {
+      if (!/\.(md|txt|markdown)$/i.test(file.name)) throw new Error("carica un file Markdown o di testo (.md, .txt)");
+      if (file.size > data.limits.fileChars * 4) throw new Error("il file supera il limite di 30.000 caratteri");
+      const content = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+      if (content.length > data.limits.fileChars) throw new Error("il file supera il limite di 30.000 caratteri");
+      begin();
+      editor.name = file.name;
+      editor.content = content;
+      draw();
+    } catch (error) { toast(error instanceof TypeError ? "il file deve contenere testo UTF-8" : error.message, true); }
+  } });
+  const newButton = btn("Nuovo file", { icon: "plus", cls: "primary", onclick: () => begin() });
+  const upload = btn("Carica file", { icon: "upgrade", onclick: () => fileInput.click() });
+  const refresh = btn("Aggiorna", { icon: "refresh", cls: "ghost", onclick: load });
+  shell([pageHead("Contesto", "Le istruzioni del server e la memoria comune agli agenti.", [upload, newButton, refresh]),
+    h("p", { class: "context-intro" }, "Aggiungi istruzioni e file di riferimento per tutti gli agenti. Puoi anche ispezionare le sorgenti del server e la memoria condivisa."),
+    h("small", { class: "context-upload-hint" }, "File .md e .txt · 30.000 caratteri per file · 60.000 caratteri attivi in totale"), fileInput, body], { title: "Contesto" });
+  newButton.disabled = upload.disabled = true;
   load();
 }
 
@@ -1949,7 +2043,7 @@ function instanceAccessPanel() {
         btn("", { icon: "close", cls: "ghost", title: tr("Rimuovi {value}", { value }), onclick: () => update(() => api("/api/access", { method: "PUT", body: { [kind]: data[kind].filter((entry) => entry !== value) } })) })))
         : h("li", { class: "access-no-rules" }, kind === "domains" ? "Nessun dominio autorizzato." : "Nessun indirizzo aggiunto.")));
   };
-  const actions = { "sign-in": "Accesso effettuato", settings: "Impostazioni aggiornate", agent: "Agente modificato", message: "Messaggio inviato", connections: "Collegamenti aggiornati", "access-policy": "Accessi aggiornati" };
+  const actions = { "sign-in": "Accesso effettuato", settings: "Impostazioni aggiornate", agent: "Agente modificato", message: "Messaggio inviato", connections: "Collegamenti aggiornati", "access-policy": "Accessi aggiornati", context: "Contesto aggiornato" };
   function draw() {
     const users = h("div", { class: "access-users" }, data.users.map((user) => h("div", { class: "access-user" },
       h("span", { class: "access-user-mark", "aria-hidden": "true" }, icon(user.role === "owner" ? "shield" : "user")),

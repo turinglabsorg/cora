@@ -95,6 +95,7 @@ const ICONS = {
   discord: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M9 4 7 20M17 4l-2 16M4.5 9h16M3.5 15h16"/></svg>`,
   telegram: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M21 4 3 11l6 2.5L18 7l-7 8 7.5 5L21 4Z"/></svg>`,
   app: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10.5 18.5h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  context: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9l-6-6Zm0 0v6h6M8 13h8M8 17h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg>`,
   plug: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2v5m6-5v5M6 7h12v4a6 6 0 0 1-12 0V7Zm6 10v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   arrow: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
@@ -295,6 +296,10 @@ export function landing({ account, joined = false, waitlistError = "" }) {
       <div class="section-head reveal"><p class="kicker">06 / The Cora harness</p><h2>Built to finish the job.</h2><p class="lead">Our own agent loop, for any model. Or run your agents on Claude Code or Codex with your subscriptions.</p></div>
       <ol class="harness-loop reveal" aria-label="The Cora harness">${HARNESS.map(([title, text], index) => `<li style="--i:${index}"><span class="loop-led"></span><b>${title}</b><span>${text}</span></li>`).join("")}</ol>
     </div>
+    <aside class="context-note reveal" aria-label="Shared context">
+      <span class="context-note-mark" aria-hidden="true">${ICONS.context}</span>
+      <div><h3>Your context, your rules.</h3><p>Add your team's instructions, notes and reference files once. They stay in your space and become shared context for your agents. Inspect what's in use, edit it, or switch it off whenever you need.</p></div>
+    </aside>
   </section>
 
   <section class="band space" id="join">

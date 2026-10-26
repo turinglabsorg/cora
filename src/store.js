@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { plainKeys } from "./box.js";
 
 export const SHARED = "_shared";
+export const CONTEXT_LIMITS = { fileChars: 30000, totalChars: 60000, files: 20 };
 /** The providers a model id can name (provider/model). */
 export const MODEL_PROVIDERS = ["claude", "codex", "ollama", "orcarouter", "hermes"];
 
@@ -64,6 +65,11 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, provider TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS context_documents (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, content TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS panel_users (
   id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '',
   role TEXT NOT NULL, source TEXT NOT NULL, blocked INTEGER NOT NULL DEFAULT 0,
@@ -391,6 +397,51 @@ export class Store {
     this.stmt("INSERT INTO settings(key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(JSON.stringify(this.cachedSettings));
     return this.cachedSettings;
+  }
+
+  /* ---------- shared context documents ---------- */
+  contextDocuments() {
+    return this.stmt("SELECT * FROM context_documents ORDER BY rowid").all().map((row) => ({
+      id: row.id, name: row.name, content: row.content, enabled: Boolean(row.enabled), revision: row.revision,
+      createdAt: row.created_at, updatedAt: row.updated_at, createdBy: row.created_by, updatedBy: row.updated_by,
+    }));
+  }
+
+  contextDocument(id) {
+    return this.contextDocuments().find((document) => document.id === id) || null;
+  }
+
+  saveContextDocument(input, { id = "", userId = "" } = {}) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("file di contesto non valido");
+    const previous = id ? this.contextDocument(id) : null;
+    if (id && !previous) throw new ValidationError("file di contesto non trovato");
+    if (previous && input.expectedRevision !== undefined && input.expectedRevision !== previous.revision) {
+      const error = new ValidationError("il file è stato modificato da un'altra persona: annulla e riaprilo prima di salvare");
+      error.status = 409;
+      throw error;
+    }
+    const all = this.contextDocuments();
+    if (!previous && all.length >= CONTEXT_LIMITS.files) throw new ValidationError("puoi salvare al massimo 20 file di contesto");
+    const name = input.name ?? previous?.name;
+    if (typeof name !== "string" || name.trim().length > 120 || !/^[^\/\\\x00-\x1f]+\.(md|txt|markdown)$/i.test(name.trim())) throw new ValidationError("usa un nome file .md o .txt senza percorsi");
+    const content = input.content ?? previous?.content;
+    if (typeof content !== "string" || !content.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(content)) throw new ValidationError("inserisci un file di testo non vuoto");
+    if (content.length > CONTEXT_LIMITS.fileChars) throw new ValidationError("il file supera il limite di 30.000 caratteri");
+    const enabled = input.enabled ?? previous?.enabled ?? true;
+    if (typeof enabled !== "boolean") throw new ValidationError("stato del file di contesto non valido");
+    if (all.some((document) => document.id !== id && document.name.toLowerCase() === name.trim().toLowerCase())) throw new ValidationError("esiste già un file con questo nome");
+    const activeChars = all.filter((document) => document.enabled && document.id !== id).reduce((total, document) => total + document.content.length, 0);
+    if (enabled && activeChars + content.length > CONTEXT_LIMITS.totalChars) throw new ValidationError("il contesto attivo supera il limite di 60.000 caratteri");
+    const at = new Date().toISOString();
+    const documentId = previous?.id || newId("ctx");
+    this.stmt(`INSERT INTO context_documents(id,name,content,enabled,created_at,updated_at,created_by,updated_by) VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,content=excluded.content,enabled=excluded.enabled,revision=context_documents.revision+1,updated_at=excluded.updated_at,updated_by=excluded.updated_by`)
+      .run(documentId, name.trim(), content, enabled ? 1 : 0, previous?.createdAt || at, at, previous?.createdBy || userId, userId);
+    return this.contextDocument(documentId);
+  }
+
+  deleteContextDocument(id) {
+    return this.stmt("DELETE FROM context_documents WHERE id = ?").run(id).changes > 0;
   }
 
   /* ---------- instance membership and individual panel sessions ---------- */

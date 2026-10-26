@@ -425,6 +425,21 @@ describe("panel auth", () => {
     assert.match(response.headers.get("content-security-policy"), /default-src 'self'/);
     assert.match(await response.text(), /assets\/app\.js/);
   });
+
+  test("database context from the panel reaches every provider through the shared system prompt", async () => {
+    const signedIn = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    const headers = { Cookie: signedIn.headers.get("set-cookie").split(";")[0] };
+    const created = await call("/api/context/documents", { method: "POST", headers, body: { name: "runtime-context.md", content: "Fixture shared reference: ORBIT." } });
+    assert.equal(created.status, 201);
+    try {
+      for (const provider of ["claude", "codex", "ollama", "orcarouter"]) {
+        const agent = { id: "ag_context_fixture", name: "Context fixture", model: `${provider}/fixture`, personality: "", core: "" };
+        assert.match(app.brain.systemPrompt(agent, { place: "test", withoutComputer: true }), /Fixture shared reference: ORBIT/);
+      }
+      await call(`/api/context/documents/${created.data.id}`, { method: "PUT", headers, body: { enabled: false } });
+      assert.doesNotMatch(app.brain.systemPrompt({ id: "ag_context_fixture", name: "Fixture", personality: "", core: "" }, { place: "test" }), /Fixture shared reference: ORBIT/);
+    } finally { await call(`/api/context/documents/${created.data.id}`, { method: "DELETE", headers }); }
+  });
 });
 
 describe("agents in Discord", () => {

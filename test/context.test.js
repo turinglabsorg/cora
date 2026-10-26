@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { Store } from "../src/store.js";
 import { startCora } from "../src/main.js";
 import { fakeDocker, tempHome } from "./helpers.js";
 
@@ -20,15 +21,17 @@ async function fixture(t) {
     docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000, sshAuthorizedKeys: "/missing/keys",
   });
   await app.ready;
-  t.after(() => app.stop());
+  let stopped = false;
+  const stop = async () => { if (!stopped) { stopped = true; await app.stop(); } };
+  t.after(stop);
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const login = await fetch(`${base}/api/login`, { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ password: "fixture-password" }) });
   const cookie = login.headers.get("set-cookie").split(";")[0];
-  const request = async (path = "/api/context", auth = true) => {
-    const response = await fetch(`${base}${path}`, { headers: auth ? { Cookie: cookie } : {} });
+  const request = async (path = "/api/context", auth = true, { method = "GET", body, csrf = true } = {}) => {
+    const response = await fetch(`${base}${path}`, { method, headers: { ...(auth ? { Cookie: cookie } : {}), ...(csrf ? { "X-Cora": "1" } : {}), "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: response.status, data: await response.json() };
   };
-  return { app, home, residentDirectories, ownerInstructions, request };
+  return { app, home, residentDirectories, ownerInstructions, request, stop };
 }
 
 test("Context shows the actual common instructions, source metadata and provider rule handling", async (t) => {
@@ -85,4 +88,78 @@ test("Context bounds the preview to the same common instruction limit and only i
   const managed = response.data.sources.filter((source) => source.scope === "account");
   assert.equal(managed.length, 1);
   assert.equal(managed[0].accountLabel, "Team notes");
+});
+
+
+test("database context files persist, join the shared prompt, and support updates, disable and deletion", async (t) => {
+  const { app, home, request, stop } = await fixture(t);
+  const path = "/api/context/documents";
+  const created = await request(path, true, { method: "POST", body: { name: "team.md", content: "Always use the fixture team vocabulary.", createdBy: "forged-user" } });
+  assert.equal(created.status, 201);
+  const document = created.data;
+  assert.equal(document.createdBy, "local-owner");
+  assert.equal(document.revision, 1);
+  const source = (await request()).data.sources.find((item) => item.id === document.id);
+  assert.equal(source.storage, "database");
+  assert.equal(source.status, "applied");
+  const agent = { id: "ag_fixture", name: "Fixture", personality: "", core: "" };
+  const prompt = () => app.brain.systemPrompt(agent, { place: "test", withoutComputer: true });
+  assert.match(prompt(), /Always use the fixture team vocabulary/);
+  const updated = await request(`${path}/${document.id}`, true, { method: "PUT", body: { name: "style.txt", content: "Use concise answers.", expectedRevision: 1 } });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.data.revision, 2);
+  assert.match(prompt(), /Use concise answers/);
+  assert.doesNotMatch(prompt(), /fixture team vocabulary/);
+  const stale = await request(`${path}/${document.id}`, true, { method: "PUT", body: { content: "Stale overwrite", expectedRevision: 1 } });
+  assert.equal(stale.status, 409);
+  assert.equal(app.store.contextDocument(document.id).content, "Use concise answers.");
+  assert.equal((await request(`${path}/${document.id}`, true, { method: "PUT", body: { enabled: false } })).status, 200);
+  assert.doesNotMatch(prompt(), /Use concise answers/);
+  assert.equal((await request()).data.sources.find((item) => item.id === document.id).status, "disabled");
+  assert.equal((await request(`${path}/${document.id}`, true, { method: "PUT", body: { enabled: true } })).status, 200);
+  const remove = await request(path, true, { method: "POST", body: { name: "delete.md", content: "Delete this fixture." } });
+  assert.equal((await request(`${path}/${remove.data.id}`, true, { method: "DELETE" })).status, 200);
+  assert.equal((await request(`${path}/${remove.data.id}`, true, { method: "DELETE" })).status, 404);
+  await stop();
+  const reopened = new Store(home);
+  try { assert.equal(reopened.contextDocument(document.id).content, "Use concise answers."); assert.equal(reopened.contextDocument(remove.data.id), null); }
+  finally { reopened.close(); }
+});
+
+test("context writes enforce auth, CSRF, text formats and bounds without changing existing sources", async (t) => {
+  const { app, request } = await fixture(t);
+  const path = "/api/context/documents";
+  const body = { name: "allowed.md", content: "Fixture text" };
+  assert.equal((await request(path, false, { method: "POST", body })).status, 401);
+  assert.equal((await request(path, true, { method: "POST", body, csrf: false })).status, 403);
+  for (const invalid of [{ ...body, name: "../outside.md" }, { ...body, name: "folder\\outside.md" }, { ...body, name: "document.pdf" }, { ...body, content: "" }, { ...body, content: "binary\u0000data" }, { ...body, content: "a".repeat(30001) }, { ...body, enabled: "true" }]) {
+    assert.equal((await request(path, true, { method: "POST", body: invalid })).status, 400);
+  }
+  const created = (await request(path, true, { method: "POST", body })).data;
+  assert.equal((await request(path, true, { method: "POST", body: { ...body, name: "ALLOWED.MD" } })).status, 400);
+  assert.equal(app.store.contextDocuments().length, 1);
+  assert.equal((await request("/api/context/documents/owner", true, { method: "DELETE" })).status, 404);
+  assert.equal((await request()).data.sources.find((source) => source.id === "owner").status, "applied");
+  assert.equal(app.store.contextDocument(created.id).content, body.content);
+  assert.ok(app.store.accessAudit().some((entry) => entry.action === "context" && entry.userId === "local-owner"));
+});
+
+test("active context budget, count limit and instance isolation prevent silent truncation or leakage", async (t) => {
+  const one = await fixture(t);
+  const two = await fixture(t);
+  const path = "/api/context/documents";
+  const create = (name, content, enabled = true) => one.request(path, true, { method: "POST", body: { name, content, enabled } });
+  assert.equal((await create("first.md", "a".repeat(30000))).status, 201);
+  assert.equal((await create("second.txt", "b".repeat(30000))).status, 201);
+  assert.equal((await create("over-budget.md", "c")).status, 400);
+  const disabled = await create("disabled.md", "c", false);
+  assert.equal(disabled.status, 201);
+  assert.equal((await one.request(`${path}/${disabled.data.id}`, true, { method: "PUT", body: { enabled: true } })).status, 400);
+  assert.equal(one.app.store.contextDocument(disabled.data.id).enabled, false);
+  for (let index = 3; index < 20; index++) assert.equal((await create(`inactive-${index}.md`, "Notes", false)).status, 201);
+  assert.equal((await create("twenty-first.md", "Notes", false)).status, 400);
+  const documents = (await one.request()).data.sources.filter((source) => source.storage === "database");
+  assert.equal(documents.length, 20);
+  assert.equal(documents.filter((source) => source.enabled).reduce((sum, source) => sum + source.content.length, 0), 60000);
+  assert.equal((await two.request()).data.sources.some((source) => source.storage === "database"), false);
 });

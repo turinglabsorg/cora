@@ -185,6 +185,8 @@ export class Brain {
     if (personal) {
       sections.push(`## Istruzioni personali del proprietario\nIl tuo proprietario vuole che tu segua anche le sue istruzioni personali per gli agenti. Valgono per te quando sono pertinenti a quello che fai qui.\nSono già tutte qui sotto: quando dicono di leggere o rileggere ~/.agents/AGENTS.md (o altri file del proprietario) consideralo fatto. Quei percorsi sono sui computer del proprietario, non sul tuo: non cercarli e non segnalare che mancano.\n\n<istruzioni_personali>\n${personal}\n</istruzioni_personali>`);
     }
+    const documents = this.store.contextDocuments().filter((document) => document.enabled);
+    if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
     if (withoutComputer) {
       sections.push("## Il tuo computer\nIn questa conversazione non hai il tuo computer: lo usi solo per chi ha il permesso del proprietario. Se ti chiedono un lavoro che lo richiede, non restare in silenzio: chiedi il via libera al proprietario con ask_owner, oppure spiega che serve il suo permesso.");
     }

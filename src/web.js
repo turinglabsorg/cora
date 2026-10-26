@@ -213,7 +213,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
     const user = sessionUser(req);
     if (!user) throw new HttpError(401, "login richiesto");
     if (!["GET", "HEAD"].includes(method) && path !== "/api/logout") {
-      const action = path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
+      const action = path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
     if (path === "/api/logout" && method === "POST") {
@@ -223,6 +223,17 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
     }
 
     if (path === "/api/context" && method === "GET") return send(res, 200, contextSources({ config, store, subscriptions, brain }));
+    if (path === "/api/context/documents" && method === "POST") {
+      const document = store.saveContextDocument(await readJson(req), { userId: user.id });
+      return send(res, 201, document);
+    }
+    const contextDocument = /^\/api\/context\/documents\/(ctx_[a-f0-9]{12})$/.exec(path);
+    if (contextDocument) {
+      const id = contextDocument[1];
+      if (!store.contextDocument(id)) throw new HttpError(404, "file di contesto non trovato");
+      if (method === "PUT") return send(res, 200, store.saveContextDocument(await readJson(req), { id, userId: user.id }));
+      if (method === "DELETE") { store.deleteContextDocument(id); return send(res, 200, { ok: true }); }
+    }
     if (path === "/api/access" || path.startsWith("/api/access/")) {
       if (user.role !== "owner") throw new HttpError(403, "solo l'owner può gestire gli accessi");
       if (path === "/api/access" && method === "GET") return send(res, 200, {

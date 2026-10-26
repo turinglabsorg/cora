@@ -906,3 +906,23 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .context-explanation { padding: 0 18px 18px; }
   .context-text { padding: 18px; max-height: 65vh; font-size: 11px; }
 }
+
+.context-group { display: block; padding: 12px 10px 6px; }
+.context-draft { display: flex; gap: 10px; align-items: center; padding: 14px 10px; color: var(--amber); font-size: 13px; }
+.context-upload-hint { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.context-editor { display: flex; flex-direction: column; gap: 18px; padding: 0 24px 24px; }
+.context-editor-text { min-height: 340px; resize: vertical; font: 400 13px/1.8 var(--mono); tab-size: 2; }
+.context-count { margin-top: -12px; color: var(--muted); font-size: 11px; text-align: right; }
+.context-editor-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line); }
+.context-tools { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 24px 20px; }
+.context-error { display: flex; gap: 8px; margin: 0 24px 20px; padding: 12px; border-left: 2px solid var(--red); background: #e5533d08; color: #ff9c8b; font-size: 12px; line-height: 1.6; }
+.context-editor .context-error { margin: 0; }
+@media (max-width: 900px) {
+  .context-group { display: none; }
+  .context-editor { padding: 0 18px 18px; }
+  .context-editor-text { min-height: 300px; font-size: 16px; }
+  .context-tools { padding: 0 18px 18px; }
+  .context-tools .btn, .context-editor-actions .btn { min-height: 44px; }
+}
+
+.context-document h2 { overflow-wrap: anywhere; }

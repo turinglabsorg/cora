@@ -116,7 +116,9 @@ Google/GitHub sign-in remains on usecora.space. Membership is checked by the tar
 
 ### Context
 
-Open **Context** in the main navigation to inspect server instruction files and shared memory. Each source shows its path, update time and whether Cora applies it, a CLI may load it, or the runtime excludes it. The common owner instructions match the text injected into agent prompts. Codex runs with automatic local instruction loading disabled; Claude files are shown as available because loading depends on the profile and turn runtime. The page is read-only and exposes a fixed instruction-file inventory, never arbitrary server files or credential stores.
+Open **Context** in the main navigation to inspect server instruction files and shared memory. Each source shows its path, update time and whether Cora applies it, a CLI may load it, or the runtime excludes it. The common owner instructions match the text injected into agent prompts. Codex runs with automatic local instruction loading disabled; Claude files are shown as available because loading depends on the profile and turn runtime. Server files remain read-only and come from a fixed instruction-file inventory, never arbitrary server paths or credential stores.
+
+Choose **New file** to write instructions or **Upload file** to import UTF-8 Markdown or text (`.md`, `.txt`, `.markdown`). Review and save the file in the instance database. Enabled files become shared context for all agents from their next turn, including agents on separately connected subscriptions. Edit, disable or delete them from the same page. The limits are 20 files, 30,000 characters each and 60,000 active characters in total; oversized content is refused rather than silently truncated. Concurrent edits are checked by revision so a stale save cannot replace another person's changes.
 
 ## The Cora harness
 
