@@ -802,6 +802,7 @@ export class Store {
     if (item.traceId) meta.traceId = item.traceId;
     if (item.file) meta.file = item.file;
     if (item.request) meta.request = item.request;
+    if (item.passive) meta.passive = true;
     this.stmt("INSERT OR IGNORE INTO messages(id, channel_id, at, author_id, author_name, kind, agent_id, content, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(String(item.id), String(channelId), Number(item.at) || Date.now(), item.authorId || null, String(item.authorName || "?"), String(item.kind || "human"), item.agentId || null, cleanText(item.content, 4000), Object.keys(meta).length ? JSON.stringify(meta) : null);
   }

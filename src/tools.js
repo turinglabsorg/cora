@@ -5,7 +5,7 @@ import { SHARED } from "./store.js";
 const XDOTOOL_BUTTON = { click: "1", double_click: "1", right_click: "3", middle_click: "2" };
 
 /** Tools every agent has, also without its computer. */
-export const MEMORY_TOOLS = new Set(["say", "remember", "forget", "recall", "update_core", "notify", "ask_owner"]);
+export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget", "recall", "update_core", "notify", "ask_owner"]);
 
 /**
  * What an agent may do about its own life without the owner's computer: speak,
@@ -63,12 +63,17 @@ export const TOOL_DEFS = [
   },
   {
     name: "say",
-    description: "Post a message in the current conversation right now and keep working. Use it to answer at once (\"ci guardo\") before something that takes time, or to share progress. Your final reply is posted too, so do not repeat yourself.",
+    description: "Write directly through Cora. Without channel_id, post in this conversation; with channel_id, post in an authorized channel from list_channels. No grog CLI, shell command, installation or extra login is needed. Use it for replies, progress and reports to another channel. Check the returned delivery result; do not post the same result again in your final reply.",
     parameters: {
       type: "object",
-      properties: { text: { type: "string" } },
+      properties: { text: { type: "string" }, channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" } },
       required: ["text"],
     },
+  },
+  {
+    name: "list_channels",
+    description: "List the channels you can write to directly with say(text, channel_id): id, name and platform. Use this to find #social or another destination instead of looking for grog or asking for credentials. The current conversation works with say(text).",
+    parameters: { type: "object", properties: {} },
   },
   {
     name: "remember",
@@ -353,12 +358,15 @@ export async function executeTool(call, ctx) {
         ctx.log?.({ type: "routine", agentId: agent.id, text: `ha eliminato la routine «${routine.name}»` });
         return { text: "archived; its execution history remains available with routine_history" };
       }
+      case "list_channels": return { text: JSON.stringify(ctx.postingChannels || []) };
       case "say": {
         const text = String(args.text || "").trim();
         if (!text) return { text: "error: empty message" };
         if (!ctx.say) return { text: "error: there is no conversation to post to right now" };
-        await ctx.say(text.slice(0, 4000));
-        return { text: "posted; keep working" };
+        const target = String(args.channel_id || channelId || "");
+        if (target !== channelId && !ctx.postingChannels?.some((channel) => channel.id === target)) return { text: "error: destination not authorized; choose a channel from list_channels" };
+        await ctx.say(text.slice(0, 4000), target);
+        return { text: target === channelId ? "posted in this conversation; keep working" : `posted directly to ${target}; do not duplicate this report in your final reply` };
       }
       case "ask_owner": {
         if (!ctx.ask) return { text: "error: requests are not available" };

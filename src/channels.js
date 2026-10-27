@@ -55,7 +55,15 @@ export class Channels {
     return this.discord.listChannels(this.store.settings.guildIds).map((channel) => ({ ...channel, kind: "discord" }));
   }
 
-  /** Whether a channel belongs to the transport in use (panel rooms always do). */
+  /** The active channels assigned to an agent, including those visible to its own bot. */
+  listFor(agent) {
+    const channels = this.list();
+    if (this.active === "discord") channels.push(...(this.bots?.client(agent.id)?.listChannels(this.store.settings.guildIds) || []).map((channel) => ({ ...channel, kind: "discord" })));
+    const chosen = agent.channelIds.filter((id) => isTelegramChannel(id) === (this.active === "telegram"));
+    return [...new Map(channels.filter((channel) => (this.active === "telegram" || this.store.settings.guildIds.includes(channel.guildId)) && (!chosen.length || chosen.includes(channel.id) || chosen.includes(channel.parentId))).map((channel) => [channel.id, channel])).values()];
+  }
+
+  /** Whether a channel belongs to the active transport (panel rooms always do). */
   isActive(id) {
     if (isWebRoom(id)) return true;
     return isTelegramChannel(id) ? this.active === "telegram" : this.active === "discord";

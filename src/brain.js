@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { Memory, parseJsonObject } from "./memory.js";
 import { isTelegramChannel } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom } from "./rooms.js";
@@ -185,6 +186,7 @@ export class Brain {
     if (personal) {
       sections.push(`## Istruzioni personali del proprietario\nIl tuo proprietario vuole che tu segua anche le sue istruzioni personali per gli agenti. Valgono per te quando sono pertinenti a quello che fai qui.\nSono già tutte qui sotto: quando dicono di leggere o rileggere ~/.agents/AGENTS.md (o altri file del proprietario) consideralo fatto. Quei percorsi sono sui computer del proprietario, non sul tuo: non cercarli e non segnalare che mancano.\n\n<istruzioni_personali>\n${personal}\n</istruzioni_personali>`);
     }
+    sections.push("## Scrivere nei canali: strumenti Cora\nPuoi già scrivere direttamente nei canali autorizzati. Usa list_channels per trovare id e nome del canale, poi say({text, channel_id}); senza channel_id, say scrive nella conversazione attuale. Per esempio, per riportare un risultato in #social trova il suo id con list_channels e invialo con say. Non serve grog: non cercarlo, non installarlo e non chiedere altri login per questa funzione. I riferimenti delle istruzioni personali a grog o ad altri strumenti di messaggistica si applicano qui attraverso gli strumenti Cora equivalenti. Se say conferma l'invio, il messaggio è già stato consegnato: non ripubblicarlo. Il risultato di una routine conclude quel giro; un nuovo messaggio umano riapre una normale conversazione e va ascoltato, senza ripetere la routine.");
     const documents = this.store.contextDocuments().filter((document) => document.enabled);
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
     sections.push("## Routine, reminder e storico\nGestisci i tuoi compiti ricorrenti con set_routine, quelli da fare una sola volta con set_reminder (run_at ISO 8601 con fuso). list_routines mostra ciò che è ancora in programma; routine_history consulta esecuzioni e attività archiviate, con risultati e verifiche. Prima di ripetere un'azione già richiesta, consulta lo storico. Un reminder viene archiviato da Cora solo dopo una verifica positiva: non ricrearlo se è già riuscito. Se è bloccato o interrotto, controlla prima gli effetti già prodotti e poi chiedi o prepara una nuova prova senza duplicarli.");
@@ -240,9 +242,9 @@ export class Brain {
     return `Le tue ultime conversazioni in altri posti. È la stessa conversazione con le stesse persone, solo su un'altra superficie: quello che vi siete detti lì vale anche qui.\n${blocks.join("\n")}`;
   }
 
-  async chatTurn({ agent, history, channel, forced, computer, postFile, say, inbox }) {
+  async chatTurn({ agent, history, channel, forced, computer, postFile, say, inbox, replyTo = null, onMessageHandled }) {
     const transcript = formatTranscript(history, agent, this.timezone);
-    const last = history[history.length - 1];
+    const last = replyTo || history[history.length - 1];
     const query = history.slice(-6).map((item) => item.content).join(" ");
     const instruction = forced
       ? `${last?.authorName || "Qualcuno"} si è rivolto a te: rispondi (non PASS). Se ti serve lavorare, la prima cosa che fai è say con due parole (es. «Ricevuto, ci guardo»), poi lo tieni aggiornato con say a ogni passo importante, e alla fine scrivi il risultato.`
@@ -252,21 +254,22 @@ export class Brain {
       this.elsewhere(agent, channel.id),
       `Ultimi messaggi ${channel.where || `in #${channel.name}`}${channel.note ? ` (${channel.note})` : ""}:\n<chat>\n${transcript}\n</chat>`,
       instruction,
+      replyTo ? `Messaggio umano a cui rispondere adesso: ${replyTo.authorName}: ${replyTo.content}\nGli eventuali risultati di routine successivi sono solo contesto, non una nuova richiesta di eseguirle.` : "",
     ].filter(Boolean).join("\n\n");
     const turn = (prompt) => this.loop({
-      agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox,
+      agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled,
       maxSteps: computer ? TASK_STEPS : CHAT_STEPS, deadline: Date.now() + (computer ? TASK_DEADLINE_MS : CHAT_DEADLINE_MS),
       images: (last?.images || []).slice(0, 2), task: Boolean(computer),
       goalRequest: history.filter((item) => item.kind === "owner" || item.kind === "human").slice(-1).map((item) => item.content).join("\n"),
     });
     const result = await turn(user);
     // A question to the owner is already an answer: it is in the chat.
-    if (result.text || !forced || result.asked) return result;
+    if (result.text || !forced || result.asked || result.spoken) return result;
     // Called by name and still passing: ask once more, plainly.
     return turn(`${user}\n\nHai risposto PASS, ma ${last?.authorName || "qualcuno"} ti ha chiamato per nome: scrivi una risposta vera, anche breve. Se ti chiede qualcosa che non puoi fare da solo, diglielo, oppure chiedi il via libera al proprietario con ask_owner.`);
   }
 
-  async routineTurn({ agent, routine, history, channel, postFile, say, inbox, onTrace }) {
+  async routineTurn({ agent, routine, history, channel, postFile, say, inbox, onTrace, onMessageHandled }) {
     const transcript = formatTranscript(history.slice(-12), agent, this.timezone);
     const user = [
       this.memoryContext(agent, `${routine.name} ${routine.prompt}`),
@@ -279,7 +282,7 @@ export class Brain {
       transcript ? `Contesto recente del canale:\n<chat>\n${transcript}\n</chat>` : "",
     ].filter(Boolean).join("\n\n");
     return this.loop({
-      agent, mode: routine.kind === "reminder" ? "reminder" : "routine", channel, user, computer: agent.tools, postFile, say, inbox, onTrace,
+      agent, mode: routine.kind === "reminder" ? "reminder" : "routine", channel, user, computer: agent.tools, postFile, say, inbox, onTrace, onMessageHandled,
       maxSteps: ROUTINE_STEPS, deadline: Date.now() + ROUTINE_DEADLINE_MS, images: [], task: Boolean(agent.tools),
       goalRequest: this.routineGoal(routine), routine,
     });
@@ -309,7 +312,7 @@ export class Brain {
    * steps the agent had taken, and the request to check where things stand
    * and finish.
    */
-  async resumeTurn({ agent, trace, channel, postFile, say, inbox, routine = null, onTrace }) {
+  async resumeTurn({ agent, trace, channel, postFile, say, inbox, routine = null, onTrace, onMessageHandled }) {
     const steps = (trace.steps || []).filter((step) => step.type === "tool" || step.type === "text").slice(-20).map((step) => step.type === "tool"
       ? `- ${step.name} ${JSON.stringify(step.args || {}).slice(0, 300)} → ${String(step.result || "").replace(/\s+/g, " ").slice(0, 300)}`
       : `- (scritto) ${String(step.text || "").replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
@@ -321,7 +324,7 @@ export class Brain {
       "Riprendi da dove eri: controlla com'è la situazione adesso (qualcosa potrebbe essere già fatto), poi porta a termine il compito e scrivi il risultato.",
     ].join("\n\n");
     return this.loop({
-      agent, mode: routine?.kind === "reminder" ? "reminder" : trace.kind === "routine" ? "routine" : "chat", channel, user, computer: agent.tools, postFile, say, inbox, onTrace,
+      agent, mode: routine?.kind === "reminder" ? "reminder" : trace.kind === "routine" ? "routine" : "chat", channel, user, computer: agent.tools, postFile, say, inbox, onTrace, onMessageHandled,
       maxSteps: TASK_STEPS, deadline: Date.now() + TASK_DEADLINE_MS, images: [], task: true,
       goalRequest: routine ? this.routineGoal(routine) : original.split("<chat>\n").pop().split("\n</chat>")[0].split("\n").filter((line) => line.includes(" ★:")).slice(-1).join("\n"), routine,
     });
@@ -368,7 +371,7 @@ export class Brain {
       const options = {
         model, tools: [], effort: "low",
         messages: [
-          { role: "system", content: 'Giudichi se un compito è finito. Rispondi SOLO con JSON: {"met": true|false, "blocked": true|false, "reason": "una frase"}. met=true soltanto se la condizione risulta soddisfatta dai risultati degli strumenti, non dalle promesse. Giudica solo il compito attuale: una routine esegue un controllo, non attende le pubblicazioni future. blocked=true quando per proseguire serve una scadenza futura, un permesso o un intervento altrui: riprovare subito non può risolverlo. La reason va nella lingua della condizione.' },
+          { role: "system", content: 'Giudichi se un compito è finito. Rispondi SOLO con JSON: {"met": true|false, "blocked": true|false, "reason": "una frase"}. met=true soltanto se la condizione risulta soddisfatta dai risultati degli strumenti, non dalle promesse. Giudica solo il compito attuale: una routine esegue un controllo, non attende le pubblicazioni future. blocked=true quando per proseguire serve una scadenza futura, un permesso o un intervento altrui: riprovare subito non può risolverlo. La reason va nella lingua della condizione. Lo stato running della routine o del suo registro è mantenuto da Cora fino a DOPO questo controllo: non richiedere che sia già done o completed. La risposta finale qui fornita viene pubblicata dopo la verifica; giudica il suo contenuto insieme ai risultati reali, non la presenza preventiva dello stesso messaggio nel canale. Un permesso mancante, una verifica umana o uno strumento non disponibile sono blocchi: non chiedere di riprovare subito la stessa azione.' },
           { role: "user", content: `Condizione:\n${goal}\n\nCosa ha fatto l'agente:\n${work || "(niente)"}\n\nCosa ha scritto come risultato:\n${answer || "(niente)"}` },
         ],
         signal,
@@ -388,7 +391,7 @@ export class Brain {
       const out = await this.llm.chat({
         model: this.store.settings.defaultModel, tools: [], effort: "low", signal,
         messages: [
-          { role: "system", content: 'Valuti l\'intenzione di nuovi messaggi durante un compito in corso. Rispondi SOLO con JSON: {"intent":"status"|"update"|"stop"|"continue", "reply":""}. Valuta il significato nel contesto, non la presenza di parole. status: chiedono come procede o un recap, senza cambiare il compito; scrivi in reply un aggiornamento breve nella loro lingua, basato solo su risultati e progressi forniti, senza promettere risultati non verificati. update: modificano il compito, aggiungono un requisito o ne chiedono un altro al suo posto. stop: chiedono esplicitamente di interrompere o abbandonare il lavoro; un riferimento alla parola stop, una negazione o una domanda sullo stato non sono un ordine di fermarsi. continue: conferme, chiarimenti o chiacchiere che non modificano il lavoro. Una domanda di stato conserva SEMPRE l\'obiettivo e il lavoro in corso. Se il messaggio combina una domanda e una nuova istruzione, considera l\'istruzione. In caso di dubbio conserva il lavoro: continue.' },
+          { role: "system", content: 'Valuti l\'intenzione di nuovi messaggi durante un compito in corso. Rispondi SOLO con JSON: {"intent":"status"|"update"|"stop"|"continue", "reply":""}. Valuta il significato nel contesto, non la presenza di parole. status: chiedono come procede o un recap, senza cambiare il compito; scrivi in reply un aggiornamento breve nella loro lingua, basato solo su risultati e progressi forniti, senza promettere risultati non verificati. update: modificano il compito, aggiungono un requisito o ne chiedono un altro al suo posto. stop: chiedono esplicitamente di interrompere o abbandonare il lavoro; un riferimento alla parola stop, una negazione o una domanda sullo stato non sono un ordine di fermarsi. continue: conferme, chiarimenti o chiacchiere che non modificano il lavoro. Se fanno una domanda o vogliono parlare con te senza cambiare il compito, scrivi in reply una risposta breve e pertinente: Cora la invia subito mentre il lavoro continua. Per una semplice conferma senza domanda puoi lasciare reply vuoto. Una domanda di stato conserva SEMPRE l\'obiettivo e il lavoro in corso. Se il messaggio combina una domanda e una nuova istruzione, considera l\'istruzione. In caso di dubbio conserva il lavoro: continue.' },
           { role: "user", content: `Richiesta attuale:\n${request}\n\nObiettivo attuale:\n${goal || "(nessuno)"}\n\nRisultati effettivi:\n${work || "(nessun risultato ancora)"}\n\nUltimo aggiornamento:\n${progress || "(nessuno)"}\n\nNuovi messaggi da valutare:\n${messages}` },
         ],
       });
@@ -399,7 +402,7 @@ export class Brain {
     }
   }
 
-  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", routine = null, onTrace = null }) {
+  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", routine = null, onTrace = null, onMessageHandled = null }) {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
     const tools = caps.tools ? TOOL_DEFS.filter((tool) => OWN_TOOLS.has(tool.name) || computer) : [];
@@ -418,24 +421,44 @@ export class Brain {
     let worked = 0;
     let looping = false;
     const recent = [];
+    let screen = "unknown";
+    let visualAction = "";
+    const repeatedCall = (signature) => {
+      recent.push(signature);
+      if (recent.length > LOOP_WINDOW) recent.shift();
+      return recent.filter((item) => item === signature).length >= LOOP_REPEATS;
+    };
+    const markLoop = (name) => {
+      if (looping) return;
+      looping = true;
+      trace.add({ type: "note", text: `Ripete ${name} senza nuovi risultati: lo fermo.` });
+    };
     // What the agent really did, in one line each: the goal check reads this, not its promises.
     const did = [];
     // What the owner said after the task started: a goal they have moved past must not hold.
     let steering = [];
     const ownerSaid = [];
     const pendingNews = [];
+    const pendingMessageIds = new Set();
+    const deliveredMessageIds = new Set();
+    const answeredMessageIds = new Set();
     const controller = new AbortController();
     let evaluation = Promise.resolve();
     let closed = false;
     let progress = "";
+    const spokenMessages = [];
     let stoppedByOwner = false;
     // Told to stop, an agent stops: no more tools, no more rounds, whatever it has is the answer.
     let halted = false;
     let lastUpdate = Date.now();
-    const sayTracked = say ? async (text) => {
+    const sayTracked = say ? async (text, target = channel.id) => {
       lastUpdate = Date.now();
       progress = String(text);
-      return say(text);
+      const result = await say(text, target);
+      spokenMessages.push(String(text).trim());
+      if (spokenMessages.length > 20) spokenMessages.shift();
+      for (const id of deliveredMessageIds) answeredMessageIds.add(id);
+      return result;
     } : null;
     const ctx = {
       agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push,
@@ -455,25 +478,33 @@ export class Brain {
       },
       channelIds: this.channelIdsFor(agent),
       channelLabel: (id) => this.channelLabel(id),
+      postingChannels: [...new Map([
+        { id: SALOTTO, name: "salotto", kind: "web" }, { id: privateRoom(agent.id), name: "la tua chat privata", kind: "web" },
+        ...(this.channels?.listFor?.(agent) || []), { id: channel.id, name: channel.name || this.channelLabel(channel.id), kind: channel.kind || "web" },
+      ].map(({ id, name, kind }) => [id, { id, name, kind }])).values()],
       formatWhen: (ms) => formatWhen(ms, this.timezone),
     };
     const runTool = async (name, args) => {
       const before = await news();
       const started = Date.now();
       const allowed = tools.some((tool) => tool.name === name);
-      const signature = `${name}:${JSON.stringify(args || {})}`;
-      recent.push(signature);
-      if (recent.length > LOOP_WINDOW) recent.shift();
-      const repeated = !MEMORY_TOOLS.has(name) && recent.filter((item) => item === signature).length >= LOOP_REPEATS;
-      if (repeated && !looping) {
-        looping = true;
-        trace.add({ type: "note", text: `Ripete ${name} con gli stessi argomenti: lo fermo.` });
-      }
+      const visual = name === "computer" || name === "open_url";
+      const signature = `${name}:${JSON.stringify(args || {})}${visual ? `:${screen}` : ""}`;
+      const repeated = name !== "screenshot" && repeatedCall(signature) && !MEMORY_TOOLS.has(name);
+      if (repeated) markLoop(name);
       if (allowed && !MEMORY_TOOLS.has(name)) worked += 1;
-      const output = halted ? { text: "error: the owner asked you to stop. Do not run anything else: say where you had got to, in one line." }
+      let output = halted ? { text: "error: the owner asked you to stop. Do not run anything else: say where you had got to, in one line." }
         : !allowed ? { text: `error: the tool ${name} is not available now` }
         : repeated ? { text: "error: you have already done exactly this several times with the same result. Stop repeating it: write what you have so far and what is blocking you." }
         : await executeTool({ name, args }, ctx);
+      if (name === "screenshot" && allowed && !halted) {
+        const observed = createHash("sha256").update(output.image || output.text).digest("hex");
+        if (output.image) screen = observed;
+        if (repeatedCall(`${signature}:${observed}:${visualAction}`)) {
+          markLoop(name);
+          output = { text: "error: repeated desktop observations returned the same result. Take a different action or explain what is blocking progress." };
+        }
+      } else if (visual && allowed && !halted && !output.text.startsWith("error:")) visualAction = `${name}:${JSON.stringify(args || {})}`;
       const ok = !output.text.startsWith("error:");
       this.log?.({
         type: "tool", agentId: agent.id, channelId: channel.id, tool: name,
@@ -498,6 +529,7 @@ export class Brain {
           trace.spent(decision.usage);
           trace.add({ type: "note", text: `Valutazione messaggio: ${decision.intent}` });
           if (decision.intent === "stop") {
+            for (const item of fresh) deliveredMessageIds.add(item.id);
             halted = true;
             stoppedByOwner = true;
             if (routine && this.store.routine(routine.id)) this.store.updateRoutine(routine.id, { enabled: false });
@@ -508,9 +540,14 @@ export class Brain {
             steering.push(messages);
             ownerSaid.push(messages);
           }
-          if (decision.intent === "status" && sayTracked) {
-            await sayTracked(decision.reply || `Sto ancora lavorando a questo obiettivo: ${goal || goalRequest}`).catch(() => {});
+          if ((decision.intent === "status" || (decision.intent === "continue" && decision.reply)) && sayTracked) {
+            try {
+              await sayTracked(decision.reply || `Sto ancora lavorando a questo obiettivo: ${goal || goalRequest}`);
+              for (const item of fresh) answeredMessageIds.add(item.id);
+              onMessageHandled?.(fresh.map((item) => item.id));
+            } catch {}
           }
+          for (const item of fresh) pendingMessageIds.add(item.id);
           pendingNews.push(`[Nel frattempo nella chat]\n${formatTranscript(fresh, agent, this.timezone)}\n${decision.intent === "status" ? "[Cora] È solo una richiesta di stato: ho già inviato il recap. L'obiettivo non cambia; continua il lavoro senza ricominciarlo." : "[Cora] Una domanda di stato o una conferma non cambia il goal. Rispetta solo le modifiche effettive alla richiesta."}`);
         });
       }
@@ -532,6 +569,8 @@ export class Brain {
     const news = async () => {
       await settleNews();
       const parts = pendingNews.splice(0);
+      for (const id of pendingMessageIds) deliveredMessageIds.add(id);
+      pendingMessageIds.clear();
       if (task && sayTracked && Date.now() - lastUpdate > UPDATE_EVERY_MS) {
         lastUpdate = Date.now();
         parts.push("[Cora] Non scrivi in chat da un po': manda con say due righe su a che punto sei, poi continua.");
@@ -540,9 +579,10 @@ export class Brain {
     };
     const done = (raw, steps) => {
       closed = true;
-      const text = cleanReply(raw, agent);
+      const reply = cleanReply(raw, agent);
+      const text = reply && !spokenMessages.includes(reply.trim()) ? reply : null;
       trace.finish({ status: halted ? "stopped" : text ? "done" : "pass", output: raw });
-      return { text, steps, traceId: trace.id, asked, stopped: halted };
+      return { text, steps, traceId: trace.id, asked, stopped: halted, spoken: spokenMessages.length > 0, handledMessageIds: [...new Set([...answeredMessageIds, ...(text || asked ? deliveredMessageIds : [])])] };
     };
     /**
      * The Cora harness at the end of a task turn: is it really finished? An
@@ -556,6 +596,7 @@ export class Brain {
     const verdict = (raw) => {
       if (halted || !task || !worked || looping || asked || nudges >= NUDGES || Date.now() > deadline - 20000) return null;
       const text = cleanReply(raw, agent);
+      if (!text && spokenMessages.length) return null;
       if (!text) return { kind: "silent", prompt: "[Cora] Hai lavorato ma non hai scritto niente. Se il lavoro è finito, scrivi il risultato per chi aspetta; se manca qualcosa, continua adesso con gli strumenti." };
       if (unfinished(text)) return { kind: "unfinished", text, prompt: "[Cora] Non hai finito: quello che hai scritto è un aggiornamento, non il risultato. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare: fallo. Quando è tutto fatto e verificato, scrivi il risultato." };
       if (!confirmed) return { kind: "confirm", text, prompt: "[Cora] Prima di chiudere: il compito che ti hanno dato è finito davvero e verificato? Se manca qualcosa, continua adesso con gli strumenti. Se è tutto fatto, rispondi solo DONE." };

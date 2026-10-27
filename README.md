@@ -35,6 +35,8 @@ web panel (password, PWA) ──► REST API + live events (SSE) + noVNC proxy +
 - **Threads and DMs.** In a Discord thread agents only speak when summoned by name. A direct message to an agent's own bot is a private conversation that only that agent answers, even if it is assigned to no channel.
 - **Shared listening.** Every agent bot listens to the channels it can see — each one switches on Discord's limited Message Content intent for its own app — so a private channel is heard as long as one agent is in it, and the same message arriving from several bots is answered once. In a channel the main bot cannot see, only the agents whose bot is really in it answer.
 - **One voice at a time.** A message that names agents is answered by them; a message that names nobody gets a single answer, never a chorus.
+- **Reports finish; conversations continue.** Routine results stay in the archive without starting another agent conversation. New human messages get an answer even when they arrive during final delivery. Status and side questions can receive an immediate reply while the same task continues.
+- **Agents post directly.** `list_channels` finds authorized destinations; `say({text, channel_id})` posts there, or in the current conversation when the id is omitted. These tools are available without a desktop, grog or another login. Delivery respects the active transport, channel assignments and actual access.
 - **Its routines are its own.** Creating, changing, pausing or deleting a routine touches nothing but that agent, so those tools are always within reach — not locked behind the owner's computer, which only opens when the owner is the one asking.
 - **One task at a time.** An agent has one computer, so it runs one task at a time: a routine landing on a busy agent is skipped with a note saying what it was on, and waits for its next turn instead of opening a second session on the same work. Each thread also admits only one active task and goal, even across different agents; another routine in that thread is skipped. Someone writing to a working agent still gets an answer, just without a second computer task.
 - **What it costs is on the record.** Every model call a turn makes is counted (the answer, the goal, the goal check, the summaries) and kept on the trace; the Agents page draws a year of days as a GitHub-style heatmap, one globally and one per agent. The scale is relative to the busiest day, because providers count tokens too differently for an absolute one to mean anything. Hermes reports nothing, so it stays at zero.
@@ -130,6 +132,8 @@ Choose **New file** to write instructions or **Upload file** to import UTF-8 Mar
 
 ## The Cora harness
 
+Browser progress is judged using the observed screen: repeated screenshots or clicks at the same coordinates remain valid when the page changes. Repeated observations with no new result are still stopped. If an agent’s personal Discord bot cannot send in an otherwise authorized shared channel, Cora can deliver the attributed reply through the main bot after checking read access. Private channels and DMs keep their identity boundary, and partially sent messages are never resent through another bot.
+
 Agents on `ollama/` run on Cora's own agent loop, the Cora harness; agents on Claude Code or Codex get the same checks around their CLI.
 
 - **Goal mode** (`settings.goalMode`, off by default) assigns one active goal per thread. The task reserves its thread before writing the goal, and releases it when finished or stopped. Different threads can work independently; concurrent routines in the same thread are skipped.
@@ -139,7 +143,7 @@ Agents on `ollama/` run on Cora's own agent loop, the Cora harness; agents on Cl
 - **A stop cancels execution.** Orders including “stoppa tutto” abort pending model requests or CLI processes, reject subsequent tool calls and end the trace as stopped. A restart does not revive stopped work or paused/deleted routines.
 - A task (a turn where the agent has its computer, or a routine) runs until it is done, for hours if needed: no fixed number of steps per turn.
 - Without a goal (the writer is unavailable, or the request is not a task) an agent that stops with nothing, with "shall I continue?", or with what it is about to do instead of doing it is sent back to work; its announcement still reaches the chat as an update. A finished agent confirms once before its result is posted.
-- The same tool call with the same arguments over and over is a loop: the call is refused and the agent writes what blocks it.
+- Repeating the same action without new results is a loop: the call is refused and the agent writes what blocks it. Visual observations compare actual screen contents, so changing pages remain valid even when screenshot arguments or click coordinates repeat.
 - New messages reach a working agent with its next tool result; the channel stays open to the other agents meanwhile.
 - Long conversations are summarised by the agent and carried on; a silent agent is reminded to send an update every 15 minutes.
 - A task cut short by a restart of Cora is picked up again where it was.

@@ -5,7 +5,7 @@ import http from "node:http";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { startCora } from "../src/main.js";
 import { passKeys, signPass } from "../src/pass.js";
-import { LISTENING_INTENTS } from "../src/discord.js";
+import { Discord, LISTENING_INTENTS } from "../src/discord.js";
 import { loginLinkToken } from "../src/web.js";
 import { SHARED, Store } from "../src/store.js";
 import { identityCli } from "./subscription-fixtures.js";
@@ -441,6 +441,258 @@ describe("panel auth", () => {
     } finally { await call(`/api/context/documents/${created.data.id}`, { method: "DELETE", headers }); }
   });
 
+  test("visual navigation can take many screenshots and click the same place on changing pages", async (t) => {
+    const agent = app.store.createAgent({ name: "Visual browser", model: "ollama/test-model", tools: true, chattiness: 0 });
+    const original = app.boxes.screenshot;
+    let frames = 0, calls = 0;
+    app.boxes.screenshot = async () => Buffer.from(`fixture-page-${++frames}`);
+    replies.set(agent.name, () => ++calls <= 12 ? { tool_calls: [{ function: { name: calls % 2 ? "screenshot" : "computer", arguments: calls % 2 ? {} : { action: "click", x: 40, y: 40 } } }] } : { content: "Sei pagine controllate." });
+    t.after(() => { app.boxes.screenshot = original; app.store.deleteAgent(agent.id); replies.delete(agent.name); });
+    const result = await app.brain.loop({ agent, mode: "chat", channel: { id: `web-${agent.id}`, place: "test" }, user: "Controlla le sei pagine.", computer: true, task: false, maxSteps: 20, deadline: Date.now() + 20000, images: [] });
+    assert.equal(result.text, "Sei pagine controllate.");
+    assert.equal(frames, 6);
+    assert.equal(app.store.trace(result.traceId).steps.filter((step) => step.type === "tool" && !step.ok).length, 0);
+  });
+
+  test("unchanging screenshots still stop a real observation loop", async (t) => {
+    const agent = app.store.createAgent({ name: "Stuck browser", model: "ollama/test-model", tools: true, chattiness: 0 });
+    const original = app.boxes.screenshot;
+    app.boxes.screenshot = async () => Buffer.from("same fixture page");
+    replies.set(agent.name, (body) => body.messages.at(-1).role === "tool" && body.messages.at(-1).content.startsWith("error:")
+      ? { content: "La pagina non cambia: mi fermo qui." } : { tool_calls: [{ function: { name: "screenshot", arguments: {} } }] });
+    t.after(() => { app.boxes.screenshot = original; app.store.deleteAgent(agent.id); replies.delete(agent.name); });
+    const result = await app.brain.loop({ agent, mode: "chat", channel: { id: `web-${agent.id}`, place: "test" }, user: "Guarda la pagina.", computer: true, task: false, maxSteps: 10, deadline: Date.now() + 20000, images: [] });
+    const tools = app.store.trace(result.traceId).steps.filter((step) => step.type === "tool");
+    assert.equal(tools.length, 4);
+    assert.equal(tools.at(-1).ok, false);
+    assert.match(result.text, /mi fermo/);
+  });
+
+  test("a forbidden agent bot can deliver through an authorized shared bot without crossing private channels", async (t) => {
+    const agent = app.store.createAgent({ name: "Shared delivery", tools: false, chattiness: 0 });
+    const token = "shared-delivery-fixture-token";
+    const own = new Discord({ token, apiBase: discord.url });
+    own.user = { id: "600000000000000098", username: agent.name };
+    app.bots.clients.set(agent.id, { client: own });
+    discord.state.deniedPosts.set(CHANNEL, new Set([token]));
+    const state = app.orchestrator.state(CHANNEL);
+    const wasBlind = state.mainBlind;
+    state.mainBlind = false;
+    t.after(() => { app.bots.clients.delete(agent.id); app.store.deleteAgent(agent.id); discord.state.deniedPosts.delete(CHANNEL); discord.state.privateTo.delete(CHANNEL); state.mainBlind = wasBlind; });
+    const before = discord.state.webhookPosts.length;
+    await app.orchestrator.postAs(agent, state, "Risposta consegnata.");
+    assert.equal(discord.state.webhookPosts.length, before + 1);
+    assert.equal(discord.state.webhookPosts.at(-1).username, agent.name);
+    assert.equal(discord.state.webhookPosts.at(-1).content, "Risposta consegnata.");
+    state.mainBlind = true;
+    await assert.rejects(app.orchestrator.postAs(agent, state, "Non deve passare."), /403/);
+    state.mainBlind = false;
+    discord.state.privateTo.set(CHANNEL, token);
+    await assert.rejects(app.orchestrator.postAs(agent, state, "Il principale non può leggere."), /403/);
+    assert.equal(discord.state.webhookPosts.length, before + 1);
+  });
+
+  test("a partially delivered Discord reply is never resent through another bot", async (t) => {
+    const agent = app.store.createAgent({ name: "Partial delivery", tools: false, chattiness: 0 });
+    const token = "partial-delivery-fixture-token";
+    const own = new Discord({ token, apiBase: discord.url });
+    own.user = { id: "600000000000000097", username: agent.name };
+    const original = own.sendPayload.bind(own);
+    own.sendPayload = async (...args) => { const sent = await original(...args); discord.state.deniedPosts.set(CHANNEL, new Set([token])); return sent; };
+    app.bots.clients.set(agent.id, { client: own });
+    t.after(() => { app.bots.clients.delete(agent.id); app.store.deleteAgent(agent.id); discord.state.deniedPosts.delete(CHANNEL); });
+    const before = discord.state.webhookPosts.length;
+    await assert.rejects(app.orchestrator.postAs(agent, app.orchestrator.state(CHANNEL), "lunga ".repeat(600)), (error) => error.status === 403 && error.sentCount === 1);
+    assert.equal(discord.state.webhookPosts.length, before);
+    assert.equal(discord.state.botPosts.filter((post) => post.token === token).length, 1);
+  });
+
+  test("routine reports stay passive and a new human message gets a normal answer", async (t) => {
+    const agent = app.store.createAgent({ name: "Calma", model: "ollama/test-model", tools: false, chattiness: 0 });
+    const room = `web-${agent.id}`, state = app.orchestrator.state(room);
+    const focus = { ids: [agent.id], at: Date.now() };
+    Object.assign(state, { focus, budget: 7, ownerOrigin: true });
+    let calls = 0;
+    replies.set(agent.name, (body) => { calls += 1; return { content: lastUserText(body).includes('routine "Report"') ? "Report concluso. Calma, controlla questo risultato." : "Sì, parliamone." }; });
+    t.after(() => { app.store.deleteAgent(agent.id); replies.delete(agent.name); });
+    const routine = app.store.createRoutine(agent.id, { name: "Report", schedule: "0 9 * * *", channelId: room, prompt: "Pubblica il risultato." });
+    await app.orchestrator.runRoutine(routine);
+    assert.equal(state.history.at(-1).passive, true);
+    assert.equal(app.store.recentMessages(room, 10).at(-1).passive, true);
+    assert.equal(state.budget, 7);
+    assert.equal(state.ownerOrigin, true);
+    assert.equal(state.focus, focus);
+    assert.equal(state.nextRoundAt || 0, 0);
+    await app.orchestrator.round(state);
+    assert.equal(calls, 1, "a report cannot reactivate itself even with a named agent and remaining budget");
+    await app.orchestrator.onWebMessage({ room, text: "Calma, possiamo parlare del risultato?" });
+    await waitFor(() => state.history.some((item) => item.content === "Sì, parliamone."));
+    await quiet();
+    assert.equal(calls, 2);
+    assert.equal(state.humanQueue.size, 0);
+    assert.equal(app.store.routineHistory({ agentId: agent.id }).items.length, 1);
+  });
+
+  test("a human arriving during final routine delivery is answered once after the worker releases", async (t) => {
+    const agent = app.store.createAgent({ name: "Staffetta", model: "ollama/test-model", tools: false, chattiness: 0 });
+    const room = `web-${agent.id}`, state = app.orchestrator.state(room);
+    let release, delivering = false, routineCalls = 0, chatCalls = 0;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const original = app.orchestrator.postAs;
+    app.orchestrator.postAs = async function (speaker, target, text, ...rest) {
+      if (speaker.id === agent.id && text === "Routine finita.") { delivering = true; await gate; }
+      return original.call(this, speaker, target, text, ...rest);
+    };
+    replies.set(agent.name, (body) => {
+      if (lastUserText(body).includes('routine "Handoff"')) { routineCalls += 1; return { content: "Routine finita." }; }
+      chatCalls += 1;
+      assert.match(lastUserText(body), /Messaggio umano a cui rispondere adesso:.*guardiamo insieme/);
+      return { content: "Certo, guardiamo insieme." };
+    });
+    t.after(() => { release(); app.orchestrator.postAs = original; app.store.deleteAgent(agent.id); replies.delete(agent.name); });
+    const routine = app.store.createRoutine(agent.id, { name: "Handoff", schedule: "0 9 * * *", channelId: room, prompt: "Concludi il report." });
+    const running = app.orchestrator.runRoutine(routine);
+    await waitFor(() => delivering);
+    await app.orchestrator.onWebMessage({ room, text: "Staffetta, guardiamo insieme il report?" });
+    await sleep(500);
+    assert.equal(chatCalls, 0);
+    release();
+    await running;
+    await waitFor(() => state.history.some((item) => item.content === "Certo, guardiamo insieme."));
+    await quiet();
+    assert.equal(routineCalls, 1);
+    assert.equal(chatCalls, 1);
+    assert.equal(state.humanQueue.size, 0);
+    assert.equal(app.orchestrator.threadWork.has(room), false);
+  });
+
+  test("status and side questions get immediate answers while the same routine goal continues", async (t) => {
+    const previous = app.store.settings.goalMode;
+    app.store.updateSettings({ goalMode: true });
+    const agent = app.store.createAgent({ name: "Dialogo", model: "ollama/test-model", tools: true, chattiness: 0 });
+    const room = `web-${agent.id}`, state = app.orchestrator.state(room);
+    let release, started = false, calls = 0;
+    const gate = new Promise((resolve) => { release = resolve; });
+    goals = () => "Il report è stato controllato";
+    intentions = (body) => JSON.stringify(lastUserText(body).includes("che significa") ? { intent: "continue", reply: "Significa che il controllo è ancora in corso." } : { intent: "status", reply: "Sto controllando il report; il lavoro continua." });
+    replies.set(agent.name, async () => { calls += 1; started = true; await gate; return { content: "Report controllato." }; });
+    t.after(() => { release(); app.store.updateSettings({ goalMode: previous }); app.store.deleteAgent(agent.id); replies.delete(agent.name); });
+    const routine = app.store.createRoutine(agent.id, { name: "Dialogo durante il lavoro", schedule: "0 9 * * *", channelId: room, prompt: "Controlla il report." });
+    const running = app.orchestrator.runRoutine(routine);
+    await waitFor(() => started);
+    await app.orchestrator.onWebMessage({ room, text: "Dialogo, come andiamo?" });
+    await waitFor(() => state.history.some((item) => item.content === "Sto controllando il report; il lavoro continua."));
+    await app.orchestrator.onWebMessage({ room, text: "Dialogo, che significa questo stato?" });
+    await waitFor(() => state.history.some((item) => item.content === "Significa che il controllo è ancora in corso."));
+    assert.equal(app.brain.channelGoals.get(room), "Il report è stato controllato");
+    assert.equal(app.orchestrator.threadWork.get(room), agent.id);
+    assert.equal(state.humanQueue.size, 0);
+    release();
+    await running;
+    await quiet();
+    assert.equal(calls, 1);
+    assert.equal(app.store.routine(routine.id).enabled, true);
+    assert.equal(app.store.routineHistory({ agentId: agent.id }).items.length, 1);
+  });
+
+  test("channel discovery and direct delivery work without a computer or grog and never duplicate PASS", async (t) => {
+    const agent = app.store.createAgent({ name: "Canali", model: "ollama/test-model", tools: false, chattiness: 0, channelIds: [CHANNEL] });
+    const room = `web-${agent.id}`, state = app.orchestrator.state(room);
+    let calls = 0;
+    replies.set(agent.name, (body) => {
+      calls += 1;
+      assert.ok(body.tools.some((tool) => tool.function.name === "list_channels"));
+      assert.ok(!body.tools.some((tool) => tool.function.name === "shell"));
+      if (calls === 1) return { tool_calls: [{ function: { name: "list_channels", arguments: {} } }] };
+      if (calls === 2) {
+        const channels = JSON.parse(body.messages.at(-1).content);
+        assert.ok(channels.some((channel) => channel.id === CHANNEL && channel.kind === "discord"));
+        assert.ok(!channels.some((channel) => channel.id === OTHER_CHANNEL));
+        return { tool_calls: [{ function: { name: "say", arguments: { text: "Risultato pubblicato direttamente.", channel_id: CHANNEL } } }] };
+      }
+      assert.match(body.messages.at(-1).content, /posted directly/);
+      return { content: "PASS" };
+    });
+    t.after(() => { app.store.deleteAgent(agent.id); replies.delete(agent.name); });
+    const result = await app.brain.chatTurn({ agent, channel: app.channels.info(room), history: [{ id: "direct-question", at: Date.now(), kind: "owner", authorName: "Sam", content: "Riporta il risultato nel canale." }], forced: true, computer: false, say: (text, target) => app.orchestrator.postDirect(agent, state, target, text) });
+    assert.equal(result.text, null);
+    assert.equal(result.spoken, true);
+    assert.equal(calls, 3);
+    assert.equal(discord.state.webhookPosts.filter((item) => item.content === "Risultato pubblicato direttamente.").length, 1);
+    assert.equal(app.orchestrator.state(CHANNEL).history.at(-1).passive, true);
+    assert.match(app.store.trace(result.traceId).system, /Non serve grog/);
+  });
+
+  test("direct posting respects assignments, guilds and actual read permission, including own-bot channels", async (t) => {
+    const privateId = "200000000000000099";
+    const agent = app.store.createAgent({ name: "Confini", tools: false, chattiness: 0, channelIds: [CHANNEL, privateId, OTHER_CHANNEL] });
+    const token = "direct-private-fixture-token", own = new Discord({ token, apiBase: discord.url });
+    own.user = { id: "600000000000000096", username: agent.name };
+    own.listChannels = () => [{ id: privateId, name: "own-private", guildId: GUILD }, { id: OTHER_CHANNEL, name: "other-guild", guildId: OTHER_GUILD }];
+    app.bots.clients.set(agent.id, { client: own });
+    const state = app.orchestrator.state(`web-${agent.id}`);
+    t.after(() => { app.bots.clients.delete(agent.id); app.store.deleteAgent(agent.id); discord.state.privateTo.delete(privateId); });
+    assert.ok(app.channels.listFor(agent).some((channel) => channel.id === privateId));
+    discord.state.privateTo.set(privateId, token);
+    await app.orchestrator.postDirect(agent, state, privateId, "Messaggio nel mio canale privato.");
+    assert.equal(discord.state.botPosts.at(-1).channelId, privateId);
+    assert.equal(discord.state.botPosts.at(-1).token, token);
+    const sent = discord.state.botPosts.length + discord.state.webhookPosts.length;
+    await assert.rejects(app.orchestrator.postDirect(agent, state, OTHER_CHANNEL, "Fuori area"), /not authorized/);
+    await assert.rejects(app.orchestrator.postDirect(agent, state, "web-some-other-agent", "Privato altrui"), /not authorized/);
+    await assert.rejects(app.orchestrator.postDirect(agent, state, "200000000000000098", "Non assegnato"), /not authorized/);
+    discord.state.privateTo.set(privateId, "some-other-bot");
+    await assert.rejects(app.orchestrator.postDirect(agent, state, privateId, "Non leggibile"), /403/);
+    assert.equal(discord.state.botPosts.length + discord.state.webhookPosts.length, sent);
+  });
+
+  test("reloading Discord history preserves the passive flag of delivered routine reports", async (t) => {
+    const agent = app.store.createAgent({ name: "Passive reload", tools: false, chattiness: 0 });
+    t.after(() => app.store.deleteAgent(agent.id));
+    const state = app.orchestrator.state(CHANNEL);
+    const [posted] = await app.orchestrator.postAs(agent, state, "Archived routine result.", undefined, undefined, { passive: true });
+    discord.state.history.set(CHANNEL, [...(discord.state.history.get(CHANNEL) || []), posted]);
+    const id = state.history.at(-1).id;
+    const reloaded = { id: CHANNEL, history: [], seen: new Set() };
+    await app.orchestrator.ensureHistory(reloaded);
+    assert.equal(reloaded.history.find((item) => item.id === id)?.passive, true);
+  });
+
+  test("a routine that answers through say then PASS does not answer the human twice", async (t) => {
+    const agent = app.store.createAgent({ name: "Solo una risposta", model: "ollama/test-model", tools: false, chattiness: 0 });
+    const room = `web-${agent.id}`, state = app.orchestrator.state(room);
+    let release, started = false, calls = 0;
+    const gate = new Promise((resolve) => { release = resolve; });
+    intentions = () => JSON.stringify({ intent: "continue", reply: "" });
+    replies.set(agent.name, async () => {
+      calls += 1;
+      if (calls === 1) { started = true; await gate; return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] }; }
+      if (calls === 2) return { tool_calls: [{ function: { name: "say", arguments: { text: "Sì, ti rispondo mentre finisco." } } }] };
+      return { content: "PASS" };
+    });
+    t.after(() => { release(); app.store.deleteAgent(agent.id); replies.delete(agent.name); });
+    const routine = app.store.createRoutine(agent.id, { name: "Risposta diretta", schedule: "0 9 * * *", channelId: room, prompt: "Controlla le routine." });
+    const running = app.orchestrator.runRoutine(routine);
+    await waitFor(() => started);
+    await app.orchestrator.onWebMessage({ room, text: "Mi rispondi mentre finisci?" });
+    await sleep(200);
+    release();
+    await running;
+    await quiet();
+    assert.equal(calls, 3);
+    assert.equal(state.humanQueue.size, 0);
+    assert.equal(state.history.filter((item) => item.content === "Sì, ti rispondo mentre finisco.").length, 1);
+  });
+
+  test("passive routine metadata survives a store restart", () => {
+    const directory = tempHome(), store = new Store(directory);
+    store.appendArchive("web", { id: "passive-result", at: Date.now(), kind: "agent", authorName: "Reporter", content: "Report", passive: true });
+    store.close();
+    const reopened = new Store(directory);
+    try { assert.equal(reopened.recentMessages("web", 1)[0].passive, true); }
+    finally { reopened.close(); }
+  });
+
   test("one-time reminders are verified by the runtime and exposed in the persistent archive", async () => {
     const signedIn = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
     const headers = { Cookie: signedIn.headers.get("set-cookie").split(";")[0] };
@@ -835,7 +1087,7 @@ describe("agents in Discord", () => {
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
     // Its own routines travel with it: they are the agent's own, not the owner's computer.
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner"]);
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);

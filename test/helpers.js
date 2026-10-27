@@ -95,6 +95,7 @@ export async function fakeDiscord() {
     webhookAllowed: true,
     // channel id -> the only bot token allowed to read it (a private channel).
     privateTo: new Map(),
+    deniedPosts: new Map(),
     botUsers: new Map(),
     intentPatches: [],
     refuseIntent: new Set(),
@@ -165,6 +166,7 @@ export async function fakeDiscord() {
       return json(res, 200, { ...caller, bot: true });
     }
     if ((match = /^\/channels\/(\d+)\/messages$/.exec(url.pathname)) && req.method === "POST") {
+      if (state.deniedPosts.get(match[1])?.has(token)) return json(res, 403, { message: "Missing Access", code: 50001 });
       const payload = JSON.parse(body.toString("utf8"));
       const message = { id: id(), channel_id: match[1], guild_id: GUILD, content: payload.content, author: { id: caller.id, username: caller.username, bot: true }, timestamp: new Date().toISOString() };
       state.botPosts.push({ ...payload, channelId: match[1], token });

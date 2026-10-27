@@ -454,7 +454,9 @@ export class Discord extends EventEmitter {
     const sent = [];
     for (let index = 0; index < Math.max(chunks.length, 1); index += 1) {
       const attach = index === Math.max(chunks.length, 1) - 1 ? file : null;
-      const message = await this.sendPayload(`/channels/${channelId}/messages`, { content: chunks[index] || "", allowed_mentions: { parse: ["users"] } }, attach, true);
+      let message;
+      try { message = await this.sendPayload(`/channels/${channelId}/messages`, { content: chunks[index] || "", allowed_mentions: { parse: ["users"] } }, attach, true); }
+      catch (error) { error.sentCount = sent.length; throw error; }
       this.rememberOwn(message);
       sent.push(message);
     }
