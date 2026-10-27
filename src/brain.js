@@ -105,6 +105,7 @@ export class Brain {
   constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null }) {
     // The orchestrator admits one task per thread. Its current goal belongs to that task only.
     this.channelGoals = new Map();
+    this.progressEvery = 20;
     this.traces = traces;
     this.push = push;
     this.ownerInstructionsPath = ownerInstructionsPath;
@@ -257,11 +258,14 @@ export class Brain {
       instruction,
       replyTo ? `Messaggio umano a cui rispondere adesso: ${replyTo.authorName}: ${replyTo.content}\nGli eventuali risultati di routine successivi sono solo contesto, non una nuova richiesta di eseguirle.` : "",
     ].filter(Boolean).join("\n\n");
+    const request = replyTo || history.filter((item) => item.kind === "owner" || item.kind === "human").at(-1);
+    const requestIndex = request ? history.findIndex((item) => item.id === request.id) : -1;
+    const goalContext = requestIndex > 0 ? formatTranscript(history.slice(0, requestIndex).filter((item) => !item.passive && ["owner", "human", "agent"].includes(item.kind)).slice(-6).map((item) => ({ ...item, content: String(item.content || "").slice(0, 2000) })), agent, this.timezone).slice(-6000) : "";
     const turn = (prompt) => this.loop({
       agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled,
       maxSteps: computer ? TASK_STEPS : CHAT_STEPS, deadline: Date.now() + (computer ? TASK_DEADLINE_MS : CHAT_DEADLINE_MS),
       images: (last?.images || []).slice(0, 2), task: Boolean(computer),
-      goalRequest: history.filter((item) => item.kind === "owner" || item.kind === "human").slice(-1).map((item) => item.content).join("\n"),
+      goalRequest: request?.content || "", goalContext,
     });
     const result = await turn(user);
     // A question to the owner is already an answer: it is in the chat.
@@ -328,6 +332,7 @@ export class Brain {
       agent, mode: routine?.kind === "reminder" ? "reminder" : trace.kind === "routine" ? "routine" : "chat", channel, user, computer: agent.tools, postFile, say, inbox, onTrace, onMessageHandled,
       maxSteps: TASK_STEPS, deadline: Date.now() + TASK_DEADLINE_MS, images: [], task: true,
       goalRequest: routine ? this.routineGoal(routine) : original.split("<chat>\n").pop().split("\n</chat>")[0].split("\n").filter((line) => line.includes(" ★:")).slice(-1).join("\n"), routine,
+      goalContext: routine ? "" : original.split("<chat>\n").pop().split("\n</chat>")[0].slice(-6000),
     });
   }
 
@@ -341,15 +346,15 @@ export class Brain {
    * writes it, so an agent never sets its own finish line. Empty when it
    * cannot be written: the task then runs on the plain harness rules.
    */
-  async goalFor(request, since = "") {
+  async goalFor(request, since = "", context = "") {
     const model = this.store.settings.defaultModel;
     if (!this.store.settings.goalMode || !model || this.llm.isAgentic(model)) return { goal: "", usage: null };
     try {
       const out = await this.llm.chat({
         model, tools: [], effort: "low",
         messages: [
-          { role: "system", content: "Scrivi la condizione di completamento di un compito: cosa deve essere vero e verificato perché sia finito, non i passi per arrivarci. Una riga sola, nella lingua della richiesta, senza preamboli. Se la richiesta non è un compito ma una chiacchiera, rispondi NESSUNO." },
-          { role: "user", content: `Richiesta:\n${String(request).slice(0, 4000)}${since ? `\n\nPoi il proprietario ha detto:\n${since.slice(0, 2000)}\nSe cambia quello che chiede, la condizione è la nuova, non quella di prima.` : ""}\n\nCondizione di completamento (una riga):` },
+          { role: "system", content: "Scrivi la condizione di completamento di un compito: cosa deve essere vero e verificato perché sia finito, non i passi per arrivarci. Una riga sola, nella lingua della richiesta, senza preamboli. Le conferme brevi come «ok manda» autorizzano la proposta immediatamente precedente: usa la conversazione pertinente solo per risolvere questi riferimenti, senza assumere vecchi obiettivi, ricordi o compiti di altri canali. Una menzione identifica il destinatario della richiesta, non un messaggio da inviare. Se mancano dati necessari, non inventarli: la condizione richiede il risultato autorizzato oppure una richiesta precisa del dato mancante. Se la richiesta non è un compito ma una chiacchiera, rispondi NESSUNO." },
+          { role: "user", content: `${context ? `Conversazione pertinente, solo per interpretare la richiesta attuale:\n${context.slice(-6000)}\n\n` : ""}Richiesta:\n${String(request).slice(0, 4000)}${since ? `\n\nPoi il proprietario ha detto:\n${since.slice(0, 2000)}\nSe cambia quello che chiede, la condizione è la nuova, non quella di prima.` : ""}\n\nCondizione di completamento (una riga):` },
         ],
       });
       const text = String(out.text || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim().split("\n")[0].trim();
@@ -403,13 +408,13 @@ export class Brain {
     }
   }
 
-  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", routine = null, onTrace = null, onMessageHandled = null }) {
+  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null }) {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
     const tools = caps.tools ? TOOL_DEFS.filter((tool) => OWN_TOOLS.has(tool.name) || computer) : [];
     const place = channel.place || "";
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
-    let { goal, usage: goalCost } = task && goalRequest ? await this.goalFor(goalRequest) : { goal: "", usage: null };
+    let { goal, usage: goalCost } = task && goalRequest ? await this.goalFor(goalRequest, "", goalContext) : { goal: "", usage: null };
     if (task && goal) this.channelGoals.set(channel.id, goal);
     const currentPrompt = () => `Ora: ${formatNow(this.timezone)}.\n\n${user}${goal ? `\n\n[Obiettivo] Questa è l'unica condizione attuale; sostituisce gli obiettivi precedenti: ${goal}` : ""}`;
     const prompt = currentPrompt();
@@ -421,6 +426,9 @@ export class Brain {
     // What the Cora harness watches while an agent works: real work done, and calls repeated without progress.
     let worked = 0;
     let looping = false;
+    let progressCalls = 0;
+    let blockedWork = "";
+    let ownerRevision = 0;
     const recent = [];
     let screen = "unknown";
     let visualAction = "";
@@ -494,7 +502,8 @@ export class Brain {
       const repeated = name !== "screenshot" && repeatedCall(signature) && !MEMORY_TOOLS.has(name);
       if (repeated) markLoop(name);
       if (allowed && !MEMORY_TOOLS.has(name)) worked += 1;
-      let output = halted ? { text: "error: the owner asked you to stop. Do not run anything else: say where you had got to, in one line." }
+      const waitingForOwner = blockedWork && !OWN_TOOLS.has(name) && !["say", "ask_owner", "notify", "list_channels"].includes(name);
+      let output = waitingForOwner ? { text: `error: the progress review found a real dependency: ${blockedWork}. Do not repeat searches or writes. Report completed results and ask the owner for the precise missing decision with ask_owner.` } : halted ? { text: "error: the owner asked you to stop. Do not run anything else: say where you had got to, in one line." }
         : !allowed ? { text: `error: the tool ${name} is not available now` }
         : repeated ? { text: "error: you have already done exactly this several times with the same result. Stop repeating it: write what you have so far and what is blocking you." }
         : await executeTool({ name, args }, ctx);
@@ -513,8 +522,20 @@ export class Brain {
       });
       trace.add({ type: "tool", name, args: args || {}, result: output.text, ok, ms: Date.now() - started, image: Boolean(output.image) });
       if (allowed) did.push(`${name} ${summarizeArgs(name, args || {})} → ${String(output.text).slice(0, 2400)}`);
+      let review = "";
+      if (task && goal && !steering.length && allowed && !waitingForOwner && !MEMORY_TOOLS.has(name) && !["say", "ask_owner", "notify", "list_channels"].includes(name) && !halted && !asked && ++progressCalls >= this.progressEvery) {
+        progressCalls = 0;
+        const revision = ownerRevision;
+        const verdict = await this.goalCheck(goal, { answer: progress, work: `Controllo durante l'esecuzione: valuta se esiste un ostacolo reale che richiede una decisione o un accesso del proprietario; l'agente non ha ancora scritto la risposta finale.\n${did.slice(-40).join("\n")}` }, AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]));
+        trace.spent(verdict.usage);
+        if (!halted && !steering.length && revision === ownerRevision && verdict.blocked && !verdict.met) {
+          blockedWork = verdict.reason || "Serve una decisione o un accesso del proprietario.";
+          review = `[Cora] La verifica dei progressi ha rilevato un blocco: ${blockedWork}. Conserva i risultati già verificati, non ripetere gli invii e le ricerche, e usa ask_owner per chiedere esattamente il dato o l'intervento mancante.`;
+          trace.add({ type: "note", text: `Verifica progressi: dipendenza esterna — ${blockedWork}` });
+        }
+      }
       const steer = await news();
-      return before || steer ? { ...output, text: [output.text, before, steer].filter(Boolean).join("\n\n") } : output;
+      return before || steer || review ? { ...output, text: [output.text, before, steer, review].filter(Boolean).join("\n\n") } : output;
     };
     // New chat messages reach a working agent with its next tool result (or its next step on Ollama).
     const collectNews = () => {
@@ -536,6 +557,10 @@ export class Brain {
             if (routine && this.store.routine(routine.id)) this.store.updateRoutine(routine.id, { enabled: false });
             controller.abort();
             return;
+          }
+          if (decision.intent === "update" || decision.intent === "continue") {
+            blockedWork = "";
+            ownerRevision++;
           }
           if (decision.intent === "update") {
             steering.push(messages);
@@ -616,7 +641,7 @@ export class Brain {
       if (steering.length) {
         // They have spoken since the goal was written: it is theirs to move, not ours to defend.
         steering = [];
-        const { goal: next, usage: cost } = await this.goalFor(goalRequest, ownerSaid.join("\n"));
+        const { goal: next, usage: cost } = await this.goalFor(goalRequest, ownerSaid.join("\n"), goalContext);
         await settleNews();
         if (halted) return null;
         trace.spent(cost);

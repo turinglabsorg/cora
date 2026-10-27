@@ -2416,6 +2416,81 @@ describe("thread goal lifecycle", () => {
     assert.ok(!app.brain.channelGoals.has(CHANNEL), "the goal is released with its invocation");
   });
 
+  test("a short approval resolves the preceding proposal, not memories or a later human message", async () => {
+    const inputs = [];
+    goals = (body) => { inputs.push(body.messages[1].content); return "le tre bozze approvate sono inviate e verificate"; };
+    checks = () => JSON.stringify({ met: true });
+    replies.set("Iris", () => ({ content: "Le bozze approvate sono verificate." }));
+    const at = Date.now();
+    const proposal = { id: "proposal", at, kind: "agent", agentId: iris.id, authorName: "Iris", content: "Ho tre bozze pronte per i destinatari verificati. Le invio dopo il tuo ok." };
+    const approval = { id: "approval", at: at + 1, kind: "owner", authorName: "Sam", content: "Ok manda @Iris" };
+    const later = { id: "later", at: at + 2, kind: "owner", authorName: "Sam", content: "UNRELATED_LATER_TASK" };
+    await app.brain.chatTurn({ agent: iris, history: [proposal, approval, later], channel: { id: CHANNEL, name: "test" }, forced: true, computer: true, replyTo: approval });
+    assert.equal(inputs.length, 1);
+    assert.match(inputs[0], /tre bozze pronte/);
+    assert.match(inputs[0], /Richiesta:\nOk manda @Iris/);
+    assert.doesNotMatch(inputs[0], /UNRELATED_LATER_TASK|OBSOLETE|Ti torna in mente/);
+  });
+
+  test("a progress check asks for missing owner input instead of allowing more desktop searches", async () => {
+    const shell = app.boxes.shell;
+    const every = app.brain.progressEvery;
+    const executed = [];
+    app.brain.progressEvery = 2;
+    app.boxes.shell = async (id, command) => { executed.push(command); return { code: 0, output: "The correct company cannot be inferred. The owner must identify it." }; };
+    goals = () => "le risposte autorizzate sono inviate oppure è richiesto il dato proprietario mancante";
+    let reviews = 0;
+    checks = (body) => { reviews++; assert.match(body.messages[1].content, /Controllo durante l'esecuzione/); return JSON.stringify({ met: false, blocked: true, reason: "Il proprietario deve identificare la società corretta." }); };
+    let step = 0;
+    replies.set("Iris", () => {
+      step++;
+      if (step <= 3) return { tool_calls: [{ function: { name: "shell", arguments: { command: `lookup-company-${step}` } } }] };
+      if (step === 4) return { tool_calls: [{ function: { name: "ask_owner", arguments: { question: "A quale società si riferisce questa pratica?" } } }] };
+      return { content: "Attendo il dato necessario per completare le risposte." };
+    });
+    try {
+      const result = await app.brain.chatTurn({ agent: iris, history: [{ id: "approval", at: Date.now(), kind: "owner", authorName: "Sam", content: "Invia le risposte approvate" }], channel: { id: CHANNEL, name: "test" }, forced: true, computer: true });
+      assert.equal(result.asked, true);
+      assert.deepEqual(executed, ["lookup-company-1", "lookup-company-2"]);
+      assert.equal(reviews, 1);
+      const trace = app.store.trace(result.traceId);
+      assert.ok(trace.steps.some((entry) => entry.type === "note" && /Verifica progressi/.test(entry.text)));
+      assert.ok(trace.steps.some((entry) => entry.name === "shell" && /lookup-company-3/.test(JSON.stringify(entry.args)) && !entry.ok));
+    } finally { app.boxes.shell = shell; app.brain.progressEvery = every; }
+  });
+
+  test("progress reviews preserve useful work and accept an owner's clarification without replacing the goal", async () => {
+    const shell = app.boxes.shell;
+    const every = app.brain.progressEvery;
+    const executed = [];
+    app.brain.progressEvery = 2;
+    app.boxes.shell = async (id, command) => { executed.push(command); return { code: 0, output: executed.length <= 2 ? "The owner must identify the company." : "The selected individual business is verified." }; };
+    let written = 0;
+    goals = () => { written++; return "la pratica autorizzata è verificata"; };
+    let reviews = 0;
+    let evaluated = 0;
+    checks = async (body) => {
+      if (!/Controllo durante l'esecuzione/.test(body.messages[1].content)) return JSON.stringify({ met: true });
+      reviews++;
+      if (reviews === 1) await waitFor(() => evaluated === 1, { what: "the owner's clarification during the progress review" });
+      return JSON.stringify({ met: false, blocked: reviews === 1, reason: reviews === 1 ? "Serve identificare la società." : "La verifica sta avanzando." });
+    };
+    intentions = (body) => { evaluated++; assert.match(body.messages[1].content, /ditta individuale/); return JSON.stringify({ intent: "continue", reply: "" }); };
+    let delivered = false;
+    const inbox = () => reviews === 1 && !delivered ? (delivered = true, [{ id: "company-answer", at: Date.now(), kind: "owner", authorName: "Sam", content: "Si tratta della mia ditta individuale." }]) : [];
+    let step = 0;
+    replies.set("Iris", () => ++step <= 4 ? { tool_calls: [{ function: { name: "shell", arguments: { command: `verify-company-${step}` } } }] } : { content: "La pratica della ditta individuale è verificata." });
+    try {
+      const result = await app.brain.chatTurn({ agent: iris, history: [{ id: "verify", at: Date.now(), kind: "owner", authorName: "Sam", content: "Verifica la pratica approvata" }], channel: { id: CHANNEL, name: "test" }, forced: true, computer: true, inbox });
+      assert.deepEqual(executed, ["verify-company-1", "verify-company-2", "verify-company-3", "verify-company-4"]);
+      assert.equal(written, 1, "clarification keeps the original goal");
+      assert.equal(reviews, 2);
+      assert.equal(evaluated, 1);
+      assert.equal(result.stopped, false);
+      assert.equal(result.asked, false);
+    } finally { app.boxes.shell = shell; app.brain.progressEvery = every; }
+  });
+
   test("one thread admits one goal even when different agents have routines due together", async () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
