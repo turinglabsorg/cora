@@ -547,6 +547,18 @@ describe("panel auth", () => {
     assert.equal(discord.state.webhookPosts.length, before + 1);
     assert.equal(discord.state.webhookPosts.at(-1).username, agent.name);
     assert.equal(discord.state.webhookPosts.at(-1).content, "Risposta consegnata.");
+    discord.state.privateTo.set(CHANNEL, MAIN_TOKEN);
+    assert.equal(await app.bots.canRead(agent, CHANNEL), false);
+    await assert.rejects(app.orchestrator.postAs(agent, state, "Non può leggere, quindi non può parlare."), /403/);
+    await assert.rejects(app.orchestrator.postDirect(agent, app.orchestrator.state(`web-${agent.id}`), CHANNEL, "Nessun accesso tramite il principale."), /403/);
+    const inaccessible = app.store.createRoutine(agent.id, { name: "Canale non accessibile", prompt: "Non deve partire", schedule: "35 * * * *", channelId: CHANNEL });
+    assert.equal((await app.orchestrator.runRoutine(inaccessible)).status, "blocked");
+    const interrupted = { id: "tr_denied_channel", agentId: agent.id, channelId: CHANNEL, kind: "chat", model: "ollama/test-model", status: "interrupted", startedAt: new Date().toISOString(), endedAt: null, system: "", prompt: "Compito precedente", output: "", error: "", dropped: 0, steps: [] };
+    app.store.saveTrace(interrupted);
+    await app.orchestrator.resumeTask(agent, interrupted);
+    assert.equal(app.store.trace(interrupted.id).status, "stopped");
+    assert.ok(!app.orchestrator.threadWork.has(CHANNEL));
+    discord.state.privateTo.delete(CHANNEL);
     state.mainBlind = true;
     await assert.rejects(app.orchestrator.postAs(agent, state, "Non deve passare."), /403/);
     state.mainBlind = false;
@@ -1820,6 +1832,7 @@ describe("talking with the agents", () => {
   });
 
   test("Cora harness: a long task frees the channel for the others, still gets new messages, and picks up again after a restart", async () => {
+    intentions = (body) => JSON.stringify({ intent: lastUserText(body).includes("Pino, ci sei?") ? "continue" : "update" });
     app.orchestrator.releaseAfterMs = 300;
     let open;
     const gate = new Promise((resolve) => { open = resolve; });
@@ -2112,6 +2125,18 @@ describe("shared listening", () => {
     await waitFor(() => fake.state.botPosts.some((item) => item.channelId === PRIVATE && item.content === "Rispondo io, che sono dentro."), { what: "the agent inside the channel answering" });
     await sleep(800);
     assert.ok(!fake.state.botPosts.some((item) => item.channelId === PRIVATE && item.token === "pia-token"), "an agent whose bot is not in the channel never speaks there");
+
+    const SHARED = "1599000000000000901";
+    fake.dispatch("CHANNEL_CREATE", { id: SHARED, name: "strategy", guild_id: GUILD, type: 0 });
+    fake.state.privateTo.set(SHARED, "pia-token");
+    other.store.updateAgent(vale.id, { chattiness: 1 });
+    let unexpected = 0;
+    replies.set("Vale", () => { unexpected++; return { content: "Non devo entrare." }; });
+    replies.set("Pia", () => ({ content: "Leggo io il documento nel mio canale." }));
+    fake.say({ channel: SHARED, content: "Analizziamo questo documento" });
+    await waitFor(() => fake.state.botPosts.some((item) => item.channelId === SHARED && item.content === "Leggo io il documento nel mio canale."), { what: "only the agent able to read the listener's channel responding" });
+    assert.equal(unexpected, 0, "the main listener's access never admits an absent colleague");
+    assert.ok(!fake.state.webhookPosts.some((item) => item.channelId === SHARED && item.username === "Vale"));
   });
 });
 
@@ -2500,14 +2525,15 @@ describe("thread goal lifecycle", () => {
     const first = routine(iris, "Primo controllo");
     const second = routine(ivo, "Secondo controllo");
     const pending = app.orchestrator.runRoutine(first);
+    const overlapping = app.orchestrator.runRoutine(second);
     try {
       await waitFor(() => entered);
-      const overlap = await app.orchestrator.runRoutine(second);
+      const overlap = await overlapping;
       assert.equal(overlap.status, "busy");
       assert.equal(app.store.routine(second.id).lastStatus, "skipped");
       assert.equal(app.orchestrator.threadWork.size, 1);
       assert.equal(app.brain.channelGoals.size, 1);
-    } finally { release(); await pending; }
+    } finally { release(); await Promise.all([pending, overlapping]); }
     assert.equal(app.orchestrator.threadWork.size, 0);
     assert.equal(app.brain.channelGoals.size, 0);
     replies.set("Ivo", () => ({ content: "PASS" }));
@@ -2600,6 +2626,39 @@ describe("thread goal lifecycle", () => {
     } finally { release(); await pending; }
     assert.equal(written, 1);
     assert.equal(app.store.traces(iris.id, 1)[0].status, "pass");
+  });
+
+  test("an evaluated task handoff releases the previous worker before the named agent receives its desktop", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let oldCalls = 0, nextCalls = 0, commands = 0;
+    const shell = app.boxes.shell;
+    goals = () => "il documento è letto e verificato";
+    checks = () => JSON.stringify({ met: true });
+    intentions = (body) => { assert.match(body.messages[1].content, /rivolti esplicitamente a un altro agente/); return JSON.stringify({ intent: "update", reply: "" }); };
+    replies.set("Iris", async () => { oldCalls++; await gate; return { content: "Risposta obsoleta di Iris" }; });
+    replies.set("Ivo", (body) => {
+      nextCalls++;
+      assert.ok(body.tools.some((tool) => tool.function.name === "shell"), "the new worker has its desktop tools");
+      return nextCalls === 1 ? { tool_calls: [{ function: { name: "shell", arguments: { command: "read-authorized-document" } } }] } : { content: "Documento verificato da Ivo." };
+    });
+    app.boxes.shell = async () => {
+      commands++;
+      assert.ok(!app.orchestrator.atWork.has(iris.id), "the old worker has released its lock");
+      assert.equal(app.orchestrator.threadWork.get(CHANNEL), ivo.id);
+      return { code: 0, output: "Document read and verified." };
+    };
+    try {
+      discord.say({ content: "Iris, analizza il documento" });
+      await waitFor(() => oldCalls === 1);
+      discord.say({ content: "Ivo, occupatene tu: leggi il documento dal tuo computer" });
+      await waitFor(() => commands === 1, { what: "the named agent receiving its desktop after semantic handoff" });
+      await waitFor(() => discord.state.webhookPosts.some((post) => post.username === "Ivo" && post.content === "Documento verificato da Ivo."));
+      assert.equal(oldCalls, 1);
+      assert.equal(app.store.traces(iris.id, 1)[0].status, "stopped");
+      assert.ok(!discord.state.webhookPosts.some((post) => post.content === "Risposta obsoleta di Iris"));
+      assert.ok(!app.orchestrator.state(CHANNEL).humanQueue.size);
+    } finally { release(); app.boxes.shell = shell; await quiet(); }
   });
 
   test("tools wait for semantic evaluation and cannot run after an evaluated stop", async () => {

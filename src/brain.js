@@ -105,6 +105,7 @@ export class Brain {
   constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null }) {
     // The orchestrator admits one task per thread. Its current goal belongs to that task only.
     this.channelGoals = new Map();
+    this.activeTurns = new Map();
     this.progressEvery = 20;
     this.traces = traces;
     this.push = push;
@@ -167,7 +168,7 @@ export class Brain {
       `## La tua scheda (sempre a mente)\n${agent.core.trim() || "(vuota: riempila con update_core quando sai abbastanza)"}`,
     ];
     if (this.store.settings.sharedMemory.trim()) sections.push(`## Cose che tutti gli agenti sanno\n${this.store.settings.sharedMemory.trim()}`);
-    if (others) sections.push(`## Gli altri agenti\n${others}`);
+    if (others) sections.push(`## Gli altri agenti dell'istanza\nQuesto elenco non indica chi è presente nella conversazione attuale: non coinvolgere un collega soltanto perché è elencato qui. Rispondi come ${agent.name}, senza parlare a nome degli altri.\n${others}`);
     sections.push([
       "## La tua memoria",
       "- In ogni turno ricevi i ricordi pertinenti e il tuo diario recente. Non è tutto: con recall puoi cercare tra tutti i ricordi e le conversazioni passate.",
@@ -269,7 +270,7 @@ export class Brain {
     });
     const result = await turn(user);
     // A question to the owner is already an answer: it is in the chat.
-    if (result.text || !forced || result.asked || result.spoken) return result;
+    if (result.text || !forced || result.asked || result.spoken || result.stopped) return result;
     // Called by name and still passing: ask once more, plainly.
     return turn(`${user}\n\nHai risposto PASS, ma ${last?.authorName || "qualcuno"} ti ha chiamato per nome: scrivi una risposta vera, anche breve. Se ti chiede qualcosa che non puoi fare da solo, diglielo, oppure chiedi il via libera al proprietario con ask_owner.`);
   }
@@ -392,6 +393,13 @@ export class Brain {
     }
   }
 
+  async settleChannel(channelId) {
+    const control = this.activeTurns.get(channelId);
+    if (!control) return false;
+    await control.settle();
+    return control.handoff;
+  }
+
   async evaluateMessage({ goal, request, messages, work, progress }, signal) {
     try {
       const out = await this.llm.chat({
@@ -457,6 +465,7 @@ export class Brain {
     let progress = "";
     const spokenMessages = [];
     let stoppedByOwner = false;
+    const control = { handoff: false, settle: null };
     // Told to stop, an agent stops: no more tools, no more rounds, whatever it has is the answer.
     let halted = false;
     let lastUpdate = Date.now();
@@ -543,39 +552,56 @@ export class Brain {
       const fresh = inbox?.() || [];
       if (fresh.length) {
         trace.add({ type: "note", text: `Nuovi messaggi mentre lavora:\n${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}` });
-        evaluation = evaluation.then(async () => {
-          if (halted || closed) return;
-          const messages = fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n");
-          const decision = await this.evaluateMessage({ goal, request: goalRequest, messages, work: did.slice(-12).join("\n"), progress }, AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]));
-          if (halted || closed) return;
-          trace.spent(decision.usage);
-          trace.add({ type: "note", text: `Valutazione messaggio: ${decision.intent}` });
-          if (decision.intent === "stop") {
-            for (const item of fresh) deliveredMessageIds.add(item.id);
-            halted = true;
-            stoppedByOwner = true;
-            if (routine && this.store.routine(routine.id)) this.store.updateRoutine(routine.id, { enabled: false });
-            controller.abort();
-            return;
-          }
-          if (decision.intent === "update" || decision.intent === "continue") {
-            blockedWork = "";
-            ownerRevision++;
-          }
-          if (decision.intent === "update") {
-            steering.push(messages);
-            ownerSaid.push(messages);
-          }
-          if ((decision.intent === "status" || (decision.intent === "continue" && decision.reply)) && sayTracked) {
-            try {
-              await sayTracked(decision.reply || `Sto ancora lavorando a questo obiettivo: ${goal || goalRequest}`);
-              for (const item of fresh) answeredMessageIds.add(item.id);
-              onMessageHandled?.(fresh.map((item) => item.id));
-            } catch {}
-          }
-          for (const item of fresh) pendingMessageIds.add(item.id);
-          pendingNews.push(`[Nel frattempo nella chat]\n${formatTranscript(fresh, agent, this.timezone)}\n${decision.intent === "status" ? "[Cora] È solo una richiesta di stato: ho già inviato il recap. L'obiettivo non cambia; continua il lavoro senza ricominciarlo." : "[Cora] Una domanda di stato o una conferma non cambia il goal. Rispetta solo le modifiche effettive alla richiesta."}`);
-        });
+        const batches = [];
+        for (const item of fresh) {
+          const elsewhere = Boolean(item.addressed?.length && !item.addressed.includes(agent.id));
+          if (batches.at(-1)?.elsewhere === elsewhere) batches.at(-1).items.push(item);
+          else batches.push({ elsewhere, items: [item] });
+        }
+        for (const { elsewhere, items: fresh } of batches) {
+          evaluation = evaluation.then(async () => {
+            if (halted || closed) return;
+            const messages = `${elsewhere ? "[Messaggi rivolti esplicitamente a un altro agente. Valuta update se assegnano o trasferiscono un lavoro a quell'agente; una domanda di stato o una chiacchiera conserva il lavoro attuale.]\n" : ""}${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}`;
+            const decision = await this.evaluateMessage({ goal, request: goalRequest, messages, work: did.slice(-12).join("\n"), progress }, AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]));
+            if (halted || closed) return;
+            trace.spent(decision.usage);
+            trace.add({ type: "note", text: `Valutazione messaggio: ${decision.intent}` });
+            if (elsewhere) {
+              if (decision.intent === "update") {
+                control.handoff = true;
+                halted = true;
+                trace.add({ type: "note", text: "Passaggio del compito all'agente chiamato dal proprietario; nessun secondo worker sullo stesso thread." });
+                controller.abort();
+              }
+              return;
+            }
+            if (decision.intent === "stop") {
+              for (const item of fresh) deliveredMessageIds.add(item.id);
+              halted = true;
+              stoppedByOwner = true;
+              if (routine && this.store.routine(routine.id)) this.store.updateRoutine(routine.id, { enabled: false });
+              controller.abort();
+              return;
+            }
+            if (decision.intent === "update" || decision.intent === "continue") {
+              blockedWork = "";
+              ownerRevision++;
+            }
+            if (decision.intent === "update") {
+              steering.push(messages);
+              ownerSaid.push(messages);
+            }
+            if ((decision.intent === "status" || (decision.intent === "continue" && decision.reply)) && sayTracked) {
+              try {
+                await sayTracked(decision.reply || `Sto ancora lavorando a questo obiettivo: ${goal || goalRequest}`);
+                for (const item of fresh) answeredMessageIds.add(item.id);
+                onMessageHandled?.(fresh.map((item) => item.id));
+              } catch {}
+            }
+            for (const item of fresh) pendingMessageIds.add(item.id);
+            pendingNews.push(`[Nel frattempo nella chat]\n${formatTranscript(fresh, agent, this.timezone)}\n${decision.intent === "status" ? "[Cora] È solo una richiesta di stato: ho già inviato il recap. L'obiettivo non cambia; continua il lavoro senza ricominciarlo." : "[Cora] Una domanda di stato o una conferma non cambia il goal. Rispetta solo le modifiche effettive alla richiesta."}`);
+          });
+        }
       }
       if (routine) {
         const current = this.store.routine(routine.id);
@@ -606,7 +632,7 @@ export class Brain {
     const done = (raw, steps) => {
       closed = true;
       const reply = cleanReply(raw, agent);
-      const text = reply && !spokenMessages.includes(reply.trim()) ? reply : null;
+      const text = !control.handoff && reply && !spokenMessages.includes(reply.trim()) ? reply : null;
       trace.finish({ status: halted ? "stopped" : text ? "done" : "pass", output: raw });
       return { text, steps, traceId: trace.id, asked, stopped: halted, spoken: spokenMessages.length > 0, handledMessageIds: [...new Set([...answeredMessageIds, ...(text || asked ? deliveredMessageIds : [])])] };
     };
@@ -679,6 +705,8 @@ export class Brain {
       return goal ? goalVerdict(raw) : verdict(raw);
     };
 
+    control.settle = settleNews;
+    if (task) this.activeTurns.set(channel.id, control);
     const controlTimer = setInterval(collectNews, 100);
     try {
       await settleNews();
@@ -781,6 +809,7 @@ export class Brain {
     } finally {
       closed = true;
       clearInterval(controlTimer);
+      if (this.activeTurns.get(channel.id) === control) this.activeTurns.delete(channel.id);
       if (task) this.channelGoals.delete(channel.id);
     }
   }

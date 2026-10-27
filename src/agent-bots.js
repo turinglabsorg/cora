@@ -204,6 +204,21 @@ export class AgentBots {
     return entry?.client.user ? entry.client : null;
   }
 
+  async canRead(agent, channelId) {
+    const client = this.client(agent.id);
+    if (!client) {
+      if (this.token(agent)) throw new Error("agent Discord bot is not connected");
+      return true;
+    }
+    try {
+      await client.fetchMessages(channelId, 1);
+      return true;
+    } catch (error) {
+      if (error.status === 403 || error.status === 404) return false;
+      throw error;
+    }
+  }
+
   agentIdForUser(userId) {
     for (const [agentId, { client }] of this.clients) {
       if (client.user?.id === userId) return agentId;

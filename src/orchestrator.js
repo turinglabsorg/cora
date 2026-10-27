@@ -513,6 +513,11 @@ export class Orchestrator {
 
   async round(state) {
     state.working ??= new Set();
+    if (this.threadWork.has(state.id) && !this.brain.activeTurns.has(state.id)) {
+      this.schedule(state, 300);
+      return;
+    }
+    if (await this.brain.settleChannel(state.id)) return;
     // An agent still on a task gets new messages through its inbox, never a second turn.
     let eligible = this.agentsFor(state.id);
     // A channel the main bot cannot see is private: only the agents whose own bot is in it can read or post there.
@@ -521,6 +526,10 @@ export class Orchestrator {
     for (const [id, item] of state.humanQueue) {
       if (item.toOthers || (item.addressed?.length && !eligible.some((agent) => item.addressed.includes(agent.id)))
         || (summonedOnly && !item.addressed?.length && !eligible.some((agent) => mentions(item.content, agent.name)))) state.humanQueue.delete(id);
+    }
+    if (!isWebRoom(state.id) && !isTelegramChannel(state.id) && !this.dmAgentId(state.id) && this.bots) {
+      const access = await Promise.allSettled(eligible.map((agent) => this.bots.canRead(agent, state.id)));
+      eligible = eligible.filter((agent, index) => access[index].status === "fulfilled" && access[index].value);
     }
     const agents = eligible.filter((agent) => !state.working.has(agent.id));
     if (!agents.length) return;
@@ -686,6 +695,11 @@ export class Orchestrator {
       const run = this.store.pendingRoutineRuns().find((item) => item.routineId === routine.id);
       return this.runRoutine(routine, { resumeTrace: trace, resumeRunId: run?.id || "" });
     }
+    if (!isWebRoom(trace.channelId) && !isTelegramChannel(trace.channelId) && !this.dmAgentId(trace.channelId) && this.bots && !await this.bots.canRead(agent, trace.channelId)) {
+      this.store.saveTrace({ ...trace, status: "stopped", endedAt: new Date().toISOString(), error: "The agent no longer has access to this channel." });
+      this.log({ type: "warning", agentId: agent.id, channelId: trace.channelId, text: "Il lavoro non riparte: il bot dell'agente non ha accesso al canale." });
+      return;
+    }
     if (this.atWork.has(agent.id) || this.threadWork.has(trace.channelId)) return;
     this.atWork.set(agent.id, "il compito interrotto");
     this.threadWork.set(trace.channelId, agent.id);
@@ -768,12 +782,7 @@ export class Orchestrator {
       const info = this.channels.listFor(agent).find((channel) => channel.id === target);
       if (!info?.guildId || !this.allowedGuild(info.guildId)) throw new Error("destination not authorized");
       const own = this.bots?.client(agent.id);
-      try { await (own || this.discord).fetchMessages(target, 1); }
-      catch (error) {
-        if (error.status !== 403 || !own) throw error;
-        await this.discord.fetchMessages(target, 1);
-        state.mainBlind = false;
-      }
+      await (own || this.discord).fetchMessages(target, 1);
     }
     return this.postAs(agent, state, text, undefined, undefined, { ...options, passive: true });
   }
@@ -794,6 +803,7 @@ export class Orchestrator {
         catch (error) {
           const channel = this.channelMeta(state.id);
           if (error.status !== 403 || error.sentCount || state.mainBlind || this.dmAgent.has(state.id) || !channel.guildId || !this.allowedGuild(channel.guildId)) throw error;
+          await own.fetchMessages(state.id, 1);
           await this.discord.fetchMessages(state.id, 1);
           this.log({ type: "warning", agentId: agent.id, channelId: state.id, text: "Il bot dell'agente non può scrivere qui; rispondo con la sua identità tramite il bot principale autorizzato." });
           sent = await shared();
@@ -967,14 +977,6 @@ export class Orchestrator {
         resumeRunId = pendingRun.id;
       } else this.store.recordRoutineRun(routine.id, "interrupted", "Esecuzione interrotta prima di registrare una traccia; nuova prova richiesta manualmente.", { runId: pendingRun.id });
     }
-    // One agent, one computer: a routine that lands on a busy agent waits for its next turn
-    // instead of opening a second session on the same work.
-    const busyWith = this.atWork.get(agent.id) || (this.threadWork.has(routine.channelId) ? "un compito già attivo in questo thread" : null);
-    if (busyWith) {
-      this.store.recordRoutineRun(routine.id, "skipped", `saltata: stava già lavorando a ${busyWith}`);
-      this.log({ type: "routine-skip", agentId: agent.id, channelId: routine.channelId, text: `${routine.name}: stava già lavorando` });
-      return { status: "busy" };
-    }
     const channel = this.channelMeta(routine.channelId);
     if (!this.channels.isActive(routine.channelId)) {
       this.store.recordRoutineRun(routine.id, "error", `il canale è su ${isTelegramChannel(routine.channelId) ? "Telegram" : "Discord"}, ma ora Cora vive sull'altro`, { runId: pendingRun?.id });
@@ -983,6 +985,19 @@ export class Orchestrator {
     if (channel.guildId && !this.allowedGuild(channel.guildId)) {
       this.store.recordRoutineRun(routine.id, "error", "channel is in a server cora does not use", { runId: pendingRun?.id });
       return { status: "error" };
+    }
+    if (!isWebRoom(routine.channelId) && !isTelegramChannel(routine.channelId) && !this.dmAgentId(routine.channelId) && this.bots && !await this.bots.canRead(agent, routine.channelId)) {
+      this.store.recordRoutineRun(routine.id, "blocked", "Il bot dell'agente non ha accesso a questo canale.", { runId: pendingRun?.id });
+      return { status: "blocked" };
+    }
+    if (this.store.routine(routine.id)?.updatedAt !== routine.updatedAt) return { status: "stopped" };
+    // One agent, one computer: a routine that lands on a busy agent waits for its next turn
+    // instead of opening a second session on the same work.
+    const busyWith = this.atWork.get(agent.id) || (this.threadWork.has(routine.channelId) ? "un compito già attivo in questo thread" : null);
+    if (busyWith) {
+      this.store.recordRoutineRun(routine.id, "skipped", `saltata: stava già lavorando a ${busyWith}`);
+      this.log({ type: "routine-skip", agentId: agent.id, channelId: routine.channelId, text: `${routine.name}: stava già lavorando` });
+      return { status: "busy" };
     }
     const snapshot = { ...routine };
     const run = this.store.beginRoutineRun(routine, { manual, resumeRunId });
