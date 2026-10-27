@@ -18,7 +18,7 @@ export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine
 export const TOOL_DEFS = [
   {
     name: "shell",
-    description: "Run a bash command on your own Linux computer (Debian, user 'agent' with passwordless sudo, home /home/agent, DISPLAY=:1 so GUI apps open on your desktop). Use it to browse with curl, write and run scripts (node, python3), manage files, install packages. Long-running GUI apps must be started in the background (nohup ... &).",
+    description: "Run a bash command on your own Linux computer (Debian, user 'agent' with passwordless sudo, home /home/agent, DISPLAY=:1 so GUI apps open on your desktop). This Cora MCP tool runs on your separate desktop: it can write files and call authorized remote connectors even when the local Codex CLI host is read-only. Respect the current task's authorization and actual connector permissions. Use it to browse with curl, write and run scripts (node, python3), manage files, install packages. Long-running GUI apps must be started in the background (nohup ... &).",
     parameters: {
       type: "object",
       properties: {

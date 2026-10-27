@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 
 export const MCP_SCRIPT = fileURLToPath(new URL("./mcp-server.js", import.meta.url));
 const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "VAPID_KEY"];
+const CODEX_CORA_INSTRUCTIONS = [
+  "You are running inside Cora. Codex's read-only sandbox protects the local CLI host; its native shell, filesystem editing and browser tools are disabled.",
+  "The mcp__cora tools are provided by Cora separately. When available, mcp__cora.shell executes on the agent's own Linux desktop, where files can be written and authorized remote connectors can be called. The local host sandbox does not make those connectors read-only.",
+  "Use only the tools exposed for this turn. Follow the owner's actual request or scheduled task, including any read-only limit, recipient, account and confirmation requirements. Tool availability alone is not authorization for unrelated writes.",
+  "For an already authorized action, inspect the connector's actual schema and results. Do not invent a missing write permission from the CLI sandbox. Respect real permission denials and report their evidence; never bypass them or change the host sandbox.",
+].join("\n");
 const CODEX_DISABLED_FEATURES = [
   "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external", "computer_use",
   "tool_suggest", "view_image", "memories", "sleep_tool", "multi_agent",
@@ -226,6 +232,7 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--color", "never",
     "-s", "read-only", "-C", workDir, "-m", model, "-o", outFile, "--json",
     "-c", "approval_policy=\"never\"", "-c", "model_reasoning_summary=\"detailed\"",
+    "-c", `developer_instructions=${tomlString(CODEX_CORA_INSTRUCTIONS)}`,
     "-c", `cli_auth_credentials_store="${residentAuth ? "auto" : "file"}"`, "-c", 'forced_login_method="chatgpt"',
     ...(effort ? ["-c", `model_reasoning_effort=${tomlString(effort)}`] : []),
   ];

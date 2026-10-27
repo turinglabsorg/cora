@@ -441,6 +441,69 @@ describe("panel auth", () => {
     } finally { await call(`/api/context/documents/${created.data.id}`, { method: "DELETE", headers }); }
   });
 
+  test("Codex keeps its host read-only while authorized Cora desktop writes use the MCP bridge", async (t) => {
+    const agent = app.store.createAgent({ name: "Remote writer", model: "codex/test-model", subscriptionId: subscriptionIds.codex, tools: true, chattiness: 0 });
+    const directory = tempHome(), marker = join(directory, "connector-result.txt");
+    const original = app.boxes.shell;
+    app.boxes.shell = async (id, command) => {
+      assert.equal(id, agent.id);
+      assert.equal(command, "fixture-authorized-connector-write");
+      writeFileSync(marker, "record updated in fixture connector");
+      return { code: 0, output: "Fixture record updated." };
+    };
+    cli.set({ tool: "shell", args: { command: "fixture-authorized-connector-write" }, reply: "Aggiornamento verificato." });
+    t.after(() => { app.boxes.shell = original; app.store.deleteAgent(agent.id); cli.set({ reply: "ok" }); });
+    const previousGoalMode = app.store.settings.goalMode;
+    app.store.updateSettings({ goalMode: true });
+    goals = () => "Il record di prova è aggiornato";
+    t.after(() => app.store.updateSettings({ goalMode: previousGoalMode }));
+    const routine = app.store.createRoutine(agent.id, { name: "Authorized connector update", prompt: "Aggiorna il record di prova già autorizzato e verifica il risultato.", schedule: "0 9 * * *", channelId: `web-${agent.id}` });
+    const before = cli.calls().length;
+    const result = await app.brain.routineTurn({ agent, routine, history: [], channel: { id: `web-${agent.id}`, place: "test" }, say: async () => {} });
+    assert.match(result.text, /Aggiornamento verificato/);
+    assert.equal(readFileSync(marker, "utf8"), "record updated in fixture connector");
+    const run = cli.calls().slice(before).find((item) => item.flavor === "codex");
+    const contract = JSON.parse(run.argv.find((item) => item.startsWith("developer_instructions=")).slice("developer_instructions=".length));
+    assert.match(contract, /read-only sandbox protects the local CLI host/);
+    assert.match(contract, /agent's own Linux desktop/);
+    assert.match(contract, /availability alone is not authorization/);
+    assert.equal(run.argv[run.argv.indexOf("-s") + 1], "read-only");
+    for (const feature of ["shell_tool", "unified_exec", "browser_use", "computer_use"]) assert.ok(run.argv.some((value, index) => value === "--disable" && run.argv[index + 1] === feature));
+    assert.ok(!run.argv.includes("--dangerously-bypass-approvals-and-sandbox"));
+    assert.match(run.stdin, /Il sandbox dell'host non rende in sola lettura/);
+    assert.equal(app.store.trace(result.traceId).steps.find((step) => step.type === "tool" && step.name === "shell").ok, true);
+  });
+
+  test("Codex without a desktop retains the write boundary and cannot gain shell from application instructions", async (t) => {
+    const agent = app.store.createAgent({ name: "No desktop writer", model: "codex/test-model", subscriptionId: subscriptionIds.codex, tools: true, chattiness: 0 });
+    const original = app.boxes.shell;
+    let called = false;
+    app.boxes.shell = async () => { called = true; throw new Error("unexpected desktop access"); };
+    cli.set({ tool: "shell", args: { command: "must-not-run" }, reply: "Serve il computer autorizzato." });
+    t.after(() => { app.boxes.shell = original; app.store.deleteAgent(agent.id); cli.set({ reply: "ok" }); });
+    const before = cli.calls().length;
+    await app.brain.chatTurn({ agent, history: [{ id: "readonly-question", at: Date.now(), kind: "human", authorName: "Guest", content: "Aggiorna il connettore." }], channel: { id: `web-${agent.id}`, place: "test" }, forced: true, computer: false, say: async () => {} });
+    const run = cli.calls().slice(before).find((item) => item.flavor === "codex");
+    assert.equal(called, false);
+    assert.ok(!run.tools.includes("shell"));
+    assert.match(run.output, /tool shell is not available/);
+    assert.equal(run.argv[run.argv.indexOf("-s") + 1], "read-only");
+    assert.match(run.stdin, /In questa conversazione non hai il tuo computer/);
+  });
+
+  test("the verifier requires connector evidence and preserves a real permission denial", async () => {
+    checks = (body) => {
+      assert.match(body.messages[0].content, /la sola affermazione dell'agente non basta/);
+      assert.match(body.messages[0].content, /Non chiedere tentativi di scrittura non autorizzati/);
+      assert.match(lastUserText(body), /403: write permission denied/);
+      return JSON.stringify({ met: false, blocked: true, reason: "Il connettore ha negato la scrittura con 403." });
+    };
+    const verdict = await app.brain.goalCheck("Il record autorizzato è aggiornato", { answer: "Scrittura rifiutata.", work: "update_record → 403: write permission denied" });
+    assert.equal(verdict.met, false);
+    assert.equal(verdict.blocked, true);
+    assert.match(verdict.reason, /403/);
+  });
+
   test("visual navigation can take many screenshots and click the same place on changing pages", async (t) => {
     const agent = app.store.createAgent({ name: "Visual browser", model: "ollama/test-model", tools: true, chattiness: 0 });
     const original = app.boxes.screenshot;
