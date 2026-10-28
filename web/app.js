@@ -864,6 +864,18 @@ function fitOf(model, card) {
 }
 
 /**
+ * What the card really took of a model that is loaded now: Ollama leaves on the
+ * processor whatever did not fit, and even a tenth left behind costs most of the
+ * speed, so anything short of all of it is a warning.
+ */
+function residencyOf(loaded) {
+  if (!loaded.size) return null;
+  const share = Math.round((loaded.vram / loaded.size) * 100);
+  if (share >= 99) return { kind: "on", text: tr("acceso, tutto sulla scheda") };
+  return { kind: "warn", text: tr("acceso, {share}% sulla scheda: il resto gira sul processore", { share }) };
+}
+
+/**
  * The machine an agent thinks with: its cards, the Ollama that serves each of
  * them, and which models are installed there. Ollama chooses the card when it
  * starts, never per request, so choosing a server is how an agent picks a card.
@@ -926,9 +938,12 @@ function brainMachine(agent, modelNode, getHarness = () => "cora") {
       const unusable = installed.filter((model) => !model.tools);
       const current = (select.value || agent.model || "").replace(/^(ollama|hermes)\//, "");
       const row = (model, ok) => {
-        const fit = fitOf(model, card);
         const chosenOne = model.name === current;
         const loaded = (chosen.loaded || []).find((item) => item.name === model.name);
+        // A loaded model has already answered the question the estimate was asking:
+        // how much of it the card actually took. What is left over runs on the
+        // processor, and a model half on the processor crawls, so say so instead.
+        const fit = loaded ? residencyOf(loaded) : fitOf(model, card);
         return h("button", {
           type: "button", class: `row-link model-row${chosenOne ? " on" : ""}`, disabled: !ok,
           title: ok ? "" : "Senza strumenti un agente non può fare nulla",
@@ -940,7 +955,6 @@ function brainMachine(agent, modelNode, getHarness = () => "cora") {
               h("span", {}, model.size >= WEIGHTS_AT_LEAST ? raw(tr("{size} GB", { size: gbFromBytes(model.size) })) : tr("non è su questa macchina")),
               fit ? badge(fit.text, fit.kind, fit.kind === "on" ? "check" : "alert") : null,
               model.vision ? h("span", {}, tr("vede")) : null,
-              loaded ? h("span", {}, raw(tr("caricato: {vram} GB in VRAM", { vram: gbFromBytes(loaded.vram) }))) : null,
               ok ? null : h("span", {}, tr("senza strumenti")))));
       };
       out.push(h("div", { class: "field full" }, h("span", { class: "label" }, "Modelli su questa macchina"),

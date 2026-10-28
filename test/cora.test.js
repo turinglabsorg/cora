@@ -2493,6 +2493,17 @@ describe("what runs the models", () => {
     assert.ok(Array.isArray(hardware.gpus), "a host without a card reports none instead of failing");
   });
 
+  test("a model the card could not take whole says what is left on the processor", () => {
+    const panel = panelHarness({ language: "en", fetch: async () => new Response("{}") });
+    // The panel answers from inside its own realm, so compare what it says, field by field.
+    const whole = panel.run("residencyOf({ size: 18_600_000_000, vram: 18_600_000_000 })");
+    assert.equal(whole.kind, "on");
+    assert.equal(whole.text, "running, all of it on the card", "all of it on the card is good news, plainly said");
+    const spilling = panel.run("residencyOf({ size: 22_200_000_000, vram: 18_500_000_000 })");
+    assert.equal(spilling.kind, "warn", "a model half on the processor crawls: that is a warning, not a detail");
+    assert.equal(spilling.text, "running, 83% on the card: the rest runs on the processor");
+  });
+
   test("an agent can be put on a card, which is the Ollama that serves it", async (t) => {
     // The stand-in keeps one reply handler for every instance: put the old one back.
     const previousReply = fakeOllama.current;

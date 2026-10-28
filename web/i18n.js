@@ -853,7 +853,8 @@ export const EN = {
   "scelto": "chosen",
   "vede": "sees",
   "in uso da lui": "the one it uses",
-  "caricato: {vram} GB in VRAM": "loaded: {vram} GB in VRAM",
+  "acceso, tutto sulla scheda": "running, all of it on the card",
+  "acceso, {share}% sulla scheda: il resto gira sul processore": "running, {share}% on the card: the rest runs on the processor",
   "{free} GB liberi di {total}": "{free} GB free of {total}",
   // harness and model
   "Harness": "Harness",
