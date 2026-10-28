@@ -2512,6 +2512,32 @@ describe("thread goal lifecycle", () => {
     assert.ok(!app.brain.channelGoals.has(CHANNEL), "the goal is released with its invocation");
   });
 
+  test("a planning routine completes today's authorized work instead of accepting an unfinished queue check", async () => {
+    const shell = app.boxes.shell;
+    const commands = [];
+    app.boxes.shell = async (id, command) => { commands.push(command); return { code: 0, output: "Contacts verified, CRM updated, future queue filled; no duplicate sends." }; };
+    goals = (body) => {
+      assert.match(body.messages[1].content, /Ora:.*Richiesta:/s);
+      assert.match(body.messages[1].content, /Aggiorna il CRM e programma tutti i contatti validi negli orari futuri/);
+      assert.match(body.messages[1].content, /Non ridurre una richiesta di ricerca, aggiornamento o programmazione a un semplice resoconto/);
+      return "CRM aggiornato e contatti validi pianificati negli orari futuri, con verifiche completate";
+    };
+    let checksMade = 0;
+    checks = (body) => {
+      checksMade++;
+      assert.match(body.messages[0].content, /Una verifica futura non sostituisce le azioni e le verifiche fattibili ora/);
+      return JSON.stringify(checksMade === 1 ? { met: false, blocked: false, reason: "Le verifiche dei contatti e la programmazione sono ancora fattibili ora e incomplete." } : { met: true });
+    };
+    let step = 0;
+    replies.set("Iris", () => ++step === 1 ? { content: "La coda arriva alle 10:20. Non ho completato le verifiche; controllerò alle 10:30." } : step === 2 ? { tool_calls: [{ function: { name: "shell", arguments: { command: "verify-contacts-and-plan-approved-queue" } } }] } : { content: "Verifiche completate, CRM e coda futura aggiornati." });
+    const work = routine(iris, "Programmazione odierna", "Aggiorna il CRM e programma tutti i contatti validi negli orari futuri; verifica storico e duplicati. Non aspettare che partano gli invii programmati.");
+    try {
+      await app.orchestrator.runRoutine(work);
+      assert.deepEqual(commands, ["verify-contacts-and-plan-approved-queue"]);
+      assert.equal(checksMade, 2);
+    } finally { app.boxes.shell = shell; }
+  });
+
   test("a short approval resolves the preceding proposal, not memories or a later human message", async () => {
     const inputs = [];
     goals = (body) => { inputs.push(body.messages[1].content); return "le tre bozze approvate sono inviate e verificate"; };
