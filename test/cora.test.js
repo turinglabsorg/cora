@@ -2555,7 +2555,8 @@ describe("what runs the models", () => {
       ],
       providers: { claude: true, codex: false, ollama: true, ollamaLocal: true, ollamaCloud: false, orcarouter: false, hermes: false },
       ollamaCloud: { signedIn: false, signinUrl: "https://ollama.com/connect?name=fixture" }, keys: { ollama: false, orcarouter: false },
-      settings: { defaultModel: "ollama/deepseek-v4.1-flash:cloud", useResidentSubscriptions: false },
+      // Exactly what dopamina had: a default no Ollama on this machine lists at all.
+      settings: { defaultModel: "ollama/deepseek-v4.1-flash", useResidentSubscriptions: false },
       transport: "discord", discord: { state: "ready", user: null, guilds: [] }, telegram: { state: "missing-token" }, slack: null,
       push: { enabled: false, publicKey: "", devices: 0 }, currentUser: { id: "u", name: "Owner", role: "owner" },
       access: { hosted: false, canManage: true }, boxImage: { name: "cora-box:latest", ready: true }, timezone: "Europe/Rome",
@@ -2581,6 +2582,8 @@ describe("what runs the models", () => {
     panel.app.querySelector(".segmented").children[1].click();
     assert.match(side().querySelector(".notice").textContent, /Ollama Cloud is not connected/);
     assert.ok(side().querySelectorAll(".model-row").every((node) => "disabled" in node.attributes));
+    const fallback = side().querySelectorAll(".model-row").find((node) => node.textContent.startsWith("The instance default"));
+    assert.equal(fallback.attributes.title, "is not among this machine's models", "a default that is not here is said to be not here");
 
     // Claude Code opens on one of its own models, never on Cora's default.
     row("Claude Code").click();

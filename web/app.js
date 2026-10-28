@@ -915,6 +915,9 @@ const HARNESS_NEEDS = {
 const harnessMissing = (harness) => (harnessReady(harness) ? [] : (HARNESSES[harness]?.providers || [])
   .map((provider) => tr(HARNESS_NEEDS[provider] || PROVIDER_HINTS[provider] || provider)));
 
+/** Why a model id that nothing on this machine lists cannot be used. */
+const MISSING_MODEL = "non è tra i modelli di questa macchina";
+
 /** The harnesses that run on someone's subscription: the account is part of the choice. */
 const SUBSCRIPTION_HARNESSES = ["claude", "codex"];
 
@@ -1038,7 +1041,7 @@ function brainPanel(agent) {
     // The default belongs to one harness and to one side: offering it anywhere else
     // is how "Predefinito (Ollama Cloud)" ended up under Claude Code.
     if (!fallback || harnessOf(fallback) !== harness || placeOfModel(fallback) !== place) return null;
-    const known = S.data.models.find((item) => item.id === fallback) || { id: fallback };
+    const known = S.data.models.find((item) => item.id === fallback) || { id: fallback, usable: false, reason: MISSING_MODEL };
     return modelRow({ ...known, id: "", label: tr("Predefinito dell'istanza") }, {
       subtitle: modelLabel(fallback), selected: !chosen, quiet,
     });
@@ -2937,8 +2940,9 @@ function renderSettings() {
         h("div", { class: "field" }, h("span", { class: "label" }, "Modello predefinito"), modelPicker("defaultModel", settings.defaultModel, { allowDefault: false }),
           (() => {
             const known = S.data.models.find((model) => model.id === settings.defaultModel);
-            return known?.usable === false
-              ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("{model} non risponde su questa macchina ({reason}). Gli agenti senza un modello loro, gli obiettivi e le verifiche lo usano: scegline uno che gira qui.", { model: known.label, reason: tr(known.reason || "non disponibile") }))))
+            const reason = !settings.defaultModel ? "" : !known ? tr(MISSING_MODEL) : known.usable === false ? tr(known.reason || "non disponibile") : "";
+            return reason
+              ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("{model} non risponde su questa macchina ({reason}). Gli agenti senza un modello loro, gli obiettivi e le verifiche lo usano: scegline uno che gira qui.", { model: known?.label || settings.defaultModel, reason }))))
               : h("small", {}, "Lo usano gli agenti senza un modello loro, e il lavoro di fondo: obiettivi, verifiche, sonno.");
           })()),
         field("Ora del sonno", h("input", { type: "number", name: "sleepHour", min: 0, max: 23, value: settings.sleepHour, inputmode: "numeric" }), "consolidamento notturno della memoria"),

@@ -894,6 +894,7 @@ export const EN = {
   "Non serve: questa macchina è già collegata a Ollama Cloud.": "Not needed: this machine is already connected to Ollama Cloud.",
   "In alternativa alla chiave, collega questa macchina al tuo account Ollama.": "Instead of a key, you can connect this machine to your Ollama account.",
   "Collega questa macchina": "Connect this machine",
+  "non è tra i modelli di questa macchina": "is not among this machine's models",
   "acceso, tutto sulla scheda": "running, all of it on the card",
   "acceso, {share}% sulla scheda: il resto gira sul processore": "running, {share}% on the card: the rest runs on the processor",
   "{free} GB liberi di {total}": "{free} GB free of {total}",
