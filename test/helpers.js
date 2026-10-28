@@ -283,7 +283,20 @@ export async function fakeOllama(reply) {
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/api/tags") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ models: [{ name: "test-model", capabilities: ["completion", "tools"] }, { name: "embed", capabilities: ["embedding"] }] }));
+      return res.end(JSON.stringify({ models: [
+        { name: "test-model", size: 18_600_000_000, capabilities: ["completion", "tools"] },
+        { name: "embed", capabilities: ["embedding"] },
+        // A local Ollama also lists the cloud models it proxies.
+        { name: "test-model-big:cloud", size: 0, capabilities: ["completion", "tools"] },
+      ] }));
+    }
+    if (url.pathname === "/api/version") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ version: "0.16.2" }));
+    }
+    if (url.pathname === "/api/ps") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ models: [{ name: "test-model", size: 18_600_000_000, size_vram: 17_100_000_000, expires_at: "2026-10-28T13:00:00Z" }] }));
     }
     if (url.pathname === "/api/chat") {
       const body = JSON.parse((await readBody(req)).toString("utf8"));

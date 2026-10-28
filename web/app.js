@@ -33,6 +33,10 @@ const PROVIDERS = {
   orcarouter: "OrcaRouter",
   hermes: "Hermes Agent",
 };
+const PROVIDER_GROUPS = {
+  "ollama-local": "Ollama su questa macchina",
+  ollama: "Ollama Cloud",
+};
 const PROVIDER_HINTS = {
   claude: "Claude Code non trovato su questa macchina",
   codex: "Codex non trovato su questa macchina",
@@ -341,7 +345,8 @@ function modelLabel(model, { short = false } = {}) {
   const known = S.data?.models.find((item) => item.id === model);
   const provider = model.split("/")[0];
   const names = short ? PROVIDER_SHORT : PROVIDERS;
-  return `${names[provider] || provider} · ${known?.label || model.split("/").slice(1).join("/")}`;
+  const where = provider === "ollama" && known ? tr(known.local ? "Ollama locale" : "Ollama Cloud") : names[provider] || provider;
+  return `${where} · ${known?.label || model.split("/").slice(1).join("/")}`;
 }
 
 function transportInfo(kind = S.data.transport) {
@@ -822,16 +827,56 @@ function renderAgents() {
 }
 
 /* ---------- agent ---------- */
+const gbFromBytes = (value) => Math.round((Number(value) || 0) / 1e8) / 10;
+const gbFromMib = (value) => Math.round((Number(value) || 0) / 102.4) / 10;
+
+/** The cards in this machine, what is loaded in them and which Ollama answers. */
+function machineNode() {
+  const node = h("div", { class: "stack-sm" }, h("small", { class: "muted" }, tr("Guardo la macchina…")));
+  api("/api/hardware").then((info) => {
+    const body = [];
+    const marks = [];
+    if (info.ollama?.url) marks.push(badge(info.ollama.local ? "Ollama su questa macchina" : "Ollama Cloud", info.ollama.reachable ? "on" : "err", "chip"));
+    if (info.ollama?.version) marks.push(badge(`v${info.ollama.version}`, "", "info"));
+    if (marks.length) body.push(h("div", { class: "badges" }, marks));
+    const gpus = info.gpus || [];
+    if (gpus.length) {
+      body.push(h("div", { class: "rows" }, gpus.map((gpu) => h("div", { class: "row-item" },
+        h("div", { class: "row-text full" },
+          h("span", { class: "row-title" }, icon("chip"), raw(gpu.name)),
+          h("span", { class: "row-meta" },
+            h("span", {}, raw(tr("{used} di {total} GB", { used: gbFromMib(gpu.memoryUsed), total: gbFromMib(gpu.memoryTotal) }))),
+            h("span", {}, raw(tr("carico {load}%", { load: gpu.load })))))))));
+    } else if (info.ollama?.local) {
+      body.push(h("small", { class: "muted" }, "Nessuna scheda dedicata su questa macchina: i modelli locali girano sul processore."));
+    }
+    const loaded = info.loaded || [];
+    if (loaded.length) {
+      body.push(h("div", { class: "rows" }, loaded.map((model) => h("div", { class: "row-item" },
+        h("div", { class: "row-text full" },
+          h("span", { class: "row-title" }, raw(model.name)),
+          h("span", { class: "row-meta" },
+            h("span", {}, raw(tr("{size} GB", { size: gbFromBytes(model.size) }))),
+            model.vram ? h("span", {}, raw(tr("{vram} GB in VRAM", { vram: gbFromBytes(model.vram) }))) : null))))));
+    } else if (info.ollama?.reachable) {
+      body.push(h("small", { class: "muted" }, "Nessun modello caricato in questo momento."));
+    }
+    node.replaceChildren(...body.filter(Boolean));
+  }).catch(() => node.replaceChildren(h("small", { class: "muted" }, tr("Non riesco a leggere la macchina."))));
+  return node;
+}
+
 function modelSelect(name, current, { allowDefault = true } = {}) {
   const select = h("select", { name });
   if (allowDefault) select.append(h("option", { value: "" }, tr("Predefinito ({model})", { model: modelLabel(S.data.settings.defaultModel) })));
   const groups = {};
-  for (const model of S.data.models) (groups[model.provider] ||= []).push(model);
-  for (const provider of Object.keys(PROVIDERS)) {
+  // An Ollama on this machine also proxies the cloud models: they are not the same thing.
+  for (const model of S.data.models) (groups[model.provider === "ollama" && model.local ? "ollama-local" : model.provider] ||= []).push(model);
+  for (const provider of ["ollama-local", ...Object.keys(PROVIDERS)]) {
     const list = groups[provider];
     if (!list?.length) continue;
-    select.append(h("optgroup", { label: PROVIDERS[provider] },
-      list.map((model) => h("option", { value: model.id, selected: model.id === current }, `${model.label}${model.vision ? tr(" · vede") : ""}${model.tools ? "" : tr(" · senza strumenti")}`))));
+    select.append(h("optgroup", { label: tr(PROVIDER_GROUPS[provider] || PROVIDERS[provider] || provider) },
+      list.map((model) => h("option", { value: model.id, selected: model.id === current }, `${model.label}${model.size ? ` · ${gbFromBytes(model.size)} GB` : ""}${model.vision ? tr(" · vede") : ""}${model.tools ? "" : tr(" · senza strumenti")}`))));
   }
   if (current && !S.data.models.some((model) => model.id === current)) select.append(h("option", { value: current, selected: true }, tr("{model} (non disponibile ora)", { model: current })));
   return select;
@@ -1127,6 +1172,7 @@ function agentForm(agent) {
     panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
       h("div", { class: "stack-sm" },
         field("Modello", model),
+        h("div", { class: "field full" }, h("span", { class: "label" }, "La macchina"), machineNode()),
         subscription.node,
         field("Ragionamento: livello", h("select", { name: "effort" },
           [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) => h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label))),

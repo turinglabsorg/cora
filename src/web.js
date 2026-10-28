@@ -174,6 +174,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
   };
 
+  const hardware = { at: 0, value: null };
   const publicAgent = async (agent) => ({
     ...agent,
     memoryCount: store.memoryCount(agent.id),
@@ -414,6 +415,14 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         for (const channel of await (skBots?.channelsFor(agent.id) || [])) if (!channelsSeen.has(channel.id)) channelsSeen.set(channel.id, channel);
       }
       return send(res, 200, [...channelsSeen.values()]);
+    }
+    if (path === "/api/hardware" && method === "GET") {
+      // Asking the cards costs a process: a few seconds of memory is plenty for a panel.
+      if (!hardware.at || Date.now() - hardware.at > 10000) {
+        hardware.at = Date.now();
+        hardware.value = await llm.hardware().catch(() => ({ ollama: { url: "", local: false, reachable: false, version: "" }, gpus: [], loaded: [] }));
+      }
+      return send(res, 200, hardware.value);
     }
     if (path === "/api/activity" && method === "GET") {
       return send(res, 200, store.recentActivity(300));

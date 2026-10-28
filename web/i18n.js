@@ -818,4 +818,16 @@ export const EN = {
   "questo token non è di un bot: serve quello che comincia con xoxb-": "this token is not a bot's: the one starting with xoxb- is needed",
   "Slack rifiuta il token del bot: copialo di nuovo da OAuth & Permissions": "Slack rejects the bot token: copy it again from OAuth & Permissions",
   "il token a livello app non apre il Socket Mode: serve quello xapp- con lo scope connections:write": "the app-level token does not open Socket Mode: the xapp- one with the connections:write scope is needed",
+  // where a model runs
+  "Ollama su questa macchina": "Ollama on this machine",
+  "Ollama locale": "Ollama local",
+  "La macchina": "The machine",
+  "Guardo la macchina…": "Looking at the machine…",
+  "Non riesco a leggere la macchina.": "I cannot read the machine.",
+  "Nessuna scheda dedicata su questa macchina: i modelli locali girano sul processore.": "No dedicated card on this machine: local models run on the processor.",
+  "Nessun modello caricato in questo momento.": "No model is loaded right now.",
+  "{used} di {total} GB": "{used} of {total} GB",
+  "carico {load}%": "load {load}%",
+  "{size} GB": "{size} GB",
+  "{vram} GB in VRAM": "{vram} GB in VRAM",
 };

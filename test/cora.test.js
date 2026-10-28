@@ -11,9 +11,10 @@ import { SHARED, Store } from "../src/store.js";
 import { panelHarness } from "./panel.js";
 import { identityCli } from "./subscription-fixtures.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
-import { LLM } from "../src/llm.js";
+import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
-import { readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
 
@@ -2477,6 +2478,34 @@ describe("hosted on usecora.space", () => {
     assert.equal((await get(`/auth/link?token=${encodeURIComponent(token)}`)).headers.get("location"), "/?signin=refused", "the emergency link works once");
     assert.equal((await get(`/auth/link?token=${encodeURIComponent(loginLinkToken("a guessed key"))}`)).headers.get("location"), "/?signin=refused");
     await hosted.stop();
+  });
+});
+
+describe("what runs the models", () => {
+  test("a model on this machine is told apart from one in the cloud, and the panel can see the cards", async () => {
+    const state = (await call("/api/state")).data;
+    const local = state.models.find((model) => model.id === "ollama/test-model");
+    const cloud = state.models.find((model) => model.id === "ollama/test-model-big:cloud");
+    assert.equal(local.local, true, "the fixture Ollama answers on 127.0.0.1: that one is here");
+    assert.equal(cloud.local, false, "a :cloud model runs somewhere else, even through a local Ollama");
+    assert.equal(local.size, 18_600_000_000, "its size is shown so nobody picks a model the card cannot hold");
+
+    const hardware = (await call("/api/hardware")).data;
+    assert.equal(hardware.ollama.local, true);
+    assert.equal(hardware.ollama.reachable, true);
+    assert.equal(hardware.ollama.version, "0.16.2");
+    assert.deepEqual(hardware.loaded.map((model) => [model.name, model.vram]), [["test-model", 17_100_000_000]]);
+    assert.ok(Array.isArray(hardware.gpus), "a host without a card reports none instead of failing");
+  });
+
+  test("the cards are read from nvidia-smi when there is one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cora-gpu-"));
+    const stub = join(dir, "nvidia-smi");
+    writeFileSync(stub, "#!/bin/sh\necho 'NVIDIA GeForce RTX 4090, 24564, 17213, 41'\n");
+    chmodSync(stub, 0o755);
+    const cards = await graphicsCards({ bin: stub });
+    assert.deepEqual(cards, [{ name: "NVIDIA GeForce RTX 4090", memoryTotal: 24564, memoryUsed: 17213, load: 41 }]);
+    assert.deepEqual(await graphicsCards({ bin: join(dir, "missing-smi") }), [], "no card, no noise");
   });
 });
 

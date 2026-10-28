@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -16,6 +17,35 @@ const RETRIES = 2;
 const RETRY_WAIT_MS = 4000;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The cards in this machine, asked of nvidia-smi. A host without one answers
+ * nothing and that is a fact, not a failure: a Mac has no card to report here.
+ */
+export function graphicsCards({ bin = "nvidia-smi", timeoutMs = 4000 } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(bin, ["--query-gpu=name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], { stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      resolve([]);
+      return;
+    }
+    let out = "";
+    const timer = setTimeout(() => { try { child.kill(); } catch {} resolve([]); }, timeoutMs);
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    child.on("error", () => { clearTimeout(timer); resolve([]); });
+    child.on("close", () => {
+      clearTimeout(timer);
+      resolve(out.split("\n").map((line) => line.split(",").map((part) => part.trim())).filter((parts) => parts.length >= 4 && parts[0]).map((parts) => ({
+        name: parts[0],
+        memoryTotal: Number(parts[1]) || 0,
+        memoryUsed: Number(parts[2]) || 0,
+        load: Number(parts[3]) || 0,
+      })));
+    });
+  });
+}
 
 export const PROVIDERS = {
   claude: "Claude (abbonamento)",
@@ -95,6 +125,36 @@ export class LLM {
     };
   }
 
+  /**
+   * What this machine has to run models with: the cards, what is loaded in them
+   * right now, and which Ollama answers. An install with its own GPU should be
+   * able to see it; a host without one simply reports none.
+   */
+  async hardware() {
+    const out = { ollama: { url: this.ollamaUrl, local: this.localOllama, reachable: false, version: "" }, gpus: [], loaded: [] };
+    const ask = async (path, timeoutMs = 4000) => {
+      const response = await fetch(`${this.ollamaUrl}${path}`, { headers: this.ollamaHeaders(), signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) throw new Error(String(response.status));
+      return response.json();
+    };
+    try {
+      const version = await ask("/api/version");
+      out.ollama.reachable = true;
+      out.ollama.version = String(version.version || "");
+    } catch {}
+    try {
+      const running = await ask("/api/ps");
+      out.loaded = (running.models || []).map((model) => ({
+        name: model.name,
+        size: Number(model.size) || 0,
+        vram: Number(model.size_vram) || 0,
+        until: model.expires_at || "",
+      }));
+    } catch {}
+    if (this.localOllama) out.gpus = await graphicsCards();
+    return out;
+  }
+
   /** Harnesses with a goal mode of their own: Cora hands them the condition and lets them iterate. */
   hasGoalMode(model) {
     return splitModel(model).provider === "claude";
@@ -123,7 +183,13 @@ export class LLM {
         for (const model of data.models || []) {
           const caps = model.capabilities || ["completion", "tools"];
           if (!caps.includes("completion")) continue;
-          models.push({ id: `ollama/${model.name}`, provider: "ollama", label: model.name, tools: caps.includes("tools"), vision: caps.includes("vision"), thinking: caps.includes("thinking") });
+          // A local Ollama also proxies the cloud ones: those run somewhere else and say so.
+          const remote = model.remote === true || /:cloud$/.test(model.name);
+          models.push({
+            id: `ollama/${model.name}`, provider: "ollama", label: model.name,
+            local: this.localOllama && !remote, size: Number(model.size) || 0,
+            tools: caps.includes("tools"), vision: caps.includes("vision"), thinking: caps.includes("thinking"),
+          });
         }
       } catch {}
     }
