@@ -50,10 +50,21 @@ const PROVIDER_GROUPS = {
   "ollama-local": "Ollama su questa macchina",
   ollama: "Ollama Cloud",
 };
+/** What Settings → Collegamenti lists, one line per thing that can be connected. */
+const CONNECTIONS = [
+  ["ollamaLocal", "Ollama su questa macchina"],
+  ["ollamaCloud", "Ollama Cloud"],
+  ["orcarouter", "OrcaRouter"],
+  ["claude", "Claude Code"],
+  ["codex", "Codex"],
+  ["hermes", "Hermes Agent"],
+];
 const PROVIDER_HINTS = {
   claude: "Claude Code non trovato su questa macchina",
   codex: "Codex non trovato su questa macchina",
-  ollama: "manca CORA_OLLAMA_API_KEY in hush",
+  ollama: "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush",
+  ollamaLocal: "nessun Ollama in ascolto su questa macchina",
+  ollamaCloud: "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush",
   orcarouter: "manca CORA_ORCAROUTER_API_KEY in hush",
   hermes: "Hermes non trovato su questa macchina",
 };
@@ -68,6 +79,7 @@ const PRESETS = [
 ];
 const TABS = [
   ["profilo", "Profilo", "user"],
+  ["cervello", "Cervello", "chip"],
   ["chat", "Chat", "chat"],
   ["memoria", "Memoria", "book"],
   ["routine", "Routine e reminder", "clock"],
@@ -597,7 +609,7 @@ function banners() {
     out.push(h("a", { class: "banner", href: "#/settings" }, icon("info"), h("span", {}, h("b", {}, "Nessuna chat Telegram accesa. "), "Aggiungi il bot a un gruppo e accendi la chat nelle impostazioni.")));
   }
   if (!S.data.boxImage.ready) out.push(h("div", { class: "banner" }, icon("monitor"), h("span", {}, h("b", {}, "Immagine desktop mancante. "), tr("Va costruita {image} su questa macchina.", { image: S.data.boxImage.name }))));
-  const missing = Object.entries(S.data.providers || {}).filter(([, ok]) => !ok).map(([key]) => PROVIDERS[key]);
+  const missing = CONNECTIONS.filter(([key]) => !S.data.providers?.[key]).map(([, label]) => tr(label));
   if (missing.length) out.push(h("div", { class: "banner" }, icon("chip"), h("span", {}, h("b", {}, "Provider non disponibili: "), `${missing.join(", ")}.`)));
   return out.length ? h("div", { class: "banners" }, out) : null;
 }
@@ -854,9 +866,9 @@ const VRAM_NEEDED = (size) => Number(size || 0) * 1.2;
 // proxies without saying so, and promising they fit would be a lie.
 const WEIGHTS_AT_LEAST = 100_000_000;
 
-function fitOf(model, card) {
+function fitOf(model, card, reclaimable = 0) {
   if (!card || !card.memoryTotal || !model.size || model.size < WEIGHTS_AT_LEAST) return null;
-  const freeMib = card.memoryTotal - card.memoryUsed;
+  const freeMib = card.memoryTotal - card.memoryUsed + reclaimable / 1_048_576;
   const neededMib = VRAM_NEEDED(model.size) / 1_048_576;
   if (neededMib <= freeMib) return { kind: "on", text: "entra" };
   if (neededMib <= card.memoryTotal) return { kind: "warn", text: "stretta: libera la scheda" };
@@ -875,122 +887,352 @@ function residencyOf(loaded) {
   return { kind: "warn", text: tr("acceso, {share}% sulla scheda: il resto gira sul processore", { share }) };
 }
 
-/**
- * The machine an agent thinks with: its cards, the Ollama that serves each of
- * them, and which models are installed there. Ollama chooses the card when it
- * starts, never per request, so choosing a server is how an agent picks a card.
- */
-function brainMachine(agent, modelNode, getHarness = () => "cora") {
-  const select = modelNode.querySelector("select");
-  const hostInput = h("input", { type: "hidden", name: "ollamaHost", value: agent.ollamaHost || "" });
-  const body = h("div", { class: "stack-sm" }, h("small", { class: "muted" }, tr("Guardo la macchina…")));
-  const wrap = h("div", { class: "stack-sm" }, hostInput, body);
+/** Where a model runs. The two places are a real difference, not a label. */
+const PLACES = {
+  local: ["Su questa macchina", "I pesi stanno qui: niente esce, e la scheda decide la velocità."],
+  cloud: ["Nel cloud", "Il modello gira altrove, con l'account o la chiave che hai collegato."],
+};
 
-  const choose = (name) => {
-    // The same local model can be driven by Cora or by Hermes: the harness picks the prefix.
-    const id = `${getHarness() === "hermes" ? "hermes" : "ollama"}/${name}`;
-    if (![...select.options].some((option) => option.value === id)) select.append(h("option", { value: id }, name));
-    select.value = id;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    const custom = modelNode.querySelector("input[type=text]");
-    if (custom) { custom.value = ""; select.disabled = false; }
-    draw(latest);
+/** The providers a harness can drive, reduced to the ones this instance actually has. */
+const harnessProviders = (harness) => (HARNESSES[harness]?.providers || []).filter((provider) => S.data.providers?.[provider]);
+
+/** A harness can think here when at least one of the things it drives is here. */
+const harnessReady = (harness) => harnessProviders(harness).length > 0;
+
+/** In one line, what to do so a harness can run here. */
+const HARNESS_NEEDS = {
+  claude: "Claude Code non è installato su questa macchina: installalo sul server con l'utente di Cora.",
+  codex: "Codex non è installato su questa macchina: installalo sul server con l'utente di Cora.",
+  hermes: "Hermes non è installato su questa macchina: installalo sul server con l'utente di Cora.",
+  ollama: "Nessun Ollama su questa macchina e nessuna chiave Ollama Cloud.",
+  orcarouter: "Nessuna chiave OrcaRouter.",
+};
+
+/**
+ * What a harness that cannot think here is missing. Only asked when nothing it drives
+ * is available: a missing router is not a reason to call Cora's harness broken.
+ */
+const harnessMissing = (harness) => (harnessReady(harness) ? [] : (HARNESSES[harness]?.providers || [])
+  .map((provider) => tr(HARNESS_NEEDS[provider] || PROVIDER_HINTS[provider] || provider)));
+
+/** The harnesses that run on someone's subscription: the account is part of the choice. */
+const SUBSCRIPTION_HARNESSES = ["claude", "codex"];
+
+const modelsOf = (harness, place) => {
+  const providers = harnessProviders(harness);
+  return S.data.models.filter((model) => providers.includes(model.provider) && Boolean(model.local) === (place === "local"));
+};
+
+const placesOf = (harness) => ["local", "cloud"].filter((place) => modelsOf(harness, place).length);
+
+/** Where a model id lives, for reopening the panel on the side the agent is already on. */
+function placeOfModel(id) {
+  const known = S.data.models.find((item) => item.id === id);
+  return known?.local ? "local" : "cloud";
+}
+
+/** A model this agent may actually be put on: it exists here, has tools, and can be reached. */
+const usableModel = (id) => {
+  const known = S.data.models.find((item) => item.id === id);
+  return Boolean(known && known.tools !== false && known.usable !== false);
+};
+
+/**
+ * The agent's brain, as two questions instead of one list: on the left who drives
+ * the loop, on the right where that harness's model runs and which one it is.
+ * A harness this machine cannot run says what it needs; it never falls back to a
+ * default that belongs to a different one, and it cannot be saved half-chosen.
+ */
+function brainPanel(agent) {
+  const fallback = S.data.settings.defaultModel || "";
+  let harness = harnessOf(agent.model || fallback);
+  let place = "";
+  let chosen = agent.model || "";
+  let hardware = null;
+  let problem = "";
+  const modelInput = h("input", { type: "hidden", name: "model", value: chosen });
+  const hostInput = h("input", { type: "hidden", name: "ollamaHost", value: agent.ollamaHost || "" });
+  const custom = h("input", {
+    type: "text", name: "modelCustom", autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+    placeholder: "provider/modello, es. orcarouter/deepseek/deepseek-v4.1-flash",
+  });
+  const subscription = subscriptionPicker(agent.subscriptionId);
+  const left = h("div", { class: "harness-list", role: "radiogroup", "aria-label": "Harness" });
+  const right = h("div", { class: "stack-sm brain-side" });
+
+  custom.addEventListener("input", () => {
+    modelInput.disabled = Boolean(custom.value.trim());
+    right.classList.toggle("dim", modelInput.disabled);
+  });
+
+  const pick = (id) => {
+    chosen = id;
+    modelInput.value = id;
+    modelInput.disabled = false;
+    custom.value = "";
+    problem = "";
+    right.classList.remove("dim");
+    drawRight();
   };
 
-  let latest = null;
-  const draw = (info) => {
-    latest = info;
-    // Claude Code and Codex run on a subscription, not on this machine's cards.
-    if (!["cora", "hermes"].includes(getHarness())) {
-      body.replaceChildren(h("small", { class: "muted" }, tr("Questo harness non usa le schede di questa macchina.")));
-      return;
+  /** The model a harness opens on: the agent's own if it belongs here, else the first that works. */
+  const opening = (key) => {
+    if (agent.model && harnessOf(agent.model) === key && usableModel(agent.model)) return agent.model;
+    if (fallback && harnessOf(fallback) === key && usableModel(fallback)) return "";
+    for (const where of ["local", "cloud"]) {
+      const first = modelsOf(key, where).find((model) => model.tools !== false && model.usable !== false);
+      if (first) return first.id;
     }
-    const hosts = (info.hosts || []).filter((host) => host.local);
-    const chosen = hosts.find((host) => host.url === hostInput.value) || hosts[0] || null;
-    if (chosen && !hostInput.value) hostInput.value = hosts.length > 1 ? chosen.url : "";
-    const cards = info.gpus || [];
-    const card = chosen?.gpu ? cards.find((item) => item.uuid === chosen.gpu) : cards.length === 1 ? cards[0] : null;
+    return null;
+  };
+
+  const chooseHarness = (key) => {
+    if (key === harness) return;
+    harness = key;
+    const next = opening(key);
+    chosen = next ?? "";
+    modelInput.value = chosen;
+    place = next ? placeOfModel(next) : next === "" ? placeOfModel(fallback) : "";
+    problem = "";
+    subscription.setProvider(SUBSCRIPTION_HARNESSES.includes(key) && harnessReady(key) ? key : "");
+    drawLeft();
+    drawRight();
+  };
+
+  function drawLeft() {
+    left.replaceChildren(...Object.entries(HARNESSES).map(([key, item]) => {
+      const ready = harnessReady(key);
+      const on = key === harness;
+      return h("button", {
+        type: "button", class: `harness-row${on ? " on" : ""}${ready ? "" : " off"}`, role: "radio",
+        "aria-checked": String(on), onclick: () => chooseHarness(key),
+      },
+        h("span", { class: "harness-led", "aria-hidden": "true" }),
+        h("span", { class: "harness-text" },
+          h("span", { class: "harness-name" }, tr(item.label), ready ? null : h("span", { class: "harness-flag" }, tr("non installato"))),
+          h("span", { class: "harness-hint" }, tr(item.hint))));
+    }));
+  }
+
+  function modelRow(model, { subtitle = "", fit = null, selected = false, quiet = false, sees = true }) {
+    // Two ways a model cannot be used: no tools, or this machine cannot reach it. Both
+    // disable the row; the reason is in words, and once only when a notice above says it.
+    const blocked = model.tools === false ? tr("Senza strumenti un agente non può fare nulla")
+      : model.usable === false ? tr(model.reason || "non disponibile su questa macchina") : "";
+    return h("button", {
+      type: "button", class: `row-link model-row${selected ? " on" : ""}`, role: "radio", "aria-checked": String(selected),
+      disabled: Boolean(blocked), title: blocked,
+      onclick: blocked ? undefined : () => pick(model.id),
+    },
+      h("div", { class: "row-text full" },
+        h("span", { class: "row-title" }, raw(model.label || model.id), selected ? badge("scelto", "on", "check") : null),
+        h("span", { class: "row-meta" },
+          subtitle ? h("span", {}, raw(subtitle)) : null,
+          fit ? badge(fit.text, fit.kind, fit.kind === "on" ? "check" : "alert") : null,
+          model.vision && sees ? tag("vede") : null,
+          model.tools === false ? tag("senza strumenti") : null,
+          model.usable === false ? tag(quiet ? "da collegare" : model.reason || "non disponibile") : null)));
+  }
+
+  function defaultRow({ quiet = false } = {}) {
+    // The default belongs to one harness and to one side: offering it anywhere else
+    // is how "Predefinito (Ollama Cloud)" ended up under Claude Code.
+    if (!fallback || harnessOf(fallback) !== harness || placeOfModel(fallback) !== place) return null;
+    const known = S.data.models.find((item) => item.id === fallback) || { id: fallback };
+    return modelRow({ ...known, id: "", label: tr("Predefinito dell'istanza") }, {
+      subtitle: modelLabel(fallback), selected: !chosen, quiet,
+    });
+  }
+
+  function cloudSide() {
     const out = [];
+    const models = modelsOf(harness, "cloud");
+    // An Ollama on this machine lists the cloud models whether or not it may run them.
+    const cloud = S.data.ollamaCloud || {};
+    const unpaired = !cloud.signedIn && models.some((model) => model.usable === false);
+    if (unpaired) {
+      out.push(h("div", { class: "notice warn" }, icon("alert"), h("div", { class: "stack-sm" },
+        h("span", {}, h("b", {}, tr("Ollama Cloud non è collegato a questa macchina.")), " ",
+          tr("I suoi modelli compaiono perché l'Ollama locale li elenca, ma rispondono solo dopo il collegamento.")),
+        cloud.signinUrl ? h("span", {}, btn("Collega Ollama Cloud", { icon: "external", cls: "sm", href: cloud.signinUrl, target: "_blank" })) : null)));
+    }
+    // Under a subscription the provider is the harness itself: saying it on every row is noise.
+    const subtitleOf = (model) => (SUBSCRIPTION_HARNESSES.includes(harness) ? "" : tr(model.via || PROVIDERS[model.provider] || model.provider));
+    const sees = !models.every((model) => model.vision);
+    const rows = models.map((model) => modelRow(model, { subtitle: subtitleOf(model), selected: model.id === chosen, quiet: unpaired, sees }));
+    const first = defaultRow({ quiet: unpaired });
+    if (!rows.length && !first) out.push(h("small", { class: "muted" }, tr("Nessun modello nel cloud per questo harness.")));
+    else out.push(h("div", { class: "rows", role: "radiogroup", "aria-label": "Modello" }, first, ...rows));
+    return out;
+  }
+
+  function localSide() {
+    if (!hardware) return [h("small", { class: "muted" }, tr("Guardo la macchina…"))];
+    const out = [];
+    const hosts = hardware.hosts || [];
+    const cards = hardware.gpus || [];
+    const host = hosts.find((item) => item.url === hostInput.value) || hosts[0] || null;
+    const card = host?.gpu ? cards.find((item) => item.uuid === host.gpu) : cards.length === 1 ? cards[0] : null;
+    // What Ollama holds for the model loaded now is not lost to the next one: it unloads.
+    const held = (host?.loaded || []).reduce((sum, item) => sum + (item.vram || 0), 0);
 
     if (cards.length) {
-      out.push(h("div", { class: "rows" }, cards.map((item) => {
-        const mine = card && item.uuid === card.uuid;
-        return h("div", { class: "row-item" }, h("div", { class: "row-text full" },
-          h("span", { class: "row-title" }, icon("chip"), raw(item.name), mine && cards.length > 1 ? badge("in uso da lui", "on", "check") : null),
-          h("span", { class: "row-meta" },
-            h("span", {}, raw(tr("{free} GB liberi di {total}", { free: gbFromMib(item.memoryTotal - item.memoryUsed), total: gbFromMib(item.memoryTotal) }))),
-            h("span", {}, raw(tr("carico {load}%", { load: item.load }))))));
-      })));
+      out.push(h("div", { class: "card-strip" }, cards.map((item) => h("div", { class: "card-line" },
+        icon("chip"),
+        h("b", {}, raw(item.name)),
+        card && item.uuid === card.uuid && cards.length > 1 ? badge("in uso da lui", "on", "check") : null,
+        h("span", { class: "card-meta" },
+          raw(tr("{free} GB liberi di {total}", { free: gbFromMib(item.memoryTotal - item.memoryUsed), total: gbFromMib(item.memoryTotal) })),
+          // Without this the verdicts below look wrong: a 9 GB model "fits" in 4.5 GB free
+          // because the model loaded now is let go when the agent changes model.
+          held && card && item.uuid === card.uuid ? [" · ", raw(tr("{held} GB al modello acceso, che si libera cambiando", { held: gbFromBytes(held) }))] : null,
+          " · ", raw(tr("carico {load}%", { load: item.load })))))));
     } else if (hosts.length) {
       out.push(h("small", { class: "muted" }, "Nessuna scheda dedicata: i modelli locali girano sul processore."));
     }
 
     if (hosts.length > 1) {
-      const picker = h("select", {}, hosts.map((host) => h("option", { value: host.url, selected: host.url === (hostInput.value || hosts[0].url) },
-        `${host.label || host.url}${host.version ? ` · Ollama ${host.version}` : ""}`)));
-      picker.addEventListener("change", () => { hostInput.value = picker.value; draw(latest); });
+      const picker = h("select", {}, hosts.map((item) => h("option", { value: item.url, selected: item.url === (hostInput.value || hosts[0].url) },
+        `${item.label || item.url}${item.version ? ` · Ollama ${item.version}` : ""}`)));
+      picker.addEventListener("change", () => { hostInput.value = picker.value; drawRight(); });
       out.push(field("Scheda", picker, "Ogni scheda ha il suo Ollama: scegliere il server è come scegliere la scheda."));
     }
 
-    if (chosen) {
-      const installed = (chosen.models || []).filter((model) => model.local && model.completion);
-      const usable = installed.filter((model) => model.tools);
-      const unusable = installed.filter((model) => !model.tools);
-      const current = (select.value || agent.model || "").replace(/^(ollama|hermes)\//, "");
-      const row = (model, ok) => {
-        const chosenOne = model.name === current;
-        const loaded = (chosen.loaded || []).find((item) => item.name === model.name);
-        // A loaded model has already answered the question the estimate was asking:
-        // how much of it the card actually took. What is left over runs on the
-        // processor, and a model half on the processor crawls, so say so instead.
-        const fit = loaded ? residencyOf(loaded) : fitOf(model, card);
-        return h("button", {
-          type: "button", class: `row-link model-row${chosenOne ? " on" : ""}`, disabled: !ok,
-          title: ok ? "" : "Senza strumenti un agente non può fare nulla",
-          onclick: ok ? () => choose(model.name) : undefined,
-        },
-          h("div", { class: "row-text full" },
-            h("span", { class: "row-title" }, raw(model.name), chosenOne ? badge("scelto", "on", "check") : null),
-            h("span", { class: "row-meta" },
-              h("span", {}, model.size >= WEIGHTS_AT_LEAST ? raw(tr("{size} GB", { size: gbFromBytes(model.size) })) : tr("non è su questa macchina")),
-              fit ? badge(fit.text, fit.kind, fit.kind === "on" ? "check" : "alert") : null,
-              model.vision ? h("span", {}, tr("vede")) : null,
-              ok ? null : h("span", {}, tr("senza strumenti")))));
-      };
-      out.push(h("div", { class: "field full" }, h("span", { class: "label" }, "Modelli su questa macchina"),
-        usable.length || unusable.length
-          ? h("div", { class: "rows" }, usable.map((model) => row(model, true)), unusable.map((model) => row(model, false)))
-          : h("small", { class: "muted" }, "Nessun modello installato qui.")));
+    const prefix = harness === "hermes" ? "hermes" : "ollama";
+    const installed = (host?.models || []).filter((model) => model.local && model.completion);
+    const rows = [...installed.filter((model) => model.tools), ...installed.filter((model) => !model.tools)].map((model) => {
+      const id = `${prefix}/${model.name}`;
+      const loaded = (host?.loaded || []).find((item) => item.name === model.name);
+      return modelRow({ id, label: model.name, tools: model.tools, vision: model.vision }, {
+        subtitle: model.size >= WEIGHTS_AT_LEAST ? tr("{size} GB", { size: gbFromBytes(model.size) }) : tr("non è su questa macchina"),
+        fit: loaded ? residencyOf(loaded) : fitOf(model, card, held),
+        selected: id === chosen,
+      });
+    });
+    out.push(h("div", { class: "field full" }, h("span", { class: "label" }, "Modelli su questa macchina"),
+      rows.length ? h("div", { class: "rows", role: "radiogroup", "aria-label": "Modello" }, defaultRow(), ...rows)
+        : h("small", { class: "muted" }, "Nessun modello installato qui.")));
 
-      const name = h("input", { type: "text", placeholder: tr("nome del modello, es. qwen3-coder:30b"), autocomplete: "off", spellcheck: "false" });
-      const status = h("small", { class: "muted" });
-      const install = btn("Scarica", { icon: "upgrade", cls: "primary", onclick: async () => {
-        const wanted = name.value.trim();
-        if (!wanted) return;
-        if (!confirm(tr("Scarico {model} su {card}? Ollama lo installa e lo configura da sé; l'avanzamento lo vedi qui.", { model: wanted, card: card?.name || chosen.label || tr("questa macchina") }))) return;
-        status.textContent = tr("comincio…");
-        await guard(api("/api/ollama/pull", { method: "POST", body: { model: wanted, host: chosen.url } }), tr("Scarico {model}", { model: wanted }));
-      } });
-      S.onPull = (event) => {
-        if (event.host !== chosen.url) return;
-        if (event.done) {
-          status.textContent = event.ok ? tr("{model} è pronto.", { model: event.model }) : tr("{model}: {error}", { model: event.model, error: event.error });
-          if (event.ok) api("/api/hardware").then(draw).catch(() => {});
-          return;
-        }
-        const percent = event.total ? Math.round((event.completed / event.total) * 100) : 0;
-        status.textContent = `${event.model}: ${event.status}${event.total ? ` ${percent}%` : ""}`;
-      };
-      out.push(h("div", { class: "field full" }, h("span", { class: "label" }, "Installa un modello"),
-        h("div", { class: "input-row" }, name, install), status));
+    const name = h("input", { type: "text", placeholder: tr("nome del modello, es. qwen3:14b"), autocomplete: "off", spellcheck: "false" });
+    const status = h("small", { class: "muted" });
+    const install = btn("Scarica", { icon: "upgrade", onclick: async () => {
+      const wanted = name.value.trim();
+      if (!wanted || !host) return;
+      if (!confirm(tr("Scarico {model} su {card}? Ollama lo installa e lo configura da sé; l'avanzamento lo vedi qui.", { model: wanted, card: card?.name || host.label || tr("questa macchina") }))) return;
+      status.textContent = tr("comincio…");
+      await guard(api("/api/ollama/pull", { method: "POST", body: { model: wanted, host: host.url } }), tr("Scarico {model}", { model: wanted }));
+    } });
+    S.onPull = (event) => {
+      if (!host || event.host !== host.url) return;
+      if (event.done) {
+        status.textContent = event.ok ? tr("{model} è pronto.", { model: event.model }) : tr("{model}: {error}", { model: event.model, error: event.error });
+        if (event.ok) loadHardware();
+        return;
+      }
+      const percent = event.total ? Math.round((event.completed / event.total) * 100) : 0;
+      status.textContent = `${event.model}: ${event.status}${event.total ? ` ${percent}%` : ""}`;
+    };
+    out.push(h("details", { class: "brain-custom" }, h("summary", {}, tr("Installa un altro modello")),
+      h("div", { class: "stack-sm" }, h("div", { class: "input-row" }, name, install), status)));
+    return out;
+  }
+
+  function drawRight() {
+    const out = [];
+    if (!harnessReady(harness)) {
+      // Nothing to choose until the harness exists: no list, no default, no free-text id.
+      out.push(h("div", { class: "notice warn" }, icon("alert"), h("div", { class: "stack-sm" },
+        ...harnessMissing(harness).map((line) => h("span", {}, raw(line))),
+        SUBSCRIPTION_HARNESSES.includes(harness)
+          ? h("span", { class: "muted" }, tr("Dopo l'installazione l'account si collega qui, o in Impostazioni → Collegamenti."))
+          : null)));
+      right.replaceChildren(...out);
+      return;
+    }
+    const places = placesOf(harness);
+    if (!place || !places.includes(place)) place = places.includes(placeOfModel(chosen || fallback)) ? placeOfModel(chosen || fallback) : places[0] || "cloud";
+
+    if (SUBSCRIPTION_HARNESSES.includes(harness)) out.push(subscription.node);
+    if (places.length > 1) {
+      const switcher = h("div", { class: "segmented", role: "tablist", "aria-label": "Dove gira il modello" });
+      for (const key of places) {
+        switcher.append(h("button", {
+          type: "button", role: "tab", class: place === key ? "on" : "", "aria-selected": String(place === key),
+          onclick: () => { place = key; drawRight(); },
+        }, tr(PLACES[key][0])));
+      }
+      out.push(h("div", { class: "field" }, h("span", { class: "label" }, "Dove gira"), switcher, h("small", {}, tr(PLACES[place][1]))));
+    } else if (places.length === 1 && !SUBSCRIPTION_HARNESSES.includes(harness)) {
+      out.push(h("small", { class: "muted" }, tr(PLACES[places[0]][1])));
     }
 
-    body.replaceChildren(...out.filter(Boolean));
+    if (problem) out.push(h("p", { class: "notice warn", role: "alert" }, icon("alert"), h("span", {}, problem)));
+    out.push(...(place === "local" ? localSide() : cloudSide()));
+    out.push(h("details", { class: "brain-custom" }, h("summary", {}, tr("Scrivi tu l'id del modello")),
+      h("div", { class: "stack-sm" }, custom, h("small", { class: "muted" }, "Se lo scrivi, vince su quello scelto qui sopra."))));
+    right.replaceChildren(...out.filter(Boolean));
+  }
+
+  const loadHardware = () => api("/api/hardware").then((data) => { hardware = data; if (place === "local") drawRight(); }).catch(() => {});
+
+  /** The save is refused here, in words, rather than storing a brain that cannot think. */
+  const validate = () => {
+    const typed = custom.value.trim();
+    if (!harnessReady(harness)) problem = tr("{harness} non è installato su questa macchina: scegli un altro harness.", { harness: tr(HARNESSES[harness].label) });
+    else if (typed) problem = harnessOf(typed) === harness ? "" : tr("L'id scritto appartiene a un altro harness.");
+    else if (!chosen && !(fallback && harnessOf(fallback) === harness && usableModel(fallback))) problem = tr("Scegli un modello: quello predefinito dell'istanza non gira con questo harness.");
+    else if (chosen && !usableModel(chosen) && !chosen.startsWith("ollama/") && !chosen.startsWith("hermes/")) problem = tr("Questo modello non è disponibile su questa macchina.");
+    else problem = "";
+    if (problem) { drawRight(); toast(problem, true); right.scrollIntoView({ block: "center", behavior: "smooth" }); return false; }
+    return subscription.validate();
   };
 
-  api("/api/hardware").then(draw).catch(() => body.replaceChildren(h("small", { class: "muted" }, tr("Non riesco a leggere la macchina."))));
-  wrap.reload = () => (latest ? draw(latest) : api("/api/hardware").then(draw).catch(() => {}));
-  return wrap;
+  subscription.setProvider(SUBSCRIPTION_HARNESSES.includes(harness) && harnessReady(harness) ? harness : "");
+  drawLeft();
+  drawRight();
+  loadHardware();
+
+  return {
+    node: h("div", { class: "brain" },
+      h("div", { class: "brain-main" },
+        h("div", { class: "stack-sm" }, h("span", { class: "label" }, "Harness"), left),
+        h("div", { class: "stack-sm" }, h("span", { class: "label" }, "Modello"), right)),
+      modelInput, hostInput),
+    validate,
+    subscriptionId: () => subscription.value(),
+  };
+}
+
+/** The Cervello tab: the two columns, plus what the brain does once it has a model. */
+function brainTab(agent) {
+  const brain = brainPanel(agent);
+  const form = h("form", { class: "stack" },
+    panel({ icon: "chip", title: "Cervello", hint: "Chi guida il ciclo, dove gira il modello e quale." }, brain.node),
+    panel({ icon: "spark", title: "Come pensa", hint: "Quanto si ferma a ragionare e cosa ha per le mani." },
+      h("div", { class: "stack-sm" },
+        field("Ragionamento: livello", h("select", { name: "effort" },
+          [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) =>
+            h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label))),
+          "Quanto pensa prima di rispondere: più alto è più accurato ma più lento."),
+        switchInput("tools", "Usa il suo computer", agent.tools ?? true, "Un desktop Linux tutto suo, che vedi anche tu."))),
+    h("div", { class: "savebar" }, h("span", { class: "spacer" }), btn("Salva", { icon: "check", type: "submit", cls: "primary" })));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!brain.validate()) return;
+    const data = new FormData(form);
+    const body = {
+      model: pickedModel(data, "model"),
+      ollamaHost: data.get("ollamaHost") || "",
+      subscriptionId: brain.subscriptionId(),
+      tools: form.elements.tools.checked,
+      effort: data.get("effort"),
+      think: false,
+    };
+    if (!await guard(api(`/api/agents/${agent.id}`, { method: "PUT", body }), "Salvato")) return;
+    await loadState();
+    renderAgent();
+  });
+  return form;
 }
 
 function modelSelect(name, current, { allowDefault = true, harness = "" } = {}) {
@@ -1007,7 +1249,8 @@ function modelSelect(name, current, { allowDefault = true, harness = "" } = {}) 
     const list = groups[provider];
     if (!list?.length) continue;
     select.append(h("optgroup", { label: tr(PROVIDER_GROUPS[provider] || PROVIDERS[provider] || provider) },
-      list.map((model) => h("option", { value: model.id, selected: model.id === current }, `${model.label}${model.size ? ` · ${gbFromBytes(model.size)} GB` : ""}${model.vision ? tr(" · vede") : ""}${model.tools ? "" : tr(" · senza strumenti")}`))));
+      list.map((model) => h("option", { value: model.id, selected: model.id === current, disabled: model.usable === false && model.id !== current },
+        `${model.label}${model.size ? ` · ${gbFromBytes(model.size)} GB` : ""}${model.vision ? tr(" · vede") : ""}${model.tools ? "" : tr(" · senza strumenti")}${model.usable === false ? ` · ${tr(model.reason || "non disponibile")}` : ""}`))));
   }
   if (current && !S.data.models.some((model) => model.id === current)) select.append(h("option", { value: current, selected: true }, tr("{model} (non disponibile ora)", { model: current })));
   return select;
@@ -1029,6 +1272,8 @@ function pickedModel(data, name) {
   return String(data.get(`${name}Custom`) || "").trim() || data.get(name) || "";
 }
 
+/** The program each subscription runs through, which is what has to be installed. */
+const CLI_NAMES = { claude: "Claude Code", codex: "Codex" };
 const SUBSCRIPTION_STATES = { disconnected: "Da collegare", connecting: "Accesso in corso", ready: "Collegata", error: "Accesso non riuscito" };
 
 function subscriptionPicker(currentId, { manage = false } = {}) {
@@ -1112,6 +1357,17 @@ function subscriptionPicker(currentId, { manage = false } = {}) {
       h("div", { class: "grow" }, h("span", { class: "label" }, "Abbonamento"), h("h3", {}, raw(name))),
       record && !choosing ? status : null));
     if (actionError) content.append(h("p", { class: "subscription-error", role: "alert" }, icon("alert"), tr(actionError)));
+
+    // Without the CLI on the server there is nothing to log in to: offering the
+    // device code anyway only ever ends in "Accesso non riuscito".
+    if (!S.data.providers?.[provider]) {
+      // The account is ChatGPT's or Claude's; what is missing is the program that uses it.
+      content.append(h("p", { class: "subscription-description" },
+        tr("{cli} non è installato su questa macchina, quindi non c'è ancora niente da collegare. Installalo sul server con l'utente di Cora e questa scheda si accende da sola.", { cli: CLI_NAMES[provider] || name })));
+      if (!manage) content.append(h("div", { class: "subscription-footer" }, btn("Impostazioni", { cls: "ghost", href: "#/settings/collegamenti" })));
+      for (const button of content.querySelectorAll("button")) button.disabled = requestBusy;
+      return;
+    }
 
     if (choosing && (records.length || resident)) {
       content.append(h("p", { class: "subscription-description" }, "Scegli l'account da usare per questo agente."));
@@ -1271,8 +1527,13 @@ function armedButton(label, armedLabel, { icon: name = "trash", onconfirm }) {
   return button;
 }
 
-function agentForm(agent) {
+/**
+ * Who the agent is. The brain lives in its own tab once the agent exists; while it
+ * is being created there is no tab yet, so the simple pair harness + model rides here.
+ */
+function agentForm(agent, { only = "" } = {}) {
   const isNew = !agent.id;
+  const wantsBrain = only !== "profile";
   const nameInput = h("input", { type: "text", name: "name", value: agent.name || "", required: true, maxlength: 32, placeholder: "es. Marta", autocomplete: "off" });
   const avatarInput = h("input", { type: "url", name: "avatarUrl", value: agent.avatarUrl || "", placeholder: "https://… (png o jpg)" });
   const fader = h("input", { type: "range", class: "fader", name: "chattiness", min: 0, max: 100, value: Math.round((agent.chattiness ?? 0.5) * 100) });
@@ -1280,30 +1541,28 @@ function agentForm(agent) {
   fader.addEventListener("input", () => { faderValue.textContent = fader.value; });
   const hidden = (agent.channelIds || []).filter((id) => !S.data.channels.some((channel) => channel.id === id));
   // Two choices, not one: who runs the loop, and which model thinks.
-  const current = agent.model || S.data.settings.defaultModel || "";
-  let harness = harnessOf(current);
-  const model = modelPicker("model", agent.model || "", { harness });
-  const harnessPick = h("select", {}, Object.entries(HARNESSES).map(([key, item]) =>
-    h("option", { value: key, selected: key === harness }, tr(item.label))));
-  const harnessHint = h("small", { class: "muted" }, tr(HARNESSES[harness].hint));
-  const subscription = subscriptionPicker(agent.subscriptionId);
-  const machine = brainMachine(agent, model, () => harness);
-  const syncSubscription = () => {
-    const select = model.querySelector("select");
-    const custom = model.querySelector("input");
-    subscription.setProvider((custom.value.trim() || select.value || S.data.settings.defaultModel).split("/")[0]);
-  };
-  model.addEventListener("change", syncSubscription);
-  model.addEventListener("input", syncSubscription);
-  harnessPick.addEventListener("change", () => {
-    harness = harnessPick.value;
-    harnessHint.textContent = tr(HARNESSES[harness].hint);
-    const fresh = modelSelect("model", "", { allowDefault: true, harness });
-    model.querySelector("select").replaceWith(fresh);
-    machine.reload(harness);
-    syncSubscription();
-  });
-  subscription.setProvider((agent.model || S.data.settings.defaultModel).split("/")[0]);
+  let harness = harnessOf(agent.model || S.data.settings.defaultModel || "");
+  const model = wantsBrain ? modelPicker("model", agent.model || "", { harness }) : null;
+  const harnessPick = wantsBrain ? h("select", {}, Object.entries(HARNESSES).map(([key, item]) =>
+    h("option", { value: key, selected: key === harness }, tr(item.label)))) : null;
+  const harnessHint = wantsBrain ? h("small", { class: "muted" }, tr(HARNESSES[harness].hint)) : null;
+  const subscription = wantsBrain ? subscriptionPicker(agent.subscriptionId) : null;
+  if (wantsBrain) {
+    const syncSubscription = () => {
+      const select = model.querySelector("select");
+      const typed = model.querySelector("input");
+      subscription.setProvider((typed.value.trim() || select.value || S.data.settings.defaultModel).split("/")[0]);
+    };
+    model.addEventListener("change", syncSubscription);
+    model.addEventListener("input", syncSubscription);
+    harnessPick.addEventListener("change", () => {
+      harness = harnessPick.value;
+      harnessHint.textContent = tr(HARNESSES[harness].hint);
+      model.querySelector("select").replaceWith(modelSelect("model", "", { allowDefault: true, harness }));
+      syncSubscription();
+    });
+    subscription.setProvider((agent.model || S.data.settings.defaultModel).split("/")[0]);
+  }
   const form = h("form", { class: "stack" },
     panel({ icon: "user", title: "Identità", hint: "Come si chiama e come appare." },
       h("div", { class: "grid2" },
@@ -1315,17 +1574,16 @@ function agentForm(agent) {
               const seed = encodeURIComponent(nameInput.value || "cora");
               avatarInput.value = `https://api.dicebear.com/9.x/notionists/png?seed=${seed}&size=256&backgroundColor=f2a93b,e9dfcc,8cc56a,6fa8dc`;
             } }))))),
-    panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
+    wantsBrain ? panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
       h("div", { class: "stack-sm" },
         field("Harness", harnessPick, "Chi guida il ciclo: Cora, oppure il modello stesso."),
         harnessHint,
         field("Modello", model),
-        machine,
         subscription.node,
         field("Ragionamento: livello", h("select", { name: "effort" },
           [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) => h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label))),
         "Quanto pensa prima di rispondere: più alto è più accurato ma più lento."),
-        switchInput("tools", "Usa il suo computer", agent.tools ?? true, "Un desktop Linux tutto suo, che vedi anche tu."))),
+        switchInput("tools", "Usa il suo computer", agent.tools ?? true, "Un desktop Linux tutto suo, che vedi anche tu."))) : null,
     panel({ icon: "spark", title: "Carattere", hint: "Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri." },
       h("textarea", { name: "personality", class: "tall", placeholder: "Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…" }, agent.personality || "")),
     panel({ icon: "radio", title: "Ascolto", hint: "Quanto interviene e dove." },
@@ -1346,22 +1604,23 @@ function agentForm(agent) {
       btn(isNew ? "Crea agente" : "Salva", { icon: "check", type: "submit", cls: "primary" })));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!subscription.validate()) return;
+    if (wantsBrain && !subscription.validate()) return;
     const data = new FormData(form);
     const body = {
       name: data.get("name"),
       avatarUrl: data.get("avatarUrl"),
-      model: pickedModel(data, "model"),
-      ollamaHost: data.get("ollamaHost") || "",
-      subscriptionId: subscription.value(),
       color: data.get("color"),
       chattiness: Number(data.get("chattiness")) / 100,
       channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
       enabled: form.elements.enabled.checked,
-      tools: form.elements.tools.checked,
-      effort: data.get("effort"),
-      think: false,
       personality: data.get("personality"),
+      ...(wantsBrain ? {
+        model: pickedModel(data, "model"),
+        subscriptionId: subscription.value(),
+        tools: form.elements.tools.checked,
+        effort: data.get("effort"),
+        think: false,
+      } : {}),
     };
     const saved = await guard(isNew ? api("/api/agents", { method: "POST", body }) : api(`/api/agents/${agent.id}`, { method: "PUT", body }), isNew ? "Agente creato" : "Salvato");
     if (!saved) return;
@@ -1570,7 +1829,8 @@ async function renderAgent() {
   else if (tab === "attivita") body = activityTab(agent);
   else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent });
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
-  else body = [S.data.transport === "slack" ? slackAccount(agent) : S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), agentForm(agent)];
+  else if (tab === "cervello") body = brainTab(agent);
+  else body = [S.data.transport === "slack" ? slackAccount(agent) : S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), agentForm(agent, { only: "profile" })];
   if (isCurrent()) slot.replaceChildren(...[body].flat().filter(Boolean));
 }
 
@@ -2524,7 +2784,9 @@ function connectionsPanel() {
       return h("div", { class: "resident-account" },
         h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(provider === "claude" ? "spark" : "chip")),
         h("div", { class: "grow" }, h("b", {}, provider === "codex" ? "ChatGPT / Codex" : "Claude"),
-          h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato")) : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
+          h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato"))
+            : !S.data.providers?.[provider] ? tr("{cli} non installato su questa macchina", { cli: CLI_NAMES[provider] })
+              : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
           connected && record.plan ? h("small", {}, raw(subscriptionPlanLabel(record.plan))) : null),
         h("span", { class: `subscription-status ${connected ? "ready" : "disconnected"}` }, h("i", { "aria-hidden": "true" }), connected ? "Disponibile" : "Da collegare"));
     }));
@@ -2546,7 +2808,8 @@ function connectionsPanel() {
     return picker.node;
   });
   const keyPanel = (provider, name) => {
-    const configured = S.data.providers?.[provider];
+    // A local Ollama is not a key: the card is about the key, and says what else counts.
+    const configured = Boolean(S.data.keys?.[provider]);
     const key = h("input", { type: "password", autocomplete: "new-password", autocapitalize: "off", spellcheck: "false", "aria-label": tr("Chiave API {provider}", { provider: name }), placeholder: configured ? "Incolla una nuova chiave per sostituirla" : "Incolla la chiave API" });
     const save = btn(configured ? "Aggiorna chiave" : "Salva chiave", { icon: "check", cls: "primary", onclick: async () => {
       if (!key.value.trim()) { key.focus(); return; }
@@ -2556,6 +2819,7 @@ function connectionsPanel() {
       const result = await guard(api(`/api/providers/${provider}/key`, { method: "PUT", body: { key: value } }), "Chiave salvata");
       if (result) {
         S.data.providers[provider] = true;
+        S.data.keys = { ...S.data.keys, [provider]: true };
         status.replaceChildren(icon("check"), tr("Configurata"));
         status.className = "badge on";
         key.placeholder = tr("Incolla una nuova chiave per sostituirla");
@@ -2565,8 +2829,16 @@ function connectionsPanel() {
     } });
     const status = badge(configured ? "Configurata" : "Da configurare", configured ? "on" : "", configured ? "check" : "key");
     key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
+    const cloud = S.data.ollamaCloud || {};
+    const about = provider !== "ollama" ? h("p", {}, "La chiave vale per tutti gli agenti di questa istanza.")
+      : h("div", { class: "stack-sm" },
+        h("p", {}, "Serve solo per i modelli di Ollama Cloud. L'Ollama di questa macchina non ne ha bisogno."),
+        configured ? null
+          : cloud.signedIn ? h("p", { class: "muted" }, "Non serve: questa macchina è già collegata a Ollama Cloud.")
+            : h("p", { class: "muted" }, "In alternativa alla chiave, collega questa macchina al tuo account Ollama.",
+              cloud.signinUrl ? [" ", h("a", { href: cloud.signinUrl, target: "_blank", rel: "noopener" }, tr("Collega questa macchina"))] : null));
     return h("div", { class: "provider-key" }, h("div", { class: "provider-key-head" }, h("h3", {}, raw(name)), status),
-      h("p", {}, "La chiave vale per tutti gli agenti di questa istanza."), field("Chiave API", key), save);
+      about, field("Chiave API", key), save);
   };
   return h("div", { class: "stack" },
     panel({ icon: "monitor", title: "Subscription del dispositivo", hint: "Gli account trovati sul server Cora.", actions: scan }, residentToggle, residentList),
@@ -2579,9 +2851,9 @@ function renderSettings() {
   const discord = S.data.discord;
   const telegram = S.data.telegram;
   const guilds = discord.guilds;
-  const providers = h("div", { class: "badges" }, Object.entries(PROVIDERS).map(([key, label]) => {
+  const providers = h("div", { class: "badges" }, CONNECTIONS.map(([key, label]) => {
     const on = S.data.providers?.[key];
-    return h("span", { class: `badge${on ? " on" : ""}`, title: on ? "" : PROVIDER_HINTS[key] }, icon(on ? "check" : "close"), label);
+    return h("span", { class: `badge${on ? " on" : ""}`, title: on ? "" : PROVIDER_HINTS[key] }, icon(on ? "check" : "close"), tr(label));
   }));
   const listening = S.data.agents.find((agent) => agent.bot?.user && agent.bot.user.id === discord.user?.id);
   const discordPanel = panel({ icon: "hash", title: "Discord", hint: "Un bot ascolta i server accesi (gli altri vengono ignorati); ogni agente scrive col suo.", actions: S.data.transport === "discord" ? badge("In uso", "on", "radio") : null },
@@ -2662,7 +2934,13 @@ function renderSettings() {
         field("Messaggi di contesto", h("input", { type: "number", name: "historySize", min: 5, max: 100, value: settings.historySize, inputmode: "numeric" }), "quanta chat rileggono"))),
     panel({ icon: "chip", title: "Cervelli e sonno", hint: "Il modello di chi non ne sceglie uno e l'ora in cui riordinano la memoria." },
       h("div", { class: "grid2" },
-        field("Modello predefinito", modelPicker("defaultModel", settings.defaultModel, { allowDefault: false })),
+        h("div", { class: "field" }, h("span", { class: "label" }, "Modello predefinito"), modelPicker("defaultModel", settings.defaultModel, { allowDefault: false }),
+          (() => {
+            const known = S.data.models.find((model) => model.id === settings.defaultModel);
+            return known?.usable === false
+              ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("{model} non risponde su questa macchina ({reason}). Gli agenti senza un modello loro, gli obiettivi e le verifiche lo usano: scegline uno che gira qui.", { model: known.label, reason: tr(known.reason || "non disponibile") }))))
+              : h("small", {}, "Lo usano gli agenti senza un modello loro, e il lavoro di fondo: obiettivi, verifiche, sonno.");
+          })()),
         field("Ora del sonno", h("input", { type: "number", name: "sleepHour", min: 0, max: 23, value: settings.sleepHour, inputmode: "numeric" }), "consolidamento notturno della memoria"),
         h("div", { class: "field full" }, h("span", { class: "label" }, "Provider"), providers))),
     panel({ icon: "book", title: "Memoria condivisa", hint: "Cose che tutti gli agenti sanno: chi sei, i progetti, le regole della casa." },

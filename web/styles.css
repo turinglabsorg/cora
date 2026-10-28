@@ -346,6 +346,46 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .model-row:hover:not(:disabled) { background: linear-gradient(90deg, rgba(242, 169, 59, 0.05), transparent); }
 .model-row.on { background: linear-gradient(90deg, var(--amber-wash), transparent); }
 .model-row:disabled { opacity: 0.45; cursor: not-allowed; }
+/* The brain, as two questions side by side: who drives, and what it drives. */
+.brain-main { display: grid; grid-template-columns: minmax(230px, 0.9fr) minmax(0, 1.6fr); gap: 24px; align-items: start; }
+.brain-main > .stack-sm { min-width: 0; }
+.brain-side { min-width: 0; }
+.brain-main > .stack-sm + .stack-sm { padding-left: 24px; border-left: 1px solid var(--line); }
+.brain-side.dim > .rows, .brain-side.dim > .field { opacity: 0.4; pointer-events: none; }
+/* A harness is a radio with a lamp: lit amber when it drives, dark when it cannot here. */
+.harness-list { display: flex; flex-direction: column; gap: 6px; }
+.harness-row { display: flex; gap: 12px; align-items: flex-start; width: 100%; text-align: left; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel-2); color: inherit; font: inherit; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.harness-row:hover { border-color: var(--line-strong); }
+.harness-row.on { border-color: var(--amber-line); background: var(--amber-wash); }
+.harness-led { flex: none; width: 9px; height: 9px; margin-top: 6px; border-radius: 50%; background: var(--faint); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4); }
+.harness-row.on .harness-led { background: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
+.harness-row.off:not(.on) .harness-led { background: transparent; box-shadow: inset 0 0 0 1px var(--faint); }
+.harness-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.harness-name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-weight: 600; }
+.harness-row.on .harness-name { color: var(--amber); }
+.harness-flag { color: var(--muted); font: 500 10px/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.harness-hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
+.harness-row.off:not(.on) .harness-name, .harness-row.off:not(.on) .harness-hint { opacity: 0.7; }
+/* The card the local models run on, as one line above them. */
+.card-strip { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); }
+.card-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.card-line > svg { color: var(--amber); }
+.card-meta { color: var(--muted); font: 400 12px/1.5 var(--mono); }
+/* Where the model runs: two sides of one switch, not a dropdown. */
+.segmented { display: inline-flex; padding: 3px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel-2); gap: 3px; }
+.segmented button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 7px 14px; border-radius: calc(var(--r-md) - 3px); font: inherit; font-size: 13px; }
+.segmented button:hover { color: var(--text); }
+.segmented button.on { background: var(--amber); color: var(--ink); font-weight: 600; }
+.brain-custom > summary { cursor: pointer; color: var(--muted); font-size: 13px; list-style: none; }
+.brain-custom > summary::-webkit-details-marker { display: none; }
+.brain-custom > summary::before { content: "▸ "; color: var(--faint); }
+.brain-custom[open] > summary::before { content: "▾ "; }
+.brain-custom > summary:hover { color: var(--text); }
+.brain-custom > .stack-sm { margin-top: 10px; }
+.notice { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); }
+.notice.warn { border-color: var(--amber-line); background: var(--amber-wash); color: var(--text); }
+.notice > svg { flex: none; margin-top: 3px; color: var(--amber); }
+.notice .stack-sm { gap: 8px; }
 /* The app manifest a provider is created from: folded away, mono, never in the way. */
 .manifest > summary { cursor: pointer; color: var(--muted); font: 500 11px/1.4 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; list-style: none; }
 .manifest > summary::-webkit-details-marker { display: none; }
@@ -758,6 +798,13 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .panel-body { padding: 16px; }
   .panel-title h2 { font-size: 19px; }
   .split, .grid2, .grid3, .choices { grid-template-columns: minmax(0, 1fr); }
+  .brain-main { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .brain-main > .stack-sm + .stack-sm { padding-left: 0; padding-top: 18px; border-left: 0; border-top: 1px solid var(--line); }
+  /* On a phone the list is the way to the models: only the chosen one explains itself. */
+  .harness-row { padding: 10px 12px; }
+  .harness-row:not(.on) .harness-hint { display: none; }
+  .segmented { display: flex; width: 100%; }
+  .segmented button { flex: 1; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .stat { padding: 12px; gap: 10px; }
   .stat .panel-ico { width: 32px; height: 32px; }

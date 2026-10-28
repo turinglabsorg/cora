@@ -983,7 +983,7 @@ describe("agents in Discord", () => {
     assert.ok(state.data.models.some((model) => model.id === "claude/claude-opus-5-5"));
     assert.ok(state.data.models.some((model) => model.id === "codex/gpt-6-sol"));
     assert.ok(!state.data.models.some((model) => model.id === "codex/hidden"));
-    assert.deepEqual(state.data.providers, { claude: true, codex: true, ollama: true, orcarouter: true, hermes: true });
+    assert.deepEqual(state.data.providers, { claude: true, codex: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true });
   });
 
   test("creates two agents through the API", async () => {
@@ -2163,7 +2163,10 @@ describe("talking with the agents", () => {
     const models = (await call("/api/state")).data.models.map((model) => model.id);
     assert.ok(models.includes("hermes/test-model"));
     assert.ok(!models.includes("hermes/embed"), "only models that write");
-    assert.ok(models.includes("hermes/test-model:cloud"), "Ollama Cloud models through the local Ollama");
+    assert.ok(models.includes("hermes/test-model-big:cloud"), "Ollama Cloud models through the local Ollama");
+    assert.ok(!models.includes("hermes/test-model:cloud"), "a model installed here has no cloud twin to invent");
+    assert.ok(models.includes("hermes/orcarouter/vendor/brand-new-model") || models.some((id) => id.startsWith("hermes/orcarouter/")),
+      "a router's models are Hermes' too, at the router's address");
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/test-model" } });
     t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
     const before = cli.calls().length;
@@ -2181,6 +2184,24 @@ describe("talking with the agents", () => {
     assert.match(run.hermesConfig, /CORA_BRIDGE_TOKEN: "\$\{CORA_BRIDGE_TOKEN\}"/, "the session token never lands in the file");
     assert.deepEqual(run.secretEnv, []);
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } });
+  });
+
+  test("Hermes on a router's model talks to the router, with a key it is handed and never writes down", async (t) => {
+    await call("/api/state");
+    assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/orcarouter/vendor/router-model" } })).status, 200);
+    t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
+    const before = cli.calls().length;
+    cli.set({ reply: "Fatto passando dal router." });
+    discord.say({ content: "Olga, prova il router" });
+    await waitFor(() => posts("Olga").some((text) => text.startsWith("Fatto passando dal router.")), { what: "Olga's answer through Hermes on the router" });
+    await quiet();
+    const run = cli.calls().slice(before).find((item) => item.flavor === "hermes");
+    assert.equal(run.argv[run.argv.indexOf("-m") + 1], "vendor/router-model", "the router's own id, without the address it was routed by");
+    assert.ok(run.hermesConfig.includes(`base_url: "${orca.url.replace(/\/$/, "")}"`), "Hermes is pointed at the router");
+    assert.match(run.hermesConfig, /api_key: "\$\{CORA_ENDPOINT_KEY\}"/, "the file names the key, it does not hold it");
+    assert.ok(!run.hermesConfig.includes("sk-orca-test"), "the key value never lands in Hermes' config");
+    assert.equal(run.endpointKey, "set", "the run itself is handed the key");
+    assert.match(run.hermesHome, /-orcarouter$/, "a router's turns keep their own Hermes home, so parallel turns never rewrite each other's config");
   });
 
   test("when Hermes answers that the model gave it no content, the agent fails openly instead of saying that banner", async (t) => {
@@ -2491,6 +2512,109 @@ describe("what runs the models", () => {
     assert.equal(hardware.ollama.version, "0.16.2");
     assert.deepEqual(hardware.loaded.map((model) => [model.name, model.vram]), [["test-model", 17_100_000_000]]);
     assert.ok(Array.isArray(hardware.gpus), "a host without a card reports none instead of failing");
+  });
+
+  test("the brain is its own tab: a harness on the left, where the model runs on the right", async () => {
+    // It starts in the cloud, so a save that changed nothing could not pass for one that did.
+    const agent = app.store.createAgent({ name: "Cervellone", model: "ollama/test-model-big:cloud", tools: false, chattiness: 0 });
+    const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
+    await panel.run("boot()");
+    await panel.navigate(`#/agent/${agent.id}/cervello`);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 4);
+    assert.deepEqual(panel.app.querySelectorAll(".harness-row").map((node) => node.querySelector(".harness-name").textContent),
+      ["Cora's harness", "Claude Code", "Codex", "Hermes"], "every harness, as a list and not a dropdown");
+    // It opens on the side the agent is already on: the cloud.
+    const places = panel.app.querySelector(".segmented");
+    assert.deepEqual(places.children.map((node) => node.textContent), ["On this machine", "In the cloud"]);
+    assert.equal(places.children.find((node) => node.className === "on").textContent, "In the cloud");
+    assert.ok(panel.app.querySelectorAll(".model-row").some((node) => node.textContent.includes("test-model-big:cloud")));
+
+    // The other side lists what this machine has, with its weight.
+    places.children[0].click();
+    await waitFor(() => panel.app.querySelectorAll(".model-row").some((node) => node.textContent.includes("18.6 GB")));
+    const here = panel.app.querySelectorAll(".model-row").find((node) => node.querySelector(".row-title").textContent.startsWith("test-model"));
+    assert.ok(here, "the models of this machine are the ones offered for the local side");
+
+    // Choosing one and saving sends only the brain's half of the agent.
+    here.click();
+    panel.app.querySelector("form").dispatch("submit");
+    await waitFor(() => app.store.agent(agent.id).model === "ollama/test-model");
+    assert.equal(app.store.agent(agent.id).name, "Cervellone", "the profile is a different tab and a different save");
+  });
+
+  test("a harness this machine cannot run says what it needs, and is never saved", async () => {
+    // dopamina's machine: a card and a local Ollama, Claude Code, no Codex, no Hermes, no
+    // OrcaRouter key, and a cloud the local Ollama lists without being paired to it.
+    const agent = { id: "ag_x", name: "Dina", model: "ollama/qwen3:14b", enabled: true, tools: true, chattiness: 0.4, channelIds: [], color: "#e8a33d", memoryCount: 0 };
+    const state = {
+      agents: [agent], channels: [], routines: [], subscriptions: [], requests: [], guilds: [], discordChannels: [],
+      models: [
+        { id: "ollama/qwen3:14b", provider: "ollama", label: "qwen3:14b", local: true, size: 9_300_000_000, tools: true },
+        { id: "ollama/deepseek-v4.1-flash:cloud", provider: "ollama", label: "deepseek-v4.1-flash:cloud", local: false, tools: true, usable: false, reason: "questa macchina non è collegata a Ollama Cloud" },
+        { id: "claude/claude-sonnet-5-5", provider: "claude", label: "Sonnet 5.5", local: false, tools: true, vision: true },
+      ],
+      providers: { claude: true, codex: false, ollama: true, ollamaLocal: true, ollamaCloud: false, orcarouter: false, hermes: false },
+      ollamaCloud: { signedIn: false, signinUrl: "https://ollama.com/connect?name=fixture" }, keys: { ollama: false, orcarouter: false },
+      settings: { defaultModel: "ollama/deepseek-v4.1-flash:cloud", useResidentSubscriptions: false },
+      transport: "discord", discord: { state: "ready", user: null, guilds: [] }, telegram: { state: "missing-token" }, slack: null,
+      push: { enabled: false, publicKey: "", devices: 0 }, currentUser: { id: "u", name: "Owner", role: "owner" },
+      access: { hosted: false, canManage: true }, boxImage: { name: "cora-box:latest", ready: true }, timezone: "Europe/Rome",
+    };
+    const puts = [];
+    const reply = (body) => new Response(JSON.stringify(body));
+    const panel = panelHarness({ language: "en", hash: `#/agent/${agent.id}/cervello`, fetch: async (path, options) => {
+      if (path === "/api/me") return reply({ authed: true });
+      if (path === "/api/state") return reply(state);
+      if (path === "/api/activity") return reply([]);
+      if (path === "/api/hardware") return reply({ gpus: [], hosts: [], loaded: [] });
+      if (options?.method === "PUT") puts.push(path);
+      return reply({});
+    } });
+    await panel.run("boot()");
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 4);
+    const side = () => panel.app.querySelector(".brain-side");
+    const row = (name) => panel.app.querySelectorAll(".harness-row").find((node) => node.querySelector(".harness-name").textContent.startsWith(name));
+    assert.ok(!row("Cora's harness").querySelector(".harness-flag"), "a missing router does not make Cora's harness missing");
+    assert.equal(row("Codex").querySelector(".harness-flag").textContent, "not installed");
+
+    // Its own cloud: listed, but not choosable, and the default that points there neither.
+    panel.app.querySelector(".segmented").children[1].click();
+    assert.match(side().querySelector(".notice").textContent, /Ollama Cloud is not connected/);
+    assert.ok(side().querySelectorAll(".model-row").every((node) => "disabled" in node.attributes));
+
+    // Claude Code opens on one of its own models, never on Cora's default.
+    row("Claude Code").click();
+    const chosen = side().querySelectorAll(".model-row").find((node) => node.className.split(" ").includes("on"));
+    assert.equal(chosen.querySelector(".row-title").textContent.replace("chosen", ""), "Sonnet 5.5");
+
+    // Codex is not here: what it needs, no list to pick from, and no save.
+    row("Codex").click();
+    assert.match(side().querySelector(".notice").textContent, /Codex is not installed on this machine/);
+    assert.equal(side().querySelectorAll(".model-row").length, 0);
+    panel.app.querySelector("form").dispatch("submit");
+    await sleep(20);
+    assert.deepEqual(puts, [], "an agent is never saved onto a harness the machine does not have");
+  });
+
+  test("a machine nobody paired with Ollama Cloud says so instead of offering its models", async (t) => {
+    // No key here on purpose: then the only thing that may reach the cloud is the pairing.
+    const previous = fakeOllama.cloud;
+    fakeOllama.cloud = false;
+    t.after(() => { fakeOllama.cloud = previous; });
+    const llm = new LLM({ ollamaUrl: ollama.url, ollamaKey: "", cliWorkDir: "/unused", claudeBin: "/not-installed/claude", codexBin: "/not-installed/codex", hermesBin: "/not-installed/hermes" });
+    const models = await llm.listModels({ fresh: true });
+    const cloud = models.find((model) => model.id === "ollama/test-model-big:cloud");
+    const here = models.find((model) => model.id === "ollama/test-model");
+    assert.equal(cloud.usable, false, "a cloud model on an unpaired machine cannot answer");
+    assert.match(cloud.reason, /Ollama Cloud/);
+    assert.equal(here.usable, undefined, "what is installed here is unaffected");
+    assert.equal(llm.providers().ollamaCloud, false, "the account and the local server are two different connections");
+    assert.equal(llm.providers().ollamaLocal, true, "the server on this machine is a connection of its own");
+
+    fakeOllama.cloud = true;
+    const paired = await llm.listModels({ fresh: true });
+    assert.equal(paired.find((model) => model.id === "ollama/test-model-big:cloud").usable, undefined, "once paired it is a model like any other");
+    assert.equal(llm.providers().ollamaCloud, true);
   });
 
   test("a model the card could not take whole says what is left on the processor", () => {

@@ -8,16 +8,52 @@ class Element {
     this.text = text;
     this.attributes = {};
     this.children = [];
+    this.listeners = {};
     this.style = { setProperty() {} };
+    // A browser's text fields start empty, never undefined.
+    if (tag === "input" || tag === "textarea") this.value = "";
   }
   get className() { return this.attributes.class || ""; }
   set className(value) { this.attributes.class = value; }
+  get classList() {
+    const names = () => this.className.split(" ").filter(Boolean);
+    const write = (list) => { this.className = [...new Set(list)].join(" "); };
+    return {
+      contains: (name) => names().includes(name),
+      add: (...added) => write([...names(), ...added]),
+      remove: (...gone) => write(names().filter((name) => !gone.includes(name))),
+      toggle: (name, force) => {
+        const on = force === undefined ? !names().includes(name) : Boolean(force);
+        write(on ? [...names(), name] : names().filter((item) => item !== name));
+        return on;
+      },
+    };
+  }
   get textContent() { return this.text + this.children.map((child) => child.textContent).join(""); }
   set textContent(value) { this.text = value; this.replaceChildren(); }
   get lastChild() { return this.children.at(-1); }
   get isConnected() { return this.tagName === "document" || Boolean(this.parent?.isConnected); }
   setAttribute(key, value) { this.attributes[key] = String(value); }
-  addEventListener() {}
+  addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); }
+  /** What a real click does to the panel, so a test can follow a choice through. */
+  dispatch(type, event = {}) {
+    for (const handler of this.listeners[type] || []) handler({ type, preventDefault() {}, stopPropagation() {}, ...event });
+    return this;
+  }
+  click() { return this.dispatch("click"); }
+  /** Every named field below this one, the way form.elements and FormData see them. */
+  get fields() {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.children) {
+        if (child.attributes.name && ["input", "select", "textarea"].includes(child.tagName)) out.push(child);
+        walk(child);
+      }
+    };
+    walk(this);
+    return out;
+  }
+  get elements() { return Object.fromEntries(this.fields.map((field) => [field.attributes.name, field])); }
   scrollIntoView() {}
   append(...children) {
     for (const child of children) {
@@ -38,6 +74,27 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
 }
 
+/** What a browser submits for a form: enabled fields, checked boxes, a select's chosen option. */
+class FormData {
+  constructor(form) {
+    this.entries = [];
+    for (const field of form.fields) {
+      if (field.disabled === true || "disabled" in field.attributes) continue;
+      const type = field.attributes.type;
+      if ((type === "checkbox" || type === "radio") && !field.checked) continue;
+      let value = field.value;
+      if (field.tagName === "select" && value === undefined) {
+        const options = field.querySelectorAll("option");
+        const chosen = options.find((option) => option.selected) || options[0];
+        value = chosen ? chosen.value ?? chosen.attributes.value ?? chosen.textContent : "";
+      }
+      this.entries.push([field.attributes.name, String(value ?? "")]);
+    }
+  }
+  get(name) { return this.entries.find(([key]) => key === name)?.[1] ?? null; }
+  getAll(name) { return this.entries.filter(([key]) => key === name).map(([, value]) => value); }
+}
+
 /** Runs the served panel against the integration server with a small, inert DOM. */
 export function panelHarness({ source, fetch, hash = "", language = "it" }) {
   const document = new Element("document");
@@ -52,7 +109,7 @@ export function panelHarness({ source, fetch, hash = "", language = "it" }) {
   document.createTextNode = (text) => new Element("text", String(text));
   document.getElementById = () => app;
   const context = createContext({
-    EN, Node: Element, document, fetch,
+    EN, Node: Element, document, fetch, FormData,
     navigator: { language }, location: { hash },
     localStorage: { getItem: () => language },
     window: { addEventListener() {} },

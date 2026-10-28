@@ -109,6 +109,9 @@ const ROUTERS = {
   orcarouter: { label: "OrcaRouter", auto: "orcarouter/auto" },
 };
 
+/** An Ollama name that answers from the cloud, not from this machine: name:cloud, name:tag-cloud. */
+const CLOUD_NAME = /(^|[:-])cloud$/i;
+
 /** Model families that take images, for routers whose model list does not say. */
 const VISION = /(gpt-4o|gpt-4\.1|gpt-5|o3|o4|claude|gemini|grok-4|pixtral|vision|-vl|llava|qwen.*vl)/i;
 
@@ -135,7 +138,7 @@ function parseArgs(value) {
   try { return JSON.parse(value || "{}"); } catch { return { _raw: String(value) }; }
 }
 
-function onPath(bin) {
+export function onPath(bin) {
   if (bin.includes("/")) return existsSync(bin);
   return (process.env.PATH || "").split(":").some((dir) => dir && existsSync(join(dir, bin)));
 }
@@ -179,7 +182,7 @@ export class LLM {
 
   /** What one Ollama answers: which models it has, which are loaded, which version it speaks. */
   async ollamaReport(host) {
-    const report = { ...host, reachable: false, version: "", models: [], loaded: [] };
+    const report = { ...host, reachable: false, version: "", models: [], loaded: [], cloud: { signedIn: false, signinUrl: "" } };
     const ask = async (path, timeoutMs = 5000) => {
       const response = await fetch(`${host.url}${path}`, { headers: this.ollamaHeaders(), signal: AbortSignal.timeout(timeoutMs) });
       if (!response.ok) throw new Error(String(response.status));
@@ -220,6 +223,16 @@ export class LLM {
       const running = await ask("/api/ps");
       report.loaded = (running.models || []).map((model) => ({ name: model.name, size: Number(model.size) || 0, vram: Number(model.size_vram) || 0 }));
     } catch {}
+    // A local Ollama lists the cloud models whether or not the machine may run them.
+    // /api/me is the one cheap way to know: it answers the account, or a link to pair it.
+    try {
+      const response = await fetch(`${host.url}/api/me`, { method: "POST", headers: this.ollamaHeaders(), signal: AbortSignal.timeout(4000) });
+      const data = await response.json().catch(() => ({}));
+      report.cloud = response.ok
+        ? { signedIn: true, signinUrl: "", name: String(data.name || data.user || "") }
+        : { signedIn: false, signinUrl: typeof data.signin_url === "string" ? data.signin_url : "" };
+    } catch {}
+    if (this.ollamaKey) report.cloud = { ...report.cloud, signedIn: true };
     return report;
   }
 
@@ -232,6 +245,10 @@ export class LLM {
       claude: onPath(this.claudeBin),
       codex: onPath(this.codexBin),
       ollama: Boolean(this.ollamaKey) || this.localOllama,
+      // An Ollama on this machine is not an Ollama Cloud account: it lists the cloud
+      // models either way, and only a paired machine (or a key) can run them.
+      ollamaLocal: this.localOllama,
+      ollamaCloud: Boolean(this.ollamaKey) || Boolean(this.cloudAccount?.signedIn),
       orcarouter: Boolean(this.routers.orcarouter.key),
       hermes: onPath(this.hermes.bin),
     };
@@ -250,6 +267,7 @@ export class LLM {
     const first = reports.find((host) => host.local) || reports[0] || { url: "", local: false, reachable: false, version: "" };
     out.ollama = { url: first.url, local: Boolean(first.local), reachable: first.reachable, version: first.version };
     out.loaded = first.loaded || [];
+    out.cloud = first.cloud || { signedIn: false, signinUrl: "" };
     return out;
   }
 
@@ -334,6 +352,19 @@ export class LLM {
     return provider === "claude" || provider === "codex" || provider === "hermes";
   }
 
+  /**
+   * The endpoint behind a Hermes model. `<router>/<model>` runs on that router with its
+   * key; anything else runs on Hermes' own endpoint, which is this machine's Ollama.
+   */
+  hermesEndpoint(name) {
+    const slash = String(name).indexOf("/");
+    const router = slash > 0 ? this.routers[name.slice(0, slash)] : null;
+    // Each endpoint keeps its own Hermes home: runs in parallel share one config.yaml, and
+    // two turns on two addresses must never rewrite each other's.
+    if (router?.key) return { baseUrl: router.url, key: router.key, model: name.slice(slash + 1), home: `${this.hermes.home}-${name.slice(0, slash)}` };
+    return { baseUrl: this.hermes.baseUrl, key: "", model: String(name), home: this.hermes.home };
+  }
+
   async listModels({ fresh = false, host = "" } = {}) {
     if (host && host !== this.ollamaUrl) return this.hostModels(host, { fresh });
     if (!fresh && Date.now() - this.cache.at < 5 * 60 * 1000 && this.cache.models.length) return this.cache.models;
@@ -351,12 +382,15 @@ export class LLM {
       const report = await this.ollamaReport({ url: this.ollamaUrl, label: "", gpu: "", local: this.localOllama });
       for (const model of report.models) {
         if (!model.completion) continue;
+        const reachable = model.local || report.cloud.signedIn;
         models.push({
           id: `ollama/${model.name}`, provider: "ollama", label: model.name,
           local: model.local, size: model.size,
           tools: model.tools, vision: model.vision, thinking: model.thinking,
+          ...(reachable ? {} : { usable: false, reason: "questa macchina non è collegata a Ollama Cloud" }),
         });
       }
+      this.cloudAccount = report.cloud;
     }
     if (available.hermes) {
       // Hermes runs the models of its endpoint: by default the local Ollama, cloud models included.
@@ -368,18 +402,15 @@ export class LLM {
           // argo-* models belong to another project on this machine.
           if (!model.name || /^argo-/i.test(model.name)) continue;
           if (Array.isArray(model.capabilities) && !model.capabilities.includes("completion")) continue;
-          models.push({ id: `hermes/${model.name}`, provider: "hermes", label: model.name, tools: true, vision: false, thinking: false });
+          const size = Number(model.size) || 0;
+          const local = !CLOUD_NAME.test(model.name) && size > 0;
+          models.push({
+            id: `hermes/${model.name}`, provider: "hermes", label: model.name,
+            local, size, ...(local ? {} : { via: PROVIDERS.ollama }),
+            tools: true, vision: false, thinking: false,
+          });
         }
       } catch {}
-      // Ollama Cloud models reach Hermes through the local Ollama under their cloud name: name:cloud, name:tag-cloud.
-      const seen = new Set(models.filter((model) => model.provider === "hermes").map((model) => model.id));
-      for (const model of models.filter((item) => item.provider === "ollama")) {
-        const name = splitModel(model.id).name;
-        const cloud = name.includes(":") ? `${name}-cloud` : `${name}:cloud`;
-        if (/^argo-/i.test(name) || seen.has(`hermes/${cloud}`)) continue;
-        seen.add(`hermes/${cloud}`);
-        models.push({ id: `hermes/${cloud}`, provider: "hermes", label: `${cloud}`, tools: model.tools, vision: false, thinking: false });
-      }
     }
     for (const [provider, router] of Object.entries(this.routers)) {
       if (!available[provider]) continue;
@@ -396,6 +427,26 @@ export class LLM {
       } catch {}
       const auto = ROUTERS[provider].auto;
       if (auto && !ids.has(auto)) models.unshift({ id: `${provider}/${auto}`, provider, label: `${auto} (sceglie il router)`, tools: true, vision: false, thinking: false });
+    }
+    // Hermes drives any OpenAI-compatible endpoint, so every cloud model Cora can reach is
+    // one Hermes can run too. Ollama Cloud answers through the local Ollama under its cloud
+    // name; a router answers at its own address, which the id carries as a first segment.
+    if (available.hermes) {
+      const seen = new Set(models.filter((model) => model.provider === "hermes").map((model) => model.id));
+      // Only what is really in the cloud: a model installed here has no cloud twin to invent.
+      for (const model of models.filter((item) => item.provider === "ollama" && !item.local)) {
+        const name = splitModel(model.id).name;
+        const cloud = CLOUD_NAME.test(name) ? name : name.includes(":") ? `${name}-cloud` : `${name}:cloud`;
+        if (/^argo-/i.test(name) || seen.has(`hermes/${cloud}`)) continue;
+        seen.add(`hermes/${cloud}`);
+        models.push({ id: `hermes/${cloud}`, provider: "hermes", label: cloud, via: PROVIDERS.ollama, local: false, tools: model.tools, vision: false, thinking: false });
+      }
+      for (const model of models.filter((item) => ROUTERS[item.provider])) {
+        const id = `hermes/${model.provider}/${splitModel(model.id).name}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        models.push({ id, provider: "hermes", label: model.label, via: ROUTERS[model.provider].label, local: false, tools: model.tools, vision: false, thinking: false });
+      }
     }
     this.cache = { at: Date.now(), models };
     return models;
@@ -445,7 +496,10 @@ export class LLM {
             workDir: authEnv ? join(this.cliWorkDir, subscriptionId) : this.cliWorkDir });
           return await this.subscriptions.run(subscriptionId, provider, runSignal, invoke);
         }
-        if (provider === "hermes") return await runHermes({ bin: this.hermes.bin, home: this.hermes.home, baseUrl: this.hermes.baseUrl, ...options });
+        if (provider === "hermes") {
+          const endpoint = this.hermesEndpoint(name);
+          return await runHermes({ bin: this.hermes.bin, ...options, home: endpoint.home, baseUrl: endpoint.baseUrl, model: endpoint.model, apiKey: endpoint.key });
+        }
         throw new Error(`${provider} is not a CLI provider`);
       } finally {
         run?.dispose();

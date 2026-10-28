@@ -164,7 +164,7 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
  * whose session arrives per run through ${...} placeholders Hermes fills in
  * from the environment. Runs in parallel share it.
  */
-export function hermesConfig({ baseUrl, model }) {
+export function hermesConfig({ baseUrl, model, keyed = false }) {
   return [
     "# Written by Cora: Hermes runs Cora's agents with Cora's tools only.",
     "model:",
@@ -174,6 +174,9 @@ export function hermesConfig({ baseUrl, model }) {
     "providers:",
     "  cora-endpoint:",
     `    api: ${JSON.stringify(baseUrl)}`,
+    `    base_url: ${JSON.stringify(baseUrl)}`,
+    // The key never lands in the file: Hermes expands the variable the run gives it.
+    ...(keyed ? ["    api_key: \"${CORA_ENDPOINT_KEY}\""] : []),
     `    default_model: ${JSON.stringify(model)}`,
     "mcp_servers:",
     "  cora:",
@@ -195,11 +198,11 @@ const NO_REPLY = /^\s*\W{0,4}No reply\b/i;
  * toolset: no terminal, files or computer use on the host), no personal rules
  * or memory of the owner's Hermes, the answer on stdout.
  */
-export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl, signal }) {
+export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl, apiKey = "", signal }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const configFile = join(home, "config.yaml");
-  const config = hermesConfig({ baseUrl, model });
+  const config = hermesConfig({ baseUrl, model, keyed: Boolean(apiKey) });
   let current = "";
   try { current = readFileSync(configFile, "utf8"); } catch {}
   // Only the default model changes between runs, and -m overrides it: rewrite when anything else differs.
@@ -208,7 +211,7 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   const tools = mcp && toolNames.length;
   // In one-shot mode an MCP server's toolset is named after the server, and -t is the complete list.
   const args = ["-z", `${system}\n\n---\n\n${prompt}`, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify"];
-  const env = { HERMES_HOME: home, ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
+  const env = { HERMES_HOME: home, ...(apiKey ? { CORA_ENDPOINT_KEY: apiKey } : {}), ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
   const out = await run(bin, args, { cwd: workDir, timeoutMs, env, signal });
   signal?.throwIfAborted();
   if (out.timedOut) throw new Error(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`);

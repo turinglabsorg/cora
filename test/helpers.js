@@ -290,6 +290,16 @@ export async function fakeOllama(reply) {
         { name: "test-model-big:cloud", size: 0, capabilities: ["completion", "tools"] },
       ] }));
     }
+    // A local Ollama answers /api/me with the account it is paired to, or refuses with
+    // the link to pair it. `fakeOllama.cloud = false` is a machine nobody signed in on.
+    if (url.pathname === "/api/me") {
+      if (fakeOllama.cloud === false) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "unauthorized", signin_url: "https://ollama.com/connect?name=fixture" }));
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ name: "fixture" }));
+    }
     if (url.pathname === "/api/version") {
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ version: "0.16.2" }));
@@ -439,7 +449,7 @@ process.stdin.on("end", async () => {
     process.stderr.write("Selected model is at capacity. Please try a different model.\\n");
     process.exit(1);
   }
-  const record = { flavor, argv, stdin, tools: null, output: null, hermesConfig, secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
+  const record = { flavor, argv, stdin, tools: null, output: null, hermesConfig, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
   if (control.hang) {
     fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ ...record, pid: process.pid }) + "\\n");
     setInterval(() => {}, 1000);

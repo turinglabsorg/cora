@@ -285,6 +285,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         routines: store.routines().map(routineView),
         models,
         providers: llm.providers(),
+        ollamaCloud: llm.cloudAccount || { signedIn: false, signinUrl: "" },
+        // Which keys are stored, apart from whether the thing they unlock is reachable some other way.
+        keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key) },
         subscriptions: subscriptions.list(),
         boxImage: { name: config.boxImage, ready: imageReady },
         timezone: config.timezone,

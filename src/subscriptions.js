@@ -4,6 +4,7 @@ import { resolve as resolvePath, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ValidationError } from "./store.js";
+import { onPath } from "./llm.js";
 
 const LOGIN_MS = 10 * 60 * 1000;
 const BROWSER_HELPER = fileURLToPath(new URL("./subscription-browser.js", import.meta.url));
@@ -160,10 +161,19 @@ export class Subscriptions {
     return env;
   }
 
+  /** Whether the CLI this account would be used through is installed here at all. */
+  installed(provider) {
+    return onPath(this.bins[provider] || provider);
+  }
+
   view(id) {
     const record = this.require(id);
     const login = this.logins.get(id);
-    return { ...record, ...(login ? { login: { url: login.url, userCode: login.userCode, manualCode: record.provider === "claude", expiresAt: login.expiresAt } } : {}) };
+    return {
+      ...record,
+      installed: this.installed(record.provider),
+      ...(login ? { login: { url: login.url, userCode: login.userCode, manualCode: record.provider === "claude", expiresAt: login.expiresAt } } : {}),
+    };
   }
 
   list() { return this.store.subscriptions().map((record) => this.view(record.id)); }
@@ -192,6 +202,9 @@ export class Subscriptions {
     const record = this.require(id);
     if (record.resident) throw new ValidationError("le subscription residenti si gestiscono sul server");
     if (this.closed) throw new ValidationError("Cora si sta fermando");
+    if (!this.installed(record.provider)) {
+      throw new ValidationError(`${record.provider === "codex" ? "Codex" : "Claude Code"} non è installato su questa macchina: installalo sul server e riprova`);
+    }
     if (this.busy.has(id) || this.queues.has(id)) throw new ValidationError("subscription in uso: attendi la fine del lavoro");
     if (this.logins.has(id)) return this.view(id);
     const directory = this.directory(record);
