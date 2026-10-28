@@ -383,4 +383,13 @@ export class Slack extends EventEmitter {
 
   /** Slack has no typing indicator for a bot user outside assistant threads. */
   typing() {}
+
+  /** A mark on the message says the agent took it: quieter than a line in the channel. */
+  async react(channelId, ts, name = "eyes") {
+    try { await this.request("reactions.add", { channel: channelId, timestamp: ts, name }); } catch {}
+  }
+
+  async unreact(channelId, ts, name = "eyes") {
+    try { await this.request("reactions.remove", { channel: channelId, timestamp: ts, name }); } catch {}
+  }
 }

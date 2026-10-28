@@ -33,6 +33,19 @@ const PROVIDERS = {
   orcarouter: "OrcaRouter",
   hermes: "Hermes Agent",
 };
+// Who runs the loop is one choice; which model thinks is another. Cora's own harness
+// drives Ollama and the routers; Claude Code, Codex and Hermes drive themselves.
+const HARNESSES = {
+  cora: { label: "Harness di Cora", hint: "Cora guida il modello e gli passa gli strumenti.", providers: ["ollama", "orcarouter"] },
+  claude: { label: "Claude Code", hint: "Claude guida sé stesso con il tuo abbonamento.", providers: ["claude"] },
+  codex: { label: "Codex", hint: "Codex guida sé stesso con il tuo abbonamento.", providers: ["codex"] },
+  hermes: { label: "Hermes", hint: "Hermes guida sé stesso sui modelli del suo endpoint, di solito quelli di questa macchina.", providers: ["hermes"] },
+};
+const harnessOf = (model) => {
+  const provider = String(model || "").split("/")[0];
+  return Object.keys(HARNESSES).find((key) => HARNESSES[key].providers.includes(provider)) || "cora";
+};
+
 const PROVIDER_GROUPS = {
   "ollama-local": "Ollama su questa macchina",
   ollama: "Ollama Cloud",
@@ -406,6 +419,10 @@ function connectEvents() {
         h("span", { class: "panel-ico" }, icon("shield")), h("h1", {}, "Accesso revocato"),
         h("p", { class: "login-sub" }, "L'owner ha modificato i tuoi permessi. Contattalo per accedere di nuovo."),
         btn("Usa un altro account", { icon: "logout", cls: "primary", href: S.cloud?.logout || "/" }))));
+      return;
+    }
+    if (entry.type === "ollama-pull") {
+      S.onPull?.(entry);
       return;
     }
     if (entry.type === "subscriptions") return;
@@ -830,48 +847,145 @@ function renderAgents() {
 const gbFromBytes = (value) => Math.round((Number(value) || 0) / 1e8) / 10;
 const gbFromMib = (value) => Math.round((Number(value) || 0) / 102.4) / 10;
 
-/** The cards in this machine, what is loaded in them and which Ollama answers. */
-function machineNode() {
-  const node = h("div", { class: "stack-sm" }, h("small", { class: "muted" }, tr("Guardo la macchina…")));
-  api("/api/hardware").then((info) => {
-    const body = [];
-    const marks = [];
-    if (info.ollama?.url) marks.push(badge(info.ollama.local ? "Ollama su questa macchina" : "Ollama Cloud", info.ollama.reachable ? "on" : "err", "chip"));
-    if (info.ollama?.version) marks.push(badge(`v${info.ollama.version}`, "", "info"));
-    if (marks.length) body.push(h("div", { class: "badges" }, marks));
-    const gpus = info.gpus || [];
-    if (gpus.length) {
-      body.push(h("div", { class: "rows" }, gpus.map((gpu) => h("div", { class: "row-item" },
-        h("div", { class: "row-text full" },
-          h("span", { class: "row-title" }, icon("chip"), raw(gpu.name)),
-          h("span", { class: "row-meta" },
-            h("span", {}, raw(tr("{used} di {total} GB", { used: gbFromMib(gpu.memoryUsed), total: gbFromMib(gpu.memoryTotal) }))),
-            h("span", {}, raw(tr("carico {load}%", { load: gpu.load })))))))));
-    } else if (info.ollama?.local) {
-      body.push(h("small", { class: "muted" }, "Nessuna scheda dedicata su questa macchina: i modelli locali girano sul processore."));
-    }
-    const loaded = info.loaded || [];
-    if (loaded.length) {
-      body.push(h("div", { class: "rows" }, loaded.map((model) => h("div", { class: "row-item" },
-        h("div", { class: "row-text full" },
-          h("span", { class: "row-title" }, raw(model.name)),
-          h("span", { class: "row-meta" },
-            h("span", {}, raw(tr("{size} GB", { size: gbFromBytes(model.size) }))),
-            model.vram ? h("span", {}, raw(tr("{vram} GB in VRAM", { vram: gbFromBytes(model.vram) }))) : null))))));
-    } else if (info.ollama?.reachable) {
-      body.push(h("small", { class: "muted" }, "Nessun modello caricato in questo momento."));
-    }
-    node.replaceChildren(...body.filter(Boolean));
-  }).catch(() => node.replaceChildren(h("small", { class: "muted" }, tr("Non riesco a leggere la macchina."))));
-  return node;
+/** How much of a card a model needs: its weights plus room for the conversation. */
+const VRAM_NEEDED = (size) => Number(size || 0) * 1.2;
+
+function fitOf(model, card) {
+  if (!card || !card.memoryTotal) return null;
+  const freeMib = card.memoryTotal - card.memoryUsed;
+  const neededMib = VRAM_NEEDED(model.size) / 1_048_576;
+  if (!model.size) return null;
+  if (neededMib <= freeMib) return { kind: "on", text: "entra" };
+  if (neededMib <= card.memoryTotal) return { kind: "warn", text: "stretta: libera la scheda" };
+  return { kind: "err", text: "non entra: girerebbe sul processore" };
 }
 
-function modelSelect(name, current, { allowDefault = true } = {}) {
+/**
+ * The machine an agent thinks with: its cards, the Ollama that serves each of
+ * them, and which models are installed there. Ollama chooses the card when it
+ * starts, never per request, so choosing a server is how an agent picks a card.
+ */
+function brainMachine(agent, modelNode, getHarness = () => "cora") {
+  const select = modelNode.querySelector("select");
+  const hostInput = h("input", { type: "hidden", name: "ollamaHost", value: agent.ollamaHost || "" });
+  const body = h("div", { class: "stack-sm" }, h("small", { class: "muted" }, tr("Guardo la macchina…")));
+  const wrap = h("div", { class: "stack-sm" }, hostInput, body);
+
+  const choose = (name) => {
+    // The same local model can be driven by Cora or by Hermes: the harness picks the prefix.
+    const id = `${getHarness() === "hermes" ? "hermes" : "ollama"}/${name}`;
+    if (![...select.options].some((option) => option.value === id)) select.append(h("option", { value: id }, name));
+    select.value = id;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    const custom = modelNode.querySelector("input[type=text]");
+    if (custom) { custom.value = ""; select.disabled = false; }
+    draw(latest);
+  };
+
+  let latest = null;
+  const draw = (info) => {
+    latest = info;
+    // Claude Code and Codex run on a subscription, not on this machine's cards.
+    if (!["cora", "hermes"].includes(getHarness())) {
+      body.replaceChildren(h("small", { class: "muted" }, tr("Questo harness non usa le schede di questa macchina.")));
+      return;
+    }
+    const hosts = (info.hosts || []).filter((host) => host.local);
+    const chosen = hosts.find((host) => host.url === hostInput.value) || hosts[0] || null;
+    if (chosen && !hostInput.value) hostInput.value = hosts.length > 1 ? chosen.url : "";
+    const cards = info.gpus || [];
+    const card = chosen?.gpu ? cards.find((item) => item.uuid === chosen.gpu) : cards.length === 1 ? cards[0] : null;
+    const out = [];
+
+    if (cards.length) {
+      out.push(h("div", { class: "rows" }, cards.map((item) => {
+        const mine = card && item.uuid === card.uuid;
+        return h("div", { class: "row-item" }, h("div", { class: "row-text full" },
+          h("span", { class: "row-title" }, icon("chip"), raw(item.name), mine && cards.length > 1 ? badge("in uso da lui", "on", "check") : null),
+          h("span", { class: "row-meta" },
+            h("span", {}, raw(tr("{free} GB liberi di {total}", { free: gbFromMib(item.memoryTotal - item.memoryUsed), total: gbFromMib(item.memoryTotal) }))),
+            h("span", {}, raw(tr("carico {load}%", { load: item.load }))))));
+      })));
+    } else if (hosts.length) {
+      out.push(h("small", { class: "muted" }, "Nessuna scheda dedicata: i modelli locali girano sul processore."));
+    }
+
+    if (hosts.length > 1) {
+      const picker = h("select", {}, hosts.map((host) => h("option", { value: host.url, selected: host.url === (hostInput.value || hosts[0].url) },
+        `${host.label || host.url}${host.version ? ` · Ollama ${host.version}` : ""}`)));
+      picker.addEventListener("change", () => { hostInput.value = picker.value; draw(latest); });
+      out.push(field("Scheda", picker, "Ogni scheda ha il suo Ollama: scegliere il server è come scegliere la scheda."));
+    }
+
+    if (chosen) {
+      const installed = (chosen.models || []).filter((model) => model.local && model.completion);
+      const usable = installed.filter((model) => model.tools);
+      const unusable = installed.filter((model) => !model.tools);
+      const current = (select.value || agent.model || "").replace(/^(ollama|hermes)\//, "");
+      const row = (model, ok) => {
+        const fit = fitOf(model, card);
+        const chosenOne = model.name === current;
+        const loaded = (chosen.loaded || []).find((item) => item.name === model.name);
+        return h("button", {
+          type: "button", class: `row-link model-row${chosenOne ? " on" : ""}`, disabled: !ok,
+          title: ok ? "" : "Senza strumenti un agente non può fare nulla",
+          onclick: ok ? () => choose(model.name) : undefined,
+        },
+          h("div", { class: "row-text full" },
+            h("span", { class: "row-title" }, raw(model.name), chosenOne ? badge("scelto", "on", "check") : null),
+            h("span", { class: "row-meta" },
+              h("span", {}, raw(tr("{size} GB", { size: gbFromBytes(model.size) }))),
+              fit ? badge(fit.text, fit.kind, fit.kind === "on" ? "check" : "alert") : null,
+              model.vision ? h("span", {}, tr("vede")) : null,
+              loaded ? h("span", {}, raw(tr("caricato: {vram} GB in VRAM", { vram: gbFromBytes(loaded.vram) }))) : null,
+              ok ? null : h("span", {}, tr("senza strumenti")))));
+      };
+      out.push(h("div", { class: "field full" }, h("span", { class: "label" }, "Modelli su questa macchina"),
+        usable.length || unusable.length
+          ? h("div", { class: "rows" }, usable.map((model) => row(model, true)), unusable.map((model) => row(model, false)))
+          : h("small", { class: "muted" }, "Nessun modello installato qui.")));
+
+      const name = h("input", { type: "text", placeholder: tr("nome del modello, es. qwen3-coder:30b"), autocomplete: "off", spellcheck: "false" });
+      const status = h("small", { class: "muted" });
+      const install = btn("Scarica", { icon: "upgrade", cls: "primary", onclick: async () => {
+        const wanted = name.value.trim();
+        if (!wanted) return;
+        if (!confirm(tr("Scarico {model} su {card}? Ollama lo installa e lo configura da sé; l'avanzamento lo vedi qui.", { model: wanted, card: card?.name || chosen.label || tr("questa macchina") }))) return;
+        status.textContent = tr("comincio…");
+        await guard(api("/api/ollama/pull", { method: "POST", body: { model: wanted, host: chosen.url } }), tr("Scarico {model}", { model: wanted }));
+      } });
+      S.onPull = (event) => {
+        if (event.host !== chosen.url) return;
+        if (event.done) {
+          status.textContent = event.ok ? tr("{model} è pronto.", { model: event.model }) : tr("{model}: {error}", { model: event.model, error: event.error });
+          if (event.ok) api("/api/hardware").then(draw).catch(() => {});
+          return;
+        }
+        const percent = event.total ? Math.round((event.completed / event.total) * 100) : 0;
+        status.textContent = `${event.model}: ${event.status}${event.total ? ` ${percent}%` : ""}`;
+      };
+      out.push(h("div", { class: "field full" }, h("span", { class: "label" }, "Installa un modello"),
+        h("div", { class: "input-row" }, name, install), status));
+    }
+
+    body.replaceChildren(...out.filter(Boolean));
+  };
+
+  api("/api/hardware").then(draw).catch(() => body.replaceChildren(h("small", { class: "muted" }, tr("Non riesco a leggere la macchina."))));
+  wrap.reload = () => (latest ? draw(latest) : api("/api/hardware").then(draw).catch(() => {}));
+  return wrap;
+}
+
+function modelSelect(name, current, { allowDefault = true, harness = "" } = {}) {
   const select = h("select", { name });
   if (allowDefault) select.append(h("option", { value: "" }, tr("Predefinito ({model})", { model: modelLabel(S.data.settings.defaultModel) })));
   const groups = {};
+  const wanted = harness ? HARNESSES[harness]?.providers || [] : null;
   // An Ollama on this machine also proxies the cloud models: they are not the same thing.
-  for (const model of S.data.models) (groups[model.provider === "ollama" && model.local ? "ollama-local" : model.provider] ||= []).push(model);
+  for (const model of S.data.models) {
+    if (wanted && !wanted.includes(model.provider)) continue;
+    (groups[model.provider === "ollama" && model.local ? "ollama-local" : model.provider] ||= []).push(model);
+  }
   for (const provider of ["ollama-local", ...Object.keys(PROVIDERS)]) {
     const list = groups[provider];
     if (!list?.length) continue;
@@ -1148,8 +1262,15 @@ function agentForm(agent) {
   const faderValue = h("b", { class: "fader-value" }, fader.value);
   fader.addEventListener("input", () => { faderValue.textContent = fader.value; });
   const hidden = (agent.channelIds || []).filter((id) => !S.data.channels.some((channel) => channel.id === id));
-  const model = modelPicker("model", agent.model || "");
+  // Two choices, not one: who runs the loop, and which model thinks.
+  const current = agent.model || S.data.settings.defaultModel || "";
+  let harness = harnessOf(current);
+  const model = modelPicker("model", agent.model || "", { harness });
+  const harnessPick = h("select", {}, Object.entries(HARNESSES).map(([key, item]) =>
+    h("option", { value: key, selected: key === harness }, tr(item.label))));
+  const harnessHint = h("small", { class: "muted" }, tr(HARNESSES[harness].hint));
   const subscription = subscriptionPicker(agent.subscriptionId);
+  const machine = brainMachine(agent, model, () => harness);
   const syncSubscription = () => {
     const select = model.querySelector("select");
     const custom = model.querySelector("input");
@@ -1157,6 +1278,14 @@ function agentForm(agent) {
   };
   model.addEventListener("change", syncSubscription);
   model.addEventListener("input", syncSubscription);
+  harnessPick.addEventListener("change", () => {
+    harness = harnessPick.value;
+    harnessHint.textContent = tr(HARNESSES[harness].hint);
+    const fresh = modelSelect("model", "", { allowDefault: true, harness });
+    model.querySelector("select").replaceWith(fresh);
+    machine.reload(harness);
+    syncSubscription();
+  });
   subscription.setProvider((agent.model || S.data.settings.defaultModel).split("/")[0]);
   const form = h("form", { class: "stack" },
     panel({ icon: "user", title: "Identità", hint: "Come si chiama e come appare." },
@@ -1171,8 +1300,10 @@ function agentForm(agent) {
             } }))))),
     panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
       h("div", { class: "stack-sm" },
+        field("Harness", harnessPick, "Chi guida il ciclo: Cora, oppure il modello stesso."),
+        harnessHint,
         field("Modello", model),
-        h("div", { class: "field full" }, h("span", { class: "label" }, "La macchina"), machineNode()),
+        machine,
         subscription.node,
         field("Ragionamento: livello", h("select", { name: "effort" },
           [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) => h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label))),
@@ -1204,6 +1335,7 @@ function agentForm(agent) {
       name: data.get("name"),
       avatarUrl: data.get("avatarUrl"),
       model: pickedModel(data, "model"),
+      ollamaHost: data.get("ollamaHost") || "",
       subscriptionId: subscription.value(),
       color: data.get("color"),
       chattiness: Number(data.get("chattiness")) / 100,

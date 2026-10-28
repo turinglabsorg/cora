@@ -341,6 +341,11 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .search input:focus { box-shadow: none; }
 .search:focus-within { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-glow); }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+/* A model to pick: a row that behaves like a button, and says when it cannot be used. */
+.model-row { width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--line); cursor: pointer; font: inherit; color: inherit; padding: 12px 2px; }
+.model-row:hover:not(:disabled) { background: linear-gradient(90deg, rgba(242, 169, 59, 0.05), transparent); }
+.model-row.on { background: linear-gradient(90deg, var(--amber-wash), transparent); }
+.model-row:disabled { opacity: 0.45; cursor: not-allowed; }
 /* The app manifest a provider is created from: folded away, mono, never in the way. */
 .manifest > summary { cursor: pointer; color: var(--muted); font: 500 11px/1.4 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; list-style: none; }
 .manifest > summary::-webkit-details-marker { display: none; }

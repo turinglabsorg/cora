@@ -37,6 +37,8 @@ const DEFAULT_SETTINGS = {
   slackChannelIds: [],
   slackOwnerIds: [],
   slackTeamId: "",
+  // The Ollama servers of this machine: one per card when there is more than one.
+  ollamaHosts: [],
   sshKeys: [],
   language: "it",
   // Where notices from usecora.space (waitlist sign-ups) are posted: a channel with this name.
@@ -52,6 +54,7 @@ const AGENT_DEFAULTS = {
   core: "",
   model: "",
   subscriptionId: "",
+  ollamaHost: "",
   chattiness: 0.5,
   channelIds: [],
   enabled: true,
@@ -190,6 +193,18 @@ function cleanIds(value, pattern = /^\d{5,25}$/) {
 /** A Discord channel id, a Telegram chat as tg:<chat id>, or a Slack conversation as sl:<channel>[:<thread ts>]. */
 const CHANNEL_ID = /^(\d{5,25}|tg:-?\d{1,20}|sl:[A-Z0-9]{5,}(:\d{10}\.\d{1,8})?|web(-[\w-]+)?)$/;
 
+/** An http(s) address with nothing after it: empty when it is not one. */
+function cleanUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    return /^https?:$/.test(url.protocol) ? url.origin : "";
+  } catch {
+    return "";
+  }
+}
+
 function cleanText(value, max) {
   return String(value ?? "").slice(0, max);
 }
@@ -221,6 +236,8 @@ export function sanitizeAgent(input, previous = {}) {
     core: cleanText(merged.core, 4000),
     model: checkModel(merged.model),
     subscriptionId: cleanText(merged.subscriptionId, 80).trim(),
+    // Ollama decides the card when it starts, so one server per card is how an agent picks one.
+    ollamaHost: cleanUrl(merged.ollamaHost),
     chattiness: clampNumber(merged.chattiness, 0, 1, 0.5),
     channelIds: cleanIds(merged.channelIds, CHANNEL_ID),
     enabled: Boolean(merged.enabled),
@@ -253,6 +270,11 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     slackChannelIds: cleanIds(merged.slackChannelIds, /^[A-Z0-9]{5,}$/),
     slackOwnerIds: cleanIds(merged.slackOwnerIds, /^[UW][A-Z0-9]{4,}$/),
     slackTeamId: cleanText(merged.slackTeamId, 24).trim(),
+    ollamaHosts: (Array.isArray(merged.ollamaHosts) ? merged.ollamaHosts : []).slice(0, 8).map((host) => ({
+      url: cleanUrl(host?.url),
+      label: cleanText(host?.label, 60).trim(),
+      gpu: cleanText(host?.gpu, 80).trim(),
+    })).filter((host) => host.url),
     language: ["it", "en"].includes(merged.language) ? merged.language : "it",
     noticeChannel: cleanText(merged.noticeChannel, 100).trim().replace(/^#/, ""),
     sshKeys: plainKeys(Array.isArray(merged.sshKeys) ? merged.sshKeys.join("\n") : merged.sshKeys).slice(0, 30),

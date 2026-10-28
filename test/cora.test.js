@@ -1758,32 +1758,30 @@ describe("talking with the agents", () => {
     assert.ok(!app.store.recentMessages(CHANNEL, 10).some((item) => item.content === "(messaggio vuoto)"), "system messages are not archived");
   });
 
-  test("in a live conversation an agent does not keep saying it is on it", async (t) => {
-    app.orchestrator.ackAfterMs = 300;
-    t.after(() => { app.orchestrator.ackAfterMs = 15000; });
-    const ack = "Ricevuto, ci lavoro: ti aggiorno qui.";
+  test("an agent at work shows it the way a person does, without a line in the channel", async () => {
+    const before = discord.state.typing;
     let turn = 0;
     replies.set("Olga", async () => {
       turn += 1;
       if (turn === 1) return { content: "Eccomi, dimmi." };
-      await sleep(900);
+      // Long enough that the indicator has to be refreshed rather than sent once.
+      await sleep(9000);
       return { content: "Fatto, guardato." };
     });
-    // It answers at once, so nobody needs telling it is there.
     discord.say({ content: "Olga, ci sei?" });
     await waitFor(() => posts("Olga").includes("Eccomi, dimmi."), { what: "Olga's quick answer" });
     await quiet();
-    // The next request takes longer, but the conversation is live: no second "ricevuto".
+    const afterQuick = discord.state.typing;
+    assert.ok(afterQuick > before, "she is shown as typing while she thinks");
+
     discord.say({ content: "Olga, allora guarda quella cosa" });
-    await waitFor(() => posts("Olga").includes("Fatto, guardato."), { what: "Olga's slower answer", timeout: 20000 });
+    await waitFor(() => posts("Olga").includes("Fatto, guardato."), { what: "Olga's slower answer", timeout: 25000 });
     await quiet();
-    assert.ok(!posts("Olga").includes(ack), "it never repeats the acknowledgement to someone it is already talking to");
+    assert.ok(discord.state.typing - afterQuick >= 2, "a long turn keeps the indicator alive instead of saying it is on it");
+    assert.ok(!posts("Olga").some((text) => /Ricevuto, ci lavoro/.test(text)), "and nothing is posted to say so");
   });
 
-  test("a busy agent says it is on it, gets the new messages while it works, and a named agent that passes is asked again", async () => {
-    app.orchestrator.ackAfterMs = 300;
-    // The acknowledgement is for silence; this test is about a busy agent, so allow it either way.
-    app.orchestrator.ackQuietMs = 0;
+  test("a busy agent gets the new messages while it works, and a named agent that passes is asked again", async () => {
     let steered = "";
     replies.set("Olga", async (body) => {
       const last = body.messages[body.messages.length - 1];
@@ -1798,10 +1796,7 @@ describe("talking with the agents", () => {
     discord.say({ content: "Olga, controlla il salotto" });
     await waitFor(() => posts("Olga").includes("Fatto: ho controllato anche la cucina."), { what: "the steered answer", timeout: 20000 });
     assert.match(steered, /\[Nel frattempo nella chat\][\s\S]*controlla anche la cucina/);
-    assert.ok(posts("Olga").includes("Ricevuto, ci lavoro: ti aggiorno qui."), "the automatic acknowledgement came first");
     await quiet();
-    app.orchestrator.ackAfterMs = 15000;
-    app.orchestrator.ackQuietMs = 5 * 60 * 1000;
 
     let asked = 0;
     replies.set("Pino", (body) => {
@@ -2498,13 +2493,53 @@ describe("what runs the models", () => {
     assert.ok(Array.isArray(hardware.gpus), "a host without a card reports none instead of failing");
   });
 
+  test("an agent can be put on a card, which is the Ollama that serves it", async (t) => {
+    // The stand-in keeps one reply handler for every instance: put the old one back.
+    const previousReply = fakeOllama.current;
+    const second = await fakeOllama(() => ({ content: "Rispondo dalla seconda scheda." }));
+    const agent = app.store.createAgent({ name: "Due schede", model: "ollama/test-model", tools: false, chattiness: 0 });
+    app.store.updateSettings({ ollamaHosts: [{ url: second.url, label: "RTX 4090 #1", gpu: "GPU-second" }] });
+    t.after(async () => {
+      app.store.updateSettings({ ollamaHosts: [] });
+      app.store.deleteAgent(agent.id);
+      await second.close();
+      fakeOllama.current = previousReply;
+    });
+
+    const hardware = (await call("/api/hardware")).data;
+    assert.deepEqual(hardware.hosts.map((host) => host.url).sort(), [ollama.url, second.url].sort(), "both servers of this machine are reported");
+    assert.ok(hardware.hosts.every((host) => host.models.some((model) => model.name === "test-model")), "each one says what it has installed");
+
+    const saved = await call(`/api/agents/${agent.id}`, { method: "PUT", body: { ollamaHost: second.url } });
+    assert.equal(saved.data.ollamaHost, second.url);
+    const before = second.calls.length;
+    await app.brain.chatTurn({ agent: app.store.agent(agent.id), history: [{ id: "card-question", at: Date.now(), kind: "owner", authorName: "Sam", content: "Chi ti risponde?" }], channel: { id: `web-${agent.id}`, place: "test" }, forced: true, computer: false, say: async () => {} });
+    assert.ok(second.calls.length > before, "its turn went to the server of its own card");
+  });
+
+  test("a model is installed on request, and a refusal is explained in words", async (t) => {
+    t.after(() => { fakeOllama.pullError = ""; });
+    const started = await call("/api/ollama/pull", { method: "POST", body: { model: "test-model-2" } });
+    assert.equal(started.status, 202);
+    assert.equal(started.data.started, true);
+    await waitFor(async () => (await call("/api/activity")).data.some((entry) => /modello test-model-2 pronto/.test(entry.text || "")), { what: "the model to be ready" });
+    assert.ok(ollama.calls.some((call) => call.pull === "test-model-2"), "the download was asked of Ollama");
+
+    fakeOllama.pullError = "the model you are attempting to pull requires a newer version of Ollama";
+    await call("/api/ollama/pull", { method: "POST", body: { model: "test-model-3" } });
+    const refused = await waitFor(async () => (await call("/api/activity")).data.find((entry) => /test-model-3:/.test(entry.text || "")), { what: "the refusal" });
+    assert.match(refused.text, /richiede un Ollama più recente/, "the real sentence, not a number");
+
+    assert.match((await call("/api/ollama/pull", { method: "POST", body: { model: "non un modello!" } })).data.error, /nome di un modello/);
+  });
+
   test("the cards are read from nvidia-smi when there is one", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cora-gpu-"));
     const stub = join(dir, "nvidia-smi");
-    writeFileSync(stub, "#!/bin/sh\necho 'NVIDIA GeForce RTX 4090, 24564, 17213, 41'\n");
+    writeFileSync(stub, "#!/bin/sh\necho '0, GPU-5f2c, NVIDIA GeForce RTX 4090, 24564, 17213, 41'\n");
     chmodSync(stub, 0o755);
     const cards = await graphicsCards({ bin: stub });
-    assert.deepEqual(cards, [{ name: "NVIDIA GeForce RTX 4090", memoryTotal: 24564, memoryUsed: 17213, load: 41 }]);
+    assert.deepEqual(cards, [{ index: 0, uuid: "GPU-5f2c", name: "NVIDIA GeForce RTX 4090", memoryTotal: 24564, memoryUsed: 17213, load: 41 }], "the uuid is what pins an agent's Ollama to a card");
     assert.deepEqual(await graphicsCards({ bin: join(dir, "missing-smi") }), [], "no card, no noise");
   });
 });
@@ -2833,6 +2868,24 @@ describe("agents in Slack", () => {
     const reply = await waitFor(() => slack.state.posts[0], { what: "Nadia in the thread" });
     assert.equal(reply.app, "nadia");
     assert.equal(reply.thread_ts, asked.ts, "the answer stays in the thread");
+    await quiet();
+  });
+
+  test("while it works it marks the message, and takes the mark back when it answers", async () => {
+    slack.state.reactions.length = 0;
+    slack.state.posts.length = 0;
+    replies.set("Silvia", async () => {
+      await sleep(1200);
+      return { content: "Ecco fatto." };
+    });
+    const asked = slack.say({ text: "Silvia, guarda una cosa" });
+    await waitFor(() => slack.state.reactions.some((item) => item.action === "add"), { what: "the mark on the message" });
+    const added = slack.state.reactions.find((item) => item.action === "add");
+    assert.equal(added.name, "eyes");
+    assert.equal(added.ts, asked.ts, "on the message that asked, not on its own answer");
+    await waitFor(() => slack.postsIn(SLACK_CHANNEL).length, { what: "Silvia's answer" });
+    await waitFor(() => slack.state.reactions.some((item) => item.action === "remove"), { what: "the mark taken back" });
+    assert.ok(!slack.state.posts.some((post) => /Ricevuto, ci lavoro/.test(post.text || "")), "Slack gets no line saying it is on it");
     await quiet();
   });
 

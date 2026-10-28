@@ -13,11 +13,36 @@ else
   tar -C "$SRC" --exclude .git --exclude '*.log' -cf - . | $SSH "$HOST" 'set -e; rm -rf "$HOME/Services/cora.incoming"; mkdir -p "$HOME/Services/cora.incoming" "$HOME/Services/cora"; tar -xf - -C "$HOME/Services/cora.incoming"; rsync -a --delete "$HOME/Services/cora.incoming/" "$HOME/Services/cora/"; rm -rf "$HOME/Services/cora.incoming"'
 fi
 
-# The desktop image is rebuilt only when box/ changed (or with --build-box); cora then
-# recreates every desktop built from an older image when it starts, keeping their volumes.
+# The desktop image is rebuilt only when box/ changed; cora then recreates every desktop
+# built from an older image when it starts, keeping their volumes. A build is minutes of
+# the other machine's CPU, so it can be skipped, forced, or done here and shipped over.
+#   --skip-box   leave the image alone: the desktops keep the one they have
+#   --build-box  build it there even if box/ did not change
+#   --ship-box   build it here and send it: the customer's machine only loads it
 BOX_HASH=$(cat "$SRC"/box/* | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)
+BOX_MODE=auto
+for argument in "$@"; do
+  case "$argument" in
+    --skip-box) BOX_MODE=skip ;;
+    --build-box) BOX_MODE=force ;;
+    --ship-box) BOX_MODE=ship ;;
+  esac
+done
 
-$SSH "$HOST" BUILD_BOX="$1" BOX_HASH="$BOX_HASH" sh -s <<'REMOTE'
+if [ "$BOX_MODE" = ship ]; then
+  HERE=$(docker version --format '{{.Server.Arch}}' 2>/dev/null || echo unknown)
+  THERE=$($SSH "$HOST" "docker version --format '{{.Server.Arch}}' 2>/dev/null || echo unknown")
+  if [ "$HERE" != "$THERE" ]; then
+    echo "this machine builds $HERE images and that one runs $THERE: build it there, or cross-build with buildx"
+    exit 1
+  fi
+  echo "building the desktop image here ($BOX_HASH) and sending it…"
+  docker build -q --label "cora.box=$BOX_HASH" -t cora-box:latest "$SRC/box" >/dev/null
+  docker save cora-box:latest | gzip | $SSH "$HOST" 'gunzip | docker load'
+  BOX_MODE=skip
+fi
+
+$SSH "$HOST" BOX_MODE="$BOX_MODE" BOX_HASH="$BOX_HASH" sh -s <<'REMOTE'
 set -e
 export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 DIR="$HOME/Services/cora"
@@ -29,7 +54,7 @@ for pair in ADMIN_PASSWORD:16 SESSION_KEY:32 VAPID_KEY:32; do
   hush info "CORA_$name" >/dev/null 2>&1 || hush info "CORO_$name" >/dev/null 2>&1 || hush generate "CORA_$name" --bytes "${pair##*:}" >/dev/null
 done
 CURRENT_BOX=$(docker image inspect cora-box:latest --format '{{index .Config.Labels "cora.box"}}' 2>/dev/null || true)
-if [ "$BUILD_BOX" = "--build-box" ] || [ "$CURRENT_BOX" != "$BOX_HASH" ]; then
+if [ "$BOX_MODE" != skip ] && { [ "$BOX_MODE" = force ] || [ "$CURRENT_BOX" != "$BOX_HASH" ]; }; then
   echo "building the desktop image ($BOX_HASH)…"
   docker build -q --label "cora.box=$BOX_HASH" -t cora-box:latest "$DIR/box" > "$HOME/.cora/box-build.log" 2>&1 || { tail -20 "$HOME/.cora/box-build.log"; exit 1; }
 fi

@@ -11,6 +11,7 @@ import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
 import { Slack } from "./slack.js";
 import { slackAppEnvName, slackBotEnvName } from "./slack-bots.js";
 import { Telegram } from "./telegram.js";
+import { pullModel } from "./llm.js";
 import { telegramBotEnvName } from "./telegram-bots.js";
 import { isWebRoom, roomAgentId } from "./rooms.js";
 import { nextRuns } from "./scheduler.js";
@@ -175,6 +176,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   };
 
   const hardware = { at: 0, value: null };
+  const pulls = new Set();
   const publicAgent = async (agent) => ({
     ...agent,
     memoryCount: store.memoryCount(agent.id),
@@ -418,11 +420,31 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     if (path === "/api/hardware" && method === "GET") {
       // Asking the cards costs a process: a few seconds of memory is plenty for a panel.
-      if (!hardware.at || Date.now() - hardware.at > 10000) {
+      const key = JSON.stringify(store.settings.ollamaHosts);
+      if (!hardware.at || hardware.key !== key || Date.now() - hardware.at > 10000) {
         hardware.at = Date.now();
-        hardware.value = await llm.hardware().catch(() => ({ ollama: { url: "", local: false, reachable: false, version: "" }, gpus: [], loaded: [] }));
+        hardware.key = key;
+        hardware.value = await llm.hardware({ hosts: store.settings.ollamaHosts }).catch(() => ({ ollama: { url: "", local: false, reachable: false, version: "" }, gpus: [], hosts: [], loaded: [] }));
       }
       return send(res, 200, hardware.value);
+    }
+    if (path === "/api/ollama/pull" && method === "POST") {
+      const body = await readJson(req, 2048);
+      const name = String(body.model || "").trim();
+      if (!/^[\w./:@-]{2,120}$/.test(name)) throw new HttpError(400, "non sembra il nome di un modello");
+      const hosts = llm.ollamaHostList(store.settings.ollamaHosts);
+      const host = hosts.find((item) => item.url === String(body.host || "").replace(/\/$/, "")) || hosts.find((item) => item.local) || hosts[0];
+      if (!host?.local) throw new HttpError(400, "si scaricano modelli solo su un Ollama di questa macchina");
+      if (pulls.has(`${host.url}|${name}`)) return send(res, 200, { started: false, already: true });
+      pulls.add(`${host.url}|${name}`);
+      activity({ type: "settings", text: `scarico il modello ${name}` });
+      pullModel(host.url, name, (event) => broadcast({ type: "ollama-pull", host: host.url, model: name, ...event }))
+        .then((done) => {
+          activity({ type: "settings", text: done.ok ? `modello ${name} pronto` : `modello ${name}: ${done.error}` });
+          broadcast({ type: "ollama-pull", host: host.url, model: name, done: true, ok: done.ok, error: done.error || "" });
+        })
+        .finally(() => pulls.delete(`${host.url}|${name}`));
+      return send(res, 202, { started: true, host: host.url, model: name });
     }
     if (path === "/api/activity" && method === "GET") {
       return send(res, 200, store.recentActivity(300));

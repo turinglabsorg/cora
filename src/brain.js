@@ -753,12 +753,14 @@ export class Brain {
       // The last real answer the agent gave: a final "DONE" (confirming it is finished) posts this, not the word "DONE".
       let lastAnswer = "";
       const size = () => messages.reduce((total, message) => total + String(message.content || "").length + JSON.stringify(message.toolCalls || "").length, 0);
+      // A local model has its own window, usually smaller than our old fixed number.
+      const compactLimit = await this.llm.compactAt(model, agent.ollamaHost || "", COMPACT_CHARS);
       for (; steps < maxSteps && Date.now() < deadline && !halted; steps += 1) {
         if (steps > 0) {
           const steer = await news();
           if (steer) messages.push({ role: "user", content: steer });
         }
-        if (task && size() > COMPACT_CHARS) {
+        if (task && size() > compactLimit) {
           // Hours of work outgrow any context: the agent writes down where it is and carries on from that.
           const summary = await this.llm.chat({
             model, effort: "low", tools: [], signal: controller.signal,
@@ -772,7 +774,7 @@ export class Brain {
             { role: "user", content: currentPrompt() },
             { role: "user", content: `[Cora] Stai lavorando a questo compito da un po'. Il tuo riassunto di dove sei arrivato:\n${notes}\n\nContinua da qui.` });
         }
-        const result = await this.llm.chat({ model, messages, tools, effort: effortOf(agent), signal: controller.signal });
+        const result = await this.llm.chat({ model, messages, tools, effort: effortOf(agent), host: agent.ollamaHost || "", signal: controller.signal });
         trace.spent(result.usage);
         think(result);
         if (!result.toolCalls.length) {

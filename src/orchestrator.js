@@ -13,13 +13,8 @@ const HUMAN_DEBOUNCE_MS = 1200;
 const FOCUS_MS = 5 * 60 * 1000;
 // After a restart, unanswered human messages this recent are picked up again.
 const CATCH_UP_MS = 15 * 60 * 1000;
-// Someone called an agent and it has said nothing yet: it acknowledges on its own after this long.
-const ACK_AFTER_MS = 15000;
-/** The acknowledgement answers silence: an agent that has just spoken here does not repeat it. */
-const ACK_QUIET_MS = 5 * 60 * 1000;
 /** How long a round holds its channel before the agents still working carry on in the background. */
 const RELEASE_AFTER_MS = 20000;
-const ACK_TEXT = { it: "Ricevuto, ci lavoro: ti aggiorno qui.", en: "Got it, working on it: I'll keep you posted here." };
 const IMAGE_LIMIT_BYTES = 5 * 1024 * 1024;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,14 +75,11 @@ export class Orchestrator {
     // Discord DM channels, each owned by the one agent whose bot received the message.
     this.dmAgent = new Map();
     this.routineRuns = new Set();
-    this.ackAfterMs = ACK_AFTER_MS;
     // An agent has one computer, so it runs one task at a time: what it is on, by agent id.
     this.atWork = new Map();
     this.threadWork = new Map();
-    this.ackQuietMs = ACK_QUIET_MS;
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
     this.releaseAfterMs = RELEASE_AFTER_MS;
-    this.ackText = null;
   }
 
   state(channelId) {
@@ -715,19 +707,11 @@ export class Orchestrator {
       const started = Date.now();
       if (computer) this.atWork.set(agent.id, `una richiesta ${this.channelMeta(state.id).where || "in chat"}`);
       if (computer) this.threadWork.set(state.id, agent.id);
-      let spoke = false;
-      const say = (text, target = state.id) => {
-        spoke = true;
-        return this.postDirect(agent, state, target, text);
-      };
-      // "Ricevuto, ci lavoro" tells the owner an agent is there when nothing else does. In a live
-      // conversation it says nothing they cannot already see, so it is sent only after a silence.
-      const quiet = started - this.spokeHereAt(state, agent.id) > this.ackQuietMs;
-      const ack = isForced && quiet ? setTimeout(() => {
-        if (spoke || (state.request?.agentId === agent.id && state.request.at >= started)) return;
-        say(this.ackText || ACK_TEXT[this.store.settings.language] || ACK_TEXT.it).catch(() => {});
-        this.log({ type: "say", agentId: agent.id, channelId: state.id, text: "(conferma automatica: sta ancora lavorando)" });
-      }, this.ackAfterMs) : null;
+      const say = (text, target = state.id) => this.postDirect(agent, state, target, text);
+      // An agent at work shows it the way a person does: the typing indicator, kept alive
+      // for as long as the turn lasts. Where the platform has none — Slack gives bots
+      // nothing — it marks the message it took instead. No line in the channel either way.
+      const working = this.showWorking(state, agent, last);
       let result;
       try {
         result = await this.brain.chatTurn({
@@ -744,7 +728,7 @@ export class Orchestrator {
         if (isForced) result = { text: `(non riesco a rispondere: ${error.message.slice(0, 180)})` };
         else return;
       } finally {
-        clearTimeout(ack);
+        working.stop();
         if (computer) this.atWork.delete(agent.id);
         if (computer) this.threadWork.delete(state.id);
       }
@@ -913,13 +897,26 @@ export class Orchestrator {
     if (shared) this.discord.typing(channelId);
   }
 
-  /** When this agent last said something in this channel, 0 when it has not. */
-  spokeHereAt(state, agentId) {
-    for (let index = state.history.length - 1; index >= 0; index -= 1) {
-      const item = state.history[index];
-      if (item.kind === "agent" && item.agentId === agentId) return item.at || 0;
+  /**
+   * Show that this agent is on it, in the way its home allows: the typing
+   * indicator refreshed while the turn runs, or on Slack a mark on the message
+   * that started it, taken back when the answer arrives.
+   */
+  showWorking(state, agent, item) {
+    const slack = slackIds(state.id);
+    if (slack) {
+      const ts = String(item?.id || "").startsWith("sl_") ? String(item.id).split("_").pop() : "";
+      const client = this.skBots?.client(agent.id) || this.slack;
+      if (!ts || !client) return { stop() {} };
+      client.react(slack.channelId, ts).catch(() => {});
+      return { stop: () => client.unreact(slack.channelId, ts).catch(() => {}) };
     }
-    return 0;
+    const beat = () => this.typing(state.id, [agent]);
+    beat();
+    // Discord's indicator lasts about ten seconds, Telegram's about five.
+    const timer = setInterval(beat, isTelegramChannel(state.id) ? 4000 : 7000);
+    if (timer.unref) timer.unref();
+    return { stop: () => clearInterval(timer) };
   }
 
   async postDirect(agent, current, target, text, options = {}) {

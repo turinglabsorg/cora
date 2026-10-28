@@ -14,6 +14,8 @@ const REQUEST_TIMEOUT_MS = 240000;
  */
 const TRANSIENT = /\b(at capacity|capacity|rate.?limit|too many requests|429|50[0234]|overloaded|unavailable|temporar\w*|try again)\b|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|socket hang up|fetch failed|network|timed out|no answer within|returned no content|exited with \d+ and said nothing/i;
 const RETRIES = 2;
+/** The largest context we ask a local model for: more is rarely worth the memory it eats. */
+const MAX_CONTEXT = 32_768;
 const RETRY_WAIT_MS = 4000;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -22,11 +24,56 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * The cards in this machine, asked of nvidia-smi. A host without one answers
  * nothing and that is a fact, not a failure: a Mac has no card to report here.
  */
+const isLocalUrl = (value) => /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/i.test(String(value || ""));
+
+/** Ollama refuses a model it cannot read yet: that deserves the real sentence, not a number. */
+function pullFailure(status, text) {
+  if (status === 412 || /newer version of ollama/i.test(text)) return "questo modello richiede un Ollama più recente di quello installato";
+  if (status === 404 || /not found|unknown model/i.test(text)) return "questo modello non esiste nella libreria di Ollama";
+  if (/no space|disk/i.test(text)) return "spazio su disco finito";
+  return String(text || `errore ${status}`).slice(0, 200);
+}
+
+/**
+ * Install a model on one of this machine's Ollama servers. Ollama does the whole
+ * setup itself; this only follows the download and says how far it got.
+ */
+export async function pullModel(url, name, onProgress = () => {}) {
+  let response;
+  try {
+    response = await fetch(`${url}/api/pull`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: name, stream: true }),
+    });
+  } catch (error) {
+    return { ok: false, error: `non raggiungo Ollama: ${error.message}` };
+  }
+  if (!response.ok || !response.body) return { ok: false, error: pullFailure(response.status, await response.text().catch(() => "")) };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let failure = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event;
+      try { event = JSON.parse(line); } catch { continue; }
+      if (event.error) failure = pullFailure(200, event.error);
+      else onProgress({ status: String(event.status || ""), completed: Number(event.completed) || 0, total: Number(event.total) || 0 });
+    }
+  }
+  return failure ? { ok: false, error: failure } : { ok: true };
+}
+
 export function graphicsCards({ bin = "nvidia-smi", timeoutMs = 4000 } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(bin, ["--query-gpu=name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], { stdio: ["ignore", "pipe", "ignore"] });
+      child = spawn(bin, ["--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], { stdio: ["ignore", "pipe", "ignore"] });
     } catch {
       resolve([]);
       return;
@@ -37,11 +84,13 @@ export function graphicsCards({ bin = "nvidia-smi", timeoutMs = 4000 } = {}) {
     child.on("error", () => { clearTimeout(timer); resolve([]); });
     child.on("close", () => {
       clearTimeout(timer);
-      resolve(out.split("\n").map((line) => line.split(",").map((part) => part.trim())).filter((parts) => parts.length >= 4 && parts[0]).map((parts) => ({
-        name: parts[0],
-        memoryTotal: Number(parts[1]) || 0,
-        memoryUsed: Number(parts[2]) || 0,
-        load: Number(parts[3]) || 0,
+      resolve(out.split("\n").map((line) => line.split(",").map((part) => part.trim())).filter((parts) => parts.length >= 6 && parts[2]).map((parts) => ({
+        index: Number(parts[0]) || 0,
+        uuid: parts[1],
+        name: parts[2],
+        memoryTotal: Number(parts[3]) || 0,
+        memoryUsed: Number(parts[4]) || 0,
+        load: Number(parts[5]) || 0,
       })));
     });
   });
@@ -108,7 +157,57 @@ export class LLM {
 
   /** An Ollama on this machine or this network answers without a key: on-premise has its own GPU. */
   get localOllama() {
-    return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/i.test(this.ollamaUrl);
+    return isLocalUrl(this.ollamaUrl);
+  }
+
+  /**
+   * The Ollama servers of this machine. Ollama decides which card it uses when
+   * it starts (CUDA_VISIBLE_DEVICES), never per request, so one server per card
+   * is how an agent is put on a card: its address is the choice.
+   */
+  ollamaHostList(extra = []) {
+    const seen = new Set();
+    const list = [];
+    for (const host of [{ url: this.ollamaUrl, label: "", gpu: "" }, ...extra]) {
+      const url = String(host?.url || "").replace(/\/$/, "");
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      list.push({ url, label: String(host?.label || ""), gpu: String(host?.gpu || ""), local: isLocalUrl(url) });
+    }
+    return list;
+  }
+
+  /** What one Ollama answers: which models it has, which are loaded, which version it speaks. */
+  async ollamaReport(host) {
+    const report = { ...host, reachable: false, version: "", models: [], loaded: [] };
+    const ask = async (path, timeoutMs = 5000) => {
+      const response = await fetch(`${host.url}${path}`, { headers: this.ollamaHeaders(), signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) throw new Error(String(response.status));
+      return response.json();
+    };
+    try {
+      report.version = String((await ask("/api/version")).version || "");
+      report.reachable = true;
+    } catch {
+      return report;
+    }
+    try {
+      const tags = await ask("/api/tags", 8000);
+      report.models = (tags.models || []).map((model) => {
+        const caps = model.capabilities || ["completion", "tools"];
+        const remote = model.remote === true || /:cloud$/.test(model.name);
+        return {
+          name: model.name, size: Number(model.size) || 0, local: host.local && !remote,
+          completion: caps.includes("completion"), tools: caps.includes("tools"),
+          vision: caps.includes("vision"), thinking: caps.includes("thinking"),
+        };
+      });
+    } catch {}
+    try {
+      const running = await ask("/api/ps");
+      report.loaded = (running.models || []).map((model) => ({ name: model.name, size: Number(model.size) || 0, vram: Number(model.size_vram) || 0 }));
+    } catch {}
+    return report;
   }
 
   ollamaHeaders() {
@@ -130,29 +229,67 @@ export class LLM {
    * right now, and which Ollama answers. An install with its own GPU should be
    * able to see it; a host without one simply reports none.
    */
-  async hardware() {
-    const out = { ollama: { url: this.ollamaUrl, local: this.localOllama, reachable: false, version: "" }, gpus: [], loaded: [] };
-    const ask = async (path, timeoutMs = 4000) => {
-      const response = await fetch(`${this.ollamaUrl}${path}`, { headers: this.ollamaHeaders(), signal: AbortSignal.timeout(timeoutMs) });
-      if (!response.ok) throw new Error(String(response.status));
-      return response.json();
-    };
-    try {
-      const version = await ask("/api/version");
-      out.ollama.reachable = true;
-      out.ollama.version = String(version.version || "");
-    } catch {}
-    try {
-      const running = await ask("/api/ps");
-      out.loaded = (running.models || []).map((model) => ({
-        name: model.name,
-        size: Number(model.size) || 0,
-        vram: Number(model.size_vram) || 0,
-        until: model.expires_at || "",
-      }));
-    } catch {}
-    if (this.localOllama) out.gpus = await graphicsCards();
+  async hardware({ hosts = [] } = {}) {
+    const list = this.ollamaHostList(hosts);
+    const reports = await Promise.all(list.map((host) => this.ollamaReport(host)));
+    const out = { gpus: list.some((host) => host.local) ? await graphicsCards() : [], hosts: reports };
+    // What the panel showed before this had several servers: the first local one.
+    const first = reports.find((host) => host.local) || reports[0] || { url: "", local: false, reachable: false, version: "" };
+    out.ollama = { url: first.url, local: Boolean(first.local), reachable: first.reachable, version: first.version };
+    out.loaded = first.loaded || [];
     return out;
+  }
+
+  /**
+   * How much a model can hold. Ollama does not refuse a prompt that is too long:
+   * it quietly drops the oldest part, so an agent would forget the beginning of
+   * its own task without a word. Asking the model and saying so is the whole fix.
+   */
+  async contextLength(model, host = "") {
+    const { provider, name } = splitModel(model);
+    if (provider !== "ollama") return 0;
+    const url = host || this.ollamaUrl;
+    this.contextCache ||= new Map();
+    const key = `${url}|${name}`;
+    if (this.contextCache.has(key)) return this.contextCache.get(key);
+    let length = 0;
+    try {
+      const response = await fetch(`${url}/api/show`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...this.ollamaHeaders() },
+        body: JSON.stringify({ model: name }), signal: AbortSignal.timeout(8000),
+      });
+      const data = await response.json();
+      const info = data.model_info || {};
+      const found = Object.entries(info).find(([field]) => field.endsWith(".context_length"));
+      length = Number(found?.[1]) || 0;
+      // What the model was built with is a ceiling; the Modelfile may ask for less.
+      const asked = Number(/num_ctx\s+(\d+)/.exec(String(data.parameters || ""))?.[1]) || 0;
+      if (asked) length = asked;
+    } catch {}
+    this.contextCache.set(key, length);
+    return length;
+  }
+
+  /** Past this much conversation an agent should write itself a summary: 70% of what it can hold. */
+  async compactAt(model, host = "", fallback = 180_000) {
+    const length = await this.contextLength(model, host);
+    if (!length) return fallback;
+    // Roughly three and a half characters to a token, and room left to answer.
+    return Math.max(20_000, Math.round(length * 3.5 * 0.7));
+  }
+
+  /** The models of one of this machine's other Ollama servers, cached like the main list. */
+  async hostModels(host, { fresh = false } = {}) {
+    this.hostCache ||= new Map();
+    const cached = this.hostCache.get(host);
+    if (!fresh && cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.models;
+    const report = await this.ollamaReport({ url: host, label: "", gpu: "", local: isLocalUrl(host) });
+    const models = report.models.filter((model) => model.completion).map((model) => ({
+      id: `ollama/${model.name}`, provider: "ollama", label: model.name,
+      local: model.local, size: model.size, tools: model.tools, vision: model.vision, thinking: model.thinking,
+    }));
+    this.hostCache.set(host, { at: Date.now(), models });
+    return models;
   }
 
   /** Harnesses with a goal mode of their own: Cora hands them the condition and lets them iterate. */
@@ -166,7 +303,8 @@ export class LLM {
     return provider === "claude" || provider === "codex" || provider === "hermes";
   }
 
-  async listModels({ fresh = false } = {}) {
+  async listModels({ fresh = false, host = "" } = {}) {
+    if (host && host !== this.ollamaUrl) return this.hostModels(host, { fresh });
     if (!fresh && Date.now() - this.cache.at < 5 * 60 * 1000 && this.cache.models.length) return this.cache.models;
     const available = this.providers();
     const models = [];
@@ -246,8 +384,8 @@ export class LLM {
     return ["gpt-6-sol", "gpt-6-luna"];
   }
 
-  async capabilities(model) {
-    const known = (await this.listModels()).find((item) => item.id === model);
+  async capabilities(model, host = "") {
+    const known = (await this.listModels({ host })).find((item) => item.id === model);
     if (known) return known;
     const { provider } = splitModel(model);
     return { id: model, provider, tools: true, vision: provider !== "ollama", thinking: false };
@@ -317,12 +455,14 @@ export class LLM {
     }
   }
 
-  async chatOnce({ model, messages, tools = [], effort = "", signal }) {
+  async chatOnce({ model, messages, tools = [], effort = "", signal, host = "" }) {
     const { provider, name } = splitModel(model);
     if (this.routers[provider]) return this.routerChat(provider, name, model, { messages, tools, signal });
     if (provider !== "ollama") throw new Error(`unknown model provider: ${provider}`);
-    if (!this.ollamaKey && !this.localOllama) throw new Error("OLLAMA_API_KEY is not set");
-    const caps = await this.capabilities(model);
+    // An agent put on a card talks to that card's Ollama; everyone else to the instance's own.
+    const url = host || this.ollamaUrl;
+    if (!this.ollamaKey && !isLocalUrl(url)) throw new Error("OLLAMA_API_KEY is not set");
+    const caps = await this.capabilities(model, host);
     const out = [];
     for (const message of messages) {
       if (message.role === "assistant") {
@@ -339,12 +479,16 @@ export class LLM {
       }
     }
     const body = { model: name, messages: out, stream: false, options: { temperature: 0.8 } };
+    // Ask for the whole window the model was built with (within reason), or Ollama uses
+    // its small default and silently forgets the start of a long task.
+    const window = await this.contextLength(model, host);
+    if (window) body.options.num_ctx = Math.min(window, MAX_CONTEXT);
     if (tools.length && caps.tools) {
       body.tools = tools.map((tool) => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } }));
     }
     // Ollama: no level = the model's default; "low" turns thinking off; gpt-oss takes the level itself.
     if (caps.thinking && effort) body.think = effort === "low" ? false : /gpt-oss/i.test(name) ? effort : true;
-    const response = await fetch(`${this.ollamaUrl}/api/chat`, {
+    const response = await fetch(`${url}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this.ollamaHeaders() },
       body: JSON.stringify(body),

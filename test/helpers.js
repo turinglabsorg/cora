@@ -294,6 +294,19 @@ export async function fakeOllama(reply) {
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ version: "0.16.2" }));
     }
+    if (url.pathname === "/api/pull") {
+      const body = JSON.parse((await readBody(req)).toString("utf8"));
+      calls.push({ pull: body.model });
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      if (fakeOllama.pullError) {
+        res.end(`${JSON.stringify({ error: fakeOllama.pullError })}\n`);
+        return;
+      }
+      res.write(`${JSON.stringify({ status: "pulling manifest" })}\n`);
+      res.write(`${JSON.stringify({ status: "downloading", completed: 500, total: 1000 })}\n`);
+      res.end(`${JSON.stringify({ status: "success" })}\n`);
+      return;
+    }
     if (url.pathname === "/api/ps") {
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ models: [{ name: "test-model", size: 18_600_000_000, size_vram: 17_100_000_000, expires_at: "2026-10-28T13:00:00Z" }] }));
@@ -601,6 +614,7 @@ export async function fakeSlack() {
     apps: new Map(),
     posts: [],
     uploads: [],
+    reactions: [],
     sockets: new Map(),
     acks: [],
     opens: 0,
@@ -670,6 +684,10 @@ export async function fakeSlack() {
         state.posts.push(message);
         return ok(res, { ts: message.ts, channel: params.channel });
       }
+      case "reactions.add":
+      case "reactions.remove":
+        state.reactions.push({ action: method.split(".")[1], channel: params.channel, ts: params.timestamp, name: params.name, app: app.name });
+        return ok(res, {});
       case "files.getUploadURLExternal":
         return ok(res, { upload_url: `http://127.0.0.1:${server.address().port}/upload/F1`, file_id: "F1" });
       case "files.completeUploadExternal": {
