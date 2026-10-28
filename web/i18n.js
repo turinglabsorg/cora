@@ -868,6 +868,7 @@ export const EN = {
   "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush": "this machine is not connected to Ollama Cloud, and CORA_OLLAMA_API_KEY is missing from hush",
   "nessun Ollama in ascolto su questa macchina": "no Ollama listening on this machine",
   "questa macchina non è collegata a Ollama Cloud": "this machine is not connected to Ollama Cloud",
+  "troppo poco contesto per Hermes, che ne vuole almeno 64K": "too little context for Hermes, which needs at least 64K",
   "Collega Ollama Cloud": "Connect Ollama Cloud",
   "non disponibile su questa macchina": "not available on this machine",
   "Claude Code non è installato su questa macchina: installalo sul server con l'utente di Cora.": "Claude Code is not installed on this machine: install it on the server as Cora's user.",

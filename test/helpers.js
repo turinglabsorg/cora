@@ -304,6 +304,17 @@ export async function fakeOllama(reply) {
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ version: "0.16.2" }));
     }
+    // How much a model holds, only for the models a test gave a window to (`handle.context`).
+    if (url.pathname === "/api/show") {
+      const body = JSON.parse((await readBody(req)).toString("utf8"));
+      const length = handle.context[body.model];
+      if (!length) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "not found" }));
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ model_info: { "test.context_length": length }, capabilities: ["completion", "tools"] }));
+    }
     if (url.pathname === "/api/pull") {
       const body = JSON.parse((await readBody(req)).toString("utf8"));
       calls.push({ pull: body.model });
@@ -342,15 +353,17 @@ export async function fakeOllama(reply) {
   });
   fakeOllama.current = reply;
   const port = await listen(server);
-  return {
+  const handle = {
     url: `http://127.0.0.1:${port}`,
     calls,
+    context: {},
     setReply(fn) { fakeOllama.current = fn; },
     close() {
       server.closeAllConnections?.();
       return new Promise((resolve) => server.close(resolve));
     },
   };
+  return handle;
 }
 
 /** A stand-in docker CLI: records its arguments and fakes the few commands cora uses. */

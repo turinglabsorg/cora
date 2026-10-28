@@ -16,6 +16,9 @@ const TRANSIENT = /\b(at capacity|capacity|rate.?limit|too many requests|429|50[
 const RETRIES = 2;
 /** The largest context we ask a local model for: more is rarely worth the memory it eats. */
 const MAX_CONTEXT = 32_768;
+// Hermes refuses a model that holds less, and says so only once the turn is under way.
+export const HERMES_MIN_CONTEXT = 64_000;
+export const HERMES_TOO_SHORT = "troppo poco contesto per Hermes, che ne vuole almeno 64K";
 const RETRY_WAIT_MS = 4000;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -218,6 +221,10 @@ export class LLM {
           tools: caps.includes("tools"), vision: caps.includes("vision"), thinking: caps.includes("thinking"),
         };
       });
+      // How much each installed model holds: Hermes turns away one under 64K.
+      await Promise.all(report.models.filter((model) => model.local).map(async (model) => {
+        model.context = await this.contextLength(`ollama/${model.name}`, host.url);
+      }));
     } catch {}
     try {
       const running = await ask("/api/ps");
@@ -356,12 +363,17 @@ export class LLM {
    * The endpoint behind a Hermes model. `<router>/<model>` runs on that router with its
    * key; anything else runs on Hermes' own endpoint, which is this machine's Ollama.
    */
-  hermesEndpoint(name) {
+  hermesEndpoint(name, host = "") {
     const slash = String(name).indexOf("/");
     const router = slash > 0 ? this.routers[name.slice(0, slash)] : null;
     // Each endpoint keeps its own Hermes home: runs in parallel share one config.yaml, and
     // two turns on two addresses must never rewrite each other's.
     if (router?.key) return { baseUrl: router.url, key: router.key, model: name.slice(slash + 1), home: `${this.hermes.home}-${name.slice(0, slash)}` };
+    // An agent put on a card runs Hermes on that card's Ollama.
+    const card = String(host || "").replace(/\/$/, "");
+    if (card && `${card}/v1` !== this.hermes.baseUrl) {
+      return { baseUrl: `${card}/v1`, key: "", model: String(name), home: `${this.hermes.home}-${card.replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/gi, "-")}` };
+    }
     return { baseUrl: this.hermes.baseUrl, key: "", model: String(name), home: this.hermes.home };
   }
 
@@ -398,18 +410,20 @@ export class LLM {
         const root = this.hermes.baseUrl.replace(/\/v1$/, "");
         const response = await fetch(`${root}/api/tags`, { signal: AbortSignal.timeout(5000) });
         const data = await response.json();
-        for (const model of data.models || []) {
-          // argo-* models belong to another project on this machine.
-          if (!model.name || /^argo-/i.test(model.name)) continue;
-          if (Array.isArray(model.capabilities) && !model.capabilities.includes("completion")) continue;
+        // argo-* models belong to another project on this machine.
+        const listed = (data.models || []).filter((model) => model.name && !/^argo-/i.test(model.name)
+          && !(Array.isArray(model.capabilities) && !model.capabilities.includes("completion")));
+        models.push(...await Promise.all(listed.map(async (model) => {
           const size = Number(model.size) || 0;
           const local = !CLOUD_NAME.test(model.name) && size > 0;
-          models.push({
+          const window = local ? await this.contextLength(`ollama/${model.name}`, root) : 0;
+          return {
             id: `hermes/${model.name}`, provider: "hermes", label: model.name,
             local, size, ...(local ? {} : { via: PROVIDERS.ollama }),
             tools: true, vision: false, thinking: false,
-          });
-        }
+            ...(window && window < HERMES_MIN_CONTEXT ? { usable: false, reason: HERMES_TOO_SHORT } : {}),
+          };
+        })));
       } catch {}
     }
     for (const [provider, router] of Object.entries(this.routers)) {
@@ -473,7 +487,7 @@ export class LLM {
    * A full agent turn on a subscription CLI. `tools` are cora's tool definitions,
    * `execute(name, args)` runs one of them; both reach the CLI through MCP.
    */
-  async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal }) {
+  async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal, host = "" }) {
     const { provider, name } = splitModel(model);
     subscriptionId ||= this.subscriptions?.defaultId(provider);
     if (["claude", "codex"].includes(provider) && (!this.subscriptions || !subscriptionId)) throw new Error("subscription da collegare");
@@ -497,7 +511,11 @@ export class LLM {
           return await this.subscriptions.run(subscriptionId, provider, runSignal, invoke);
         }
         if (provider === "hermes") {
-          const endpoint = this.hermesEndpoint(name);
+          const endpoint = this.hermesEndpoint(name, host);
+          if (!endpoint.key) {
+            const window = await this.contextLength(`ollama/${endpoint.model}`, endpoint.baseUrl.replace(/\/v1$/, ""));
+            if (window && window < HERMES_MIN_CONTEXT) throw new Error(`hermes/${endpoint.model}: ${HERMES_TOO_SHORT} (ne ha ${Math.round(window / 1024)}K)`);
+          }
           return await runHermes({ bin: this.hermes.bin, ...options, home: endpoint.home, baseUrl: endpoint.baseUrl, model: endpoint.model, apiKey: endpoint.key });
         }
         throw new Error(`${provider} is not a CLI provider`);

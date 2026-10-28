@@ -917,6 +917,9 @@ const harnessMissing = (harness) => (harnessReady(harness) ? [] : (HARNESSES[har
 
 /** Why a model id that nothing on this machine lists cannot be used. */
 const MISSING_MODEL = "non è tra i modelli di questa macchina";
+// Hermes turns away a model that holds less than this; the server says the same in the list.
+const HERMES_MIN_CONTEXT = 64000;
+const HERMES_TOO_SHORT = "troppo poco contesto per Hermes, che ne vuole almeno 64K";
 
 /** The harnesses that run on someone's subscription: the account is part of the choice. */
 const SUBSCRIPTION_HARNESSES = ["claude", "codex"];
@@ -1106,7 +1109,8 @@ function brainPanel(agent) {
     const rows = [...installed.filter((model) => model.tools), ...installed.filter((model) => !model.tools)].map((model) => {
       const id = `${prefix}/${model.name}`;
       const loaded = (host?.loaded || []).find((item) => item.name === model.name);
-      return modelRow({ id, label: model.name, tools: model.tools, vision: model.vision }, {
+      const short = harness === "hermes" && model.context > 0 && model.context < HERMES_MIN_CONTEXT;
+      return modelRow({ id, label: model.name, tools: model.tools, vision: model.vision, ...(short ? { usable: false, reason: HERMES_TOO_SHORT } : {}) }, {
         subtitle: model.size >= WEIGHTS_AT_LEAST ? tr("{size} GB", { size: gbFromBytes(model.size) }) : tr("non è su questa macchina"),
         fit: loaded ? residencyOf(loaded) : fitOf(model, card, held),
         selected: id === chosen,

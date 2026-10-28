@@ -2655,6 +2655,66 @@ describe("what runs the models", () => {
     assert.ok(second.calls.length > before, "its turn went to the server of its own card");
   });
 
+  test("Hermes on a card runs on that card's Ollama in a home of its own, and a model too short for Hermes never reaches it", async (t) => {
+    const previousReply = fakeOllama.current;
+    const card = await fakeOllama(() => ({ content: "" }));
+    card.context = { "test-model": 262144 };
+    const old = await fakeOllama(() => ({ content: "" }));
+    old.context = { "test-model": 40960 };
+    const agent = app.store.createAgent({ name: "Ermes", model: "hermes/test-model", tools: false, chattiness: 0 });
+    app.store.updateSettings({ ollamaHosts: [{ url: card.url, label: "LFM3", gpu: "" }, { url: old.url, label: "Vecchio", gpu: "" }] });
+    t.after(async () => {
+      app.store.updateSettings({ ollamaHosts: [] });
+      app.store.deleteAgent(agent.id);
+      await card.close();
+      await old.close();
+      fakeOllama.current = previousReply;
+    });
+    const turn = () => app.brain.chatTurn({ agent: app.store.agent(agent.id), history: [{ id: `hermes-card-${Date.now()}`, at: Date.now(), kind: "owner", authorName: "Sam", content: "Chi ti risponde?" }], channel: { id: `web-${agent.id}`, place: "test" }, forced: true, computer: false, say: async () => {} }).catch((error) => error);
+
+    const hardware = (await call("/api/hardware")).data;
+    const holds = (url) => hardware.hosts.find((host) => host.url === url).models.find((model) => model.name === "test-model").context;
+    assert.equal(holds(card.url), 262144, "each installed model says how much it holds");
+    assert.equal(holds(old.url), 40960);
+
+    await call(`/api/agents/${agent.id}`, { method: "PUT", body: { ollamaHost: card.url } });
+    const before = cli.calls().length;
+    cli.set({ reply: "Rispondo da Hermes sulla scheda." });
+    await turn();
+    const run = cli.calls().slice(before).find((item) => item.flavor === "hermes");
+    assert.ok(run, "Hermes ran");
+    assert.ok(run.hermesConfig.includes(`base_url: "${card.url}/v1"`), "Hermes is pointed at the Ollama of the agent's card");
+    assert.match(run.hermesHome, /-127-0-0-1-\d+$/, "a card's turns keep their own Hermes home");
+
+    await call(`/api/agents/${agent.id}`, { method: "PUT", body: { ollamaHost: old.url } });
+    const count = cli.calls().length;
+    await turn();
+    assert.equal(cli.calls().slice(count).filter((item) => item.flavor === "hermes").length, 0, "Hermes is never started on a model it would turn away");
+    const trace = (await call(`/api/agents/${agent.id}/traces`)).data.find((item) => item.status === "error");
+    assert.ok(trace, "the turn is recorded as failed");
+    assert.match(trace.error, /troppo poco contesto per Hermes[\s\S]*40K/, "and says why, with the number");
+  });
+
+  test("for Hermes, a model that holds too little is shown with the reason and cannot be chosen", async (t) => {
+    const previousReply = fakeOllama.current;
+    const old = await fakeOllama(() => ({ content: "" }));
+    old.context = { "test-model": 40960 };
+    app.store.updateSettings({ ollamaHosts: [{ url: old.url, label: "Vecchio", gpu: "" }] });
+    const agent = app.store.createAgent({ name: "Corto", model: "hermes/test-model", ollamaHost: old.url, tools: false, chattiness: 0 });
+    t.after(async () => {
+      app.store.updateSettings({ ollamaHosts: [] });
+      app.store.deleteAgent(agent.id);
+      await old.close();
+      fakeOllama.current = previousReply;
+    });
+    const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
+    await panel.run("boot()");
+    await panel.navigate(`#/agent/${agent.id}/cervello`);
+    const row = await waitFor(() => panel.app.querySelectorAll(".model-row").find((node) => node.querySelector(".row-title").textContent.startsWith("test-model")));
+    assert.ok("disabled" in row.attributes, "Hermes would turn it away, so it cannot be picked");
+    assert.match(row.textContent, /too little context for Hermes, which needs at least 64K/);
+  });
+
   test("a model is installed on request, and a refusal is explained in words", async (t) => {
     t.after(() => { fakeOllama.pullError = ""; });
     const started = await call("/api/ollama/pull", { method: "POST", body: { model: "test-model-2" } });
