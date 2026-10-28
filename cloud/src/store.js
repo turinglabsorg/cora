@@ -75,6 +75,8 @@ export class CloudStore {
     try { chmodSync(this.path, 0o600); } catch {}
     this.db.exec(SCHEMA);
     try { this.db.exec("ALTER TABLE identities ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0"); } catch {}
+    // An on-premise space answers on its own domain: people go there, nothing passes through the cloud.
+    try { this.db.exec("ALTER TABLE spaces ADD COLUMN public_url TEXT NOT NULL DEFAULT ''"); } catch {}
     this.db.exec(`CREATE TABLE IF NOT EXISTS space_members (
       slug TEXT NOT NULL REFERENCES spaces(slug) ON DELETE CASCADE,
       account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -172,18 +174,24 @@ export class CloudStore {
     this.stmt("UPDATE accounts SET epoch = epoch + 1 WHERE id = ?").run(accountId);
   }
 
-  addSpace({ slug, accountId, upstream }) {
+  addSpace({ slug, accountId, upstream, publicUrl = "" }) {
     if (!validSlug(slug)) throw new Error(`"${slug}" is not a valid space name`);
     const url = new URL(upstream);
     if (!/^https?:$/.test(url.protocol)) throw new Error("the upstream must be an http(s) address");
-    this.stmt("INSERT INTO spaces (slug, account_id, upstream, created_at) VALUES (?, ?, ?, ?)").run(slug, accountId, url.origin, Date.now());
+    let own = "";
+    if (publicUrl) {
+      const address = new URL(publicUrl);
+      if (address.protocol !== "https:") throw new Error("an own address must be https");
+      own = address.origin;
+    }
+    this.stmt("INSERT INTO spaces (slug, account_id, upstream, public_url, created_at) VALUES (?, ?, ?, ?, ?)").run(slug, accountId, url.origin, own, Date.now());
     this.stmt("DELETE FROM requests WHERE account_id = ?").run(accountId);
     return this.space(slug);
   }
 
   space(slug) {
     const row = this.stmt("SELECT * FROM spaces WHERE slug = ?").get(String(slug || ""));
-    return row ? { slug: row.slug, accountId: row.account_id, upstream: row.upstream, createdAt: row.created_at } : null;
+    return row ? { slug: row.slug, accountId: row.account_id, upstream: row.upstream, publicUrl: row.public_url || "", createdAt: row.created_at } : null;
   }
 
   spacesOf(accountId) {

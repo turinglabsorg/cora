@@ -15,11 +15,12 @@ import { LLM } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDocker, fakeOllama, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
+import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
 
 const PASSWORD = "correct horse battery staple";
 let discord;
 let telegram;
+let slack;
 let ollama;
 let docker;
 let app;
@@ -147,6 +148,7 @@ before(async () => {
     const handler = replies.get(name) || replies.get("*");
     return handler ? handler(body) : { content: "PASS" };
   });
+  slack = await fakeSlack();
   docker = fakeDocker();
   cli = fakeCli();
   home = tempHome();
@@ -170,6 +172,7 @@ before(async () => {
     discordApi: discord.url,
     telegramApi: telegram.url,
     telegramPollTimeout: 1,
+    slackApi: slack.url,
     ollamaUrl: ollama.url,
     ollamaKey: "test-ollama-key",
     orcaUrl: orca.url,
@@ -205,6 +208,7 @@ after(async () => {
   await app.stop();
   await discord.close();
   await telegram.close();
+  await slack.close();
   await ollama.close();
 });
 
@@ -2451,6 +2455,39 @@ describe("hosted on usecora.space", () => {
   });
 });
 
+describe("installed on the customer's own machine", () => {
+  test("the passes are good for its own domain and for no other", async () => {
+    const keys = passKeys("a cloud seed for the on-premise test 0123456789");
+    const ownHome = tempHome();
+    const seed = new Store(ownHome);
+    seed.updateSettings({ guildIds: [GUILD] });
+    seed.close();
+    const onPrem = startCora({
+      home: ownHome, host: "127.0.0.1", port: 0, adminPassword: "unused", sessionKey: "on-prem-session-key", insecureCookies: true,
+      cloudUrl: "https://usecora.test/", cloudKey: keys.publicKey, cloudSpace: "dopamina", publicHost: "cora.example.test",
+      discordToken: MAIN_TOKEN, discordApi: discord.url, telegramApi: telegram.url, telegramPollTimeout: 1, ollamaUrl: ollama.url, ollamaKey: "k",
+      claudeBin: cli.claude, codexBin: cli.codex, codexModelsFile: cli.models, ownerInstructions: join(home, "owner-AGENTS.md"),
+      botTokenFor: () => "", storeSecret: async () => {}, docker: docker.path, schedulerTickMs: 3600000, startBoxes: false,
+    });
+    await onPrem.ready;
+    const at = `http://127.0.0.1:${onPrem.server.address().port}`;
+    const get = (path) => fetch(`${at}${path}`, { redirect: "manual" });
+    try {
+      const forOurCloud = signPass(keys.privateKey, { aud: "dopamina.usecora.test", sub: "ac_9", email: "chief@dopamina.test" });
+      const refused = await get(`/auth/cloud?pass=${encodeURIComponent(forOurCloud)}`);
+      assert.equal(refused.headers.get("location"), "/?signin=refused", "a pass for the cloud's own subdomain is not this install's");
+
+      const mine = signPass(keys.privateKey, { aud: "cora.example.test", sub: "ac_9", email: "chief@dopamina.test" });
+      const entered = await get(`/auth/cloud?pass=${encodeURIComponent(mine)}&next=${encodeURIComponent("/#/agenti")}`);
+      assert.equal(entered.status, 302);
+      assert.equal(entered.headers.get("location"), "/#/agenti");
+      assert.match(entered.headers.get("set-cookie") || "", /cora_session=v2\./, "with a session of its own");
+    } finally {
+      await onPrem.stop();
+    }
+  });
+});
+
 describe("notifications and requests", () => {
   test("lounge replies and requests open the dedicated lounge route", async () => {
     const phone = await fakePhone();
@@ -2623,12 +2660,160 @@ describe("agents in Telegram", () => {
     const routine = await call(`/api/agents/${tina.id}/routines`, { method: "POST", body: { name: "Discord", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Saluta." } });
     await call(`/api/routines/${routine.data.id}/run`, { method: "POST" });
     const failed = await waitFor(async () => (await call("/api/state")).data.routines.find((item) => item.id === routine.data.id && item.lastStatus === "error"), { what: "routine refused" });
-    assert.match(failed.lastOutput, /ora Cora vive sull'altro/);
+    assert.match(failed.lastOutput, /ora Cora vive altrove/);
 
     await call("/api/settings", { method: "PUT", body: { transport: "discord" } });
     await waitFor(() => app.discord.state === "ready", { what: "Discord back" });
     assert.equal(app.telegram.state, "stopped");
     await call(`/api/agents/${tina.id}`, { method: "DELETE" });
+  });
+});
+
+
+describe("agents in Slack", () => {
+  const MAIN_BOT = "xoxb-main-000000000001";
+  const MAIN_APP = "xapp-main-000000000001";
+  const SILVIA_BOT = "xoxb-silvia-00000000001";
+  const SILVIA_APP = "xapp-silvia-00000000001";
+  const NADIA_BOT = "xoxb-nadia-000000000001";
+  const NADIA_APP = "xapp-nadia-000000000001";
+  let silvia;
+  let nadia;
+  let prompt = "";
+
+  test("the app's tokens are checked and stored, and switching to Slack turns Discord off", async () => {
+    slack.addApp({ botToken: MAIN_BOT, appToken: MAIN_APP, id: "U0000000100", name: "cora", channels: [SLACK_CHANNEL] });
+    assert.match((await call("/api/slack/token", { method: "PUT", body: { botToken: "nope", appToken: MAIN_APP } })).data.error, /xoxb-/);
+    assert.match((await call("/api/slack/token", { method: "PUT", body: { botToken: MAIN_BOT, appToken: "nope" } })).data.error, /xapp-/);
+    assert.match((await call("/api/slack/token", { method: "PUT", body: { botToken: "xoxb-unknown-00000001", appToken: MAIN_APP } })).data.error, /rifiuta/);
+
+    const saved = await call("/api/slack/token", { method: "PUT", body: { botToken: MAIN_BOT, appToken: MAIN_APP } });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.data.bot.username, "cora");
+    assert.equal(hushVault.CORA_SLACK_BOT_TOKEN, MAIN_BOT);
+    assert.equal(hushVault.CORA_SLACK_APP_TOKEN, MAIN_APP);
+    assert.equal(app.slack.state, "idle", "Slack waits until it is the channel in use");
+
+    const switched = await call("/api/settings", { method: "PUT", body: { transport: "slack" } });
+    assert.equal(switched.data.transport, "slack");
+    await waitFor(() => app.slack.state === "ready", { what: "the Slack socket" });
+    await waitFor(() => app.discord.state === "stopped", { what: "Discord off" });
+    const state = (await call("/api/state")).data;
+    assert.equal(state.slack.user.username, "cora");
+    assert.equal(state.slack.team.name, "Dopamina");
+    assert.deepEqual(state.channels, [], "no Slack channel is allowed yet");
+    assert.equal(app.store.settings.slackTeamId, "T0000000001");
+  });
+
+  test("a channel is heard only once allowed, the workspace owner becomes the owner, and the agent answers with its own app", async () => {
+    silvia = (await call("/api/agents", { method: "POST", body: { name: "Silvia", model: "ollama/test-model", chattiness: 0, tools: false } })).data;
+    slack.addApp({ botToken: SILVIA_BOT, appToken: SILVIA_APP, id: "U0000000101", name: "silvia", channels: [SLACK_CHANNEL] });
+    assert.match((await call(`/api/agents/${silvia.id}/slack-bot`, { method: "PUT", body: { botToken: MAIN_BOT, appToken: MAIN_APP } })).data.error, /app principale/);
+    const linked = await call(`/api/agents/${silvia.id}/slack-bot`, { method: "PUT", body: { botToken: SILVIA_BOT, appToken: SILVIA_APP } });
+    assert.equal(linked.status, 200);
+    assert.equal(hushVault.CORA_SK_BOT_SILVIA, SILVIA_BOT);
+    assert.equal(hushVault.CORA_SK_APP_SILVIA, SILVIA_APP);
+    assert.equal(linked.data.slackBot.user.username, "silvia");
+    assert.ok(linked.data.slackBot.manifest.settings.socket_mode_enabled, "the manifest creates a Socket Mode app");
+    assert.equal(linked.data.slackBot.manifest.features.bot_user.display_name, "Silvia");
+
+    replies.set("Silvia", (body) => {
+      prompt = lastUserText(body);
+      return { content: "Ci sono, dimmi pure." };
+    });
+    slack.say({ text: "Silvia, ci sei?" });
+    await sleep(1500);
+    assert.equal(slack.postsIn(SLACK_CHANNEL).length, 0, "a channel that is not allowed is ignored");
+
+    await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL] } });
+    const channels = (await call("/api/state")).data.channels;
+    assert.deepEqual(channels.map((channel) => [channel.id, channel.name, channel.kind]), [[`sl:${SLACK_CHANNEL}`, "generale", "slack"]]);
+
+    slack.say({ text: "Silvia, ci sei?" });
+    const post = await waitFor(() => slack.postsIn(SLACK_CHANNEL)[0], { what: "Silvia's answer" });
+    assert.equal(post.app, "silvia", "posted by her own app");
+    assert.equal(post.username, undefined, "her own app needs no name on the message");
+    assert.equal(post.text, "Ci sono, dimmi pure.");
+    assert.deepEqual(app.store.settings.slackOwnerIds, [SLACK_OWNER]);
+    assert.match(prompt, /Ultimi messaggi nel canale #generale di Slack/);
+    assert.match(prompt, /Sam ★: Silvia, ci sei\?/);
+    const [summary] = (await call(`/api/agents/${silvia.id}/traces`)).data;
+    const trace = (await call(`/api/traces/${summary.id}`)).data;
+    assert.match(trace.system, /In questo momento parlate su Slack, nello spazio "Dopamina"\./);
+    await quiet();
+  });
+
+  test("Slack's own markup becomes names and words, and what an agent writes becomes mrkdwn", async () => {
+    slack.state.posts.length = 0;
+    replies.set("Silvia", (body) => {
+      prompt = lastUserText(body);
+      return { content: "**fatto** e [il link](https://dopamina.it)" };
+    });
+    slack.say({ text: `<@${SLACK_STRANGER}> chiedi a <@U0000000101> in <#${SLACK_OTHER_CHANNEL}|clienti>: <https://dopamina.it|il sito> & altro`, user: SLACK_STRANGER });
+    const post = await waitFor(() => slack.postsIn(SLACK_CHANNEL)[0], { what: "Silvia's answer" });
+    assert.match(prompt, /@Kim chiedi a @Silvia in #clienti: il sito \(https:\/\/dopamina\.it\) & altro/);
+    assert.doesNotMatch(prompt, /Kim ★/, "a colleague is not the owner");
+    assert.equal(post.text, "*fatto* e <https://dopamina.it|il link>");
+    await quiet();
+  });
+
+  test("a message every app hears is answered once, and in a thread only a summoned agent speaks", async () => {
+    nadia = (await call("/api/agents", { method: "POST", body: { name: "Nadia", model: "ollama/test-model", chattiness: 0, tools: false } })).data;
+    slack.addApp({ botToken: NADIA_BOT, appToken: NADIA_APP, id: "U0000000102", name: "nadia", channels: [SLACK_CHANNEL] });
+    await call(`/api/agents/${nadia.id}/slack-bot`, { method: "PUT", body: { botToken: NADIA_BOT, appToken: NADIA_APP } });
+    await waitFor(() => app.skBots.client(nadia.id), { what: "Nadia's app" });
+    slack.state.posts.length = 0;
+    replies.set("*", () => ({ content: "Rispondo io." }));
+
+    const asked = slack.say({ text: "c'è qualcuno che mi dà una mano?" });
+    await waitFor(() => slack.postsIn(SLACK_CHANNEL).length, { what: "one answer" });
+    await quiet();
+    assert.equal(slack.postsIn(SLACK_CHANNEL).length, 1, "three sockets heard it, one agent answered");
+
+    slack.state.posts.length = 0;
+    slack.say({ text: "qualcuno sa?", threadTs: asked.ts });
+    await sleep(1500);
+    assert.equal(slack.state.posts.length, 0, "in a thread nobody answers unless called");
+
+    slack.say({ text: "Nadia, ci pensi tu?", threadTs: asked.ts });
+    const reply = await waitFor(() => slack.state.posts[0], { what: "Nadia in the thread" });
+    assert.equal(reply.app, "nadia");
+    assert.equal(reply.thread_ts, asked.ts, "the answer stays in the thread");
+    await quiet();
+  });
+
+  test("a direct message is answered by that agent alone, in private", async () => {
+    slack.join(SILVIA_BOT, SLACK_DM);
+    slack.state.posts.length = 0;
+    replies.set("Silvia", () => ({ content: "Te lo dico in privato." }));
+    slack.say({ text: "ciao, mi aiuti?", channel: SLACK_DM });
+    const post = await waitFor(() => slack.postsIn(SLACK_DM)[0], { what: "the private answer" });
+    assert.equal(post.app, "silvia");
+    assert.equal(slack.postsIn(SLACK_CHANNEL).length, 0, "nothing leaks into the channel");
+    await quiet();
+  });
+
+  test("messages written while cora was down are picked up when the socket opens", async () => {
+    slack.state.posts.length = 0;
+    replies.set("Silvia", () => ({ content: "Scusa, ero spenta." }));
+    slack.archive({ text: "Silvia, quando puoi guarda i conti" });
+    await app.orchestrator.catchUp();
+    const post = await waitFor(() => slack.postsIn(SLACK_CHANNEL)[0], { what: "the missed message answered" });
+    assert.equal(post.text, "Scusa, ero spenta.");
+    await quiet();
+  });
+
+  test("a routine on a Discord channel does not run while the cora lives on Slack; switching back turns Discord on again", async () => {
+    const routine = await call(`/api/agents/${silvia.id}/routines`, { method: "POST", body: { name: "Discord", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Saluta." } });
+    await call(`/api/routines/${routine.data.id}/run`, { method: "POST" });
+    const failed = await waitFor(async () => (await call("/api/state")).data.routines.find((item) => item.id === routine.data.id && item.lastStatus === "error"), { what: "routine refused" });
+    assert.match(failed.lastOutput, /il canale è su Discord, ma ora Cora vive altrove/);
+
+    await call("/api/settings", { method: "PUT", body: { transport: "discord" } });
+    await waitFor(() => app.discord.state === "ready", { what: "Discord back" });
+    assert.equal(app.slack.state, "stopped");
+    await call(`/api/agents/${silvia.id}`, { method: "DELETE" });
+    await call(`/api/agents/${nadia.id}`, { method: "DELETE" });
   });
 });
 

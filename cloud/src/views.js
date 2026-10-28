@@ -113,6 +113,20 @@ function layout({ title = TITLE, description = DESCRIPTION, body, page = "", acc
 <meta property="og:description" content="${esc(DESCRIPTION)}">
 <meta property="og:type" content="website">
 <meta property="og:url" content="${BASE}/">
+<meta property="og:site_name" content="Cora">
+<meta property="og:locale" content="en_US">
+<meta property="og:image" content="${BASE}/assets/social-card.png">
+<meta property="og:image:secure_url" content="${BASE}/assets/social-card.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Cora — AI agents that live in your team chat. Their own memory. Their own computer. Your team. Your AI.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${esc(TITLE)}">
+<meta name="twitter:description" content="${esc(DESCRIPTION)}">
+<meta name="twitter:image" content="${BASE}/assets/social-card.png">
+<meta name="twitter:image:alt" content="Cora — AI agents that live in your team chat. Their own memory. Their own computer. Your team. Your AI.">
+${page === "landing" ? `<link rel="canonical" href="${BASE}/">` : ""}
 <link rel="icon" href="${BASE}/assets/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -338,10 +352,11 @@ export function login({ next, providers, error, account }) {
 export function account({ account, identities, spaces, request, notice, error, domain }) {
   const alert = error ? `<p class="alert" role="alert">${esc(ACCOUNT_ERRORS[error] || "Something went wrong.")}</p>`
     : notice && ACCOUNT_NOTICES[notice] ? `<p class="notice" role="status">${ACCOUNT_NOTICES[notice]}</p>` : "";
+  // A space installed on the customer's own machine is named by its own address: that is where it answers.
   const spaceList = spaces.map((space) => `
     <li class="space-row">
       <span class="lamp on"><i></i>On air</span>
-      <span class="space-name"><b>${esc(space.slug)}</b>.${esc(domain)}</span>
+      <span class="space-name">${space.publicUrl ? `<b>${esc(new URL(space.publicUrl).hostname)}</b>` : `<b>${esc(space.slug)}</b>.${esc(domain)}`}</span>
       <a class="btn primary" href="${BASE}/go/${esc(space.slug)}">Enter${ICONS.arrow}</a>
     </li>`).join("");
   const asking = request

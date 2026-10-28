@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { AgentBots } from "./agent-bots.js";
 import { Channels } from "./channels.js";
+import { Slack } from "./slack.js";
+import { SlackBots } from "./slack-bots.js";
 import { Telegram } from "./telegram.js";
 import { TelegramBots } from "./telegram-bots.js";
 import { hushStore } from "./secrets.js";
@@ -38,6 +40,7 @@ export function startCora(overrides = {}) {
   const listenerToken = cfg.discordToken ?? resolveDiscordToken();
   const discord = new Discord({ token: listenerToken, apiBase: cfg.discordApi, gatewayUrl: cfg.discordGateway });
   const telegram = new Telegram({ token: cfg.telegramToken, apiBase: cfg.telegramApi, pollTimeout: cfg.telegramPollTimeout, chats: store.value("telegramChats", []) });
+  const slack = new Slack({ botToken: cfg.slackToken, appToken: cfg.slackAppToken, apiBase: cfg.slackApi });
   const bridge = new ToolBridge();
   const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, residentDirectories: cfg.residentDirectories, emit: (event) => web?.broadcast(event) });
   const llm = new LLM({
@@ -68,7 +71,8 @@ export function startCora(overrides = {}) {
   const tokenFor = cfg.botTokenFor || ((name) => process.env[name] || process.env[name.replace(/^CORA_/, "CORO_")] || "");
   const bots = new AgentBots({ store, apiBase: cfg.discordApi, gatewayUrl: cfg.discordGateway, tokenFor, log: activity });
   const tgBots = new TelegramBots({ store, apiBase: cfg.telegramApi, tokenFor, log: activity });
-  const channels = new Channels({ store, discord, bots, telegram, tgBots });
+  const skBots = new SlackBots({ store, apiBase: cfg.slackApi, tokenFor, log: activity });
+  const channels = new Channels({ store, discord, bots, telegram, tgBots, slack, skBots });
   const pickListener = () => {
     if (listenerToken) return;
     const listener = bots.listener();
@@ -80,15 +84,18 @@ export function startCora(overrides = {}) {
   bots.onChange = pickListener;
   const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push });
   const filesDir = join(cfg.home, "files");
-  const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, emit: live, filesDir, notifier: push, watching: () => web?.watching() });
+  const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching() });
   // DMs to an agent's own bot reach the orchestrator, where that one agent answers.
   bots.onDirect = (agentId, raw) => orchestrator.onDirectMessage(agentId, raw).catch((error) => activity({ type: "error", agentId, text: `dm: ${error.message}` }));
   // Every agent bot that may read content also listens: a private channel is heard if one of them is in it.
   bots.onGuild = (raw, agentId) => orchestrator.onMessage(raw, agentId).catch((error) => activity({ type: "error", channelId: raw.channel_id, text: error.message }));
+  // Every agent's Slack app listens: a channel is heard as long as one of them is in it.
+  skBots.onGuild = (event, agentId) => orchestrator.onSlackMessage(event, agentId).catch((error) => activity({ type: "error", agentId, text: `slack: ${error.message}` }));
+  skBots.onDirect = (agentId, event) => orchestrator.onSlackDirect(agentId, event).catch((error) => activity({ type: "error", agentId, text: `slack dm: ${error.message}` }));
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
   const scheduler = new Scheduler({ store, orchestrator, brain, timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, channels, boxes, llm, orchestrator, brain, bots, tgBots, activity, storeSecret, traces, push });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -110,6 +117,22 @@ export function startCora(overrides = {}) {
     if (stopping) return;
     activity({ type: "discord", text: `connesso come ${discord.user?.username}` });
     // Give the gateway a moment to deliver the servers' channels, then answer what was missed.
+    clearTimeout(catchUpTimer);
+    catchUpTimer = setTimeout(() => {
+      if (stopping) return;
+      orchestrator.catchUp().catch((error) => activity({ type: "error", text: `recupero messaggi: ${error.message}` }));
+      resume();
+    }, 3000);
+  });
+  slack.on("message", (event) => {
+    orchestrator.onSlackMessage(event).catch((error) => activity({ type: "error", text: `slack: ${error.message}` }));
+  });
+  slack.on("status", (status) => web.broadcast({ type: "slack", state: status.state, error: status.error }));
+  slack.on("ready", () => {
+    if (stopping) return;
+    activity({ type: "slack", text: `connessa come @${slack.user?.name} su ${slack.team?.name || "Slack"}` });
+    if (slack.team?.id && slack.team.id !== store.settings.slackTeamId) store.updateSettings({ slackTeamId: slack.team.id });
+    slack.listChannels().catch(() => {});
     clearTimeout(catchUpTimer);
     catchUpTimer = setTimeout(() => {
       if (stopping) return;
@@ -141,6 +164,7 @@ export function startCora(overrides = {}) {
     botTimer = setInterval(() => {
       bots.sync();
       tgBots.sync();
+      skBots.sync();
       pickListener();
     }, 60000);
     scheduler.start();
@@ -163,13 +187,15 @@ export function startCora(overrides = {}) {
     bots.stop();
     telegram.stop();
     tgBots.stop();
+    slack.stop();
+    skBots.stop();
     const closed = new Promise((resolve) => web.server.close(resolve));
     web.server.closeAllConnections?.();
     await closed;
     await bridge.stop();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, traces, push, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, server: web.server };
 }
 
 const isMain = (() => {

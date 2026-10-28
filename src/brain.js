@@ -1,9 +1,9 @@
 import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { Memory, parseJsonObject } from "./memory.js";
-import { isTelegramChannel } from "./channels.js";
+import { transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom } from "./rooms.js";
-import { SHARED } from "./store.js";
+import { SHARED, TRANSPORTS } from "./store.js";
 import { MEMORY_TOOLS, OWN_TOOLS, TOOL_DEFS, executeTool, summarizeArgs } from "./tools.js";
 import { NO_TRACE } from "./traces.js";
 import { nextRuns } from "./scheduler.js";
@@ -122,15 +122,15 @@ export class Brain {
   }
 
   /** Channels whose archive an agent may search: the ones it listens to in the servers cora uses. */
-  /** Channels whose archive an agent may search: the ones it listens to, on Discord and Telegram alike, plus its panel rooms. */
+  /** Channels whose archive an agent may search: the ones it listens to, on every transport, plus its panel rooms. */
   channelIdsFor(agent) {
     const archived = this.store.archivedChannels().filter((id) => !isWebRoom(id));
     const visible = this.channels?.list() || [];
     const ids = [SALOTTO, privateRoom(agent.id)];
-    for (const telegram of [false, true]) {
-      const chosen = agent.channelIds.filter((id) => isTelegramChannel(id) === telegram);
+    for (const transport of TRANSPORTS) {
+      const chosen = agent.channelIds.filter((id) => transportOf(id) === transport);
       if (!chosen.length) {
-        ids.push(...archived.filter((id) => isTelegramChannel(id) === telegram), ...visible.filter((channel) => isTelegramChannel(channel.id) === telegram).map((channel) => channel.id));
+        ids.push(...archived.filter((id) => transportOf(id) === transport), ...visible.filter((channel) => transportOf(channel.id) === transport).map((channel) => channel.id));
         continue;
       }
       const wanted = new Set(chosen);

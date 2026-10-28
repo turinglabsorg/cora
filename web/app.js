@@ -64,6 +64,7 @@ const TRACE_STATUS = { running: ["in corso", "agent"], done: ["ha risposto", "ok
 const TRANSPORTS = {
   discord: { label: "Discord", icon: "hash" },
   telegram: { label: "Telegram", icon: "send" },
+  slack: { label: "Slack", icon: "slack" },
 };
 const STATE_LABEL = {
   ready: "in onda", connecting: "si collega…", reconnecting: "si ricollega…", idle: "pronto", stopped: "spento",
@@ -94,6 +95,7 @@ const ICONS = {
   stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
   refresh: '<path d="M20 11.5A8 8 0 1 0 17.7 17M20 4.5v7h-7"/>',
   moon: '<path d="M20.5 13.5A8.5 8.5 0 1 1 10.5 3.5a6.5 6.5 0 0 0 10 10z"/>',
+  slack: '<path d="M3.5 9.8h6.3"/><path d="M14.2 3.5v6.3"/><path d="M20.5 14.2h-6.3"/><path d="M9.8 20.5v-6.3"/>',
   hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
   key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M16 7l3 3M18.5 4.5l2 2"/>',
   link: '<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4l-1 1M14 10a4.5 4.5 0 0 0-6.4 0l-3.2 3.2a4.5 4.5 0 0 0 6.4 6.4l1-1"/>',
@@ -320,6 +322,11 @@ function channelName(id) {
   if (id === SALOTTO) return tr("salotto");
   if (/^web-/.test(id)) return tr("chat con {name}", { name: S.data?.agents.find((agent) => agent.id === id.slice(4))?.name || "?" });
   if (/^tg:/.test(id)) return S.data?.telegram.chats.find((chat) => chat.id === id.slice(3))?.title || "chat Telegram";
+  if (/^sl:/.test(id)) {
+    const [channelId, threadTs] = id.slice(3).split(":");
+    const name = S.data?.slack?.channels.find((channel) => channel.id === channelId)?.name || channelId;
+    return threadTs ? tr("thread in #{name}", { name }) : `#${name}`;
+  }
   const channel = [...(S.data?.channels || []), ...(S.data?.discordChannels || [])].find((item) => item.id === id);
   return channel ? `#${channel.name}` : `#${id}`;
 }
@@ -338,16 +345,19 @@ function modelLabel(model, { short = false } = {}) {
 }
 
 function transportInfo(kind = S.data.transport) {
-  const status = kind === "telegram" ? S.data.telegram : S.data.discord;
+  const status = (kind === "telegram" ? S.data.telegram : kind === "slack" ? S.data.slack : S.data.discord) || { state: "missing-token", error: "", user: null };
   let where;
-  if (kind === "telegram") {
+  if (kind === "slack") {
+    const names = S.data.settings.slackChannelIds.map((id) => S.data.slack?.channels.find((channel) => channel.id === id)?.name || id);
+    where = names.length ? names.map((name) => `#${name}`).join(", ") : "nessun canale acceso";
+  } else if (kind === "telegram") {
     const chats = S.data.settings.telegramChatIds.map((id) => S.data.telegram.chats.find((chat) => chat.id === id)?.title || id);
     where = chats.length ? chats.join(", ") : "nessuna chat accesa";
   } else {
     const guilds = S.data.discord.guilds.filter((guild) => S.data.settings.guildIds.includes(guild.id)).map((guild) => guild.name);
     where = guilds.length ? guilds.join(", ") : "nessun server acceso";
   }
-  return { kind, ...TRANSPORTS[kind], state: status.state, error: status.error, user: status.user, where };
+  return { kind, ...TRANSPORTS[kind], state: status.state, error: status.error, user: status.user, team: status.team, where };
 }
 
 function shade(hex) {
@@ -558,6 +568,9 @@ function banners() {
   const info = transportInfo();
   if (info.state === "missing-token") out.push(h("a", { class: "banner err", href: "#/settings" }, icon("key"), h("span", {}, h("b", {}, info.kind === "telegram" ? "Telegram senza token. " : "Nessuno ascolta Discord. "), info.kind === "telegram" ? "Incolla il token del bot (da BotFather) nelle impostazioni." : "Attiva «Message Content Intent» nella pagina Bot dell'app Discord di almeno un agente: Cora ascolterà con quel bot.")));
   else if (info.state === "error") out.push(h("a", { class: "banner err", href: "#/settings" }, icon("alert"), h("span", {}, h("b", {}, `${info.label}: `), raw(info.error))));
+  if (info.kind === "slack" && info.state !== "missing-token" && !S.data.settings.slackChannelIds.length) {
+    out.push(h("a", { class: "banner", href: "#/settings" }, icon("info"), h("span", {}, h("b", {}, "Nessun canale Slack acceso. "), "Invita le app nei canali e accendili nelle impostazioni.")));
+  }
   if (info.kind === "telegram" && info.state !== "missing-token" && !S.data.settings.telegramChatIds.length) {
     out.push(h("a", { class: "banner", href: "#/settings" }, icon("info"), h("span", {}, h("b", {}, "Nessuna chat Telegram accesa. "), "Aggiungi il bot a un gruppo e accendi la chat nelle impostazioni.")));
   }
@@ -574,6 +587,7 @@ function statCard({ icon: name, value, label, sub, href }) {
 }
 
 function agentAccount(agent) {
+  if (S.data.transport === "slack") return agent.slackBot?.user ? ["App sua", "on"] : ["App principale", ""];
   if (S.data.transport === "telegram") return agent.telegramBot?.user ? ["Bot suo", "on"] : ["Bot principale", ""];
   return agent.bot?.user ? ["Bot suo", "on"] : ["Webhook", ""];
 }
@@ -1187,6 +1201,76 @@ function tokenForm({ placeholder, path, ok }) {
   return h("div", { class: "input-row token" }, input, button);
 }
 
+function slackTokenForm({ path, ok }) {
+  const bot = h("input", { type: "password", placeholder: tr("Token del bot (xoxb-…)"), autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
+  const level = h("input", { type: "password", placeholder: tr("Token a livello app (xapp-…)"), autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
+  const button = btn("Collega", { icon: "link", cls: "primary" });
+  const save = async () => {
+    if (!bot.value.trim() || !level.value.trim()) {
+      toast("Servono tutti e due i token", true);
+      return;
+    }
+    button.disabled = true;
+    const saved = await guard(api(path, { method: "PUT", body: { botToken: bot.value, appToken: level.value } }), ok);
+    bot.value = "";
+    level.value = "";
+    button.disabled = false;
+    if (saved) {
+      await loadState();
+      render();
+    }
+  };
+  button.addEventListener("click", save);
+  for (const input of [bot, level]) {
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        save();
+      }
+    });
+  }
+  return h("div", { class: "stack-sm" }, bot, level, h("div", { class: "row end" }, button));
+}
+
+/** Slack takes a bot's name from its app, so the app is created from a manifest already filled in. */
+function slackManifest(manifest) {
+  const text = JSON.stringify(manifest, null, 2);
+  return h("div", { class: "stack-sm" },
+    h("div", { class: "row" },
+      btn("Copia il manifest", { icon: "copy", onclick: () => {
+        navigator.clipboard?.writeText(text).then(() => toast("Copiato"), () => toast("Non riesco a copiare: selezionalo a mano", true));
+      } }),
+      btn("Crea l'app su Slack", { icon: "external", href: "https://api.slack.com/apps?new_app=1", target: "_blank" })),
+    h("details", { class: "manifest" }, h("summary", {}, tr("Vedi il manifest")), h("pre", { class: "mono" }, text)));
+}
+
+function slackAccount(agent) {
+  const bot = agent.slackBot || { configured: false, env: "", appEnv: "" };
+  const actions = bot.user
+    ? badge(bot.inChannel ? "Nel canale" : "Fuori dal canale", bot.inChannel ? "on" : "err", bot.inChannel ? "check" : "alert")
+    : badge("App principale", bot.state === "error" ? "err" : "", "slack");
+  let body;
+  if (bot.user) {
+    body = [
+      h("p", { class: "lead" }, "Collegata come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", bot.inChannel ? "Scrive nel canale col suo account." : "Non è ancora nei canali accesi: invitala con /invite e scriverà da sola."),
+      h("small", { class: "muted" }, "Nome e immagine stanno nell'app Slack: se rinomini l'agente, rinomina anche l'app."),
+    ];
+  } else {
+    body = [
+      h("p", { class: "lead" }, bot.state === "error" ? tr("I token salvati non funzionano ({error}): incollane di nuovi.", { error: bot.error }) : "Ora scrive tramite l'app principale, col suo nome sul messaggio. Con un'app sua è un utente Slack vero: la menzioni e le scrivi in privato."),
+      steps(
+        h("span", {}, "tocca «Crea l'app su Slack», scegli ", h("b", {}, "From a manifest"), " e incolla il manifest qui sotto;"),
+        h("span", {}, "Install to Workspace, poi copia il ", h("b", {}, "Bot User OAuth Token"), " (xoxb-) da OAuth & Permissions;"),
+        h("span", {}, "in Basic Information → App-Level Tokens crea un token con ", h("code", {}, "connections:write"), " e copia l'xapp-;"),
+        h("span", {}, "incolla i due token qui: li controllo e li salvo in hush come ", h("code", {}, bot.env), " e ", h("code", {}, bot.appEnv), ";"),
+        h("span", {}, "nel canale scrivi ", h("code", {}, `/invite @${agent.name}`), ".")),
+      bot.manifest ? slackManifest(bot.manifest) : null,
+      slackTokenForm({ path: `/api/agents/${agent.id}/slack-bot`, ok: "Token salvati" }),
+    ];
+  }
+  return panel({ icon: "slack", title: "Account Slack", hint: "La sua app su Slack.", actions }, body);
+}
+
 function steps(...items) {
   return h("ol", { class: "steps" }, items.map((item) => h("li", {}, item)));
 }
@@ -1291,7 +1375,7 @@ async function renderAgent() {
   else if (tab === "attivita") body = activityTab(agent);
   else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent });
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
-  else body = [S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), agentForm(agent)];
+  else body = [S.data.transport === "slack" ? slackAccount(agent) : S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), agentForm(agent)];
   if (isCurrent()) slot.replaceChildren(...[body].flat().filter(Boolean));
 }
 
@@ -2339,13 +2423,42 @@ function renderSettings() {
         h("span", { class: "switch-text" }, raw(chat.title), h("small", {}, `${tr(chat.type === "private" ? "chat privata" : chat.type === "channel" ? "canale" : "gruppo")}${chat.member === false ? tr(" · il bot non c'è più") : ""}`))))) : h("small", {}, "Aggiungi il bot a un gruppo (o scrivigli in privato): la chat compare qui e la accendi.")),
     field("Proprietari (ID utente Telegram)", h("input", { type: "text", name: "telegramOwnerIds", class: "mono", value: settings.telegramOwnerIds.join(", "), autocomplete: "off" }), "Se è vuoto diventa proprietario chi ha creato il gruppo, o chi scrive al bot in privato."));
 
+  const slack = S.data.slack || { state: "missing-token", channels: [], error: "" };
+  const slackChannels = slack.channels || [];
+  const refreshChannels = btn("Aggiorna canali", { icon: "refresh", cls: "sm ghost", onclick: async () => {
+    if (await guard(api("/api/slack/channels"), "Canali aggiornati")) {
+      await loadState();
+      renderSettings();
+    }
+  } });
+  const slackPanel = panel({ icon: "slack", title: "Slack", hint: "Un'app per ogni agente, così è un utente vero: la menzioni e le scrivi in privato.", actions: S.data.transport === "slack" ? badge("In uso", "on", "radio") : null },
+    slack.user
+      ? h("p", { class: "lead" }, "App principale: ", h("b", {}, raw(`@${slack.user.username}`)), raw(`${slack.team ? ` · ${slack.team.name}` : ""} · ${tr(STATE_LABEL[slack.state] || slack.state)}${slack.error ? ` (${slack.error})` : ""}`))
+      : slack.state === "idle" || slack.state === "stopped"
+        ? h("p", { class: "lead" }, "I token ci sono: l'app si collega quando Cora passa su Slack.")
+        : [
+          h("p", { class: "lead" }, slack.state === "error" ? tr("I token non funzionano: {error}.", { error: slack.error }) : "Serve l'app principale: tiene l'elenco dei canali e scrive gli avvisi."),
+          steps(
+            h("span", {}, "apri ", h("a", { href: "https://api.slack.com/apps?new_app=1", target: "_blank", rel: "noopener" }, "api.slack.com/apps"), " → From a manifest, e scegli il workspace;"),
+            h("span", {}, "Install to Workspace, poi copia il ", h("b", {}, "Bot User OAuth Token"), " (xoxb-);"),
+            h("span", {}, "in Basic Information → App-Level Tokens crea un token con ", h("code", {}, "connections:write"), " e copia l'xapp-;"),
+            "incolla qui i due token: li controllo e li salvo in hush."),
+        ],
+    slackTokenForm({ path: "/api/slack/token", ok: "App Slack collegata" }),
+    h("div", { class: "field" }, h("span", { class: "label" }, "Canali", slackChannels.length ? refreshChannels : null),
+      slackChannels.length ? h("div", { class: "stack-sm" }, slackChannels.map((channel) => h("label", { class: "switch" },
+        h("input", { type: "checkbox", name: "slchannel", value: channel.id, checked: settings.slackChannelIds.includes(channel.id) }),
+        h("span", { class: "rocker" }),
+        h("span", { class: "switch-text" }, raw(`#${channel.name}`), h("small", {}, tr(channel.private ? "canale privato" : "canale pubblico")))))) : h("div", { class: "row" }, h("small", {}, "Invita un'app in un canale (/invite): il canale compare qui e lo accendi."), refreshChannels)),
+    field("Proprietari (ID utente Slack)", h("input", { type: "text", name: "slackOwnerIds", class: "mono", value: settings.slackOwnerIds.join(", "), autocomplete: "off" }), "Se è vuoto diventa proprietario chi possiede il workspace, appena scrive."));
+
   const form = h("form", { class: "stack" },
     h("div", { class: "settings-pane stack", "data-settings-tab": "preferenze", role: "tabpanel" }, languagePanel(), notificationsPanel()),
     h("div", { class: "settings-pane stack", "data-settings-tab": "collegamenti", role: "tabpanel" }, connectionsPanel()),
     h("div", { class: "settings-pane stack", "data-settings-tab": "canali", role: "tabpanel" },
     panel({ icon: "radio", title: "Dove vive Cora", hint: "Un canale alla volta: quando ne accendi uno, l'altro si spegne. Il salotto del pannello c'è sempre." },
-      h("div", { class: "choices" }, transportChoice("discord"), transportChoice("telegram"))),
-    h("div", { class: "split" }, discordPanel, telegramPanel)),
+      h("div", { class: "choices" }, transportChoice("discord"), transportChoice("telegram"), transportChoice("slack"))),
+    h("div", { class: "split" }, discordPanel, telegramPanel), slackPanel),
     h("div", { class: "settings-pane stack", "data-settings-tab": "agenti", role: "tabpanel" },
     panel({ icon: "sliders", title: "Regia", hint: "Quanto possono parlarsi tra loro prima di fermarsi ad aspettare un umano." },
       h("div", { class: "grid3" },
@@ -2372,6 +2485,8 @@ function renderSettings() {
       ownerIds: ids("ownerIds"),
       telegramChatIds: [...form.querySelectorAll("input[name=tgchat]:checked")].map((input) => input.value),
       telegramOwnerIds: ids("telegramOwnerIds"),
+      slackChannelIds: [...form.querySelectorAll("input[name=slchannel]:checked")].map((input) => input.value),
+      slackOwnerIds: ids("slackOwnerIds"),
       maxAgentTurns: Number(data.get("maxAgentTurns")),
       maxRepliesPerRound: Number(data.get("maxRepliesPerRound")),
       historySize: Number(data.get("historySize")),

@@ -1,0 +1,20 @@
+[Unit]
+Description=Cora
+Documentation=https://github.com/turinglabsorg/cora
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Services/cora
+ExecStart=/bin/sh %h/Services/cora/bin/run.sh
+Environment=CORA_LISTEN_HOST=127.0.0.1
+Environment=PORT=4370
+# hush and the agents' desktops live in the user's own paths; run.sh adds the rest.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

@@ -571,3 +571,172 @@ export async function fakeTelegram() {
     },
   };
 }
+
+export const SLACK_TEAM = "T0000000001";
+export const SLACK_CHANNEL = "C0000000001";
+export const SLACK_OTHER_CHANNEL = "C0000000002";
+export const SLACK_DM = "D0000000001";
+export const SLACK_OWNER = "U0000000001";
+export const SLACK_STRANGER = "U0000000002";
+
+/** A stand-in Slack: the Web API over HTTP and Socket Mode over WebSocket. */
+export async function fakeSlack() {
+  const state = {
+    apps: new Map(),
+    posts: [],
+    uploads: [],
+    sockets: new Map(),
+    acks: [],
+    opens: 0,
+    users: new Map([
+      [SLACK_OWNER, { id: SLACK_OWNER, name: "sam", real_name: "Sam", is_owner: true, is_primary_owner: true }],
+      [SLACK_STRANGER, { id: SLACK_STRANGER, name: "kim", real_name: "Kim" }],
+    ]),
+    channels: new Map([
+      [SLACK_CHANNEL, { id: SLACK_CHANNEL, name: "generale" }],
+      [SLACK_OTHER_CHANNEL, { id: SLACK_OTHER_CHANNEL, name: "clienti" }],
+      [SLACK_DM, { id: SLACK_DM, name: "", is_im: true }],
+    ]),
+    history: new Map(),
+    nextTs: 100,
+  };
+  const ok = (res, body) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, ...body }));
+  };
+  const fail = (res, error) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error }));
+  };
+  const appFor = (req, kind = "bot") => {
+    const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    for (const app of state.apps.values()) if ((kind === "bot" ? app.botToken : app.appToken) === token) return app;
+    return null;
+  };
+  // Slack stamps a message with the second it arrived and a counter, so order follows the clock.
+  const ts = () => `${Math.floor(Date.now() / 1000)}.${String(state.nextTs++).padStart(6, "0")}`;
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://x");
+    const body = await readBody(req);
+    if (url.pathname.startsWith("/upload/")) {
+      state.uploads.push({ fileId: url.pathname.slice(8), bytes: body.length });
+      res.writeHead(200);
+      return res.end("ok");
+    }
+    const method = url.pathname.replace("/api/", "");
+    const params = Object.fromEntries(new URLSearchParams(body.toString("utf8")));
+    const app = appFor(req, method === "apps.connections.open" ? "app" : "bot");
+    if (!app) return fail(res, "invalid_auth");
+    switch (method) {
+      case "auth.test":
+        return ok(res, { user_id: app.id, user: app.name, bot_id: `B${app.id.slice(1)}`, team_id: SLACK_TEAM, team: "Dopamina", url: "https://dopamina.slack.com/" });
+      case "apps.connections.open":
+        state.opens += 1;
+        return ok(res, { url: `ws://127.0.0.1:${server.address().port}/link?t=${encodeURIComponent(app.appToken)}` });
+      case "users.conversations":
+        return ok(res, { channels: [...app.channels].map((id) => ({ ...state.channels.get(id) })), response_metadata: { next_cursor: "" } });
+      case "conversations.info": {
+        const channel = state.channels.get(params.channel);
+        return channel ? ok(res, { channel }) : fail(res, "channel_not_found");
+      }
+      case "conversations.history":
+        return ok(res, { messages: [...(state.history.get(params.channel) || [])].reverse() });
+      case "conversations.replies":
+        return ok(res, { messages: (state.history.get(params.channel) || []).filter((item) => item.thread_ts === params.ts || item.ts === params.ts) });
+      case "users.info": {
+        const user = state.users.get(params.user);
+        return user ? ok(res, { user: { ...user, profile: { display_name: user.real_name, real_name: user.real_name } } }) : fail(res, "user_not_found");
+      }
+      case "chat.postMessage": {
+        if (!app.channels.has(params.channel)) return fail(res, "not_in_channel");
+        const message = { ...params, app: app.name, ts: ts() };
+        state.posts.push(message);
+        return ok(res, { ts: message.ts, channel: params.channel });
+      }
+      case "files.getUploadURLExternal":
+        return ok(res, { upload_url: `http://127.0.0.1:${server.address().port}/upload/F1`, file_id: "F1" });
+      case "files.completeUploadExternal": {
+        const shared = ts();
+        state.posts.push({ ...params, app: app.name, ts: shared, file: true });
+        return ok(res, { files: [{ id: "F1", shares: { public: { [params.channel_id]: [{ ts: shared }] } } }] });
+      }
+      default:
+        return fail(res, `unknown_method_${method}`);
+    }
+  });
+
+  server.on("upgrade", (req, socket) => {
+    const token = new URL(req.url, "http://x").searchParams.get("t") || "";
+    const accept = createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    state.sockets.set(socket, token);
+    socket.write(encodeFrame(JSON.stringify({ type: "hello", num_connections: 1 })));
+    let buffer = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const { frames, rest } = decodeFrames(buffer);
+      buffer = rest;
+      for (const frame of frames) {
+        if (frame.opcode === 8) socket.end();
+        else if (frame.opcode === 1) state.acks.push(JSON.parse(frame.payload.toString("utf8")));
+      }
+    });
+    socket.on("close", () => state.sockets.delete(socket));
+    socket.on("error", () => state.sockets.delete(socket));
+  });
+
+  const port = await listen(server);
+  let envelope = 0;
+  return {
+    state,
+    url: `http://127.0.0.1:${port}/api`,
+    /** Register an app (the main one, or an agent's) and the channels it is in. */
+    addApp({ botToken, appToken, id, name, channels = [SLACK_CHANNEL] }) {
+      state.apps.set(botToken, { botToken, appToken, id, name, channels: new Set(channels) });
+    },
+    join(botToken, channelId) {
+      state.apps.get(botToken)?.channels.add(channelId);
+    },
+    /** Deliver an event to every app in that channel, the way Slack does. */
+    say({ text, channel = SLACK_CHANNEL, user = SLACK_OWNER, threadTs = "", files = null, botId = "", username = "" }) {
+      const event = {
+        type: "message", channel, user: botId ? undefined : user, text, ts: ts(),
+        channel_type: channel.startsWith("D") ? "im" : "channel",
+      };
+      if (threadTs) event.thread_ts = threadTs;
+      if (files) event.files = files;
+      if (botId) {
+        event.bot_id = botId;
+        event.subtype = "bot_message";
+        event.username = username || "bot";
+      }
+      const archive = state.history.get(channel) || [];
+      archive.push(event);
+      state.history.set(channel, archive);
+      for (const [socket, token] of state.sockets) {
+        const app = [...state.apps.values()].find((entry) => entry.appToken === token);
+        if (!app?.channels.has(channel)) continue;
+        envelope += 1;
+        socket.write(encodeFrame(JSON.stringify({ envelope_id: `env-${envelope}`, type: "events_api", payload: { event } })));
+      }
+      return event;
+    },
+    /** A message written while Cora was down: in the archive, never delivered. */
+    archive({ text, channel = SLACK_CHANNEL, user = SLACK_OWNER, at = null }) {
+      const event = { type: "message", channel, user, text, ts: at || ts(), channel_type: "channel" };
+      const archive = state.history.get(channel) || [];
+      archive.push(event);
+      state.history.set(channel, archive);
+      return event;
+    },
+    postsIn(channel) {
+      return state.posts.filter((post) => (post.channel || post.channel_id) === channel);
+    },
+    close() {
+      for (const socket of state.sockets.keys()) socket.destroy();
+      server.closeAllConnections?.();
+      return new Promise((resolve) => server.close(resolve));
+    },
+  };
+}

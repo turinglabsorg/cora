@@ -331,6 +331,35 @@ describe("usecora.space", () => {
   });
 });
 
+describe("a space installed on the customer's own machine", () => {
+  const OWN = "https://cora.example.test";
+
+  test("people are sent straight to its own domain, with a pass signed for that host", async () => {
+    const owner = store.createAccount({ name: "On Prem" });
+    store.invite(owner.id, "google", "chief@onprem.example");
+    store.addSpace({ slug: "onprem", accountId: owner.id, upstream: OWN, publicUrl: OWN });
+
+    const { cookie } = await signIn("google", { sub: "g-onprem", email: "chief@onprem.example", email_verified: true, name: "Chief" });
+    const go = await request("/go/onprem", { headers: { cookie } });
+    assert.equal(go.status, 302);
+    const to = new URL(go.headers.location);
+    assert.equal(to.origin, OWN, "the cloud never proxies an on-premise space");
+    assert.equal(to.pathname, "/auth/cloud");
+    const pass = verifyPass(cloud.publicKey, to.searchParams.get("pass"), { audience: "cora.example.test" });
+    assert.equal(pass.email, "chief@onprem.example");
+    assert.equal(verifyPass(cloud.publicKey, to.searchParams.get("pass"), { audience: `onprem.${DOMAIN}` }), null, "and it is good for no other host");
+
+    const account = await request("/account", { headers: { cookie } });
+    assert.match(account.body, /cora\.example\.test/, "the account page names it by its own address");
+  });
+
+  test("its name on usecora.space only points at it", async () => {
+    const visit = await request("/some/page?x=1", { host: `onprem.${DOMAIN}` });
+    assert.equal(visit.status, 302);
+    assert.equal(visit.headers.location, `${OWN}/some/page?x=1`);
+  });
+});
+
 describe("waitlist Discord webhook", () => {
   async function fixture(t) {
     const received = [];

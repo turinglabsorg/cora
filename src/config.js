@@ -21,6 +21,9 @@ export const config = {
   discordGateway: setting("DISCORD_GATEWAY") || "",
   telegramToken: env.TELEGRAM_BOT_TOKEN || "",
   telegramApi: setting("TELEGRAM_API") || "https://api.telegram.org",
+  slackToken: env.SLACK_BOT_TOKEN || "",
+  slackAppToken: env.SLACK_APP_TOKEN || "",
+  slackApi: setting("SLACK_API") || "https://slack.com/api",
   docker: setting("DOCKER") || firstExisting(["/usr/local/bin/docker", "/usr/bin/docker", "docker"]),
   boxImage: setting("BOX_IMAGE") || "cora-box:latest",
   ollamaUrl: (env.OLLAMA_URL || "https://ollama.com").replace(/\/$/, ""),
@@ -46,6 +49,8 @@ export const config = {
   cloudUrl: setting("CLOUD_URL") || "",
   cloudKey: setting("CLOUD_KEY") || "",
   cloudSpace: setting("CLOUD_SPACE") || "",
+  // An on-premise install answers on its own domain: the passes are signed for that host.
+  publicHost: (setting("PUBLIC_HOST") || "").replace(/^https?:\/\//, "").replace(/\/.*$/, ""),
 };
 
 /** The Discord bot token comes only from the environment (injected by hush as DISCORD_BOT_TOKEN). */

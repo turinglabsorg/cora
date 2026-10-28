@@ -34,13 +34,16 @@ const DEFAULT_SETTINGS = {
   transport: "discord",
   telegramChatIds: [],
   telegramOwnerIds: [],
+  slackChannelIds: [],
+  slackOwnerIds: [],
+  slackTeamId: "",
   sshKeys: [],
   language: "it",
   // Where notices from usecora.space (waitlist sign-ups) are posted: a channel with this name.
   noticeChannel: "waitlist",
 };
 const SSH_PORT_BASE = 2201;
-export const TRANSPORTS = ["discord", "telegram"];
+export const TRANSPORTS = ["discord", "telegram", "slack"];
 
 const AGENT_DEFAULTS = {
   avatarUrl: "",
@@ -184,8 +187,8 @@ function cleanIds(value, pattern = /^\d{5,25}$/) {
   return [...new Set(value.map((item) => String(item).trim()).filter((item) => pattern.test(item)))];
 }
 
-/** A Discord channel id, or a Telegram chat as tg:<chat id>. */
-const CHANNEL_ID = /^(\d{5,25}|tg:-?\d{1,20}|web(-[\w-]+)?)$/;
+/** A Discord channel id, a Telegram chat as tg:<chat id>, or a Slack conversation as sl:<channel>[:<thread ts>]. */
+const CHANNEL_ID = /^(\d{5,25}|tg:-?\d{1,20}|sl:[A-Z0-9]{5,}(:\d{10}\.\d{1,8})?|web(-[\w-]+)?)$/;
 
 function cleanText(value, max) {
   return String(value ?? "").slice(0, max);
@@ -247,6 +250,9 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     transport: TRANSPORTS.includes(merged.transport) ? merged.transport : "discord",
     telegramChatIds: cleanIds(merged.telegramChatIds, /^-?\d{1,20}$/),
     telegramOwnerIds: cleanIds(merged.telegramOwnerIds, /^\d{1,20}$/),
+    slackChannelIds: cleanIds(merged.slackChannelIds, /^[A-Z0-9]{5,}$/),
+    slackOwnerIds: cleanIds(merged.slackOwnerIds, /^[UW][A-Z0-9]{4,}$/),
+    slackTeamId: cleanText(merged.slackTeamId, 24).trim(),
     language: ["it", "en"].includes(merged.language) ? merged.language : "it",
     noticeChannel: cleanText(merged.noticeChannel, 100).trim().replace(/^#/, ""),
     sshKeys: plainKeys(Array.isArray(merged.sshKeys) ? merged.sshKeys.join("\n") : merged.sshKeys).slice(0, 30),

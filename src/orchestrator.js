@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { isTelegramChannel, telegramChannel, telegramChatId } from "./channels.js";
+import { TRANSPORT_LABELS, isSlackChannel, isTelegramChannel, slackChannel, slackIds, telegramChannel, telegramChatId, transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { MEMORY_TOOLS } from "./tools.js";
 import { userName } from "./telegram.js";
@@ -23,6 +23,8 @@ const ACK_TEXT = { it: "Ricevuto, ci lavoro: ti aggiorno qui.", en: "Got it, wor
 const IMAGE_LIMIT_BYTES = 5 * 1024 * 1024;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Slack message subtypes that still carry words for the agents.
+const SLACK_SUBTYPES = new Set(["bot_message", "file_share", "me_message", "thread_broadcast"]);
 
 function normalize(text) {
   return String(text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
@@ -58,7 +60,7 @@ function describeMessage(raw, nameFor = () => null) {
 }
 
 export class Orchestrator {
-  constructor({ store, discord, brain, log, bots = null, channels, telegram = null, tgBots = null, emit = () => {}, filesDir = null, notifier = null, watching = () => false }) {
+  constructor({ store, discord, brain, log, bots = null, channels, telegram = null, tgBots = null, slack = null, skBots = null, emit = () => {}, filesDir = null, notifier = null, watching = () => false }) {
     this.notifier = notifier;
     this.watching = watching;
     this.requestsByAgent = new Map();
@@ -66,6 +68,8 @@ export class Orchestrator {
     this.channels = channels;
     this.telegram = telegram;
     this.tgBots = tgBots;
+    this.slack = slack;
+    this.skBots = skBots;
     this.emit = emit;
     this.filesDir = filesDir;
     this.store = store;
@@ -101,7 +105,7 @@ export class Orchestrator {
 
   channelMeta(channelId) {
     if (this.dmAgentId(channelId)) {
-      return { id: channelId, kind: "discord", name: "DM", guildId: null, guildName: "", parentId: null, where: "in privato con te", place: "in un messaggio privato", note: "messaggio privato" };
+      return { id: channelId, kind: this.channels.active, name: "DM", guildId: null, guildName: "", parentId: null, where: "in privato con te", place: "in un messaggio privato", note: "messaggio privato" };
     }
     return this.channels.info(channelId);
   }
@@ -120,11 +124,11 @@ export class Orchestrator {
       const agent = this.store.agent(dm);
       return agent?.enabled ? [agent] : [];
     }
-    const telegram = isTelegramChannel(channelId);
-    const info = telegram ? null : this.discord.channelInfo(channelId);
+    const transport = transportOf(channelId);
+    const info = transport === "discord" ? this.discord.channelInfo(channelId) : transport === "slack" ? this.channels.info(channelId) : null;
     return this.store.agents().filter((agent) => {
       if (!agent.enabled) return false;
-      const chosen = agent.channelIds.filter((id) => isTelegramChannel(id) === telegram);
+      const chosen = agent.channelIds.filter((id) => transportOf(id) === transport);
       return !chosen.length || chosen.includes(channelId) || Boolean(info?.parentId && chosen.includes(info.parentId));
     });
   }
@@ -197,7 +201,7 @@ export class Orchestrator {
   /** Load the channel's recent messages once; `exclude` keeps out the message being handled, which Discord may already list. */
   async ensureHistory(state, { exclude = null } = {}) {
     if (state.loaded) return;
-    if (isWebRoom(state.id) || isTelegramChannel(state.id) || this.dmAgentId(state.id)) {
+    if (isWebRoom(state.id) || isTelegramChannel(state.id) || isSlackChannel(state.id) || this.dmAgentId(state.id)) {
       const existing = state.history;
       state.history = [];
       state.seen = new Set();
@@ -289,6 +293,7 @@ export class Orchestrator {
    * down are archived, and a recent human message nobody answered gets answered.
    */
   async catchUp() {
+    if (this.channels.active === "slack") return this.catchUpSlack();
     if (this.channels.active !== "discord") return;
     for (const channel of this.channels.list()) {
       const state = this.state(channel.id);
@@ -298,21 +303,26 @@ export class Orchestrator {
       await this.ensureHistory(state);
       const missed = state.history.filter((item) => !this.store.hasMessage(item.id));
       for (const item of missed) this.store.appendArchive(state.id, item);
-      const last = state.history[state.history.length - 1];
-      if (!last || !missed.includes(last) || Date.now() - last.at > CATCH_UP_MS) continue;
-      const human = ["owner", "human"].includes(last.kind);
-      const botCall = last.kind === "bot" && this.agentsFor(state.id).some((agent) => mentions(last.content, agent.name));
-      if (!human && !botCall) continue;
-      this.log({ type: "message", channelId: state.id, author: last.authorName, kind: last.kind, text: `(arrivato mentre ero spenta) ${last.content.slice(0, 280)}` });
-      if (human) {
-        this.address(state, last);
-        state.humanQueue.set(last.id, last);
-        state.budget = this.store.settings.maxAgentTurns;
-      }
-      state.generation += 1;
-      state.ownerOrigin = last.kind === "owner";
-      this.schedule(state, HUMAN_DEBOUNCE_MS);
+      this.wakeIfMissed(state, missed);
     }
+  }
+
+  /** The last message nobody answered, when it is still recent, starts a round. */
+  wakeIfMissed(state, missed) {
+    const last = state.history[state.history.length - 1];
+    if (!last || !missed.includes(last) || Date.now() - last.at > CATCH_UP_MS) return;
+    const human = ["owner", "human"].includes(last.kind);
+    const botCall = last.kind === "bot" && this.agentsFor(state.id).some((agent) => mentions(last.content, agent.name));
+    if (!human && !botCall) return;
+    this.log({ type: "message", channelId: state.id, author: last.authorName, kind: last.kind, text: `(arrivato mentre ero spenta) ${last.content.slice(0, 280)}` });
+    if (human) {
+      this.address(state, last);
+      state.humanQueue.set(last.id, last);
+      state.budget = this.store.settings.maxAgentTurns;
+    }
+    state.generation += 1;
+    state.ownerOrigin = last.kind === "owner";
+    this.schedule(state, HUMAN_DEBOUNCE_MS);
   }
 
   /**
@@ -443,6 +453,139 @@ export class Orchestrator {
       if (data) item.images = [data.toString("base64")];
     }
     this.ingest(state, item);
+  }
+
+  /* ---------- Slack ---------- */
+  isSlackOwner(userId) {
+    const owners = this.store.settings.slackOwnerIds;
+    return !owners.length || owners.includes(String(userId));
+  }
+
+  /** Until an owner is set, the workspace's own owner takes the role the first time they write. */
+  async claimSlackOwner(event, client) {
+    if (this.store.settings.slackOwnerIds.length || !event.user) return;
+    const info = await client.userInfo(event.user).catch(() => null);
+    if (!info?.owner || this.store.settings.slackOwnerIds.length) return;
+    this.store.updateSettings({ slackOwnerIds: [String(event.user)] });
+    this.log({ type: "settings", text: `proprietario Slack impostato (${info.name})` });
+  }
+
+  /** Slack writes ids where people read names: mentions, channels and links come back as words. */
+  async slackText(event, client) {
+    const parts = [];
+    let text = String(event.text || "");
+    for (const [match, userId] of [...text.matchAll(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g)]) {
+      const agentId = this.skBots?.agentIdForUser(userId);
+      const name = agentId ? this.store.agent(agentId)?.name : await client.userName(userId);
+      if (name) text = text.split(match).join(`@${name}`);
+    }
+    text = text
+      .replace(/<#[A-Z0-9]+\|([^>]+)>/g, "#$1")
+      .replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "$2 ($1)")
+      .replace(/<(https?:\/\/[^>]+)>/g, "$1")
+      .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+    if (text.trim()) parts.push(text.trim());
+    for (const file of event.files || []) {
+      parts.push(String(file.mimetype || "").startsWith("image/") ? "[immagine]" : `[allegato: ${file.name || "file"}]`);
+    }
+    return parts.join(" ").slice(0, 3000) || "(messaggio vuoto)";
+  }
+
+  async slackItem(event, client) {
+    const bot = Boolean(event.bot_id || event.subtype === "bot_message");
+    const item = {
+      id: `sl_${event.channel}_${event.ts}`,
+      at: Math.round(Number(event.ts) * 1000) || Date.now(),
+      authorId: String(event.user || event.bot_id || ""),
+      authorName: bot ? String(event.username || "bot") : await client.userName(event.user),
+      kind: bot ? "bot" : this.isSlackOwner(event.user) ? "owner" : "human",
+      agentId: null,
+      content: await this.slackText(event, client),
+    };
+    if ((item.kind === "owner" || item.kind === "human") && event.files?.length) {
+      const picture = event.files.find((file) => String(file.mimetype || "").startsWith("image/") && (!file.size || file.size <= IMAGE_LIMIT_BYTES));
+      const data = picture && await client.download(picture, IMAGE_LIMIT_BYTES).catch(() => null);
+      if (data) item.images = [data.toString("base64")];
+    }
+    return item;
+  }
+
+  /**
+   * A message in a Slack conversation, delivered by whichever agent's app is in
+   * it: in a private channel only those agents can answer. A reply inside a
+   * thread belongs to that thread, where agents speak only when summoned.
+   */
+  async onSlackMessage(event, viaAgentId = null) {
+    if (this.channels.active !== "slack" || !event?.channel) return;
+    // Edits, deletions, joins and the rest carry no new words for the agents.
+    if (event.subtype && !SLACK_SUBTYPES.has(event.subtype)) return;
+    if (!this.store.settings.slackChannelIds.includes(event.channel)) return;
+    const client = (viaAgentId && this.skBots?.client(viaAgentId)) || this.slack;
+    if (!client?.user) return;
+    // What our own apps post is already in the history: the socket echoes it back.
+    if (this.skBots?.isOwnMessage(event) || this.slack?.isOwnMessage(event) || this.skBots?.agentIdForBot(event.bot_id)) return;
+    const threadTs = event.thread_ts && event.thread_ts !== event.ts ? event.thread_ts : "";
+    const state = this.state(slackChannel(event.channel, threadTs));
+    // Who delivered it is who is in the conversation.
+    if (viaAgentId) state.heardFrom.add(viaAgentId);
+    const id = `sl_${event.channel}_${event.ts}`;
+    // Every app in the channel hears the same message: the first delivery wins.
+    if (state.seen.has(id) || this.store.hasMessage(id)) return;
+    await this.ensureHistory(state);
+    await this.claimSlackOwner(event, client);
+    this.ingest(state, await this.slackItem(event, client));
+  }
+
+  /** A direct message to an agent's own Slack app: a private conversation only that agent answers. */
+  async onSlackDirect(agentId, event) {
+    if (this.channels.active !== "slack" || !event?.channel) return;
+    const agent = this.store.agent(agentId);
+    if (!agent?.enabled) return;
+    if (event.subtype && event.subtype !== "file_share") return;
+    const client = this.skBots?.client(agentId);
+    if (!client || event.bot_id || this.skBots?.isOwnMessage(event)) return;
+    const id = slackChannel(event.channel);
+    this.dmAgent.set(id, agentId);
+    const state = this.state(id);
+    if (state.seen.has(`sl_${event.channel}_${event.ts}`) || this.store.hasMessage(`sl_${event.channel}_${event.ts}`)) return;
+    await this.ensureHistory(state);
+    const item = await this.slackItem(event, client);
+    if (item.kind !== "owner" && item.kind !== "human") return;
+    this.ingest(state, item);
+  }
+
+  /** Slack delivers only what happens while the socket is open: on connect, pick up what was missed. */
+  async catchUpSlack() {
+    for (const channel of this.channels.list()) {
+      const info = this.channels.info(channel.id);
+      const state = this.state(channel.id);
+      if (state.running || state.nextRoundAt) continue;
+      const client = this.slack?.user ? this.slack : null;
+      const messages = await this.slackHistory(info.channelId, this.store.settings.historySize);
+      if (!messages?.length) continue;
+      await this.ensureHistory(state);
+      const missed = [];
+      for (const event of messages) {
+        if (event.thread_ts && event.thread_ts !== event.ts) continue;
+        if (event.subtype && !SLACK_SUBTYPES.has(event.subtype)) continue;
+        if (this.skBots?.isOwnMessage(event) || this.slack?.isOwnMessage(event) || this.skBots?.agentIdForBot(event.bot_id)) continue;
+        const item = await this.slackItem({ ...event, channel: info.channelId }, client || this.skBots?.client(this.store.agents()[0]?.id) || this.slack);
+        if (this.store.hasMessage(item.id) || !this.push(state, item)) continue;
+        this.store.appendArchive(state.id, item);
+        missed.push(item);
+      }
+      if (!missed.length) continue;
+      state.history.sort((a, b) => a.at - b.at);
+      this.wakeIfMissed(state, missed);
+    }
+  }
+
+  /** Recent messages of a Slack conversation, read by any app that is in it. */
+  async slackHistory(channelId, limit, threadTs = "") {
+    if (this.slack?.user) {
+      try { return await this.slack.fetchMessages(channelId, limit, threadTs); } catch {}
+    }
+    return this.skBots?.fetchMessages(channelId, limit, threadTs) || null;
   }
 
   schedule(state, delay) {
@@ -644,9 +787,13 @@ export class Orchestrator {
       : String(fields.text || "").slice(0, 1500);
     if (!text) return;
     const name = String(this.store.settings.noticeChannel || "").replace(/^#/, "").toLowerCase();
-    const channel = name ? this.channels?.list().find((item) => item.kind === "discord" && String(item.name).toLowerCase() === name) : null;
+    const channel = name ? this.channels?.list().find((item) => ["discord", "slack"].includes(item.kind) && String(item.name).toLowerCase() === name) : null;
     this.log({ type: "settings", channelId: channel?.id, text: text.replace(/\*\*/g, "") });
     if (!channel) return;
+    if (channel.kind === "slack") {
+      await this.slack.say(this.channels.info(channel.id).channelId, { content: text, name: "Cora" });
+      return;
+    }
     await this.discord.post(channel.id, { username: "Cora", content: text });
   }
 
@@ -755,6 +902,8 @@ export class Orchestrator {
       if (shared) this.telegram.typing(chatId);
       return;
     }
+    // Slack shows no typing indicator for a bot user, so there is nothing to send.
+    if (isSlackChannel(channelId)) return;
     let shared = false;
     for (const agent of agents) {
       const own = this.bots?.client(agent.id);
@@ -778,7 +927,7 @@ export class Orchestrator {
     const allowed = target === SALOTTO || target === privateRoom(agent.id) || this.channels.listFor(agent).some((channel) => channel.id === target);
     if (!allowed || !this.channels.isActive(target)) throw new Error("destination not authorized; use list_channels");
     const state = this.state(target);
-    if (!isWebRoom(target) && !isTelegramChannel(target)) {
+    if (transportOf(target) === "discord") {
       const info = this.channels.listFor(agent).find((channel) => channel.id === target);
       if (!info?.guildId || !this.allowedGuild(info.guildId)) throw new Error("destination not authorized");
       const own = this.bots?.client(agent.id);
@@ -808,11 +957,13 @@ export class Orchestrator {
   async postAs(agent, state, text, file, traceId, { ping = "", request, passive = false } = {}) {
     if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request, passive });
     const chatId = telegramChatId(state.id);
-    // The ping (a Discord mention) goes out with the message but stays out of the archive and the agents' transcripts.
-    const body = chatId ? text || "" : await this.discordMentions(agent, state, text);
+    const slack = slackIds(state.id);
+    // The ping (a mention of the owner) goes out with the message but stays out of the archive and the agents' transcripts.
+    const body = chatId ? text || "" : slack ? await this.slackMentions(agent, state, text) : await this.discordMentions(agent, state, text);
     const content = ping && body ? `${ping} ${body}` : body;
     let sent;
     if (chatId) sent = await this.postTelegram(agent, chatId, content, file);
+    else if (slack) sent = await this.postSlack(agent, state, content, file);
     else {
       const own = this.bots?.client(agent.id);
       const shared = () => this.discord.post(state.id, { username: agent.name, avatarUrl: agent.avatarUrl, content, file });
@@ -832,7 +983,9 @@ export class Orchestrator {
     const last = sent[sent.length - 1];
     if (text) {
       const item = {
-        id: chatId && last?.message_id ? `tg_${chatId}_${last.message_id}` : last?.id || `local_${Date.now()}`,
+        id: chatId && last?.message_id ? `tg_${chatId}_${last.message_id}`
+          : slack && last?.ts ? `sl_${slack.channelId}_${last.ts}`
+          : last?.id || `local_${Date.now()}`,
         at: Date.now(),
         authorId: null,
         authorName: agent.name,
@@ -849,6 +1002,42 @@ export class Orchestrator {
     }
     this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
     return sent;
+  }
+
+  /** An agent naming another one turns into a real Slack mention, so that agent is pinged. */
+  async slackMentions(agent, state, text) {
+    const parts = String(text || "").split(/(```[\s\S]*?```|`[^`\n]*`)/g);
+    const info = this.channels.info(state.id);
+    for (const other of this.agentsFor(state.id)) {
+      if (other.id === agent.id) continue;
+      const id = this.skBots?.client(other.id)?.user?.id;
+      if (!id || !(await this.skBots.inChannel(other.id, info.channelId))) continue;
+      const name = other.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const tagged = new RegExp(`(^|[^\\p{L}\\p{N}_@.])@${name}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`, "giu");
+      const addressed = new RegExp(`(^|\\n)${name}(?=[:,]\\s)`, "giu");
+      for (let index = 0; index < parts.length; index += 2) {
+        parts[index] = parts[index].replace(tagged, `$1<@${id}>`).replace(addressed, `$1<@${id}>`);
+      }
+    }
+    return parts.join("");
+  }
+
+  /** As the agent's own Slack app when it is in the conversation, otherwise through the main app with its name and avatar. */
+  async postSlack(agent, state, text, file) {
+    const info = this.channels.info(state.id);
+    const payload = { content: text || "", file, threadTs: info.threadTs };
+    const own = this.skBots?.client(agent.id);
+    if (own && (info.direct || await this.skBots.inChannel(agent.id, info.channelId))) {
+      try {
+        return await own.say(info.channelId, payload);
+      } catch (error) {
+        if (error.sentCount || info.direct) throw error;
+        this.skBots.forgetMembership(agent.id);
+        this.log({ type: "warning", agentId: agent.id, channelId: state.id, text: `app Slack sua: ${error.message}; scrivo con l'app principale` });
+      }
+    }
+    if (!this.slack?.user) throw new Error("no Slack app in this conversation");
+    return this.slack.say(info.channelId, { ...payload, name: agent.name, avatarUrl: agent.avatarUrl });
   }
 
   /** As the agent's own Telegram bot when it is in the chat, otherwise through the main bot with its name on top. */
@@ -925,7 +1114,8 @@ export class Orchestrator {
         this.notifier.notify({ title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: text, url, tag: `request-${agent.id}` }).catch(() => {});
       }
     } else {
-      const owner = !telegramChatId(state.id) && this.store.settings.ownerIds[0];
+      const slack = slackIds(state.id);
+      const owner = slack ? this.store.settings.slackOwnerIds[0] : !telegramChatId(state.id) && this.store.settings.ownerIds[0];
       const body = clean.length ? `${text}\n${english ? "Answers" : "Risposte"}: ${clean.join(" · ")}` : text;
       await this.postAs(agent, state, body, undefined, undefined, { ping: owner ? `<@${owner}>` : "", request });
       item = state.history.findLast((entry) => entry.agentId === agent.id && entry.request === request);
@@ -998,7 +1188,7 @@ export class Orchestrator {
     }
     const channel = this.channelMeta(routine.channelId);
     if (!this.channels.isActive(routine.channelId)) {
-      this.store.recordRoutineRun(routine.id, "error", `il canale è su ${isTelegramChannel(routine.channelId) ? "Telegram" : "Discord"}, ma ora Cora vive sull'altro`, { runId: pendingRun?.id });
+      this.store.recordRoutineRun(routine.id, "error", `il canale è su ${TRANSPORT_LABELS[transportOf(routine.channelId)]}, ma ora Cora vive altrove`, { runId: pendingRun?.id });
       return { status: "error" };
     }
     if (channel.guildId && !this.allowedGuild(channel.guildId)) {

@@ -13,6 +13,8 @@ for pair in \
   SESSION_KEY:CORA_SESSION_KEY \
   DISCORD_LISTENER_TOKEN:DISCORD_BOT_TOKEN \
   TELEGRAM_BOT_TOKEN:TELEGRAM_BOT_TOKEN \
+  SLACK_BOT_TOKEN:SLACK_BOT_TOKEN \
+  SLACK_APP_TOKEN:SLACK_APP_TOKEN \
   OLLAMA_API_KEY:OLLAMA_API_KEY \
   ORCAROUTER_API_KEY:ORCAROUTER_API_KEY \
   VAPID_KEY:VAPID_KEY
@@ -26,7 +28,7 @@ do
     fi
   done
 done
-for name in $(hush list 2>/dev/null | cut -f1 | grep -E '^COR[AO]_(TG_)?BOT_[A-Z0-9_]*$'); do
+for name in $(hush list 2>/dev/null | cut -f1 | grep -E '^COR[AO]_(BOT|TG_BOT|SK_BOT|SK_APP)_[A-Z0-9_]*$'); do
   set -- hush run --name "$name" --env "$name" --redact -- "$@"
 done
 exec "$@"

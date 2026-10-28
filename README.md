@@ -28,11 +28,12 @@ web panel (password, PWA) ──► REST API + live events (SSE) + noVNC proxy +
 
 ## Where they live
 
-- **Discord or Telegram, one at a time** (`settings.transport`); switching starts one and stops the other. Only the servers or chats turned on in the panel are heard.
+- **Discord, Telegram or Slack, one at a time** (`settings.transport`); switching starts one and stops the others. Only the servers, chats or channels turned on in the panel are heard.
 - **Discord:** each agent connects as its own bot (`CORA_BOT_<NAME>`, pasted in the panel and stored in hush). Cora listens through the first agent bot whose app has the Message Content intent, or a dedicated `CORA_DISCORD_LISTENER_TOKEN`. Discord system messages (joins, pins…) are ignored.
 - **Telegram:** a main bot long-polls the chats turned on; agents post through their own Telegram bot when it is in the chat, otherwise through the main bot with their name in bold.
+- **Slack:** one Slack app per agent, so each is a real user people mention and write to; every app listens on its own Socket Mode socket, which needs no public address. The main app keeps the channel list and posts notices. Channel ids are `sl:<channel>`, a thread is `sl:<channel>:<thread ts>`, and an agent without an app of its own posts through the main one with its name and picture (`chat:write.customize`). Slack has no typing indicator for bots, so none is sent.
 - **The panel:** the Salotto and one private chat per agent, always available, archived like the other channels so memory sees them.
-- **Threads and DMs.** In a Discord thread agents only speak when summoned by name. A direct message to an agent's own bot is a private conversation that only that agent answers, even if it is assigned to no channel.
+- **Threads and DMs.** In a Discord or Slack thread agents only speak when summoned by name. A direct message to an agent's own bot is a private conversation that only that agent answers, even if it is assigned to no channel.
 - **Shared listening.** Every agent bot listens to the channels it can see — each one switches on Discord's limited Message Content intent for its own app — so a private channel is heard as long as one agent is in it, and the same message arriving from several bots is answered once. In a channel the main bot cannot see, only the agents whose bot is really in it answer.
 - **One voice at a time.** A message that names agents is answered by them; a message that names nobody gets a single answer, never a chorus.
 - **Reports finish; conversations continue.** Routine results stay in the archive without starting another agent conversation. New human messages get an answer even when they arrive during final delivery. Status and side questions can receive an immediate reply while the same task continues.
@@ -86,11 +87,11 @@ docker build -t cora-box:latest box     # the agents' desktop image
 bin/run.sh                              # injects the hush secrets that exist, then starts src/main.js
 ```
 
-Secrets come only from hush: `CORA_ADMIN_PASSWORD` (panel password), `CORA_SESSION_KEY` (cookie signing), `CORA_VAPID_KEY` (Web Push), `CORA_OLLAMA_API_KEY`, `CORA_TELEGRAM_BOT_TOKEN`, an optional `CORA_DISCORD_LISTENER_TOKEN`, and one `CORA_BOT_<NAME>` / `CORA_TG_BOT_<NAME>` per agent bot (bot tokens are pasted in the panel, checked with Discord or Telegram, and stored in hush without touching a command line or a clear file).
+Secrets come only from hush: `CORA_ADMIN_PASSWORD` (panel password), `CORA_SESSION_KEY` (cookie signing), `CORA_VAPID_KEY` (Web Push), `CORA_OLLAMA_API_KEY`, `CORA_TELEGRAM_BOT_TOKEN`, `CORA_SLACK_BOT_TOKEN` / `CORA_SLACK_APP_TOKEN` (the main Slack app), an optional `CORA_DISCORD_LISTENER_TOKEN`, and one `CORA_BOT_<NAME>` / `CORA_TG_BOT_<NAME>` / `CORA_SK_BOT_<NAME>` + `CORA_SK_APP_<NAME>` per agent (tokens are pasted in the panel, checked with Discord, Telegram or Slack, and stored in hush without touching a command line or a clear file).
 
-Environment: `PORT` (default 4370), `CORA_LISTEN_HOST` (default 127.0.0.1), `CORA_HOME` (default `~/.cora`), `CORA_PUBLIC_URL` (the VAPID subject), `OLLAMA_URL`, `CORA_CLAUDE_BIN`, `CORA_CODEX_BIN`, `CORA_TZ` (default Europe/Rome).
+Environment: `PORT` (default 4370), `CORA_LISTEN_HOST` (default 127.0.0.1), `CORA_HOME` (default `~/.cora`), `CORA_PUBLIC_URL` (the VAPID subject), `CORA_PUBLIC_HOST` (the domain an on-premise install answers on, which the cloud's passes are signed for), `OLLAMA_URL`, `CORA_CLAUDE_BIN`, `CORA_CODEX_BIN`, `CORA_TZ` (default Europe/Rome).
 
-`deploy/macos.sh` deploys to a Mac over SSH (`CORA_DEPLOY_HOST=user@host`) as the LaunchAgent in `deploy/org.turinglabs.cora.plist`; put the panel behind your own HTTPS tunnel or reverse proxy.
+`deploy/macos.sh` deploys to a Mac over SSH (`CORA_DEPLOY_HOST=user@host`) as the LaunchAgent in `deploy/org.turinglabs.cora.plist`; `deploy/linux.sh` does the same on Linux as the systemd user service in `deploy/cora.service`, needing no root. Put the panel behind your own HTTPS tunnel or reverse proxy — `deploy/ON-PREM.md` is the whole installation on someone else's machine.
 
 ### Subscription accounts and remote sign-in
 
@@ -156,6 +157,7 @@ Agents on `ollama/` run on Cora's own agent loop, the Cora harness; agents on Cl
 - `<space>.usecora.space` is routed by its Host to that space's Cora (requests, event streams and the desktop's WebSockets pass through).
 - Entering a space goes through `/go/<space>`: the cloud signs a one-minute, single-use pass with its Ed25519 key, and the space's Cora (`/auth/cloud`) checks it with the public key alone, then opens its usual session. With `CORA_CLOUD_URL`, `CORA_CLOUD_KEY` (the public key, `cloud/cli.js public-key`) and `CORA_CLOUD_SPACE` set, a Cora has no password login; `bin/login-link.mjs` makes a one-time link on the host for when the cloud cannot be reached.
 - Before sign-in opens, the landing takes waitlist emails (`cloud/cli.js waitlist` lists them). People without a space can ask for one from their account page; spaces are added by hand: `cloud/cli.js space add <name> --upstream <url> --google <email> --github <login>`.
+- A space installed on the customer's own machine keeps its own address (`--public https://cora.example.com`): the cloud signs the pass for that host and sends people straight there, so their traffic never passes through usecora.space, and `<name>.usecora.space` only redirects. `deploy/ON-PREM.md` is the whole procedure.
 
 Waitlist sign-ups post directly to Discord when `CORA_WAITLIST_WEBHOOK_URL` is stored in hush; `cloud/bin/start.sh` injects it at startup. Without a webhook, `CORA_CLOUD_NOTIFY` selects an operator space for the existing signed-notice route. Delivery failures are logged without webhook credentials and do not discard registrations.
 
@@ -167,7 +169,7 @@ Secrets in hush: `CORA_CLOUD_SEED` (sessions and the signing key), `CORA_CLOUD_G
 npm test
 ```
 
-The integration tests run the whole service against stand-ins for Discord (REST + Gateway WebSocket), Telegram (Bot API), Ollama, the `claude` / `codex` CLIs (driving the real MCP server), `docker`, and a Web Push service that decrypts what it receives. `test/cloud.test.js` runs usecora.space against stand-ins for Google, GitHub and a space.
+The integration tests run the whole service against stand-ins for Discord (REST + Gateway WebSocket), Telegram (Bot API), Slack (Web API + Socket Mode), Ollama, the `claude` / `codex` CLIs (driving the real MCP server), `docker`, and a Web Push service that decrypts what it receives. `test/cloud.test.js` runs usecora.space against stand-ins for Google, GitHub and a space.
 
 ## License
 

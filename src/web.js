@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { botEnvName } from "./agent-bots.js";
 import { passLedger, verifyPass } from "./pass.js";
-import { telegramChatId } from "./channels.js";
+import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
+import { Slack } from "./slack.js";
+import { slackAppEnvName, slackBotEnvName } from "./slack-bots.js";
 import { Telegram } from "./telegram.js";
 import { telegramBotEnvName } from "./telegram-bots.js";
 import { isWebRoom, roomAgentId } from "./rooms.js";
@@ -103,14 +105,14 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, channels, boxes, llm, orchestrator, brain, bots, tgBots, activity, storeSecret, traces, push = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null }) {
   const sessionKey = config.sessionKey || config.adminPassword;
   const failures = [];
   // On usecora.space the cloud signs people in; this panel only checks the pass it hands over.
   const cloud = config.cloudUrl && config.cloudKey && config.cloudSpace ? {
     url: config.cloudUrl.replace(/\/$/, ""),
     key: config.cloudKey,
-    audience: `${config.cloudSpace}.${new URL(config.cloudUrl).host}`,
+    audience: config.publicHost || `${config.cloudSpace}.${new URL(config.cloudUrl).host}`,
     login: `${config.cloudUrl.replace(/\/$/, "")}/go/${config.cloudSpace}`,
     logout: `${config.cloudUrl.replace(/\/$/, "")}/logout`,
   } : null;
@@ -178,6 +180,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
     box: await boxStatus(agent),
     bot: bots ? bots.status(agent, store.settings.guildIds[0]) : null,
     telegramBot: tgBots ? await tgBots.status(agent, telegramChatId(channels.list()[0]?.id) || store.settings.telegramChatIds[0]) : null,
+    slackBot: skBots ? await skBots.status(agent, slackIds(channels.list()[0]?.id)?.channelId || store.settings.slackChannelIds[0]) : null,
   });
 
   const routineView = (routine) => {
@@ -269,6 +272,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
         transport: channels.active,
         discord: discord.status(),
         telegram: telegram.status(),
+        slack: slack ? slack.status() : null,
         channels: channels.list(),
         discordChannels: discord.listChannels(store.settings.guildIds),
         guilds: discord.status().guilds,
@@ -336,7 +340,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       }
       if (settings.transport !== before) {
         channels.apply();
-        activity({ type: "settings", text: `Cora ora vive su ${settings.transport === "telegram" ? "Telegram" : "Discord"}` });
+        activity({ type: "settings", text: `Cora ora vive su ${TRANSPORT_LABELS[settings.transport] || settings.transport}` });
       }
       return send(res, 200, settings);
     }
@@ -378,6 +382,38 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
       if (channels.active === "telegram") telegram.start();
       activity({ type: "telegram", text: `token del bot Telegram salvato in hush (@${user.username})` });
       return send(res, 200, { telegram: telegram.status(), bot: { id: String(user.id), username: user.username, name: user.first_name } });
+    }
+    if (path === "/api/slack/token" && method === "PUT" && slack) {
+      const body = await readJson(req, 8192);
+      const botToken = String(body.botToken || "").trim();
+      const appToken = String(body.appToken || "").trim();
+      if (!/^xoxb-[\w-]{10,}$/.test(botToken)) throw new HttpError(400, "il token del bot comincia con xoxb- (OAuth & Permissions)");
+      if (!/^xapp-[\w-]{10,}$/.test(appToken)) throw new HttpError(400, "il token a livello app comincia con xapp- (Basic Information)");
+      const probe = new Slack({ botToken, appToken, apiBase: config.slackApi });
+      let user;
+      try {
+        user = await probe.identity();
+        await probe.request("apps.connections.open", {}, { auth: "app" });
+      } catch (error) {
+        if (error.slack) throw new HttpError(400, `Slack rifiuta questi token (${error.slack})`);
+        throw error;
+      }
+      if (skBots?.agentIdForUser(user.id)) throw new HttpError(400, "questa è l'app di un agente: quella principale è a parte");
+      await storeSecret("CORA_SLACK_BOT_TOKEN", botToken);
+      await storeSecret("CORA_SLACK_APP_TOKEN", appToken);
+      slack.useTokens(botToken, appToken);
+      if (probe.team?.id) store.updateSettings({ slackTeamId: probe.team.id });
+      if (channels.active === "slack") slack.start();
+      activity({ type: "slack", text: `token dell'app Slack salvati in hush (@${user.name})` });
+      return send(res, 200, { slack: slack.status(), bot: { id: user.id, username: user.name }, team: probe.team });
+    }
+    if (path === "/api/slack/channels" && method === "GET" && slack) {
+      const channelsSeen = new Map();
+      for (const channel of await slack.listChannels().catch(() => [])) channelsSeen.set(channel.id, channel);
+      for (const agent of store.agents()) {
+        for (const channel of await (skBots?.channelsFor(agent.id) || [])) if (!channelsSeen.has(channel.id)) channelsSeen.set(channel.id, channel);
+      }
+      return send(res, 200, [...channelsSeen.values()]);
     }
     if (path === "/api/activity" && method === "GET") {
       return send(res, 200, store.recentActivity(300));
@@ -532,6 +568,23 @@ export function createWeb({ config, store, subscriptions, discord, telegram, cha
         "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="${meta.name.replace(/"/g, "")}"`,
         "Content-Security-Policy": "default-src 'none'; sandbox",
       });
+    }
+
+    match = /^\/api\/agents\/([\w-]+)\/slack-bot$/.exec(path);
+    if (match && method === "PUT" && skBots) {
+      const agent = store.agent(match[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      const body = await readJson(req, 8192);
+      const botToken = String(body.botToken || "").trim();
+      const appToken = String(body.appToken || "").trim();
+      if (!/^xoxb-[\w-]{10,}$/.test(botToken)) throw new HttpError(400, "il token del bot comincia con xoxb- (OAuth & Permissions)");
+      if (!/^xapp-[\w-]{10,}$/.test(appToken)) throw new HttpError(400, "il token a livello app comincia con xapp- (Basic Information)");
+      const { user } = await skBots.verify(agent, { botToken, appToken, teamId: store.settings.slackTeamId, mainUserId: slack?.user?.id || "" });
+      await storeSecret(slackBotEnvName(agent), botToken);
+      await storeSecret(slackAppEnvName(agent), appToken);
+      activity({ type: "slack", agentId: agent.id, text: `token dell'app Slack salvati in hush (@${user.name})` });
+      await skBots.attach(agent, { botToken, appToken });
+      return send(res, 200, await publicAgent(store.agent(agent.id)));
     }
 
     match = /^\/api\/agents\/([\w-]+)\/telegram-bot$/.exec(path);

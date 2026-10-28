@@ -108,7 +108,9 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
   const oauth = new OAuth({ clients: config.clients || {}, endpoints, redirectBase: origin.origin });
   const SESSION = secure ? "__Host-cora" : "cora_cloud";
   const STATE = secure ? "__Host-cora_oauth" : "cora_oauth";
-  const spaceOrigin = (slug) => `${origin.protocol}//${slug}.${origin.host}`;
+  // Where a space answers: its own domain when it is installed somewhere else, otherwise its name here.
+  const spaceOrigin = (space) => (typeof space === "string" ? store.space(space)?.publicUrl : space?.publicUrl) || `${origin.protocol}//${typeof space === "string" ? space : space?.slug}.${origin.host}`;
+  const spaceAudience = (space) => new URL(spaceOrigin(space)).hostname;
   const version = createHash("sha256").update(readFileSync(join(ASSETS, "cloud.css"))).update(readFileSync(join(ASSETS, "cloud.js"))).digest("hex").slice(0, 10);
   views.configure({ origin: origin.origin, version });
   const policy = CSP.replace("script-src 'self'", `script-src 'self' ${origin.origin}`).replace("style-src 'self'", `style-src 'self' ${origin.origin}`);
@@ -209,7 +211,7 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       return res.end("User-agent: *\nAllow: /\nDisallow: /account\nDisallow: /go/\nDisallow: /auth/\n");
     }
 
-    if (method === "GET" && path === "/") {
+    if ((method === "GET" || method === "HEAD") && path === "/") {
       return html(res, 200, views.landing({ ...page, joined: url.searchParams.get("joined") === "1", waitlistError: url.searchParams.get("waitlist") || "" }));
     }
 
@@ -293,7 +295,7 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
 
     if (method === "GET" && path === "/account") {
       return html(res, 200, views.account({
-        ...page, identities: store.identities(account.id), spaces: store.accessibleSpacesOf(account.id).map((space) => ({ ...space, url: spaceOrigin(space.slug) })),
+        ...page, identities: store.identities(account.id), spaces: store.accessibleSpacesOf(account.id).map((space) => ({ ...space, url: spaceOrigin(space) })),
         request: store.requestOf(account.id), notice: url.searchParams.get("notice") || "", error: url.searchParams.get("error") || "",
       }));
     }
@@ -332,18 +334,18 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
         try {
           const response = await fetch(`${space.upstream}/api/cloud/access`, {
             method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" },
-            body: JSON.stringify({ pass: signPass(keys.privateKey, { aud: `access:${space.slug}.${domain}`, ...identity }) }),
+            body: JSON.stringify({ pass: signPass(keys.privateKey, { aud: `access:${spaceAudience(space)}`, ...identity }) }),
             signal: AbortSignal.timeout(10000), redirect: "error",
           });
           allowed = response.ok && (await response.json()).allowed === true;
         } catch {}
         if (!allowed) return html(res, 403, views.accessDenied({ ...page, slug: space.slug }));
       }
-      const pass = signPass(keys.privateKey, { aud: `${space.slug}.${domain}`, ...identity });
+      const pass = signPass(keys.privateKey, { aud: spaceAudience(space), ...identity });
       store.recordSpaceEntry(space.slug, account.id);
       log({ type: "enter", accountId: account.id, space: space.slug });
       const next = safeNext(url.searchParams.get("next"), "/");
-      return redirect(res, `${spaceOrigin(space.slug)}/auth/cloud?${new URLSearchParams({ pass, next })}`);
+      return redirect(res, `${spaceOrigin(space)}/auth/cloud?${new URLSearchParams({ pass, next })}`);
     }
 
     return html(res, 404, views.notFound(page));
@@ -365,6 +367,8 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       if (slug) {
         const space = store.space(slug);
         if (!space) return html(res, 404, views.notFound({ slug }));
+        // A space installed on its own domain is never proxied: its people go straight there.
+        if (space.publicUrl) return redirect(res, `${space.publicUrl}${url.pathname}${url.search}`);
         return proxyRequest(req, res, space.upstream, {
           onError: (error) => {
             log({ type: "space-offline", space: slug, error: error.message });
@@ -383,7 +387,8 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
 
   server.on("upgrade", (req, socket, head) => {
     const { slug } = spaceOf(req);
-    const space = slug && slug !== "www" ? store.space(slug) : null;
+    const found = slug && slug !== "www" ? store.space(slug) : null;
+    const space = found?.publicUrl ? null : found;
     if (!space) {
       socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
       return;
