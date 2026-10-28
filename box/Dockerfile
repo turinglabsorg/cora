@@ -45,7 +45,12 @@ RUN curl -fsSL https://raw.githubusercontent.com/turinglabsorg/hush/${HUSH_VERSI
 
 COPY supervisord.conf /etc/supervisor/cora.conf
 COPY start.sh /usr/local/bin/cora-box-start
-RUN chmod 755 /usr/local/bin/cora-box-start
+COPY cdp.mjs /usr/local/bin/cora-cdp
+# The same Chromium the owner watches also answers on its debugging port, so the agent
+# can read the page and its session. It is never started by a driver and never gets
+# --enable-automation: the browser stays an ordinary one, and the port stays inside.
+RUN chmod 755 /usr/local/bin/cora-box-start /usr/local/bin/cora-cdp \
+    && echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1"' > /etc/chromium.d/cora-cdp
 
 EXPOSE 6080
 CMD ["/usr/local/bin/cora-box-start"]

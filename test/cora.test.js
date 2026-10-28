@@ -522,6 +522,31 @@ describe("panel auth", () => {
     assert.equal(app.store.trace(result.traceId).steps.filter((step) => step.type === "tool" && !step.ok).length, 0);
   });
 
+  test("the browser tool reads the page and its session from the same Chromium, without the values", async (t) => {
+    const agent = app.store.createAgent({ name: "Reader", model: "ollama/test-model", tools: true, chattiness: 0 });
+    const calls = [];
+    const original = app.boxes.browser;
+    app.boxes.browser = async (agentId, action, argument) => {
+      calls.push([action, argument]);
+      if (action === "cookies") return { count: 2, cookies: [{ name: "session", domain: "slack.test", secure: true, httpOnly: true, size: 180 }] };
+      return { url: "https://slack.test/apps", title: "Le tue app", text: "Crea un'app" };
+    };
+    let step = 0;
+    replies.set(agent.name, (body) => {
+      step += 1;
+      if (step === 1) return { tool_calls: [{ function: { name: "browser", arguments: { action: "text" } } }] };
+      if (step === 2) return { tool_calls: [{ function: { name: "browser", arguments: { action: "cookies" } } }] };
+      return { content: `Pagina: ${JSON.parse(body.messages.findLast((message) => message.role === "tool" && message.content.includes("cookies")).content).cookies[0].name}` };
+    });
+    t.after(() => { app.boxes.browser = original; app.store.deleteAgent(agent.id); replies.delete(agent.name); });
+    const result = await app.brain.loop({ agent, mode: "chat", channel: { id: `web-${agent.id}`, place: "test" }, user: "Guarda che pagina è.", computer: true, task: false, maxSteps: 8, deadline: Date.now() + 20000, images: [] });
+    assert.deepEqual(calls, [["text", ""], ["cookies", ""]]);
+    assert.match(result.text, /session/);
+    const steps = app.store.trace(result.traceId).steps.filter((entry) => entry.type === "tool");
+    assert.ok(steps.every((entry) => entry.ok), "reading the page twice is work, not a loop");
+    assert.ok(!JSON.stringify(steps).includes("\"value\""), "no cookie or storage value ever reaches the transcript");
+  });
+
   test("unchanging screenshots still stop a real observation loop", async (t) => {
     const agent = app.store.createAgent({ name: "Stuck browser", model: "ollama/test-model", tools: true, chattiness: 0 });
     const original = app.boxes.screenshot;

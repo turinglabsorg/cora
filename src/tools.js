@@ -53,6 +53,18 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: "browser",
+    description: "Read the Chromium on your desktop: the page's text or elements, what it fetched, which sessions it holds. The screenshot shows you the pixels; this tells you the page. Values of cookies and storage are never returned.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["text", "query", "html", "eval", "cookies", "storage", "network", "targets", "goto"] },
+        argument: { type: "string", description: "CSS selector (query, html), JavaScript (eval), url (goto)" },
+      },
+      required: ["action"],
+    },
+  },
+  {
     name: "open_url",
     description: "Open a URL in Chromium on your desktop (the owner can watch and take over from the desktop).",
     parameters: {
@@ -280,6 +292,16 @@ export async function executeTool(call, ctx) {
         }
         const result = await boxes.run(agent.id, argv);
         return { text: result.code === 0 ? `ok (${action})` : `error: ${result.output}` };
+      }
+      case "browser": {
+        await boxes.ensure(agent);
+        const action = String(args.action || "");
+        try {
+          const result = await boxes.browser(agent.id, action, String(args.argument || ""));
+          return { text: JSON.stringify(result).slice(0, 60000) };
+        } catch (error) {
+          return { text: `error: ${error.message}` };
+        }
       }
       case "open_url": {
         const url = String(args.url || "");

@@ -516,7 +516,8 @@ export class Brain {
       const before = await news();
       const started = Date.now();
       const allowed = tools.some((tool) => tool.name === name);
-      const visual = name === "computer" || name === "open_url";
+      // Reading the page again after something changed on screen is work, not a loop.
+      const visual = name === "computer" || name === "open_url" || name === "browser";
       const signature = `${name}:${JSON.stringify(args || {})}${visual ? `:${screen}` : ""}`;
       const repeated = name !== "screenshot" && repeatedCall(signature) && !MEMORY_TOOLS.has(name);
       if (repeated) markLoop(name);

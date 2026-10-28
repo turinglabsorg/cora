@@ -253,6 +253,22 @@ export class Boxes {
     return { code: result.code, output: clip(`${result.stdout.toString("utf8")}${result.stderr}`, 4000) };
   }
 
+  /**
+   * Ask the Chromium on the desktop what the pixels cannot say: the page's text,
+   * its elements, which sessions it holds, where its requests went. Cookie and
+   * storage values never come back — only their names and sizes.
+   */
+  async browser(agentId, action, argument = "", { timeoutMs = 45000 } = {}) {
+    const result = await runProcess(this.docker, this.execArgs(agentId, ["cora-cdp", String(action), ...(argument ? [String(argument)] : [])]), { timeoutMs });
+    const output = `${result.stdout.toString("utf8")}${result.stderr}`.trim();
+    if (result.code !== 0) throw new Error(clip(output, 300) || `browser ${action} failed`);
+    try {
+      return JSON.parse(result.stdout.toString("utf8"));
+    } catch {
+      throw new Error(`browser ${action}: unreadable answer`);
+    }
+  }
+
   async screenshot(agentId) {
     const result = await runProcess(this.docker, this.execArgs(agentId, ["import", "-silent", "-window", "root", "-quality", "70", "jpg:-"]), { timeoutMs: 30000 });
     if (result.code !== 0 || !result.stdout.length) throw new Error(`screenshot failed: ${result.stderr.trim().slice(0, 200) || "no output"}`);

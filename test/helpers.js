@@ -339,6 +339,9 @@ case "$1" in
       *"tailscale status --json"*) if [ -f "${dir}/tailscale.json" ]; then cat "${dir}/tailscale.json"; else echo '{"BackendState":"NeedsLogin","AuthURL":""}'; fi; exit 0 ;;
       *"tailscale up"*) echo '{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/test"}' > "${dir}/tailscale.json"; exit 0 ;;
       *"tailscale set"*) exit 0 ;;
+      *cora-cdp*)
+        if [ -f "${dir}/cdp" ]; then cat "${dir}/cdp"; exit 0; fi
+        echo '{"url":"https://example.test/","title":"Esempio","text":"ciao dal browser"}'; exit 0 ;;
     esac
     for last; do :; done
     echo "ran: $last"; exit 0 ;;
