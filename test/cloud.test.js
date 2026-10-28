@@ -330,3 +330,114 @@ describe("usecora.space", () => {
     assert.ok(logs.some((event) => event.type === "space-offline" && event.space === "acme"));
   });
 });
+
+describe("waitlist Discord webhook", () => {
+  async function fixture(t) {
+    const received = [];
+    const events = [];
+    let status = 204;
+    let disconnect = false;
+    const webhook = http.createServer(async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      received.push({ path: req.url, method: req.method, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+      if (disconnect) return req.socket.destroy();
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(status === 204 ? undefined : JSON.stringify({ message: `failed ${req.url}` }));
+    });
+    await new Promise((resolve) => webhook.listen(0, "127.0.0.1", resolve));
+    const upstreamUrl = `http://127.0.0.1:${webhook.address().port}`;
+    const webhookUrl = `${upstreamUrl}/api/webhooks/test/test-private-path`;
+    const ownStore = new CloudStore(tempHome());
+    const owner = ownStore.createAccount();
+    ownStore.addSpace({ slug: "operator", accountId: owner.id, upstream: upstreamUrl });
+    const config = { domain: DOMAIN, seed: SEED, insecureCookies: true, notify: "operator", waitlistWebhookUrl: webhookUrl };
+    const ownCloud = createCloud({ config, store: ownStore, log: (event) => events.push(event) });
+    await new Promise((resolve) => ownCloud.server.listen(0, "127.0.0.1", resolve));
+    t.after(async () => {
+      ownCloud.server.closeAllConnections();
+      await new Promise((resolve) => ownCloud.server.close(resolve));
+      webhook.closeAllConnections();
+      await new Promise((resolve) => webhook.close(resolve));
+      ownStore.close();
+    });
+    const join = (fields, extraHeaders = {}) => new Promise((resolve, reject) => {
+      const req = http.request({
+        host: "127.0.0.1", port: ownCloud.server.address().port, path: "/waitlist", method: "POST",
+        headers: { Host: DOMAIN, Origin: `https://${DOMAIN}`, "Content-Type": "application/x-www-form-urlencoded", ...extraHeaders },
+      }, (res) => {
+        res.resume();
+        res.on("end", () => resolve({ status: res.statusCode, headers: new Headers(res.headers) }));
+      });
+      req.on("error", reject);
+      req.end(new URLSearchParams(fields).toString());
+    });
+    return { received, events, store: ownStore, config, join, webhookUrl, setStatus: (value) => { status = value; }, disconnect: () => { disconnect = true; } };
+  }
+
+  test("a valid sign-up posts its normalized text directly, without mentions or a second space notification", async (t) => {
+    const f = await fixture(t);
+    const response = await f.join({ email: "  Ada@Acme.example  ", company: "  Acme @everyone  " });
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("location"), "/?joined=1#waitlist");
+    await waitFor(() => f.events.some((event) => event.type === "notify-sent"), { what: "the webhook accepting the waitlist text" });
+    assert.equal(f.received.length, 1);
+    assert.equal(f.received[0].path, "/api/webhooks/test/test-private-path?wait=true");
+    assert.equal(f.received[0].method, "POST");
+    assert.deepEqual(f.received[0].body, {
+      username: "Cora",
+      content: "📬 Nuova iscrizione alla lista d'attesa di usecora.space: **ada@acme.example (Acme @everyone)**",
+      allowed_mentions: { parse: [] },
+    });
+    assert.deepEqual(f.store.waitlist().map(({ email, company }) => [email, company]), [["ada@acme.example", "Acme @everyone"]]);
+    assert.deepEqual(f.events.find((event) => event.type === "notify-sent"), { type: "notify-sent", destination: "discord-webhook", status: 204 });
+
+    await f.join({ email: "invalid" });
+    await f.join({ email: "bot@example.com", website: "spam" });
+    assert.equal((await f.join({ email: "outsider@example.com" }, { Origin: "https://elsewhere.example" })).status, 403);
+    assert.equal(f.received.length, 1, "refused addresses and honeypots never reach the webhook");
+  });
+
+  test("a rejected webhook keeps the registration and logs only safe status metadata", async (t) => {
+    const f = await fixture(t);
+    f.setStatus(429);
+    const response = await f.join({ email: "saved@example.com", company: "Saved" });
+    assert.equal(response.headers.get("location"), "/?joined=1#waitlist");
+    await waitFor(() => f.events.some((event) => event.type === "notify-failed"), { what: "the webhook refusal recorded safely" });
+    assert.deepEqual(f.events.find((event) => event.type === "notify-failed"), { type: "notify-failed", destination: "discord-webhook", status: 429 });
+    assert.equal(f.store.waitlist()[0].email, "saved@example.com");
+    assert.equal(f.received.length, 1, "no duplicate delivery through the old route after an ambiguous failure");
+    assert.ok(!JSON.stringify(f.events).includes(f.webhookUrl));
+    assert.ok(!JSON.stringify(f.events).includes("test-private-path"));
+  });
+
+  test("a disconnected webhook keeps the registration and never logs request URLs", async (t) => {
+    const f = await fixture(t);
+    f.disconnect();
+    assert.equal((await f.join({ email: "offline@example.com" })).status, 302);
+    await waitFor(() => f.events.some((event) => event.type === "notify-failed"), { what: "the network failure recorded safely" });
+    assert.deepEqual(f.events.find((event) => event.type === "notify-failed"), { type: "notify-failed", destination: "discord-webhook", reason: "request-failed" });
+    assert.equal(f.store.waitlist()[0].email, "offline@example.com");
+    assert.ok(!JSON.stringify(f.events).includes("test-private-path"));
+  });
+
+  test("missing old-route configuration is visible in logs while the registration succeeds", async (t) => {
+    const f = await fixture(t);
+    f.config.waitlistWebhookUrl = "";
+    f.config.notify = "";
+    assert.equal((await f.join({ email: "unconfigured@example.com" })).status, 302);
+    assert.deepEqual(f.events.find((event) => event.type === "notify-failed"), { type: "notify-failed", destination: "space", reason: "not-configured" });
+    assert.equal(f.store.waitlist()[0].email, "unconfigured@example.com");
+    assert.equal(f.received.length, 0);
+  });
+
+  test("a malformed webhook is reported safely after saving the registration", async (t) => {
+    const f = await fixture(t);
+    f.config.waitlistWebhookUrl = "invalid-test-private-path";
+    assert.equal((await f.join({ email: "malformed@example.com" })).status, 302);
+    assert.deepEqual(f.events.find((event) => event.type === "notify-failed"), { type: "notify-failed", destination: "discord-webhook", reason: "request-failed" });
+    assert.equal(f.store.waitlist()[0].email, "malformed@example.com");
+    assert.ok(!JSON.stringify(f.events).includes("test-private-path"));
+    assert.equal(f.received.length, 0);
+  });
+});

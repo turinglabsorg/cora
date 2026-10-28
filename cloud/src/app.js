@@ -68,6 +68,29 @@ async function readForm(req, limit = 16 * 1024) {
   return Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString("utf8")));
 }
 
+async function notifyWaitlist(webhookUrl, fields, log) {
+  try {
+    const target = new URL(webhookUrl);
+    target.searchParams.set("wait", "true");
+    const who = [fields.email, fields.company ? `(${fields.company})` : ""].filter(Boolean).join(" ");
+    const response = await fetch(target, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: "Cora",
+        content: `📬 Nuova iscrizione alla lista d'attesa di usecora.space: **${who}**`,
+        allowed_mentions: { parse: [] },
+      }),
+      signal: AbortSignal.timeout(10000),
+      redirect: "error",
+    });
+    log({ type: response.ok ? "notify-sent" : "notify-failed", destination: "discord-webhook", status: response.status });
+    await response.body?.cancel().catch(() => {});
+  } catch {
+    log({ type: "notify-failed", destination: "discord-webhook", reason: "request-failed" });
+  }
+}
+
 /** A path on this site to come back to: never another host. */
 export function safeNext(value, fallback = "/account") {
   const next = String(value || "");
@@ -143,10 +166,17 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
   };
 
   const providers = () => Object.fromEntries(PROVIDERS.map((provider) => [provider, oauth.enabled(provider)]));
-  /** Tells the operator's own space (config.notify) what happened, signed with the cloud's key. */
+  /** Posts waitlist sign-ups directly to Discord, or to the operator's space when no webhook is configured. */
   const notify = (fields) => {
+    if (fields.type === "waitlist" && config.waitlistWebhookUrl) {
+      notifyWaitlist(config.waitlistWebhookUrl, fields, log);
+      return;
+    }
     const space = config.notify ? store.space(config.notify) : null;
-    if (!space) return;
+    if (!space) {
+      log({ type: "notify-failed", destination: "space", reason: config.notify ? "space-not-found" : "not-configured" });
+      return;
+    }
     fetch(`${space.upstream}/api/cloud/notice`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Cora": "1" },
