@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { asksToStop, cleanReply } from "../src/brain.js";
 import { Discord, splitMessage } from "../src/discord.js";
+import { LLM } from "../src/llm.js";
+import { toMrkdwn } from "../src/slack.js";
 import { mentions } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { SHARED, Store, ftsQuery } from "../src/store.js";
@@ -64,6 +66,28 @@ describe("posting as an agent through the plain bot", () => {
     // Cora listens through an agent's own bot: the author already is Primo, so saying it again
     // would print the name twice.
     assert.equal(await posted("Primo", "Primo"), "Fatto.");
+  });
+});
+
+describe("where the models run", () => {
+  const llm = (ollamaUrl, ollamaKey = "") => new LLM({ ollamaUrl, ollamaKey, cliWorkDir: "/tmp", bridge: null, subscriptions: null });
+
+  test("an Ollama on this machine needs no key, one in the cloud still does", () => {
+    assert.equal(llm("http://127.0.0.1:11434").providers().ollama, true, "the GPU in the room answers without a key");
+    assert.equal(llm("http://192.168.1.64:11434").providers().ollama, true, "so does one on the same network");
+    assert.equal(llm("https://ollama.com").providers().ollama, false, "the cloud one is not available without a key");
+    assert.equal(llm("https://ollama.com", "k").providers().ollama, true);
+    assert.deepEqual(llm("http://127.0.0.1:11434").ollamaHeaders(), {}, "no key, no Authorization header");
+  });
+});
+
+describe("writing for Slack", () => {
+  test("markdown becomes mrkdwn, and code is left alone", () => {
+    assert.equal(toMrkdwn("**fatto** e [il link](https://dopamina.it)"), "*fatto* e <https://dopamina.it|il link>");
+    assert.equal(toMrkdwn("*corsivo*"), "_corsivo_");
+    assert.equal(toMrkdwn("- uno\n- due"), "• uno\n• due");
+    assert.equal(toMrkdwn("prima `**non** qui` dopo"), "prima `**non** qui` dopo");
+    assert.equal(toMrkdwn("a < b & c"), "a &lt; b &amp; c");
   });
 });
 

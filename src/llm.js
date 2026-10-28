@@ -76,11 +76,20 @@ export class LLM {
     this.cache = { at: 0, models: [] };
   }
 
+  /** An Ollama on this machine or this network answers without a key: on-premise has its own GPU. */
+  get localOllama() {
+    return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/i.test(this.ollamaUrl);
+  }
+
+  ollamaHeaders() {
+    return this.ollamaKey ? { Authorization: `Bearer ${this.ollamaKey}` } : {};
+  }
+
   providers() {
     return {
       claude: onPath(this.claudeBin),
       codex: onPath(this.codexBin),
-      ollama: Boolean(this.ollamaKey),
+      ollama: Boolean(this.ollamaKey) || this.localOllama,
       orcarouter: Boolean(this.routers.orcarouter.key),
       hermes: onPath(this.hermes.bin),
     };
@@ -109,7 +118,7 @@ export class LLM {
     }
     if (available.ollama) {
       try {
-        const response = await fetch(`${this.ollamaUrl}/api/tags`, { headers: { Authorization: `Bearer ${this.ollamaKey}` }, signal: AbortSignal.timeout(8000) });
+        const response = await fetch(`${this.ollamaUrl}/api/tags`, { headers: this.ollamaHeaders(), signal: AbortSignal.timeout(8000) });
         const data = await response.json();
         for (const model of data.models || []) {
           const caps = model.capabilities || ["completion", "tools"];
@@ -246,7 +255,7 @@ export class LLM {
     const { provider, name } = splitModel(model);
     if (this.routers[provider]) return this.routerChat(provider, name, model, { messages, tools, signal });
     if (provider !== "ollama") throw new Error(`unknown model provider: ${provider}`);
-    if (!this.ollamaKey) throw new Error("OLLAMA_API_KEY is not set");
+    if (!this.ollamaKey && !this.localOllama) throw new Error("OLLAMA_API_KEY is not set");
     const caps = await this.capabilities(model);
     const out = [];
     for (const message of messages) {
@@ -271,7 +280,7 @@ export class LLM {
     if (caps.thinking && effort) body.think = effort === "low" ? false : /gpt-oss/i.test(name) ? effort : true;
     const response = await fetch(`${this.ollamaUrl}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.ollamaKey}` },
+      headers: { "Content-Type": "application/json", ...this.ollamaHeaders() },
       body: JSON.stringify(body),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
