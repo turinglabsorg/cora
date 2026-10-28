@@ -887,7 +887,7 @@ export class Orchestrator {
     this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
     // Nobody has the panel open: the reply reaches the owner's phone.
     if (this.notifier?.enabled && !this.watching() && !item.request) {
-      const url = state.id === "web" ? "/#/" : `/#/agent/${agent.id}/chat`;
+      const url = state.id === "web" ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
       this.notifier.notify({ title: agent.name, body: text || `📎 ${file?.name}`, url, tag: state.id }).catch(() => {});
     }
     return [item];
@@ -921,7 +921,7 @@ export class Orchestrator {
       [item] = this.postWeb(agent, state, text, undefined, undefined, { request });
       this.emit({ type: "request", agentId: agent.id });
       if (this.notifier?.enabled) {
-        const url = state.id === SALOTTO ? "/#/" : `/#/agent/${agent.id}/chat`;
+        const url = state.id === SALOTTO ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
         this.notifier.notify({ title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: text, url, tag: `request-${agent.id}` }).catch(() => {});
       }
     } else {

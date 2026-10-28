@@ -218,6 +218,28 @@ a.stat:hover { border-color: var(--line-strong); }
 .empty .ico { width: 28px; height: 28px; stroke-width: 1.5; }
 .empty p { margin: 0; }
 
+/* ---------- loading ---------- */
+.skeleton { display: block; flex: none; border-radius: var(--r-sm); background: var(--panel-2); animation: skeleton-pulse 1.8s ease-in-out infinite; }
+.loading-skeleton { display: flex; flex-direction: column; gap: 14px; }
+.sk-row { display: flex; align-items: center; gap: 14px; padding: 12px 2px; }
+.sk-avatar { width: 44px; height: 44px; border-radius: 50%; }
+.sk-label { width: 28%; min-width: 80px; height: 14px; }
+.sk-caption { width: 60%; height: 11px; }
+.sk-total { width: 72px; height: 12px; margin-left: auto; }
+.sk-heat.skeleton { height: clamp(90px, 11vw, 142px); border-radius: 2px; opacity: .7; background-image: linear-gradient(var(--panel) 3px, transparent 3px), linear-gradient(90deg, var(--panel) 3px, transparent 3px); background-size: calc(100% / 53) calc(100% / 7); }
+.sk-heat.loading-skeleton { gap: 8px; }
+.sk-heat > .sk-caption { margin-top: 4px; }
+.sk-chat { width: 100%; gap: 24px; }
+.sk-message { display: flex; flex-direction: column; gap: 10px; width: 72%; max-width: 560px; }
+.sk-message.owner { align-self: flex-end; width: 58%; }
+.sk-bubble { width: 100%; height: 78px; border-radius: var(--r-lg); }
+.sk-message.owner .sk-bubble { height: 54px; }
+.sk-compose { height: 52px; border-radius: var(--r-lg); }
+.side-agents .sk-row { padding: 6px 12px; gap: 10px; }
+.side-agents .sk-avatar { width: 26px; height: 26px; }
+.side-agents .sk-caption { display: none; }
+@keyframes skeleton-pulse { 50% { background-color: var(--line); } }
+
 /* ---------- agent cards ---------- */
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
 .agent-card {
@@ -834,9 +856,8 @@ details.raw summary .ico { width: 15px; height: 15px; }
 }
 
 /* ---------- token heatmap ---------- */
-/* A year of days, one square each. The columns stretch to the width they are given,
-   so the grid fills a desktop panel instead of huddling on the left, and never shrinks
-   below a readable square: on a phone it scrolls sideways and opens on the latest week. */
+/* Start at the first recorded use. Bounded squares keep short histories compact;
+   longer histories scroll sideways and open on the latest week after mounting. */
 .heat-wrap { display: flex; flex-direction: column; gap: 22px; }
 .heat-block { display: flex; flex-direction: column; gap: 6px; }
 .heat-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -844,10 +865,10 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .heat-head .avatar { width: 22px; height: 22px; flex: 0 0 auto; }
 .heat-total { margin-left: auto; font: 500 11px/1 var(--mono); color: var(--muted); letter-spacing: 0.06em; }
 .heat-scroll { overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
-.heat-plot { display: flex; flex-direction: column; gap: 4px; min-width: 100%; }
+.heat-plot { display: flex; flex-direction: column; gap: 4px; width: max-content; min-width: 100%; }
 .heat-months,
-.heat-grid { display: grid; grid-template-columns: repeat(var(--weeks), minmax(9px, 1fr)); gap: 3px; }
-.heat-grid { grid-template-rows: repeat(7, auto); grid-auto-flow: column; }
+.heat-grid { display: grid; grid-template-columns: repeat(var(--weeks), 14px); gap: 3px; }
+.heat-grid { grid-template-rows: repeat(var(--rows, 7), 14px); grid-auto-flow: column; }
 .heat-month { font: 500 9px/1 var(--mono); letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
 .heat-cell { display: block; aspect-ratio: 1; border-radius: 2px; border: 1px solid transparent; }
 .heat-cell.l0 { background: #141414; }
@@ -855,9 +876,11 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .heat-cell.l2 { background: rgba(242, 169, 59, 0.45); }
 .heat-cell.l3 { background: rgba(242, 169, 59, 0.7); }
 .heat-cell.l4 { background: var(--amber); }
+.heat-cell.blank { visibility: hidden; }
 .heat-cell[title] { cursor: crosshair; }
 .heat-cell[title]:hover { border-color: var(--text); }
 .heat-readout { margin: 0; font: 400 11px/1.4 var(--mono); color: var(--muted); min-height: 1.4em; }
+.heat-range { margin: 0 0 8px; font: 400 11px/1.4 var(--mono); color: var(--muted); }
 /* The scale is said once, up in the panel header. */
 .heat-legend { display: inline-flex; align-items: center; gap: 3px; }
 .heat-legend .heat-cell { width: 10px; }

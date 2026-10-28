@@ -8,6 +8,7 @@ import { passKeys, signPass } from "../src/pass.js";
 import { Discord, LISTENING_INTENTS } from "../src/discord.js";
 import { loginLinkToken } from "../src/web.js";
 import { SHARED, Store } from "../src/store.js";
+import { panelHarness } from "./panel.js";
 import { identityCli } from "./subscription-fixtures.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { LLM } from "../src/llm.js";
@@ -800,6 +801,140 @@ describe("panel auth", () => {
         assert.equal(check.tools, null, "the verifier has no tool bridge");
         assert.equal(app.store.routineHistory({ agentId: agent.id }).items[0].verification.met, true);
       } finally { app.store.deleteAgent(agent.id); }
+    }
+  });
+
+  test("opens Agents with skeletons, global usage above the roster and individual usage below", async () => {
+    const first = app.store.createAgent({ name: "Memoria", model: "ollama/test-model", enabled: false, tools: false });
+    const second = app.store.createAgent({ name: "Pannello", model: "ollama/test-model", enabled: false, tools: false });
+    for (const [agent, tokens] of [[first, 150], [second, 250]]) {
+      const trace = app.traces.start({ agentId: agent.id, kind: "chat", channelId: "web", model: agent.model });
+      trace.spent({ in: tokens - 30, out: 30 });
+      trace.finish({ status: "done", output: "Ok." });
+    }
+    const usageReady = Promise.withResolvers();
+    const paths = [];
+    const source = await fetch(`${base}/assets/app.js`).then((response) => response.text());
+    const panel = panelHarness({ source, language: "en", fetch: async (path, options) => {
+      paths.push(path);
+      if (path === "/api/usage") await usageReady.promise;
+      return fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } });
+    } });
+    try {
+      const boot = panel.run("boot()");
+      assert.ok(panel.app.querySelectorAll(".loading-skeleton").length, "startup reserves space before the state arrives");
+      await boot;
+      assert.deepEqual(panel.app.querySelectorAll("h2").map((node) => node.textContent), ["Global usage", "The agents", "Usage by agent"]);
+      assert.equal(paths.filter((path) => path === "/api/usage").length, 1, "both panels share one request");
+      assert.ok(!paths.some((path) => path.includes("/rooms/")), "opening the app never opens the lounge");
+      assert.equal(panel.app.querySelectorAll(".loading-skeleton").length, 3, "one chart skeleton globally and one per agent");
+      usageReady.resolve();
+      await waitFor(() => panel.app.querySelectorAll(".heat-block").length === 3);
+      assert.equal(panel.app.querySelectorAll(".loading-skeleton").length, 0);
+      assert.deepEqual(panel.app.querySelectorAll(".heat-total").map((node) => node.textContent), ["400 tokens", "150 tokens", "250 tokens"]);
+      assert.equal(panel.app.querySelectorAll(".heat-head")[1].querySelector("b").textContent, "Memoria", "agent names are never translated");
+      await panel.navigate("#/salotto");
+      await waitFor(() => panel.app.querySelector(".chat-input"));
+      assert.ok(paths.includes("/api/rooms/web/messages"), "the dedicated lounge still opens its history");
+      await panel.navigate("#/");
+      assert.equal(panel.app.querySelector("h1").textContent, "Agents");
+    } finally {
+      usageReady.resolve();
+      await waitFor(() => panel.app.querySelectorAll(".loading-skeleton").length === 0);
+      app.store.deleteAgent(first.id);
+      app.store.deleteAgent(second.id);
+    }
+  });
+
+  test("usage failures clear skeletons and a slow chat cannot replace a newer page", async () => {
+    const chatReady = Promise.withResolvers();
+    const panel = panelHarness({ fetch: async (path, options) => {
+      if (path === "/api/usage") return new Response(JSON.stringify({ error: "unavailable" }), { status: 503 });
+      if (path === "/api/rooms/web/messages") await chatReady.promise;
+      return fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } });
+    } });
+    await panel.run("boot()");
+    await waitFor(() => panel.app.querySelectorAll(".loading-skeleton").length === 0);
+    assert.equal(panel.app.querySelectorAll(".muted").filter((node) => node.textContent === "Consumi non disponibili.").length, 2);
+    await panel.navigate("#/salotto");
+    assert.ok(panel.app.querySelector(".sk-chat"));
+    await panel.navigate("#/agenti");
+    chatReady.resolve();
+    await sleep(50);
+    assert.equal(panel.app.querySelector("h1").textContent, "Agenti");
+    assert.equal(panel.run("S.live"), null, "a detached chat never takes over live events");
+    assert.equal(panel.app.querySelector(".chat-input"), null);
+  });
+
+  test("usage captions, months, daily details and statuses follow the panel language", async () => {
+    const source = await fetch(`${base}/assets/app.js`).then((response) => response.text());
+    for (const [language, expected] of [
+      ["en", { summary: "All agents", hint: "Each agent's token usage, day by day.", month: "Jan", active: "26 Oct · 1.5k tokens · 1 turn", plural: "24 Oct · 3.0k tokens · 2 turns", empty: "nothing", brand: "resident agents", stopped: "stopped", lounge: "lounge", memory: "memory", error: "Usage unavailable." }],
+      ["it", { summary: "Tutti insieme", hint: "Quanti token spende ognuno, giorno per giorno.", month: "gen", active: "26 ott · 1,5k token · 1 turno", plural: "24 ott · 3,0k token · 2 turni", empty: "niente", brand: "agenti residenti", stopped: "fermato", lounge: "salotto", memory: "memoria", error: "Consumi non disponibili." }],
+    ]) {
+      let failUsage = false;
+      const panel = panelHarness({ source, language, fetch: (path, options) => failUsage && path === "/api/usage"
+        ? Promise.resolve(new Response(JSON.stringify({ error: "unavailable" }), { status: 503 }))
+        : fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
+      const boot = panel.run("boot()");
+      assert.equal(panel.app.querySelector(".loading-skeleton").attributes["aria-label"], language === "en" ? "Loading…" : "Caricamento…");
+      await boot;
+      await waitFor(() => panel.app.querySelector(".heat-block"));
+      assert.equal(panel.app.querySelector(".heat-head").querySelector("b").textContent, expected.summary);
+      assert.ok(panel.app.textContent.includes(expected.hint));
+      assert.ok(panel.app.querySelector(".brand").textContent.includes(expected.brand));
+      assert.equal(panel.run("MONTHS[0]"), expected.month);
+      assert.equal(panel.run("tokenTotal(1)"), "1 token");
+      assert.equal(panel.run("tag(TRACE_STATUS.stopped[0]).textContent"), expected.stopped);
+      assert.equal(panel.run('channelName("web")'), expected.lounge);
+      assert.equal(panel.run('traceWhere({kind:"sleep"})'), expected.memory);
+      const chart = panel.run('heatmap(new Map([["2026-10-26", {tokens:1500, turns:1}], ["2026-10-24", {tokens:3000, turns:2}]]), {today:"2026-10-26"})');
+      const titles = chart.querySelectorAll(".heat-cell").map((node) => node.attributes.title).filter(Boolean);
+      assert.ok(titles.includes(expected.active));
+      assert.ok(titles.includes(expected.plural));
+      assert.ok(titles.some((title) => title.endsWith(expected.empty)));
+      const card = panel.run('agentCard({ id:"test", name:"Memoria", model:"ollama/test-model", enabled:true, tools:false, chattiness:0.5 }, 0)');
+      assert.equal(card.querySelector(".meter").attributes.title, language === "en" ? "Chattiness 50" : "Loquacità 50");
+      assert.equal(card.querySelector(".monitor").attributes["aria-label"], language === "en" ? "Memoria's desktop" : "Desktop di Memoria");
+      failUsage = true;
+      await panel.navigate("#/agenti");
+      await waitFor(() => panel.app.querySelectorAll(".loading-skeleton").length === 0);
+      assert.equal(panel.app.querySelectorAll(".muted").filter((node) => node.textContent === expected.error).length, 2);
+    }
+  });
+
+  test("usage starts at each first recorded day, keeps gaps and never invents earlier history", async () => {
+    const agents = ["Earlier", "Newer", "Quiet"].map((name) => app.store.createAgent({ name, model: "ollama/test-model", enabled: false, tools: false }));
+    const { today } = (await call("/api/usage")).data;
+    const start = new Date(`${today}T12:00:00Z`);
+    start.setUTCDate(start.getUTCDate() - 10);
+    const firstDay = start.toISOString().slice(0, 10);
+    for (const [agent, day] of [[agents[0], firstDay], [agents[1], today]]) {
+      const trace = app.traces.start({ agentId: agent.id, kind: "chat", model: agent.model });
+      trace.startedAt = `${day}T12:00:00.000Z`;
+      trace.spent({ in: 100, out: 20 });
+      trace.finish({ status: "done" });
+    }
+    try {
+      const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
+      await panel.run("boot()");
+      await waitFor(() => panel.app.querySelectorAll(".heat-block").length === 4);
+      const grids = panel.app.querySelectorAll(".heat-grid");
+      const dated = (grid) => grid.querySelectorAll(".heat-cell").map((node) => node.attributes["data-day"]).filter(Boolean);
+      assert.equal(grids.length, 3, "a quiet agent has an empty state instead of a fictional calendar");
+      assert.equal(dated(grids[0]).length, 11);
+      assert.equal(dated(grids[0])[0], firstDay);
+      assert.equal(dated(grids[0]).at(-1), today);
+      assert.deepEqual(dated(grids[1]), dated(grids[0]));
+      assert.deepEqual(dated(grids[2]), [today], "a new agent shows only today's record");
+      assert.ok(grids[0].querySelectorAll(".l0").length > 0, "quiet days after first usage remain in the timeline");
+      assert.ok(panel.app.textContent.includes("No usage yet."));
+      const crossYear = panel.run('heatmap(new Map([["2027-01-02", {tokens:5, turns:1}], ["2026-12-31", {tokens:10, turns:1}]]), {today:"2027-01-02"})');
+      assert.deepEqual(dated(crossYear), ["2026-12-31", "2027-01-01", "2027-01-02"]);
+      assert.match(crossYear.querySelector(".heat-range").textContent, /2026.*2027/);
+      assert.equal(panel.run('heatmap(new Map(), {today:"2026-10-26"}).textContent'), "No usage yet.");
+    } finally {
+      for (const agent of agents) app.store.deleteAgent(agent.id);
     }
   });
 });
@@ -2317,6 +2452,27 @@ describe("hosted on usecora.space", () => {
 });
 
 describe("notifications and requests", () => {
+  test("lounge replies and requests open the dedicated lounge route", async () => {
+    const phone = await fakePhone();
+    const agent = app.store.createAgent({ name: "Luce", model: "ollama/test-model", enabled: false, tools: false });
+    try {
+      await call("/api/push/subscribe", { method: "POST", body: { subscription: phone.subscription, device: "test lounge" } });
+      app.orchestrator.postWeb(agent, app.orchestrator.state("web"), "Risposta dal salotto.");
+      await waitFor(() => phone.received.length === 1);
+      assert.equal(phone.decrypt(phone.received[0]).url, "/#/salotto");
+      await app.orchestrator.askOwner(agent, { question: "Confermi?", choices: ["Sì", "No"] }, { channelId: "web" });
+      await waitFor(() => phone.received.length === 2);
+      assert.equal(phone.decrypt(phone.received[1]).url, "/#/salotto");
+      app.store.appendArchive("web", { id: "test-lounge-answer", at: Date.now() + 1, authorName: "Owner", kind: "owner", content: "Sì" });
+      app.orchestrator.state("web").request = null;
+    } finally {
+      app.store.deleteAgent(agent.id);
+      phone.gone();
+      await call("/api/push/test", { method: "POST" });
+      await phone.close();
+    }
+  });
+
   test("a subscribed phone gets replies while the panel is closed, the agents' notices and their requests, and answering clears the request", async () => {
     const phone = await fakePhone();
     const status = (await call("/api/state")).data.push;

@@ -60,7 +60,7 @@ const TABS = [
 ];
 const SALOTTO = "web";
 const TRACE_KIND = { chat: "conversazione", routine: "routine", reminder: "reminder", verification: "verifica", sleep: "sonno" };
-const TRACE_STATUS = { running: ["in corso", "agent"], done: ["ha risposto", "ok"], pass: ["passa", ""], error: ["errore", "err"], interrupted: ["interrotto", "err"] };
+const TRACE_STATUS = { running: ["in corso", "agent"], done: ["ha risposto", "ok"], pass: ["passa", ""], error: ["errore", "err"], interrupted: ["interrotto", "err"], stopped: ["fermato", ""] };
 const TRANSPORTS = {
   discord: { label: "Discord", icon: "hash" },
   telegram: { label: "Telegram", icon: "send" },
@@ -237,6 +237,22 @@ function empty(name, text, action) {
   return h("div", { class: "empty" }, icon(name), h("p", {}, text), action || null);
 }
 
+function skeletonLine(cls = "") {
+  return h("span", { class: `skeleton ${cls}`, "aria-hidden": "true" });
+}
+
+function skeleton(kind = "rows", count = 3) {
+  const content = kind === "heat"
+    ? [h("div", { class: "heat-head" }, skeletonLine("sk-label"), skeletonLine("sk-total")),
+      skeletonLine("sk-heat"), skeletonLine("sk-caption")]
+    : Array.from({ length: count }, (_, index) => kind === "chat"
+      ? h("div", { class: `sk-message${index % 2 ? " owner" : ""}` }, skeletonLine("sk-label"), skeletonLine("sk-bubble"))
+      : h("div", { class: "sk-row" }, skeletonLine("sk-avatar"), h("div", { class: "grow stack-sm" }, skeletonLine("sk-label"), skeletonLine("sk-caption"))));
+  const loading = h("div", { class: `loading-skeleton sk-${kind}`, role: "status", "aria-label": "Caricamento…", "aria-busy": "true" }, content);
+  if (kind !== "chat") return loading;
+  return h("section", { class: "chat" }, h("div", { class: "chat-log" }, loading), skeletonLine("sk-compose"));
+}
+
 /* ---------- api ---------- */
 async function api(path, { method = "GET", body } = {}) {
   const headers = { "X-Cora": "1" };
@@ -272,6 +288,8 @@ async function guard(promise, okText) {
 function clearTimers() {
   S.timers.forEach((timer) => clearInterval(timer));
   S.timers = [];
+  S.heatObserver?.disconnect();
+  S.heatObserver = null;
   S.settingsObserver?.disconnect();
   S.settingsObserver = null;
 }
@@ -299,7 +317,7 @@ function fmtTime(iso, withDay = false) {
 
 function channelName(id) {
   if (!id) return "";
-  if (id === SALOTTO) return "salotto";
+  if (id === SALOTTO) return tr("salotto");
   if (/^web-/.test(id)) return tr("chat con {name}", { name: S.data?.agents.find((agent) => agent.id === id.slice(4))?.name || "?" });
   if (/^tg:/.test(id)) return S.data?.telegram.chats.find((chat) => chat.id === id.slice(3))?.title || "chat Telegram";
   const channel = [...(S.data?.channels || []), ...(S.data?.discordChannels || [])].find((item) => item.id === id);
@@ -409,7 +427,9 @@ function connectEvents() {
 
 /* ---------- shell ---------- */
 function route() {
-  return location.hash.replace(/^#\/?/, "").split("?")[0].split("/");
+  const parts = location.hash.replace(/^#\/?/, "").split("?")[0].split("/");
+  if (!parts[0]) parts[0] = "agenti";
+  return parts;
 }
 
 function lamp() {
@@ -423,7 +443,7 @@ function updateLamp() {
   for (const el of document.querySelectorAll(".onair")) {
     el.className = `onair ${cls}`;
     el.title = info.error || `${info.label}: ${tr(STATE_LABEL[info.state] || info.state)}`;
-    el.lastChild.textContent = info.state === "ready" ? "On air" : tr(STATE_LABEL[info.state] || info.state);
+    el.lastChild.textContent = info.state === "ready" ? tr("In onda") : tr(STATE_LABEL[info.state] || info.state);
   }
 }
 
@@ -436,15 +456,15 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
   const [section, current] = route();
   const nav = [
     ["agenti", "Agenti", "users", ["agenti", "agent", "new"].includes(section)],
-    ["", "Salotto", "chat", section === ""],
+    ["salotto", "Salotto", "chat", section === "salotto"],
     ["banco", "Banco", "grid", section === "banco"],
     ["contesto", "Contesto", "book", section === "contesto"],
     ["settings", "Impostazioni", "sliders", section === "settings"],
   ];
-  const info = transportInfo();
+  const info = S.data ? transportInfo() : { icon: "radio", label: "Cora", where: tr("Caricamento…") };
   app.replaceChildren(h("div", { class: `app${mode ? ` mode-${mode}` : ""}` },
     h("aside", { class: "sidebar" },
-      h("a", { class: "brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "" }), h("span", {}, h("b", {}, "Cora"), h("small", {}, "resident agents"))),
+      h("a", { class: "brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "" }), h("span", {}, h("b", {}, "Cora"), h("small", {}, "agenti residenti"))),
       h("a", { class: "onair-card", href: "#/settings" },
         h("span", { class: "panel-ico" }, icon(info.icon)),
         h("span", { class: "grow" }, h("b", {}, info.label), h("small", {}, info.where)),
@@ -452,7 +472,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
       h("nav", { class: "side-nav" }, nav.map(([key, label, name, active]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label)))),
       h("div", { class: "side-agents" },
         h("span", { class: "label" }, "Agenti"),
-        S.data.agents.map((agent) => h("a", { href: `#/agent/${agent.id}/chat`, class: section === "agent" && current === agent.id ? "active" : "" }, avatar(agent, "xs"), h("span", { class: "grow" }, raw(agent.name)), agentDot(agent))),
+        S.data ? S.data.agents.map((agent) => h("a", { href: `#/agent/${agent.id}/chat`, class: section === "agent" && current === agent.id ? "active" : "" }, avatar(agent, "xs"), h("span", { class: "grow" }, raw(agent.name)), agentDot(agent))) : skeleton("rows"),
         h("a", { href: "#/new", class: section === "new" ? "active" : "" }, h("span", { class: "avatar xs add" }, icon("plus")), h("span", { class: "grow" }, "Nuovo agente"))),
       S.data?.currentUser ? h("a", { class: "side-identity", href: "#/settings/accesso" }, icon("user"),
         h("span", { class: "grow" }, h("b", {}, raw(S.data.currentUser.name || S.data.currentUser.email || "Owner")),
@@ -491,7 +511,7 @@ function requestCards() {
     h("div", { class: "requests-head" }, icon("ask"), h("b", {}, requests.length === 1 ? "Una richiesta per te" : tr("{count} richieste per te", { count: requests.length }))),
     requests.map((request) => {
       const agent = S.data.agents.find((item) => item.id === request.agentId);
-      return h("a", { class: "request-card", href: request.channelId === "web" ? "#/" : `#/agent/${request.agentId}/chat` },
+      return h("a", { class: "request-card", href: request.channelId === "web" ? "#/salotto" : `#/agent/${request.agentId}/chat` },
         agent ? avatar(agent, "sm") : null,
         h("span", { class: "grow" }, h("b", {}, raw(agent?.name || "?")), h("span", { class: "row-text" }, raw(request.content))),
         h("span", { class: "row-meta" }, fmtTime(request.at)),
@@ -560,7 +580,7 @@ function agentAccount(agent) {
 
 function agentCard(agent, index) {
   const running = agent.box?.running;
-  const monitor = h("a", { class: "monitor", href: `#/agent/${agent.id}/desktop`, "aria-label": `Desktop di ${agent.name}` });
+  const monitor = h("a", { class: "monitor", href: `#/agent/${agent.id}/desktop`, "aria-label": tr("Desktop di {name}", { name: agent.name }) });
   if (running) {
     const img = h("img", { alt: "", src: `/api/agents/${agent.id}/box/screenshot?t=${Date.now()}` });
     img.addEventListener("error", () => monitor.replaceChildren(h("span", { class: "dark" }, icon("monitor"), "Segnale assente")));
@@ -575,7 +595,7 @@ function agentCard(agent, index) {
       avatar(agent),
       h("span", { class: "grow" }, h("b", {}, raw(agent.name)), h("small", { title: modelLabel(agent.model) }, modelLabel(agent.model, { short: true }))),
       icon("next", "chev")),
-    h("div", { class: "meter", title: `Loquacità ${pct}` }, h("span", { class: "label" }, "Loquacità"), h("span", { class: "track" }, h("span", { class: "fill", vars: { width: `${pct}%` } })), h("span", { class: "label" }, pct)),
+    h("div", { class: "meter", title: tr("Loquacità {value}", { value: pct }) }, h("span", { class: "label" }, "Loquacità"), h("span", { class: "track" }, h("span", { class: "fill", vars: { width: `${pct}%` } })), h("span", { class: "label" }, pct)),
     h("div", { class: "badges" },
       badge(agent.enabled ? "In onda" : "Muto", agent.enabled ? "on" : "", "radio"),
       badge(running ? "Desktop" : "Spento", running ? "on" : "", "monitor"),
@@ -609,11 +629,10 @@ async function renderDashboard() {
   const desktops = agents.filter((agent) => agent.box?.running).length;
   const active = S.data.routines.filter((routine) => routine.enabled);
   const next = active.filter((routine) => routine.nextRunAt).sort((a, b) => Date.parse(a.nextRunAt) - Date.parse(b.nextRunAt))[0];
-  const recent = (await guard(api("/api/traces?limit=8"))) || [];
-  if (route()[0] !== "banco") return;
+  const recentSlot = h("div", {}, skeleton());
   const who = info.user ? (info.kind === "telegram" ? `@${info.user.username}` : info.user.username) : "";
   shell([
-    pageHead(h("span", {}, "Co", h("em", {}, "ra")), tr("Vive su {transport}: {where}.", { transport: info.label, where: tr(info.where) }), [btn("Archivio", { icon: "book", href: "#/archivio" }), btn("Salotto", { icon: "chat", href: "#/" }), btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
+    pageHead(h("span", {}, "Co", h("em", {}, "ra")), tr("Vive su {transport}: {where}.", { transport: info.label, where: tr(info.where) }), [btn("Archivio", { icon: "book", href: "#/archivio" }), btn("Salotto", { icon: "chat", href: "#/salotto" }), btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
     banners(),
     requestsStrip(),
     h("div", { class: "stats" },
@@ -626,31 +645,36 @@ async function renderDashboard() {
     h("div", { class: "split" },
       panel({ icon: "pulse", title: "Telescrivente", hint: "Tutto quello che succede, in diretta.", cls: "teletype" }, feed()),
       panel({ icon: "bulb", title: "Ultimi ragionamenti", hint: "Cosa hanno pensato e fatto, turno per turno." },
-        recent.length ? h("div", { class: "rows" }, recent.map((trace) => traceRow(trace, { withAgent: true }))) : empty("bulb", "Nessun turno ancora."))),
+        recentSlot)),
   ], { title: "Banco" });
   S.timers.push(setInterval(() => {
     for (const img of document.querySelectorAll(".agent-card .monitor img")) img.src = img.src.replace(/t=\d+/, `t=${Date.now()}`);
   }, 20000));
   S.timers.push(setInterval(() => scheduleRefresh(), 30000));
+  const recent = (await guard(api("/api/traces?limit=8"))) || [];
+  if (recentSlot.isConnected) recentSlot.replaceChildren(recent.length ? h("div", { class: "rows" }, recent.map((trace) => traceRow(trace, { withAgent: true }))) : empty("bulb", "Nessun turno ancora."));
 }
 
 /* ---------- token heatmap ---------- */
-const MONTHS = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"];
+const MONTH_FORMAT = new Intl.DateTimeFormat(LOCALE, { month: "short", timeZone: "UTC" });
+const MONTHS = Array.from({ length: 12 }, (_, month) => MONTH_FORMAT.format(new Date(Date.UTC(2020, month, 1))).replace(/\.$/, ""));
+const TOKEN_FORMAT = [0, 1].map((digits) => new Intl.NumberFormat(LOCALE, { minimumFractionDigits: digits, maximumFractionDigits: digits }));
 
 function shortTokens(n) {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}k`;
+  if (n >= 1e9) return `${TOKEN_FORMAT[1].format(n / 1e9)}B`;
+  if (n >= 1e6) return `${TOKEN_FORMAT[1].format(n / 1e6)}M`;
+  if (n >= 1e3) return `${TOKEN_FORMAT[n >= 1e4 ? 0 : 1].format(n / 1e3)}k`;
   return String(n);
 }
 
-/** The days to draw: whole weeks back from today, so every column is a week. */
-function heatDays(today, weeks) {
+function tokenTotal(count) {
+  return count === 1 ? "1 token" : tr("{count} token", { count: shortTokens(count) });
+}
+
+/** Only recorded history: no empty year before the first use. */
+function heatDays(today, firstDay) {
   const end = new Date(`${today}T12:00:00Z`);
-  // Columns start on Monday: walk back to the Monday of this week, then back `weeks`.
-  const weekday = (end.getUTCDay() + 6) % 7;
-  const start = new Date(end);
-  start.setUTCDate(start.getUTCDate() - weekday - (weeks - 1) * 7);
+  const start = new Date(`${firstDay}T12:00:00Z`);
   const days = [];
   for (let at = new Date(start); at <= end; at.setUTCDate(at.getUTCDate() + 1)) {
     days.push({ key: at.toISOString().slice(0, 10), date: new Date(at) });
@@ -659,24 +683,28 @@ function heatDays(today, weeks) {
 }
 
 /**
- * A year of days, a square each, darker to brighter with what was spent. The
+ * Recorded days, a square each, darker to brighter with what was spent. The
  * scale is relative to the busiest day: providers count tokens so differently
  * that an absolute scale would say nothing.
  */
-function heatmap(byDay, { today, weeks = 53, label = "" } = {}) {
-  const days = heatDays(today, weeks);
+function heatmap(byDay, { today, label = "" } = {}) {
+  const firstDay = [...byDay.keys()].filter((day) => day <= today && byDay.get(day)?.tokens > 0).sort()[0];
+  if (!firstDay) return empty("chart", "Ancora nessun consumo.");
+  const days = heatDays(today, firstDay);
   const peak = Math.max(1, ...days.map((day) => byDay.get(day.key)?.tokens || 0));
   const readout = h("p", { class: "heat-readout" }, label || "\u00a0");
   const tell = (text) => { readout.textContent = text || label || "\u00a0"; };
-  const columns = Math.ceil(days.length / 7);
+  const offset = (days[0].date.getUTCDay() + 6) % 7;
+  const columns = Math.ceil((days.length + offset) / 7);
   const months = h("div", { class: "heat-months", vars: { "--weeks": String(columns) } });
-  const grid = h("div", { class: "heat-grid", vars: { "--weeks": String(columns) } });
+  const grid = h("div", { class: "heat-grid", vars: { "--weeks": String(columns), "--rows": String(Math.min(7, days.length + offset)) } });
+  for (let index = 0; index < offset; index += 1) grid.append(h("i", { class: "heat-cell blank", "aria-hidden": "true" }));
   let lastMonth = -1;
   let labelled = -9;
   for (let index = 0; index < days.length; index += 1) {
     const day = days[index];
-    if (index % 7 === 0) {
-      const column = index / 7;
+    if (index === 0 || (index + offset) % 7 === 0) {
+      const column = Math.floor((index + offset) / 7);
       const month = day.date.getUTCMonth();
       // A label needs room: two months whose columns are close would print over each other.
       const show = month !== lastMonth && column - labelled >= 3;
@@ -690,18 +718,18 @@ function heatmap(byDay, { today, weeks = 53, label = "" } = {}) {
     const level = !tokens ? 0 : Math.min(4, 1 + Math.floor((tokens / peak) * 3.999));
     const when = `${day.date.getUTCDate()} ${MONTHS[day.date.getUTCMonth()]}`;
     const text = tokens
-      ? `${when} · ${shortTokens(tokens)} token · ${spent.turns} ${spent.turns === 1 ? "turno" : "turni"}`
-      : `${when} · niente`;
+      ? `${when} · ${tokenTotal(tokens)} · ${spent.turns} ${tr(spent.turns === 1 ? "turno" : "turni")}`
+      : `${when} · ${tr("niente")}`;
     grid.append(h("i", {
-      class: `heat-cell l${level}`, title: text,
+      class: `heat-cell l${level}`, title: text, "data-day": day.key,
       onpointerenter: () => tell(text),
       onclick: () => tell(text),
     }));
   }
   const scroll = h("div", { class: "heat-scroll" }, h("div", { class: "heat-plot" }, months, grid));
-  // Today is at the right end, and that is the end worth seeing first.
-  requestAnimationFrame(() => { scroll.scrollLeft = scroll.scrollWidth; });
-  return h("div", { class: "heat" }, scroll, readout);
+  const dateFormat = new Intl.DateTimeFormat(LOCALE, { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+  const range = firstDay === today ? dateFormat.format(days[0].date) : `${dateFormat.format(days[0].date)} – ${dateFormat.format(days.at(-1).date)}`;
+  return h("div", { class: "heat" }, h("p", { class: "heat-range" }, range), scroll, readout);
 }
 
 /** The scale, said once for the whole panel instead of under every agent. */
@@ -727,30 +755,44 @@ function foldUsage(rows) {
   return { all, byAgent };
 }
 
-function usagePanel() {
-  const body = h("div", { class: "heat-wrap" }, h("p", { class: "muted" }, tr("Carico i consumi\u2026")));
+function usagePanels(agents) {
+  const global = h("div", { class: "heat-wrap" }, skeleton("heat"));
+  const individual = h("div", { class: "heat-wrap" }, agents.map(() => skeleton("heat")));
+  if (!agents.length) individual.append(empty("users", "Ancora nessun agente."));
   api("/api/usage").then((data) => {
+    if (!global.isConnected) return;
     const { all, byAgent } = foldUsage(data.usage);
     const spent = [...all.values()].reduce((sum, day) => sum + day.tokens, 0);
-    body.replaceChildren(
+    global.replaceChildren(
       h("div", { class: "heat-block" },
-        h("div", { class: "heat-head" }, h("b", {}, tr("Tutti insieme")), h("span", { class: "heat-total" }, `${shortTokens(spent)} token`)),
-        heatmap(all, { today: data.today, label: tr("Un quadrato per giorno: tocca per vedere quanto.") })),
-      ...S.data.agents.map((agent) => {
-        const mine = byAgent.get(agent.id) || new Map();
-        const total = [...mine.values()].reduce((sum, day) => sum + day.tokens, 0);
-        return h("div", { class: "heat-block" },
-          h("div", { class: "heat-head" }, avatar(agent), h("b", {}, agent.name), h("span", { class: "heat-total" }, `${shortTokens(total)} token`)),
-          heatmap(mine, { today: data.today, label: modelLabel(agent.model, { short: true }) }));
-      }));
-  }).catch(() => body.replaceChildren(h("p", { class: "muted" }, tr("Consumi non disponibili."))));
-  return body;
+        h("div", { class: "heat-head" }, h("b", {}, tr("Tutti insieme")), h("span", { class: "heat-total" }, tokenTotal(spent))),
+        heatmap(all, { today: data.today, label: tr("Un quadrato per giorno: tocca per vedere quanto.") })));
+    if (agents.length) individual.replaceChildren(...agents.map((agent) => {
+      const mine = byAgent.get(agent.id) || new Map();
+      const total = [...mine.values()].reduce((sum, day) => sum + day.tokens, 0);
+      return h("div", { class: "heat-block" },
+        h("div", { class: "heat-head" }, avatar(agent), h("b", {}, raw(agent.name)), h("span", { class: "heat-total" }, tokenTotal(total))),
+        heatmap(mine, { today: data.today, label: modelLabel(agent.model, { short: true }) }));
+    }));
+    const align = (chart) => { if (chart.isConnected) chart.scrollLeft = chart.scrollWidth; };
+    if (typeof ResizeObserver !== "undefined") S.heatObserver = new ResizeObserver((entries) => entries.forEach(({ target }) => align(target)));
+    for (const body of [global, individual]) for (const chart of body.querySelectorAll(".heat-scroll")) {
+      align(chart);
+      S.heatObserver?.observe(chart);
+    }
+  }).catch(() => {
+    for (const body of [global, individual]) body.replaceChildren(h("p", { class: "muted" }, "Consumi non disponibili."));
+  });
+  return { global, individual };
 }
 
 function renderAgents() {
   const agents = S.data.agents;
+  const usage = usagePanels(agents);
   shell([
     pageHead("Agenti", tr("{on} in onda su {total}.", { on: agents.filter((agent) => agent.enabled).length, total: agents.length }), [btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
+    requestsStrip(),
+    panel({ icon: "chart", title: "Consumi globali", hint: "Tutti gli agenti, giorno per giorno.", actions: heatLegend() }, usage.global),
     panel({ icon: "users", title: "Gli agenti", hint: "Tocca un agente per aprire la chat; da lì profilo, memoria, routine e desktop." },
       agents.length ? h("div", { class: "rows" }, agents.map((agent) => {
         const [account] = agentAccount(agent);
@@ -761,7 +803,7 @@ function renderAgents() {
             h("span", { class: "row-meta" }, `${modelLabel(agent.model, { short: true })} · ${tr(agent.box?.running ? "desktop acceso" : "desktop spento")} · ${tr(account).toLowerCase()}`)),
           icon("next", "chev"));
       })) : empty("users", "Ancora nessun agente.", btn("Crea il primo", { icon: "plus", href: "#/new", cls: "primary" }))),
-    panel({ icon: "chart", title: tr("Consumi"), hint: tr("Quanti token spende ognuno, giorno per giorno."), actions: heatLegend() }, usagePanel()),
+    panel({ icon: "chart", title: "Consumi per agente", hint: "Quanti token spende ognuno, giorno per giorno.", actions: heatLegend() }, usage.individual),
   ], { title: "Agenti" });
 }
 
@@ -1030,8 +1072,8 @@ function armedButton(label, armedLabel, { icon: name = "trash", onconfirm }) {
     if (!armed) {
       armed = true;
       button.classList.add("armed");
-      button.lastChild.textContent = armedLabel;
-      setTimeout(() => { armed = false; button.classList.remove("armed"); button.lastChild.textContent = label; }, 4000);
+      button.lastChild.textContent = tr(armedLabel);
+      setTimeout(() => { armed = false; button.classList.remove("armed"); button.lastChild.textContent = tr(label); }, 4000);
       return;
     }
     await onconfirm();
@@ -1214,16 +1256,7 @@ async function renderAgent() {
     return;
   }
   const routines = S.data.routines.filter((routine) => routine.agentId === agent.id);
-  let body;
-  if (tab === "memoria") body = await memoryTab(agent);
-  else if (tab === "routine") body = await routineTab(agent, routines);
-  else if (tab === "desktop") body = await desktopTab(agent);
-  else if (tab === "attivita") body = activityTab(agent);
-  else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci." });
-  else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub) : await tracesTab(agent);
-  else body = [S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), agentForm(agent)];
-  const now = route();
-  if (location.hash !== view || now[0] !== "agent" || now[1] !== id || (now[2] || "profilo") !== tab) return;
+  const slot = h("div", { class: tab === "chat" ? "chat-slot" : "stack" }, tab === "chat" ? skeleton("chat") : panel({}, skeleton()));
   const toggle = btn(agent.enabled ? "In onda" : "Muto", { icon: "power", cls: `sm toggle${agent.enabled ? " on" : ""}`, title: agent.enabled ? "Spegni" : "Accendi", onclick: async () => {
     if (await guard(api(`/api/agents/${agent.id}`, { method: "PUT", body: { enabled: !agent.enabled } }), agent.enabled ? `${agent.name} è muto` : `${agent.name} è in onda`)) {
       await loadState();
@@ -1247,9 +1280,19 @@ async function renderAgent() {
       const count = key === "memoria" ? agent.memoryCount : key === "routine" ? routines.length : null;
       return h("a", { href: `#/agent/${agent.id}/${key}`, class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, count) : null);
     })),
-    body,
+    slot,
   ], { title: agent.name, back: sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : "" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
+  const isCurrent = () => slot.isConnected && location.hash === view;
+  let body;
+  if (tab === "memoria") body = await memoryTab(agent);
+  else if (tab === "routine") body = await routineTab(agent, routines);
+  else if (tab === "desktop") body = await desktopTab(agent);
+  else if (tab === "attivita") body = activityTab(agent);
+  else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent });
+  else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
+  else body = [S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), agentForm(agent)];
+  if (isCurrent()) slot.replaceChildren(...[body].flat().filter(Boolean));
 }
 
 async function memoryTab(agent) {
@@ -1260,7 +1303,7 @@ async function memoryTab(agent) {
   core.addEventListener("input", () => { coreCount.textContent = `${core.value.length}/4000`; });
   const sleepButton = btn(data.sleeping ? "Dorme…" : "Consolida", { icon: "moon", cls: "sm", disabled: data.sleeping, onclick: async () => {
     sleepButton.disabled = true;
-    sleepButton.lastChild.textContent = "Dorme…";
+    sleepButton.lastChild.textContent = tr("Dorme…");
     await guard(api(`/api/agents/${agent.id}/sleep`, { method: "POST" }), "Consolidamento avviato");
   } });
   const corePanel = panel({ tag: "form", icon: "layers", title: "Scheda", hint: `${tr("Sempre a mente, in ogni messaggio.")} ${data.lastSleepAt ? tr("Ultimo sonno: {time}.", { time: fmtTime(data.lastSleepAt, true) }) : tr("Non ha ancora dormito.")}`, actions: sleepButton },
@@ -1659,8 +1702,9 @@ function chatMessage(item, answer) {
       choices));
 }
 
-async function chatPanel(room, { placeholder = "Scrivi…", hint = null } = {}) {
+async function chatPanel(room, { placeholder = "Scrivi…", hint = null, isCurrent = () => true } = {}) {
   const data = await guard(api(`/api/rooms/${room}/messages`));
+  if (!isCurrent()) return null;
   if (!data) return panel({ icon: "alert", title: "Chat non disponibile" });
   const seen = new Set();
   const log = h("div", { class: "chat-log", role: "log", "aria-live": "polite" });
@@ -1759,20 +1803,20 @@ async function chatPanel(room, { placeholder = "Scrivi…", hint = null } = {}) 
 
 function renderSalotto() {
   S.live = null;
-  const slot = h("div", { class: "chat-slot" }, h("section", { class: "chat" }, h("div", { class: "chat-log" }, empty("chat", "Apro il salotto…"))));
+  const slot = h("div", { class: "chat-slot" }, skeleton("chat"));
   shell([
     pageHead(h("span", {}, "Il ", h("em", {}, "salotto")), "Tutti gli agenti in onda: chi nomini risponde, gli altri intervengono secondo la loquacità."),
     requestsStrip(),
     slot,
   ], { title: "Salotto", mode: "chat" });
-  chatPanel(SALOTTO, { placeholder: "Scrivi a tutti…" }).then((chat) => {
-    if (route()[0] === "") slot.replaceChildren(chat);
+  chatPanel(SALOTTO, { placeholder: "Scrivi a tutti…", isCurrent: () => slot.isConnected && route()[0] === "salotto" }).then((chat) => {
+    if (slot.isConnected && chat) slot.replaceChildren(chat);
   });
 }
 
 /* ---------- reasoning ---------- */
 function traceWhere(trace) {
-  if (trace.kind === "sleep") return "memoria";
+  if (trace.kind === "sleep") return tr("memoria");
   return trace.channelId ? channelName(trace.channelId) : "";
 }
 
@@ -1782,8 +1826,9 @@ function duration(trace) {
   return seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
 }
 
-async function tracesTab(agent) {
+async function tracesTab(agent, isCurrent = () => true) {
   const list = (await guard(api(`/api/agents/${agent.id}/traces`))) || [];
+  if (!isCurrent()) return null;
   let pending = null;
   S.live = (entry) => {
     if (entry.type !== "trace" || entry.event === "step" || entry.trace.agentId !== agent.id) return;
@@ -1814,8 +1859,9 @@ function stepEl(step, startedAt) {
   return h("div", { class: "step note" }, h("div", { class: "step-head" }, h("span", { class: "step-ico" }, icon("info")), h("b", {}, "Nota"), at), h("div", { class: "body" }, raw(step.text || "")));
 }
 
-async function traceDetail(agent, traceId) {
+async function traceDetail(agent, traceId, isCurrent = () => true) {
   const trace = await guard(api(`/api/traces/${traceId}`));
+  if (!isCurrent()) return null;
   if (!trace) return panel({ icon: "alert", title: "Ragionamento non trovato" }, btn("Tutti i turni", { icon: "back", href: `#/agent/${agent.id}/ragionamento` }));
   const startedAt = Date.parse(trace.startedAt);
   const stepsLog = h("div", { class: "steps-log" });
@@ -2403,6 +2449,8 @@ function renderCloudLogin() {
 
 function renderLogin() {
   clearTimers();
+  S.data = null;
+  S.live = null;
   if (S.cloud) return renderCloudLogin();
   const password = h("input", { type: "password", id: "password", name: "password", autocomplete: "current-password", required: true, placeholder: "La password del pannello", enterkeyhint: "go" });
   const reveal = btn("", { icon: "eye", cls: "sm ghost", title: "Mostra la password", onclick: () => {
@@ -2424,7 +2472,7 @@ function renderLogin() {
       await api("/api/login", { method: "POST", body: { password: password.value } });
       boot();
     } catch (err) {
-      error.textContent = err.message;
+      error.textContent = tr(err.message);
       enter.disabled = false;
       password.select();
     }
@@ -2452,13 +2500,20 @@ async function render() {
   else if (page === "archivio") renderRoutineArchive();
   else if (page === "contesto") renderContext();
   else if (page === "settings") renderSettings();
-  else renderSalotto();
+  else if (page === "salotto") renderSalotto();
+  else renderAgents();
 }
 
 document.documentElement.lang = LANG;
 document.title = "Cora · Computer-Operating Resident Agents";
 
 async function boot() {
+  shell([
+    pageHead("Agenti", skeletonLine("sk-caption")),
+    panel({ icon: "chart", title: "Consumi globali" }, skeleton("heat")),
+    panel({ icon: "users", title: "Gli agenti" }, skeleton()),
+    panel({ icon: "chart", title: "Consumi per agente" }, skeleton("heat")),
+  ], { title: "Agenti" });
   const me = await fetch("/api/me", { credentials: "same-origin" }).then((response) => response.json()).catch(() => ({}));
   S.cloud = me.cloud || null;
   if (!me.authed) return renderLogin();
@@ -2467,7 +2522,7 @@ async function boot() {
     S.activity = await api("/api/activity");
   } catch (error) {
     if (error.message === "login richiesto") return;
-    app.replaceChildren(h("div", { class: "login" }, h("p", {}, `Errore: ${error.message}`)));
+    app.replaceChildren(h("div", { class: "login" }, h("p", {}, tr("Errore: {error}", { error: tr(error.message) }))));
     return;
   }
   connectEvents();
