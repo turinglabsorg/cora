@@ -864,4 +864,5 @@ export const EN = {
   "Codex guida sé stesso con il tuo abbonamento.": "Codex drives itself with your subscription.",
   "Hermes guida sé stesso sui modelli del suo endpoint, di solito quelli di questa macchina.": "Hermes drives itself on the models of its endpoint, usually this machine's.",
   "Questo harness non usa le schede di questa macchina.": "This harness does not use this machine's cards.",
+  "non è su questa macchina": "not on this machine",
 };

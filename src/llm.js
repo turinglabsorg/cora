@@ -193,13 +193,26 @@ export class LLM {
     }
     try {
       const tags = await ask("/api/tags", 8000);
-      report.models = (tags.models || []).map((model) => {
-        const caps = model.capabilities || ["completion", "tools"];
-        const remote = model.remote === true || /:cloud$/.test(model.name);
+      const listed = (tags.models || []).map((model) => ({
+        name: model.name,
+        size: Number(model.size) || 0,
+        remote: model.remote === true || /:cloud$/.test(model.name),
+        caps: Array.isArray(model.capabilities) ? model.capabilities : null,
+      }));
+      // Older Ollama answers /api/tags without capabilities. Assuming tools there would
+      // put an agent on a model that cannot call any: ask each model instead.
+      const missing = listed.filter((model) => !model.caps && !model.remote);
+      for (let index = 0; index < missing.length; index += 4) {
+        await Promise.all(missing.slice(index, index + 4).map(async (model) => {
+          model.caps = await this.modelCapabilities(host.url, model.name);
+        }));
+      }
+      report.models = listed.map((model) => {
+        const caps = model.caps || [];
         return {
-          name: model.name, size: Number(model.size) || 0, local: host.local && !remote,
-          completion: caps.includes("completion"), tools: caps.includes("tools"),
-          vision: caps.includes("vision"), thinking: caps.includes("thinking"),
+          name: model.name, size: model.size, local: host.local && !model.remote,
+          completion: !caps.length || caps.includes("completion"),
+          tools: caps.includes("tools"), vision: caps.includes("vision"), thinking: caps.includes("thinking"),
         };
       });
     } catch {}
@@ -238,6 +251,24 @@ export class LLM {
     out.ollama = { url: first.url, local: Boolean(first.local), reachable: first.reachable, version: first.version };
     out.loaded = first.loaded || [];
     return out;
+  }
+
+  /** What a model can actually do, straight from it, remembered for the session. */
+  async modelCapabilities(url, name) {
+    this.capsCache ||= new Map();
+    const key = `${url}|${name}`;
+    if (this.capsCache.has(key)) return this.capsCache.get(key);
+    let caps = [];
+    try {
+      const response = await fetch(`${url}/api/show`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...this.ollamaHeaders() },
+        body: JSON.stringify({ model: name }), signal: AbortSignal.timeout(8000),
+      });
+      const data = await response.json();
+      if (Array.isArray(data.capabilities)) caps = data.capabilities;
+    } catch {}
+    this.capsCache.set(key, caps);
+    return caps;
   }
 
   /**
@@ -315,21 +346,17 @@ export class LLM {
       for (const slug of this.codexModels()) models.push({ id: `codex/${slug}`, provider: "codex", label: slug, tools: true, vision: true, thinking: true });
     }
     if (available.ollama) {
-      try {
-        const response = await fetch(`${this.ollamaUrl}/api/tags`, { headers: this.ollamaHeaders(), signal: AbortSignal.timeout(8000) });
-        const data = await response.json();
-        for (const model of data.models || []) {
-          const caps = model.capabilities || ["completion", "tools"];
-          if (!caps.includes("completion")) continue;
-          // A local Ollama also proxies the cloud ones: those run somewhere else and say so.
-          const remote = model.remote === true || /:cloud$/.test(model.name);
-          models.push({
-            id: `ollama/${model.name}`, provider: "ollama", label: model.name,
-            local: this.localOllama && !remote, size: Number(model.size) || 0,
-            tools: caps.includes("tools"), vision: caps.includes("vision"), thinking: caps.includes("thinking"),
-          });
-        }
-      } catch {}
+      // One place decides what a model is and what it can do, asking the model when the
+      // server does not say: a list that guesses "tools" puts an agent on a model that has none.
+      const report = await this.ollamaReport({ url: this.ollamaUrl, label: "", gpu: "", local: this.localOllama });
+      for (const model of report.models) {
+        if (!model.completion) continue;
+        models.push({
+          id: `ollama/${model.name}`, provider: "ollama", label: model.name,
+          local: model.local, size: model.size,
+          tools: model.tools, vision: model.vision, thinking: model.thinking,
+        });
+      }
     }
     if (available.hermes) {
       // Hermes runs the models of its endpoint: by default the local Ollama, cloud models included.

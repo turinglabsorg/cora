@@ -850,11 +850,14 @@ const gbFromMib = (value) => Math.round((Number(value) || 0) / 102.4) / 10;
 /** How much of a card a model needs: its weights plus room for the conversation. */
 const VRAM_NEEDED = (size) => Number(size || 0) * 1.2;
 
+// Under this a model has no weights here: an older Ollama lists the cloud ones it
+// proxies without saying so, and promising they fit would be a lie.
+const WEIGHTS_AT_LEAST = 100_000_000;
+
 function fitOf(model, card) {
-  if (!card || !card.memoryTotal) return null;
+  if (!card || !card.memoryTotal || !model.size || model.size < WEIGHTS_AT_LEAST) return null;
   const freeMib = card.memoryTotal - card.memoryUsed;
   const neededMib = VRAM_NEEDED(model.size) / 1_048_576;
-  if (!model.size) return null;
   if (neededMib <= freeMib) return { kind: "on", text: "entra" };
   if (neededMib <= card.memoryTotal) return { kind: "warn", text: "stretta: libera la scheda" };
   return { kind: "err", text: "non entra: girerebbe sul processore" };
@@ -934,7 +937,7 @@ function brainMachine(agent, modelNode, getHarness = () => "cora") {
           h("div", { class: "row-text full" },
             h("span", { class: "row-title" }, raw(model.name), chosenOne ? badge("scelto", "on", "check") : null),
             h("span", { class: "row-meta" },
-              h("span", {}, raw(tr("{size} GB", { size: gbFromBytes(model.size) }))),
+              h("span", {}, model.size >= WEIGHTS_AT_LEAST ? raw(tr("{size} GB", { size: gbFromBytes(model.size) })) : tr("non è su questa macchina")),
               fit ? badge(fit.text, fit.kind, fit.kind === "on" ? "check" : "alert") : null,
               model.vision ? h("span", {}, tr("vede")) : null,
               loaded ? h("span", {}, raw(tr("caricato: {vram} GB in VRAM", { vram: gbFromBytes(loaded.vram) }))) : null,
