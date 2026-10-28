@@ -1276,6 +1276,25 @@ describe("agents in Discord", () => {
     discord.state.privateTo.set(CHANNEL, "tagger-token");
     await app.orchestrator.postAs(agents[0], state, "@Receiver cannot read this channel.", undefined, undefined, { passive: true });
     assert.equal(discord.state.botPosts.filter((post) => post.token === "tagger-token").at(-1).content, "@Receiver cannot read this channel.");
+    discord.state.privateTo.delete(CHANNEL);
+    const previousGoalMode = app.store.settings.goalMode;
+    t.after(() => app.store.updateSettings({ goalMode: previousGoalMode }));
+    app.store.updateSettings({ goalMode: true });
+    goals = () => "Receiver riceve la notifica in general con vera menzione";
+    app.store.updateAgent(agents[0].id, { tools: true });
+    let checked = 0, step = 0;
+    checks = (body) => {
+      checked++;
+      assert.match(body.messages[1].content, new RegExp(`Cora delivery receipt: \\{"channel_id":"${CHANNEL}","channel_name":"general","message_ids":\\["\\d+"\\],"mentions":\\["600000000000000042"\\]\\}`));
+      assert.match(body.messages[0].content, /Se la conversazione corrente è il canale richiesto/);
+      return JSON.stringify({ met: true });
+    };
+    replies.set("Tagger", () => ++step <= 2 ? { tool_calls: [{ function: { name: "say", arguments: { text: "@Receiver, notifica consegnata." } } }] } : { content: "PASS" });
+    const notice = app.store.createRoutine(agents[0].id, { name: "Notify colleague", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Notifica Receiver in general con una vera menzione." });
+    const before = discord.state.botPosts.length;
+    await app.orchestrator.runRoutine(notice);
+    assert.equal(checked, 1, "the verifier sees the actual current-channel delivery proof");
+    assert.equal(discord.state.botPosts.length - before, 1, "repeated tool calls return the original delivery instead of posting twice");
   });
 
   test("an owner task shares a file through Cora and refuses a disabled recipient", async (t) => {

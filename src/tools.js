@@ -375,8 +375,16 @@ export async function executeTool(call, ctx) {
         if (!ctx.say) return { text: "error: there is no conversation to post to right now" };
         const target = String(args.channel_id || channelId || "");
         if (target !== channelId && !ctx.postingChannels?.some((channel) => channel.id === target)) return { text: "error: destination not authorized; choose a channel from list_channels" };
-        await ctx.say(text.slice(0, 4000), target);
-        return { text: target === channelId ? "posted in this conversation; keep working" : `posted directly to ${target}; do not duplicate this report in your final reply` };
+        const sent = await ctx.say(text.slice(0, 4000), target);
+        const messages = Array.isArray(sent) ? sent : [];
+        const receipt = {
+          channel_id: target,
+          channel_name: ctx.postingChannels?.find((channel) => channel.id === target)?.name || "",
+          message_ids: messages.map((item) => String(item.id || item.message_id || "")).filter(Boolean),
+          mentions: [...new Set(messages.flatMap((item) => [...String(item.content || "").matchAll(/<@!?(\d+)>/g)].map((match) => match[1])))],
+        };
+        const status = target === channelId ? "posted in this conversation; keep working" : `posted directly to ${target}; do not duplicate this report in your final reply`;
+        return { text: `${status}\nCora delivery receipt: ${JSON.stringify(receipt)}` };
       }
       case "ask_owner": {
         if (!ctx.ask) return { text: "error: requests are not available" };

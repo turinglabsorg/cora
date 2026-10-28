@@ -379,7 +379,7 @@ export class Brain {
       const options = {
         model, tools: [], effort: "low",
         messages: [
-          { role: "system", content: 'Giudichi se un compito è finito. Rispondi SOLO con JSON: {"met": true|false, "blocked": true|false, "reason": "una frase"}. met=true soltanto se la condizione risulta soddisfatta dai risultati degli strumenti, non dalle promesse. Giudica solo il compito attuale: una routine esegue un controllo, non attende le pubblicazioni future. blocked=true quando per proseguire serve una scadenza futura, un permesso o un intervento altrui: riprovare subito non può risolverlo. La reason va nella lingua della condizione. Lo stato running della routine o del suo registro è mantenuto da Cora fino a DOPO questo controllo: non richiedere che sia già done o completed. La risposta finale qui fornita viene pubblicata dopo la verifica; giudica il suo contenuto insieme ai risultati reali, non la presenza preventiva dello stesso messaggio nel canale. Un permesso mancante, una verifica umana o uno strumento non disponibile sono blocchi: non chiedere di riprovare subito la stessa azione. Il sandbox locale in sola lettura non implica che gli strumenti remoti Cora siano in sola lettura. Per dichiarare blocked per un limite di scrittura serve evidenza del connettore, uno strumento realmente assente o un vincolo esplicito del proprietario: la sola affermazione dell\'agente non basta, soprattutto se lo schema restituito espone operazioni di scrittura. Non chiedere tentativi di scrittura non autorizzati né retry dopo un rifiuto reale.' },
+          { role: "system", content: 'Giudichi se un compito è finito. Rispondi SOLO con JSON: {"met": true|false, "blocked": true|false, "reason": "una frase"}. met=true soltanto se la condizione risulta soddisfatta dai risultati degli strumenti, non dalle promesse. Giudica solo il compito attuale: una routine esegue un controllo, non attende le pubblicazioni future. blocked=true quando per proseguire serve una scadenza futura, un permesso o un intervento altrui: riprovare subito non può risolverlo. La reason va nella lingua della condizione. Lo stato running della routine o del suo registro è mantenuto da Cora fino a DOPO questo controllo: non richiedere che sia già done o completed. La risposta finale qui fornita viene pubblicata dopo la verifica; giudica il suo contenuto insieme ai risultati reali, non la presenza preventiva dello stesso messaggio nel canale. Per say, la Cora delivery receipt prova il canale effettivo (channel_id e channel_name), i messaggi consegnati e le menzioni Discord reali (mentions). Se la conversazione corrente è il canale richiesto, inviare qui soddisfa la destinazione: non richiedere un altro invio cross-channel. I tag @Nome sono risolti da Cora negli id reali riportati dalla ricevuta. Non chiedere di ripetere un messaggio già consegnato nel canale corretto. Un permesso mancante, una verifica umana o uno strumento non disponibile sono blocchi: non chiedere di riprovare subito la stessa azione. Il sandbox locale in sola lettura non implica che gli strumenti remoti Cora siano in sola lettura. Per dichiarare blocked per un limite di scrittura serve evidenza del connettore, uno strumento realmente assente o un vincolo esplicito del proprietario: la sola affermazione dell\'agente non basta, soprattutto se lo schema restituito espone operazioni di scrittura. Non chiedere tentativi di scrittura non autorizzati né retry dopo un rifiuto reale.' },
           { role: "user", content: `Condizione:\n${goal}\n\nCosa ha fatto l'agente:\n${work || "(niente)"}\n\nCosa ha scritto come risultato:\n${answer || "(niente)"}` },
         ],
         signal,
@@ -465,6 +465,7 @@ export class Brain {
     let closed = false;
     let progress = "";
     const spokenMessages = [];
+    const deliveries = new Map();
     let stoppedByOwner = false;
     const control = { handoff: false, settle: null };
     // Told to stop, an agent stops: no more tools, no more rounds, whatever it has is the answer.
@@ -487,7 +488,15 @@ export class Brain {
         asked = true;
         return posted;
       } : null,
-      say: sayTracked,
+      say: sayTracked ? (text, target = channel.id) => {
+        const key = `${ownerRevision}\0${target}\0${String(text).trim()}`;
+        if (!deliveries.has(key)) {
+          const delivery = sayTracked(text, target);
+          deliveries.set(key, delivery);
+          delivery.catch(() => { if (deliveries.get(key) === delivery) deliveries.delete(key); });
+        }
+        return deliveries.get(key);
+      } : null,
       checkSchedule: (expr) => {
         try {
           return nextRuns(expr, this.timezone, 1).length ? "" : "it never runs in the next month";
