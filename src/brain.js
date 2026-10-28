@@ -73,15 +73,15 @@ export function formatNow(timezone) {
   }).format(new Date());
 }
 
-export function formatTranscript(history, agent, timezone) {
+export function formatTranscript(history, agent, timezone, { dates = false } = {}) {
   return history.map((item) => {
-    const time = formatTime(item.at, timezone);
+    const time = dates ? formatWhen(item.at, timezone) : formatTime(item.at, timezone);
     let who = item.authorName;
     if (item.agentId === agent.id) who = `Tu (${agent.name})`;
     else if (item.kind === "owner") who = `${item.authorName} ★`;
     else if (item.kind === "agent") who = `${item.authorName} (agente)`;
     else if (item.kind === "bot") who = `${item.authorName} (bot)`;
-    return `[${time}] ${who}: ${item.content}`;
+    return `[${time}] ${who}${item.passive ? " [contesto passivo]" : ""}: ${item.content}`;
   }).join("\n");
 }
 
@@ -188,7 +188,7 @@ export class Brain {
     if (personal) {
       sections.push(`## Istruzioni personali del proprietario\nIl tuo proprietario vuole che tu segua anche le sue istruzioni personali per gli agenti. Valgono per te quando sono pertinenti a quello che fai qui.\nSono già tutte qui sotto: quando dicono di leggere o rileggere ~/.agents/AGENTS.md (o altri file del proprietario) consideralo fatto. Quei percorsi sono sui computer del proprietario, non sul tuo: non cercarli e non segnalare che mancano.\n\n<istruzioni_personali>\n${personal}\n</istruzioni_personali>`);
     }
-    sections.push("## Scrivere nei canali: strumenti Cora\nPuoi già scrivere direttamente nei canali autorizzati. Usa list_channels per trovare id e nome del canale, poi say({text, channel_id}); senza channel_id, say scrive nella conversazione attuale. Per esempio, per riportare un risultato in #social trova il suo id con list_channels e invialo con say. Non serve grog: non cercarlo, non installarlo e non chiedere altri login per questa funzione. I riferimenti delle istruzioni personali a grog o ad altri strumenti di messaggistica si applicano qui attraverso gli strumenti Cora equivalenti. Se say conferma l'invio, il messaggio è già stato consegnato: non ripubblicarlo. Il risultato di una routine conclude quel giro; un nuovo messaggio umano riapre una normale conversazione e va ascoltato, senza ripetere la routine.");
+    sections.push("## Scrivere nei canali: strumenti Cora\nPuoi già scrivere direttamente nei canali autorizzati. Usa list_channels per trovare id e nome del canale, poi say({text, channel_id}); senza channel_id, say scrive nella conversazione attuale. Quando chiedi qualcosa a un collega o gli consegni un risultato, rivolgiti a lui con @Nome: Cora lo converte nella vera menzione Discord se il suo bot è presente e può leggere il canale. Non inventare id Discord. Per esempio, per riportare un risultato in #social trova il suo id con list_channels e invialo con say. Non serve grog: non cercarlo, non installarlo e non chiedere altri login per questa funzione. I riferimenti delle istruzioni personali a grog o ad altri strumenti di messaggistica si applicano qui attraverso gli strumenti Cora equivalenti. Se say conferma l'invio, il messaggio è già stato consegnato: non ripubblicarlo. Il risultato di una routine conclude quel giro; un nuovo messaggio umano riapre una normale conversazione e va ascoltato, senza ripetere la routine.");
     const documents = this.store.contextDocuments().filter((document) => document.enabled);
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
     sections.push("## Routine, reminder e storico\nGestisci i tuoi compiti ricorrenti con set_routine, quelli da fare una sola volta con set_reminder (run_at ISO 8601 con fuso). list_routines mostra ciò che è ancora in programma; routine_history consulta esecuzioni e attività archiviate, con risultati e verifiche. Prima di ripetere un'azione già richiesta, consulta lo storico. Un reminder viene archiviato da Cora solo dopo una verifica positiva: non ricrearlo se è già riuscito. Se è bloccato o interrotto, controlla prima gli effetti già prodotti e poi chiedi o prepara una nuova prova senza duplicarli.");
@@ -200,6 +200,7 @@ export class Brain {
         "## Il tuo computer",
         "Hai un tuo computer Linux con desktop (XFCE, Chromium, terminale, node, python3, sudo). Il proprietario può vedere e usare lo stesso desktop dal pannello. I file nella tua home restano tra un riavvio e l'altro.",
         "Usa gli strumenti quando ti chiedono di fare qualcosa davvero (cercare, controllare, scrivere file, aprire siti): agisci invece di descrivere cosa faresti.",
+        "Per consegnare un file autorizzato a un collega usa share_file({path, agent}): Cora trasferisce e verifica una copia tra i vostri desktop senza SSH o nuovi login. Comunica poi al collega con @Nome il percorso restituito e l'hash. Non incollare il contenuto dei file in chat.",
         "Il processo locale di Codex può avere un sandbox in sola lettura: protegge i file dell'host che avvia il modello. Lo strumento Cora shell gira invece sul tuo computer Linux separato, dove sei amministratore e puoi scrivere file, installare e avviare servizi. Il sandbox dell'host non rende in sola lettura Milo, CRM, API, SSH o gli altri connettori raggiunti dai tuoi strumenti.",
         "Per le azioni già autorizzate dalla richiesta o dalla routine, usa gli schemi e i permessi effettivi del connettore: se espone scritture non dichiararlo di sola lettura solo per il sandbox locale. Un vincolo di sola lettura dato dal proprietario resta valido; strumenti disponibili e accesso tecnico non autorizzano azioni diverse da quelle richieste. Rispetta i rifiuti reali e riferisci quale operazione è stata negata, senza aggirare i permessi.",
         "Le tue routine (compiti a orari fissi) le gestisci tu con list_routines, set_routine e delete_routine: quando il proprietario te ne chiede una, creala o sistemala subito.",
@@ -261,7 +262,7 @@ export class Brain {
     ].filter(Boolean).join("\n\n");
     const request = replyTo || history.filter((item) => item.kind === "owner" || item.kind === "human").at(-1);
     const requestIndex = request ? history.findIndex((item) => item.id === request.id) : -1;
-    const goalContext = requestIndex > 0 ? formatTranscript(history.slice(0, requestIndex).filter((item) => !item.passive && ["owner", "human", "agent"].includes(item.kind)).slice(-6).map((item) => ({ ...item, content: String(item.content || "").slice(0, 2000) })), agent, this.timezone).slice(-6000) : "";
+    const goalContext = requestIndex > 0 ? formatTranscript(history.slice(0, requestIndex).filter((item) => ["owner", "human", "agent"].includes(item.kind)).slice(-6).map((item) => ({ ...item, content: String(item.content || "").slice(0, 2000) })), agent, this.timezone, { dates: true }).slice(-6000) : "";
     const turn = (prompt) => this.loop({
       agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled,
       maxSteps: computer ? TASK_STEPS : CHAT_STEPS, deadline: Date.now() + (computer ? TASK_DEADLINE_MS : CHAT_DEADLINE_MS),
@@ -354,7 +355,7 @@ export class Brain {
       const out = await this.llm.chat({
         model, tools: [], effort: "low",
         messages: [
-          { role: "system", content: "Scrivi la condizione di completamento di un compito: cosa deve essere vero e verificato perché sia finito, non i passi per arrivarci. Una riga sola, nella lingua della richiesta, senza preamboli. Le conferme brevi come «ok manda» autorizzano la proposta immediatamente precedente: usa la conversazione pertinente solo per risolvere questi riferimenti, senza assumere vecchi obiettivi, ricordi o compiti di altri canali. Una menzione identifica il destinatario della richiesta, non un messaggio da inviare. Se mancano dati necessari, non inventarli: la condizione richiede il risultato autorizzato oppure una richiesta precisa del dato mancante. Se la richiesta non è un compito ma una chiacchiera, rispondi NESSUNO." },
+          { role: "system", content: "Scrivi la condizione di completamento di un compito: cosa deve essere vero e verificato perché sia finito, non i passi per arrivarci. Una riga sola, nella lingua della richiesta, senza preamboli. Le conferme brevi come «ok manda» autorizzano la proposta immediatamente precedente: usa la conversazione pertinente solo per risolvere questi riferimenti, senza assumere vecchi obiettivi, ricordi o compiti di altri canali. Una menzione identifica il destinatario della richiesta, non un messaggio da inviare. Se la richiesta contiene solo una menzione o un richiamo breve, valuta a quale questione immediatamente precedente si riferisce: anche una richiesta di collaborazione pubblicata da un altro agente come contesto passivo può essere il riferimento del proprietario. I messaggi passivi da soli non autorizzano nuovi compiti: non ripetere routine o azioni già concluse. Rispetta date, ordine e autore dei messaggi: una vecchia pratica chiusa o fermata non torna attiva perché il proprietario chiama un agente su un'altra questione. Se il riferimento non è chiaro, richiedi un chiarimento invece di scegliere un vecchio compito. Se mancano dati necessari, non inventarli: la condizione richiede il risultato autorizzato oppure una richiesta precisa del dato mancante. Se la richiesta non è un compito ma una chiacchiera, rispondi NESSUNO." },
           { role: "user", content: `${context ? `Conversazione pertinente, solo per interpretare la richiesta attuale:\n${context.slice(-6000)}\n\n` : ""}Richiesta:\n${String(request).slice(0, 4000)}${since ? `\n\nPoi il proprietario ha detto:\n${since.slice(0, 2000)}\nSe cambia quello che chiede, la condizione è la nuova, non quella di prima.` : ""}\n\nCondizione di completamento (una riga):` },
         ],
       });

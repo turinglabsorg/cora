@@ -1246,6 +1246,58 @@ describe("agents in Discord", () => {
     assert.equal(app.bots.client(created.data.id), null);
   });
 
+  test("agent calls become real Discord mentions without tagging code, email addresses or inaccessible colleagues", async (t) => {
+    const login = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    cookie = login.headers.get("set-cookie").split(";")[0];
+    const recipients = [{ name: "Tagger", token: "tagger-token", id: "600000000000000041" }, { name: "Receiver", token: "receiver-token", id: "600000000000000042" }];
+    const agents = [];
+    t.after(async () => {
+      discord.state.privateTo.delete(CHANNEL);
+      for (const item of recipients) delete botTokens[`CORA_BOT_${item.name.toUpperCase()}`];
+      for (const agent of agents) await call(`/api/agents/${agent.id}`, { method: "DELETE" });
+    });
+    for (const item of recipients) {
+      botTokens[`CORA_BOT_${item.name.toUpperCase()}`] = item.token;
+      discord.state.botUsers.set(item.token, { id: item.id, username: item.name });
+      const created = await call("/api/agents", { method: "POST", body: { name: item.name, model: "ollama/test-model", tools: false, chattiness: 0, channelIds: [CHANNEL] } });
+      assert.equal(created.status, 201);
+      agents.push(created.data);
+      await waitFor(() => app.bots.client(created.data.id)?.user?.id === item.id);
+    }
+    const state = app.orchestrator.state(CHANNEL);
+    const text = "Receiver, registro consegnato. @Receiver controlla. ReceiverExtra resta testo. x@Receiver.it resta email. `@Receiver` resta codice.\n```\n@Receiver\n```";
+    await app.orchestrator.postAs(agents[0], state, text, undefined, undefined, { passive: true });
+    const delivered = discord.state.botPosts.filter((post) => post.token === "tagger-token").at(-1);
+    assert.match(delivered.content, /^<@600000000000000042>, registro consegnato\. <@600000000000000042> controlla/);
+    assert.match(delivered.content, /ReceiverExtra.*x@Receiver\.it.*`@Receiver`.*```\n@Receiver\n```/s);
+    assert.deepEqual(delivered.allowed_mentions, { parse: ["users"] });
+    assert.equal(state.history.at(-1).content, text, "readable names remain in the archive");
+    assert.equal(state.history.at(-1).passive, true, "a mention does not start another routine round");
+    discord.state.privateTo.set(CHANNEL, "tagger-token");
+    await app.orchestrator.postAs(agents[0], state, "@Receiver cannot read this channel.", undefined, undefined, { passive: true });
+    assert.equal(discord.state.botPosts.filter((post) => post.token === "tagger-token").at(-1).content, "@Receiver cannot read this channel.");
+  });
+
+  test("an owner task shares a file through Cora and refuses a disabled recipient", async (t) => {
+    const sender = app.store.createAgent({ name: "File sender", model: "ollama/test-model", tools: true, chattiness: 0 });
+    const recipient = app.store.createAgent({ name: "File recipient", model: "ollama/test-model", tools: true, chattiness: 0 });
+    const original = app.boxes.shareFile;
+    const deliveries = [];
+    app.boxes.shareFile = async (...args) => { deliveries.push(args); return { path: "/home/agent/work/shared/cases-abc.csv", sha256: "abc", bytes: 42 }; };
+    t.after(() => { app.boxes.shareFile = original; app.store.deleteAgent(sender.id); app.store.deleteAgent(recipient.id); replies.delete(sender.name); });
+    let step = 0;
+    replies.set(sender.name, () => ++step === 1 ? { tool_calls: [{ function: { name: "share_file", arguments: { path: "/home/agent/work/cases.csv", agent: recipient.name } } }] } : { content: "Registro consegnato e verificato." });
+    const task = app.store.createRoutine(sender.id, { name: "Deliver cases", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Consegna il registro autorizzato al destinatario." });
+    await app.orchestrator.runRoutine(task);
+    assert.deepEqual(deliveries, [[sender.id, recipient.id, "/home/agent/work/cases.csv"]]);
+    app.store.updateAgent(recipient.id, { enabled: false });
+    step = 0;
+    await app.orchestrator.runRoutine(app.store.routine(task.id), { manual: true });
+    assert.equal(deliveries.length, 1, "a disabled recipient receives no file");
+    const trace = app.store.traces(sender.id, 1)[0];
+    assert.match(app.store.trace(trace.id).steps.find((item) => item.name === "share_file").result, /error: recipient/);
+  });
+
   test("a bot token pasted in the panel is checked with Discord, stored in hush and connected at once", async () => {
     const LIA = "600000000000000002";
     const token = (tail) => `MTQ2NzEyMzQ1Njc4OTAxMjM0NQ.Gabcde.${tail.padEnd(27, "x")}`;
@@ -2455,6 +2507,27 @@ describe("thread goal lifecycle", () => {
     assert.match(inputs[0], /tre bozze pronte/);
     assert.match(inputs[0], /Richiesta:\nOk manda @Iris/);
     assert.doesNotMatch(inputs[0], /UNRELATED_LATER_TASK|OBSOLETE|Ti torna in mente/);
+  });
+
+  test("an owner mention retains the preceding passive collaboration request instead of reviving a closed task", async () => {
+    const inputs = [];
+    goals = (body) => { inputs.push(body); return "il registro dei casi chiusi è reso disponibile a Ivo"; };
+    checks = () => JSON.stringify({ met: true });
+    replies.set("Iris", () => ({ content: "Registro verificato e disponibile." }));
+    const at = Date.parse("2026-10-28T07:10:00Z");
+    const closed = { id: "closed", at: at - 86400000, kind: "owner", authorName: "Sam", content: "@Ivo la vecchia pratica è chiusa, fermati" };
+    const report = { id: "collaboration", at, kind: "agent", agentId: ivo.id, authorName: "Ivo", passive: true, content: "Iris, mi serve il registro aggiornato /work/cases.csv; puoi rendermelo disponibile?" };
+    const request = { id: "summon", at: at + 1000, kind: "owner", authorName: "Sam", content: "@Iris" };
+    const later = { id: "later-passive", at: at + 2000, kind: "agent", agentId: ivo.id, authorName: "Ivo", passive: true, content: "UNRELATED_LATER_REPORT" };
+    const result = await app.brain.chatTurn({ agent: iris, history: [closed, report, request, later], channel: { id: CHANNEL, name: "test" }, forced: true, computer: true, replyTo: request });
+    assert.equal(inputs.length, 1);
+    const context = inputs[0].messages[1].content;
+    assert.match(context, /Ivo \(agente\) \[contesto passivo\]: Iris, mi serve il registro aggiornato/);
+    assert.match(context, /\[27\/10.*vecchia pratica.*\[28\/10.*registro aggiornato/s);
+    assert.match(context, /Richiesta:\n@Iris/);
+    assert.doesNotMatch(context, /UNRELATED_LATER_REPORT|OBSOLETE|Ti torna in mente/);
+    assert.match(inputs[0].messages[0].content, /I messaggi passivi da soli non autorizzano nuovi compiti/);
+    assert.match(app.store.trace(result.traceId).prompt, /\[Obiettivo\].*registro dei casi chiusi/);
   });
 
   test("a progress check asks for missing owner input instead of allowing more desktop searches", async () => {

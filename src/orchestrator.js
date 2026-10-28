@@ -787,11 +787,30 @@ export class Orchestrator {
     return this.postAs(agent, state, text, undefined, undefined, { ...options, passive: true });
   }
 
+  async discordMentions(agent, state, text) {
+    const parts = String(text || "").split(/(```[\s\S]*?```|`[^`\n]*`)/g);
+    for (const other of this.agentsFor(state.id)) {
+      if (other.id === agent.id) continue;
+      const id = this.bots?.client(other.id)?.user?.id;
+      if (!id) continue;
+      const name = other.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const tagged = new RegExp(`(^|[^\\p{L}\\p{N}_@.])@${name}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`, "giu");
+      const addressed = new RegExp(`(^|\\n)${name}(?=[:,]\\s)`, "giu");
+      if (!parts.some((part, index) => index % 2 === 0 && (tagged.test(part) || addressed.test(part)))) continue;
+      if (!await this.bots.canRead(other, state.id)) continue;
+      for (let index = 0; index < parts.length; index += 2) {
+        parts[index] = parts[index].replace(tagged, `$1<@${id}>`).replace(addressed, `$1<@${id}>`);
+      }
+    }
+    return parts.join("");
+  }
+
   async postAs(agent, state, text, file, traceId, { ping = "", request, passive = false } = {}) {
     if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request, passive });
     const chatId = telegramChatId(state.id);
     // The ping (a Discord mention) goes out with the message but stays out of the archive and the agents' transcripts.
-    const content = ping && text ? `${ping} ${text}` : text || "";
+    const body = chatId ? text || "" : await this.discordMentions(agent, state, text);
+    const content = ping && body ? `${ping} ${body}` : body;
     let sent;
     if (chatId) sent = await this.postTelegram(agent, chatId, content, file);
     else {

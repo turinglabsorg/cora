@@ -63,7 +63,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "say",
-    description: "Write directly through Cora. Without channel_id, post in this conversation; with channel_id, post in an authorized channel from list_channels. No grog CLI, shell command, installation or extra login is needed. Use it for replies, progress and reports to another channel. Check the returned delivery result; do not post the same result again in your final reply.",
+    description: "Write directly through Cora. Without channel_id, post in this conversation; with channel_id, post in an authorized channel from list_channels. Address a colleague as @Name: Cora resolves it to their real Discord mention when their bot can read that channel. No grog CLI, shell command, installation or extra login is needed. Use it for replies, progress and reports to another channel. Check the returned delivery result; do not post the same result again in your final reply.",
     parameters: {
       type: "object",
       properties: { text: { type: "string" }, channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" } },
@@ -181,6 +181,15 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: "share_file",
+    description: "Deliver an authorized file from /home/agent/work on your desktop directly to another Cora agent's desktop. Supply the colleague's name or agent id. No SSH, Tailscale or login is required. Max 8 MB; creates a separate immutable copy in their work/shared folder and verifies SHA-256. Only share files and recipients authorized by the current task. The receipt contains the recipient's path, hash and size, never the contents; use say with @Name to tell them where the file is.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "absolute file path within /home/agent/work" }, agent: { type: "string", description: "recipient agent name or id" } },
+      required: ["path", "agent"],
+    },
+  },
+  {
     name: "send_file",
     description: "Post a file from your computer to the current Discord channel (an image, a PDF, a CSV, ...). Max 8 MB.",
     parameters: {
@@ -214,6 +223,7 @@ export function summarizeArgs(name, args) {
   if (name === "update_core") return `${String(args.text || "").length} caratteri`;
   if (name === "forget") return String(args.memory_id || "");
   if (name === "send_file") return String(args.path || "");
+  if (name === "share_file") return `${String(args.path || "")} → ${String(args.agent || "")}`;
   if (name === "notify") return String(args.message || "").slice(0, 200);
   if (name === "say") return String(args.text || "").slice(0, 200);
   if (name === "set_routine" || name === "set_reminder") return `${args.id ? `${args.id} ` : ""}${args.name || ""} ${args.schedule || args.run_at || ""}`.trim();
@@ -376,6 +386,15 @@ export async function executeTool(call, ctx) {
             ? `question posted in this chat (${posted.where}), addressed to the owner; their next message here is the answer and comes back to you. Do not repeat it: end your turn (answer PASS unless you have something else to add)`
             : `question posted in ${posted.where}, addressed to the owner; their answer will reach you there`,
         };
+      }
+      case "share_file": {
+        const wanted = String(args.agent || "").trim().toLowerCase();
+        const recipient = store.agents().find((other) => other.id === wanted || other.name.toLowerCase() === wanted);
+        if (!recipient || recipient.id === agent.id || !recipient.enabled || !recipient.tools) return { text: "error: recipient must be another enabled Cora agent with a desktop" };
+        await boxes.ensure(agent);
+        await boxes.ensure(recipient);
+        const receipt = await boxes.shareFile(agent.id, recipient.id, String(args.path || ""));
+        return { text: JSON.stringify({ recipient: recipient.name, ...receipt }) };
       }
       case "send_file": {
         if (!postFile || !channelId) return { text: "error: there is no channel to post to right now" };

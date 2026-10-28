@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { posix } from "node:path";
 
 const OUTPUT_LIMIT = 24000;
 
@@ -262,5 +264,55 @@ export class Boxes {
     if (result.code !== 0) throw new Error(result.stderr.trim().slice(0, 200) || `cannot read ${path}`);
     if (result.truncated) throw new Error(`file larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
     return result.stdout;
+  }
+
+  async shareFile(sourceId, recipientId, path) {
+    if (![sourceId, recipientId].every((id) => /^ag_[a-f0-9]{12}$/.test(id)) || sourceId === recipientId) throw new Error("invalid file recipient");
+    if (!String(path).startsWith("/home/agent/work/") || !posix.normalize(path).startsWith("/home/agent/work/")) throw new Error("only files in /home/agent/work can be shared");
+    const maxBytes = 8 * 1024 * 1024;
+    const read = await runProcess(this.docker, this.execArgs(sourceId, ["python3", "-c", `import pathlib,sys
+root=pathlib.Path('/home/agent/work')
+if root.is_symlink(): sys.exit('work directory must not be a symlink')
+root=root.resolve(strict=True)
+path=pathlib.Path(sys.argv[1]).resolve(strict=True)
+if not path.is_relative_to(root) or not path.is_file(): sys.exit('source must be a regular file within /home/agent/work')
+with path.open('rb') as file: data=file.read(8*1024*1024+1)
+if len(data)>8*1024*1024: sys.exit('file larger than 8 MB')
+sys.stdout.buffer.write(data)`, path]), { timeoutMs: 30000, maxBytes });
+    if (read.code !== 0 || read.truncated) throw new Error(read.stderr.trim().split("\n").at(-1).slice(0, 300) || "cannot read shared file");
+    const digest = createHash("sha256").update(read.stdout).digest("hex");
+    const original = posix.basename(path).replace(/[^\w.-]/g, "_").slice(-100) || "file";
+    const extension = posix.extname(original);
+    const name = `${original.slice(0, original.length - extension.length)}-${digest.slice(0, 12)}${extension}`;
+    const write = await runProcess(this.docker, this.execArgs(recipientId, ["python3", "-c", `import hashlib,json,os,secrets,sys
+data=sys.stdin.buffer.read(8*1024*1024+1)
+digest=hashlib.sha256(data).hexdigest()
+if len(data)>8*1024*1024 or digest!=sys.argv[3]: sys.exit('shared file checksum mismatch')
+directory=os.open('/home/agent',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+temporary='.incoming-'+secrets.token_hex(12)
+try:
+ for part in ('work','shared',sys.argv[1]):
+  try: os.mkdir(part,0o700,dir_fd=directory)
+  except FileExistsError: pass
+  child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+  os.close(directory)
+  directory=child
+ with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory),'wb') as file:
+  file.write(data)
+  file.flush()
+  os.fsync(file.fileno())
+ try: os.link(temporary,sys.argv[2],src_dir_fd=directory,dst_dir_fd=directory,follow_symlinks=False)
+ except FileExistsError: pass
+ with os.fdopen(os.open(sys.argv[2],os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory),'rb') as file: received=file.read(8*1024*1024+1)
+ if received!=data: sys.exit('destination already exists with different contents; left unchanged')
+ print(json.dumps({'path':'/home/agent/work/shared/'+sys.argv[1]+'/'+sys.argv[2],'sha256':digest,'bytes':len(received)}))
+finally:
+ try: os.unlink(temporary,dir_fd=directory)
+ except FileNotFoundError: pass
+ os.close(directory)`, sourceId, name, digest]), { input: read.stdout, timeoutMs: 30000 });
+    if (write.code !== 0) throw new Error(write.stderr.trim().split("\n").at(-1).slice(0, 300) || "file delivery failed");
+    const receipt = JSON.parse(write.stdout.toString("utf8"));
+    if (receipt.sha256 !== digest || receipt.bytes !== read.stdout.length) throw new Error("file delivery checksum mismatch");
+    return receipt;
   }
 }
