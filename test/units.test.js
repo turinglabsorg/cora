@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { asksToStop, cleanReply } from "../src/brain.js";
+import { asksToStop, claimsWork, cleanReply } from "../src/brain.js";
 import { Discord, splitMessage } from "../src/discord.js";
 import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
@@ -45,6 +45,17 @@ describe("being told to stop", () => {
     // "basta che" means "just", not "stop"; the rest are ordinary instructions.
     for (const text of ["basta che li rilanci tu", "fai il deploy", "continua pure", "la settimana finisce", ""]) {
       assert.ok(!asksToStop(text), `«${text}» is not`);
+    }
+  });
+});
+
+describe("work an agent says it did", () => {
+  test("reads a report of work done, and not an offer, a question or an honest no", () => {
+    for (const text of ["Ho salvato il file.", "L'ho creato ieri sul desktop.", "Ricevuto, ci guardo. Salvato in memoria: la riunione è giovedì.", "Il file è stato creato.", "I've sent the email.", "Ho appena aggiornato la pagina.", "Ricevuto. Ho ripreso il lavoro su sinalunga.md"]) {
+      assert.ok(claimsWork(text), `«${text}» reports work as done`);
+    }
+    for (const text of ["Ricevuto, ci guardo.", "Posso iniziare a compilare il file.", "Ho capito, procedo?", "Non ho creato il file: mi manca il permesso.", "Non l'ho ancora salvato.", "Il file non è stato creato.", "Vuoi che lo salvi?", "I have not created it yet.", "Ho visto che il file non esiste.", ""]) {
+      assert.ok(!claimsWork(text), `«${text}» does not`);
     }
   });
 });

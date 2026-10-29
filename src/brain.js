@@ -21,6 +21,8 @@ const COMPACT_CHARS = 180_000;
 const UPDATE_EVERY_MS = 15 * 60 * 1000;
 /** Times the Cora harness sends an agent back to work when it stops before the task is done. */
 const NUDGES = 4;
+/** Tools that talk about work without doing any. */
+const TALK_TOOLS = new Set(["say", "notify", "list_channels", "ask_owner"]);
 /** A task's goal: one line, and how many times the agent may be sent back to meet it. */
 const GOAL_CHARS = 300;
 const GOAL_ROUNDS = 12;
@@ -44,6 +46,24 @@ const UNFINISHED = [
 
 export function unfinished(text) {
   return UNFINISHED.some((pattern) => pattern.test(String(text || "")));
+}
+
+/**
+ * A final message that reports work as done: "ho salvato", "l'ho creato",
+ * "salvato in memoria", "I've sent it", but not "non l'ho creato". It is only a
+ * lie when the turn called no tool at all, and small models tell it often.
+ */
+const DONE_VERB = "(?:salvat|creat|scritt|inviat|mandat|aggiornat|caricat|generat|modificat|cancellat|eliminat|programmat|impostat|installat|scaricat|pubblicat|condivis|spostat|copiat|rinominat|compilat|redatt|riempit|aggiunt|corrett|sistemat|completat|consegnat|controllat|verificat|cercat|ripres|memorizzat|annotat|registrat)[oaie]";
+const CLAIMS = [
+  new RegExp(`(?:^|[^\\p{L}])(?<!(?:^|[^\\p{L}])non\\s+)(?:ho|abbiamo|l['’]ho|l['’]abbiamo|li ho|le ho)\\s+(?:già\\s+|appena\\s+|anche\\s+|ora\\s+|ormai\\s+)?${DONE_VERB}(?![\\p{L}])`, "iu"),
+  new RegExp(`(?:^|[.!:\\n]\\s*)(?:salvat|memorizzat|annotat|registrat)[oaie] in memoria(?![\\p{L}])`, "iu"),
+  new RegExp(`(?:^|[^\\p{L}])(?<!(?:^|[^\\p{L}])non\\s+)(?:è|sono) stat[oaie] ${DONE_VERB}(?![\\p{L}])`, "iu"),
+  /\bi(?:'ve|’ve| have)\s+(?:just\s+|already\s+|now\s+)?(?:saved|created|written|wrote|sent|updated|uploaded|generated|modified|deleted|removed|scheduled|installed|downloaded|published|shared|moved|copied|renamed|filled|added|fixed|checked|verified|searched|stored|noted)\b/i,
+  /(?:^|[.!:\n]\s*)(?:saved|stored) (?:it )?(?:to|in) (?:my )?memory\b/i,
+];
+
+export function claimsWork(text) {
+  return CLAIMS.some((pattern) => pattern.test(String(text || "")));
 }
 
 /**
@@ -434,6 +454,8 @@ export class Brain {
     let asked = false;
     // What the Cora harness watches while an agent works: real work done, and calls repeated without progress.
     let worked = 0;
+    // Any tool that does something, memory included; talking about it is not doing it.
+    let acted = 0;
     let looping = false;
     let progressCalls = 0;
     let blockedWork = "";
@@ -522,6 +544,7 @@ export class Brain {
       const repeated = name !== "screenshot" && repeatedCall(signature) && !MEMORY_TOOLS.has(name);
       if (repeated) markLoop(name);
       if (allowed && !MEMORY_TOOLS.has(name)) worked += 1;
+      if (allowed && !TALK_TOOLS.has(name)) acted += 1;
       const waitingForOwner = blockedWork && !OWN_TOOLS.has(name) && !["say", "ask_owner", "notify", "list_channels"].includes(name);
       let output = waitingForOwner ? { text: `error: the progress review found a real dependency: ${blockedWork}. Do not repeat searches or writes. Report completed results and ask the owner for the precise missing decision with ask_owner.` } : halted ? { text: "error: the owner asked you to stop. Do not run anything else: say where you had got to, in one line." }
         : !allowed ? { text: `error: the tool ${name} is not available now` }
@@ -709,11 +732,27 @@ export class Brain {
         prompt: `[Cora] L'obiettivo non è ancora raggiunto: ${reason || "manca la verifica"}. L'unica condizione attuale è: ${goal}. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare cosa farai. Quando la condizione è vera e verificata, scrivi il risultato.`,
       };
     };
+    /**
+     * Work it says it did without a single tool call has not happened. Every
+     * action, Hermes' included, goes through runTool: no call, no action. What
+     * it told the chat with say counts as saying, not doing. It is sent back
+     * once to do it, to check it with the tools if it means an earlier turn,
+     * or to say plainly that it did not do it.
+     */
+    let claimChecked = false;
+    const claimVerdict = (raw) => {
+      if (claimChecked || acted || looping || asked || Date.now() > deadline - 20000) return null;
+      const text = cleanReply(raw, agent);
+      if (![text, ...spokenMessages].some(claimsWork)) return null;
+      claimChecked = true;
+      return { kind: "claim", text, prompt: "[Cora] Nella risposta dici di aver fatto delle cose, ma in questo turno non hai usato nessuno strumento: quindi non sono successe. Falle adesso con gli strumenti. Se parli di qualcosa fatto in un turno precedente, controllalo adesso con gli strumenti prima di confermarlo. Se non puoi farlo, scrivi chiaramente che non l'hai fatto." };
+    };
+    const HARNESS_NOTES = { confirm: "chiedo conferma che sia finito", claim: "dice di aver fatto cose senza usare strumenti: lo rimando a farle" };
     /** With a goal it is the goal that decides; without one, the harness' own reading of the answer. */
     const nextStep = async (raw) => {
       await settleNews();
       if (halted) return null;
-      return goal ? goalVerdict(raw) : verdict(raw);
+      return claimVerdict(raw) || (goal ? goalVerdict(raw) : verdict(raw));
     };
 
     control.settle = settleNews;
@@ -734,7 +773,7 @@ export class Brain {
           if (next.kind !== "goal") nudges += 1;
           if (next.kind === "confirm") confirmed = true;
           if (next.kind === "unfinished" && sayTracked) await sayTracked(next.text).catch(() => {});
-          trace.add({ type: "note", text: `Cora harness: ${next.kind === "confirm" ? "chiedo conferma che sia finito" : "lo rimando al lavoro"}.` });
+          trace.add({ type: "note", text: `Cora harness: ${HARNESS_NOTES[next.kind] || "lo rimando al lavoro"}.` });
           if (halted) break;
           result = await run(`${currentPrompt()}\n\n[Messaggi successivi del proprietario]\n${ownerSaid.join("\n") || "(nessuno)"}\n\n[Azioni già eseguite: non ripeterle]\n${did.slice(-40).join("\n")}\n\n[Il tuo turno precedente si è chiuso con: «${cleanReply(result.text, agent) || "(niente)"}»]\n\n${next.prompt}`);
           trace.spent(result.usage);
@@ -792,7 +831,7 @@ export class Brain {
           } else if (next.kind === "unfinished" && sayTracked) {
             await sayTracked(next.text).catch(() => {});
           }
-          trace.add({ type: "note", text: `Cora harness: ${next.kind === "confirm" ? "chiedo conferma che sia finito" : "lo rimando al lavoro"}.` });
+          trace.add({ type: "note", text: `Cora harness: ${HARNESS_NOTES[next.kind] || "lo rimando al lavoro"}.` });
           messages.push({ role: "assistant", content: result.text || "" });
           messages.push({ role: "user", content: next.prompt });
           continue;

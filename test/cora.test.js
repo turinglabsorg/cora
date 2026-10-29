@@ -2186,6 +2186,47 @@ describe("talking with the agents", () => {
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } });
   });
 
+  test("Cora harness: an agent on Hermes that says it saved something without calling a tool is sent back to do it, and the claim never reaches the chat", async (t) => {
+    await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/test-model" } });
+    const fact = "La riunione con i fornitori è giovedì.";
+    t.after(async () => {
+      await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } });
+      for (const item of (await call(`/api/agents/${olga.id}/memories`)).data.facts.filter((item) => item.text === fact)) {
+        await call(`/api/agents/${olga.id}/memories/${item.id}`, { method: "DELETE" });
+      }
+    });
+    const before = cli.calls().length;
+    cli.set({ from: cli.calls().filter((item) => item.flavor === "hermes").length, runs: [
+      { reply: `Salvato in memoria: ${fact}` },
+      { reply: "Adesso è davvero in memoria.", tool: "remember", args: { fact } },
+    ] });
+    discord.say({ content: "Olga, ricordati che la riunione con i fornitori è giovedì" });
+    await waitFor(() => posts("Olga").some((text) => text.startsWith("Adesso è davvero in memoria.")), { what: "Olga's answer once she has really saved it" });
+    await quiet();
+    const runs = cli.calls().slice(before).filter((item) => item.flavor === "hermes");
+    assert.equal(runs.length, 2, "sent back once, and not again once it has used a tool");
+    assert.match(runs[1].argv[runs[1].argv.indexOf("-z") + 1], /in questo turno non hai usato nessuno strumento: quindi non sono successe/);
+    assert.ok(!posts("Olga").some((text) => text.startsWith("Salvato in memoria")), "the claim that never happened is not posted");
+    assert.ok((await call(`/api/agents/${olga.id}/memories`)).data.facts.some((item) => item.text === fact), "the second time the fact is really in her memory");
+  });
+
+  test("Cora harness: an agent that says it created a file without calling a tool is sent back once, and can take the claim back", async () => {
+    const nudges = [];
+    replies.set("Olga", (body) => {
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "user" && String(last.content).startsWith("[Cora] Nella risposta")) {
+        nudges.push(last.content);
+        return { content: "Correggo: il file non l'ho creato, qui non ho un computer." };
+      }
+      return { content: "Ho creato il file report.md sul desktop." };
+    });
+    discord.say({ content: "Olga, prepara il report sul desktop" });
+    await waitFor(() => posts("Olga").some((text) => text.startsWith("Correggo:")), { what: "Olga taking the claim back" });
+    await quiet();
+    assert.equal(nudges.length, 1, "sent back once");
+    assert.ok(!posts("Olga").includes("Ho creato il file report.md sul desktop."), "the false claim is not posted");
+  });
+
   test("Hermes on a router's model talks to the router, with a key it is handed and never writes down", async (t) => {
     await call("/api/state");
     assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/orcarouter/vendor/router-model" } })).status, 200);

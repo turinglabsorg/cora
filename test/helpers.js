@@ -430,6 +430,8 @@ const countCalls = (file, kind) => {
   } catch { return 0; }
 };
 const control = JSON.parse(fs.readFileSync(${JSON.stringify(control)}, "utf8"));
+// control.runs: one { reply, tool, args } per run of this CLI, counting from control.from runs.
+if (control.runs) Object.assign(control, { tool: null, args: null }, control.runs[Math.min(countCalls(${JSON.stringify(log)}, flavor) - (control.from || 0), control.runs.length - 1)]);
 let stdin = "";
 process.stdin.on("data", (d) => { stdin += d; });
 process.stdin.on("end", async () => {
