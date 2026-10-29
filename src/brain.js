@@ -50,16 +50,19 @@ export function unfinished(text) {
 
 /**
  * A final message that reports work as done: "ho salvato", "l'ho creato",
- * "salvato in memoria", "I've sent it", but not "non l'ho creato". It is only a
- * lie when the turn called no tool at all, and small models tell it often.
+ * "salvato in memoria", "ho preso nota", "I've sent it", but not "non l'ho creato".
+ * It is only a lie when the turn called no tool at all, and small models tell it
+ * often, about memory most of all: without remember nothing is kept.
  */
-const DONE_VERB = "(?:salvat|creat|scritt|inviat|mandat|aggiornat|caricat|generat|modificat|cancellat|eliminat|programmat|impostat|installat|scaricat|pubblicat|condivis|spostat|copiat|rinominat|compilat|redatt|riempit|aggiunt|corrett|sistemat|completat|consegnat|controllat|verificat|cercat|ripres|memorizzat|annotat|registrat)[oaie]";
+const DONE_VERB = "(?:salvat|creat|scritt|inviat|mandat|aggiornat|caricat|generat|modificat|cancellat|eliminat|programmat|impostat|installat|scaricat|pubblicat|condivis|spostat|copiat|rinominat|compilat|redatt|riempit|aggiunt|corrett|sistemat|completat|consegnat|controllat|verificat|cercat|ripres|memorizzat|annotat|registrat|ricordat|segnat|appuntat|inserit|mess)[oaie]";
 const CLAIMS = [
   new RegExp(`(?:^|[^\\p{L}])(?<!(?:^|[^\\p{L}])non\\s+)(?:ho|abbiamo|l['’]ho|l['’]abbiamo|li ho|le ho)\\s+(?:già\\s+|appena\\s+|anche\\s+|ora\\s+|ormai\\s+)?${DONE_VERB}(?![\\p{L}])`, "iu"),
   new RegExp(`(?:^|[.!:\\n]\\s*)(?:salvat|memorizzat|annotat|registrat)[oaie] in memoria(?![\\p{L}])`, "iu"),
+  new RegExp(`(?:^|[^\\p{L}])(?<!(?:^|[^\\p{L}])non\\s+(?:ho\\s+)?)(?:preso nota|me l[oaie] sono (?:segnat|annotat|appuntat|salvat)[oaie]|me l[oaie] ricorderò|l[oaie] terrò a mente)(?![\\p{L}])`, "iu"),
   new RegExp(`(?:^|[^\\p{L}])(?<!(?:^|[^\\p{L}])non\\s+)(?:è|sono) stat[oaie] ${DONE_VERB}(?![\\p{L}])`, "iu"),
   /\bi(?:'ve|’ve| have)\s+(?:just\s+|already\s+|now\s+)?(?:saved|created|written|wrote|sent|updated|uploaded|generated|modified|deleted|removed|scheduled|installed|downloaded|published|shared|moved|copied|renamed|filled|added|fixed|checked|verified|searched|stored|noted)\b/i,
   /(?:^|[.!:\n]\s*)(?:saved|stored) (?:it )?(?:to|in) (?:my )?memory\b/i,
+  /\bi(?:'ll|’ll| will) remember\b|\b(?:made|taken) a note\b/i,
 ];
 
 export function claimsWork(text) {
