@@ -2227,6 +2227,25 @@ describe("talking with the agents", () => {
     assert.ok(!posts("Olga").includes("Ho creato il file report.md sul desktop."), "the false claim is not posted");
   });
 
+  test("Cora harness: an agent that only looked something up and says it saved a file is sent back to do it", async () => {
+    const nudges = [];
+    let step = 0;
+    replies.set("Olga", (body) => {
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "user" && String(last.content).startsWith("[Cora] Nella risposta")) nudges.push(last.content);
+      // Once sent back she stays honest, whatever else the harness asks her.
+      if (nudges.length) return { content: "Correggo: il riepilogo non l'ho salvato, ho solo letto le routine." };
+      if (++step === 1) return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
+      return { content: "Fatto: riepilogo salvato in /home/agent/Desktop/routine.md." };
+    });
+    discord.say({ content: "Olga, salva un riepilogo delle routine sul desktop" });
+    await waitFor(() => posts("Olga").some((text) => text.startsWith("Correggo:")), { what: "Olga taking back a file she only looked up" });
+    await quiet();
+    assert.equal(nudges.length, 1, "sent back once");
+    assert.match(nudges[0], /hai solo consultato \(list_routines\): nessuno strumento le ha fatte/);
+    assert.ok(!posts("Olga").some((text) => text.includes("salvato in /home/agent")), "the false claim is not posted");
+  });
+
   test("Hermes on a router's model talks to the router, with a key it is handed and never writes down", async (t) => {
     await call("/api/state");
     assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/orcarouter/vendor/router-model" } })).status, 200);
