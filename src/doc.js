@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
@@ -42,16 +42,51 @@ export function bodyFile(command) {
  * check that fails or runs out of time lets the action through.
  */
 export class Doc {
-  constructor({ root = "", key = "", python = "python3", usageLog = "", timeoutMs = 25000 } = {}) {
+  constructor({ root = "", key = "", python = "python3", usageLog = "", rulesFile = "", timeoutMs = 25000 } = {}) {
     this.root = root;
     this.key = key;
     this.python = python;
     this.usageLog = usageLog;
+    this.rulesFile = rulesFile;
     this.timeoutMs = timeoutMs;
+    this.rules = { off: [], add: [] };
+    try {
+      const saved = JSON.parse(readFileSync(rulesFile, "utf8"));
+      this.rules = { off: Array.isArray(saved.off) ? saved.off : [], add: Array.isArray(saved.add) ? saved.add : [] };
+    } catch {}
+    this.builtinRules = null;
   }
 
   get installed() {
     return Boolean(this.root);
+  }
+
+  /** An older doc checks with its own rules only: the owner's need doc.rules. */
+  get supportsRules() {
+    return Boolean(this.root) && existsSync(join(this.root, "doc", "rules.py"));
+  }
+
+  /** doc's built-in Jev rules, as doc lists them: key, the kind of text, the reason. */
+  async builtins() {
+    if (!this.supportsRules) return [];
+    if (!this.builtinRules) {
+      const listed = await this.run("rules", null, { log: "/dev/null" });
+      if (Array.isArray(listed)) this.builtinRules = listed.filter((rule) => rule && typeof rule.key === "string" && ["reply", "comment"].includes(rule.on));
+    }
+    return this.builtinRules || [];
+  }
+
+  /** The owner's rules, in the file doc reads through DOC_RULES; written whole, never half. */
+  saveRules(rules) {
+    const temporary = `${this.rulesFile}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(rules, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporary, this.rulesFile);
+    this.rules = rules;
+  }
+
+  /** Jev's score for one rule, saved or not, on one text: `{score}`, `{error}` or null. */
+  score(target, text, rule) {
+    return this.run("rules", { target, text: String(text || ""), rule: { question: String(rule?.question || "") } }, { args: ["try"] });
   }
 
   /**
@@ -120,7 +155,7 @@ export class Doc {
     return { installed: true, runs: exact?.decision === "deny", jev: Boolean(judged) };
   }
 
-  run(module, payload, { log = this.usageLog } = {}) {
+  run(module, payload, { log = this.usageLog, args = [] } = {}) {
     return new Promise((resolve) => {
       const env = {
         PATH: process.env.PATH || "/usr/bin:/bin",
@@ -128,10 +163,11 @@ export class Doc {
         PYTHONPATH: this.root,
         ...(this.key ? { TYPESAFE_API_KEY: this.key } : {}),
         ...(log ? { DOC_USAGE_LOG: log } : {}),
+        ...(this.rulesFile && existsSync(this.rulesFile) ? { DOC_RULES: this.rulesFile } : {}),
       };
       let child;
       try {
-        child = spawn(this.python, ["-m", `doc.${module}`], { cwd: this.root, env, stdio: ["pipe", "pipe", "ignore"] });
+        child = spawn(this.python, ["-m", `doc.${module}`, ...args], { cwd: this.root, env, stdio: ["pipe", "pipe", "ignore"] });
       } catch {
         return resolve(null);
       }
@@ -153,7 +189,7 @@ export class Doc {
         try { resolve(JSON.parse(text)); } catch { resolve(null); }
       });
       child.stdin.on("error", () => {});
-      child.stdin.end(JSON.stringify(payload));
+      child.stdin.end(payload === null ? "" : JSON.stringify(payload));
     });
   }
 }

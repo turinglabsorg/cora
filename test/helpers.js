@@ -425,9 +425,18 @@ with open(${JSON.stringify(log)}, "a") as calls:
 `;
   writeFileSync(join(root, "doc", "reply_check.py"), `${record}
 text = payload.get("last_assistant_message") or ""
-blocked = "STIMA-DI-PROVA" in text or "INCOLLA-QUI-IL-TOKEN" in text or ("giorni di sviluppo" in text and os.environ.get("TYPESAFE_API_KEY"))
+try:
+    settings = json.load(open(os.environ["DOC_RULES"]))
+except Exception:
+    settings = {}
+off = set(settings.get("off") or [])
+asks_secret = "INCOLLA-QUI-IL-TOKEN" in text and "reply:secret_request" not in off
+mine = [rule for rule in settings.get("add") or [] if rule.get("enabled", True) and "reply" in rule.get("on", []) and "ACME" in text]
+blocked = "STIMA-DI-PROVA" in text or asks_secret or bool(mine) or ("giorni di sviluppo" in text and os.environ.get("TYPESAFE_API_KEY"))
 note("blocked" if blocked else "passed")
-if blocked:
+if mine:
+    print(json.dumps({"decision": "block", "reason": "doc: your last reply %s (0.95), which the user's rules forbid. %s" % (mine[0]["reason"], mine[0]["fix"])}))
+elif blocked:
     print(json.dumps({"decision": "block", "reason": "doc: your last reply breaks a rule (0.99), which the user's rules forbid. Rewrite it."}))
 `);
   writeFileSync(join(root, "doc", "publish_guard.py"), `${record}
@@ -436,6 +445,19 @@ decision = "deny" if "/home/" in command else "ask" if "DA-RICONTROLLARE" in com
 note(decision or "allow")
 if decision:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": "doc: this comment breaks the publishing rules: it contains local paths."}}))
+`);
+  // The built-in rules it lists, and a draft rule's score: high when the text names ACME.
+  writeFileSync(join(root, "doc", "rules.py"), `import json, os, sys
+if sys.argv[1:2] == ["try"]:
+    request = json.load(sys.stdin)
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        print(json.dumps({"error": "TYPESAFE_API_KEY is not set"}))
+    else:
+        print(json.dumps({"score": 0.95 if "ACME" in (request.get("text") or "") else 0.05}))
+else:
+    print(json.dumps([{"key": "effort", "on": "reply", "reason": "gives an effort or time estimate for work"},
+                      {"key": "secret_request", "on": "reply", "reason": "asks the user to paste a secret into the chat"},
+                      {"key": "local_state", "on": "comment", "reason": "it describes local or unpushed state"}]))
 `);
   const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
   return { root, calls };

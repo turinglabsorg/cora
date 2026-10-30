@@ -2895,6 +2895,141 @@ function connectionsPanel() {
     panel({ icon: "key", title: "Chiavi API", hint: "Ollama, OrcaRouter e TypeSafe. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"), keyPanel("typesafe", "TypeSafe"))));
 }
 
+// doc's built-in Jev checks, in the panel's words; a check doc adds later shows its own reason.
+const DOC_CHECKS = {
+  "reply:effort": ["Stime di tempo e di lavoro", "Ferma una stima di quanto ci vorrà, o di quanto c'è voluto."],
+  "reply:secret_request": ["Segreti chiesti in chat", "Ferma la richiesta di incollare chiavi, token o password nella chat."],
+  "comment:local_state": ["Lavoro rimasto in locale", "Ferma un commento che dice che qualcosa non è ancora pushato."],
+  "comment:effort": ["Stime nei commenti", "Ferma le stime di tempo o di lavoro nei commenti."],
+  "comment:process_log": ["Racconto del lavoro", "Ferma tentativi, comandi e setup al posto dei risultati."],
+  "comment:billing": ["Ore e fatturazione", "Ferma le ore fatturabili e il tempo tracciato."],
+};
+const DOC_TARGETS = [["reply", "Messaggi in chat", "Quello che gli agenti scrivono alle persone: say, domande, notifiche e risposte."], ["comment", "Commenti pubblicati", "Quello che pubblicano su GitHub o Linear dal loro computer."]];
+
+/** The checks doc runs for the agents: doc's own, switched on or off, and the owner's, tried on every harness before they are saved. */
+function docChecksPane() {
+  const root = h("div", { class: "stack" });
+  let data = null;
+  const save = async (off, added, okText = "Controlli aggiornati") => {
+    const result = await guard(api("/api/doc/rules", { method: "PUT", body: { off, add: added } }), okText);
+    if (result) data = result;
+    return result;
+  };
+  const offList = () => data.builtins.filter((rule) => !rule.enabled).map((rule) => `${rule.on}:${rule.key}`);
+  const points = (value) => Number(value ?? 0).toLocaleString(LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const quiet = (input) => input.addEventListener("keydown", (event) => { if (event.key === "Enter" && input.tagName !== "TEXTAREA") event.preventDefault(); });
+
+  const editor = (existing = null) => {
+    const name = h("input", { type: "text", maxlength: 60, autocomplete: "off", placeholder: "Clienti per nome", value: existing?.name || "" });
+    const question = h("textarea", { maxlength: 500, rows: 3, placeholder: "Il testo nomina un cliente o un suo referente?" }, existing?.question || "");
+    const fix = h("input", { type: "text", maxlength: 300, autocomplete: "off", placeholder: "Togli il nome del cliente.", value: existing?.fix || "" });
+    const keywords = h("input", { type: "text", autocomplete: "off", placeholder: "acme, rossi", value: (existing?.keywords || []).join(", ") });
+    const targets = DOC_TARGETS.map(([target, label]) => {
+      const input = h("input", { type: "checkbox", checked: existing ? existing.on.includes(target) : target === "reply" });
+      return { target, input, node: h("label", { class: "switch" }, input, h("span", { class: "rocker" }), h("span", { class: "switch-text" }, label)) };
+    });
+    [name, fix, keywords].forEach(quiet);
+    const draft = () => ({ ...(existing ? { key: existing.key, enabled: existing.enabled } : {}), name: name.value.trim(), question: question.value.trim(), fix: fix.value.trim(), keywords: keywords.value, on: targets.filter((item) => item.input.checked).map((item) => item.target) });
+    let tested = "";
+    const results = h("div", { class: "doc-trials", "aria-live": "polite" });
+    const summary = h("p", { class: "muted", role: "status" });
+    const saveButton = btn(existing ? "Salva le modifiche" : "Salva controllo", { icon: "check", cls: "primary", disabled: true, onclick: async () => {
+      const rule = draft();
+      const others = data.added.filter((item) => item.key !== existing?.key);
+      if (await save(offList(), [...others, rule], existing ? "Controllo aggiornato" : "Controllo aggiunto")) draw();
+    } });
+    const invalidate = () => {
+      if (!tested || tested === JSON.stringify(draft())) return;
+      tested = "";
+      saveButton.disabled = true;
+      summary.textContent = tr("Hai cambiato il controllo: provalo di nuovo prima di salvarlo.");
+    };
+    for (const control of [name, question, fix, keywords, ...targets.map((item) => item.input)]) control.addEventListener("input", invalidate);
+    const trialRow = (result) => {
+      const verdict = result.status === "error" ? [badge("Errore", "warn", "alert"), h("span", {}, raw(result.error || ""))]
+        : !result.caught ? [badge("Non fermato", "warn", "alert"), h("span", {}, tr("Jev non l'ha fermato ({score}).", { score: points(result.exampleScore) }))]
+          : !result.fixed ? [badge("Riscrittura fermata", "warn", "alert"), h("span", {}, tr("Fermato ({score}), ma anche la riscrittura non passa ({again}).", { score: points(result.exampleScore), again: points(result.rewriteScore) }))]
+            : [badge("Funziona", "on", "check"), h("span", {}, tr("Fermato ({score}), poi riscritto e passato ({again}).", { score: points(result.exampleScore), again: points(result.rewriteScore) }))];
+      return h("div", { class: "doc-trial" },
+        h("div", { class: "doc-trial-head" }, h("b", {}, raw(result.label)), h("small", {}, raw(result.agents.join(", ")))),
+        h("div", { class: "doc-trial-verdict" }, verdict),
+        result.example ? h("details", {}, h("summary", {}, "Cosa ha scritto"),
+          h("p", {}, h("span", { class: "label" }, "Esempio"), raw(result.example)),
+          result.rewrite ? h("p", {}, h("span", { class: "label" }, "Riscritto"), raw(result.rewrite)) : null) : null);
+    };
+    const tryButton = btn("Prova con tutti gli harness", { icon: "shield", onclick: async () => {
+      const rule = draft();
+      const started = await guard(api("/api/doc/rules/test", { method: "POST", body: { rule } }));
+      if (!started) return;
+      tryButton.disabled = true;
+      saveButton.disabled = true;
+      results.replaceChildren();
+      summary.textContent = tr("Ogni harness scrive un esempio che viola il controllo, poi lo riscrive dopo lo stop: {done} di {total}.", { done: 0, total: started.total });
+      const timer = setInterval(async () => {
+        const job = await api(`/api/doc/rules/test/${started.id}`).catch(() => null);
+        if (!job || !results.isConnected) { if (!results.isConnected) clearInterval(timer); return; }
+        results.replaceChildren(...job.results.map(trialRow));
+        if (job.status !== "done") { summary.textContent = tr("Ogni harness scrive un esempio che viola il controllo, poi lo riscrive dopo lo stop: {done} di {total}.", { done: job.results.length, total: job.total }); return; }
+        clearInterval(timer);
+        tryButton.disabled = false;
+        const good = job.results.filter((result) => result.caught && result.fixed).length;
+        tested = JSON.stringify(rule) === JSON.stringify(draft()) ? JSON.stringify(rule) : "";
+        saveButton.disabled = !tested;
+        summary.textContent = tr(good === job.total ? "Funziona con tutti gli harness: puoi salvarlo." : "Funziona con {good} harness su {total}: controlla i dettagli prima di salvarlo.", { good, total: job.total });
+      }, 1500);
+      S.timers.push(timer);
+    } });
+    if (!data.keySet) tryButton.disabled = true;
+    return h("div", { class: "doc-editor stack-sm" },
+      h("div", { class: "grid2" }, field("Nome", name), field("Solo se il testo contiene", keywords, "parole separate da virgole; vuoto: Jev legge ogni testo")),
+      field("Cosa deve riconoscere Jev", question, "una domanda a cui si risponde sì o no"),
+      field("Cosa dire all'agente quando scatta", fix),
+      h("div", { class: "doc-targets" }, targets.map((item) => item.node)),
+      data.keySet ? null : h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Per provare un controllo serve la chiave TypeSafe, in Collegamenti → Chiavi API.")),
+      h("div", { class: "row" }, tryButton, btn("Annulla", { cls: "ghost", onclick: () => draw() }), saveButton),
+      summary, results);
+  };
+
+  const draw = (editing = undefined) => {
+    const builtinRow = (rule) => {
+      const [label, about] = DOC_CHECKS[`${rule.on}:${rule.key}`] || [rule.key, rule.reason];
+      const input = h("input", { type: "checkbox", checked: rule.enabled, onchange: async () => {
+        rule.enabled = input.checked;
+        if (!(await save(offList(), data.added))) { rule.enabled = !input.checked; input.checked = rule.enabled; }
+      } });
+      return h("div", { class: "doc-check" }, h("label", { class: "switch" }, input, h("span", { class: "rocker" }), h("span", { class: "switch-text" }, label, h("small", {}, about))), badge("doc", "", "shield"));
+    };
+    const ownRow = (rule) => {
+      const input = h("input", { type: "checkbox", checked: rule.enabled, onchange: async () => {
+        const updated = data.added.map((item) => item.key === rule.key ? { ...item, enabled: input.checked } : item);
+        if (!(await save(offList(), updated))) input.checked = !input.checked;
+      } });
+      return h("div", { class: "doc-check own" },
+        h("label", { class: "switch" }, input, h("span", { class: "rocker" }), h("span", { class: "switch-text" }, raw(rule.name), h("small", {}, raw(rule.question)), rule.keywords.length ? h("small", { class: "mono" }, raw(rule.keywords.join(", "))) : null)),
+        h("div", { class: "doc-check-actions" },
+          btn("", { icon: "edit", cls: "sm ghost", title: "Modifica", onclick: () => draw(rule.key) }),
+          btn("", { icon: "trash", cls: "sm ghost", title: "Elimina", onclick: async () => { if (await save(offList(), data.added.filter((item) => item.key !== rule.key), "Controllo eliminato")) draw(); } })));
+    };
+    const groups = DOC_TARGETS.map(([target, label, about]) => h("div", { class: "doc-group" },
+      h("div", { class: "doc-group-head" }, h("h3", {}, label), h("p", {}, about)),
+      data.builtins.filter((rule) => rule.on === target).map(builtinRow),
+      data.added.filter((rule) => rule.on.includes(target)).map(ownRow)));
+    const adding = editing === null || typeof editing === "string";
+    root.replaceChildren(panel({ icon: "shield", title: "Controlli di doc", hint: "Jev di TypeSafe legge quello che gli agenti scrivono alle persone e i commenti che pubblicano, e ferma quello che un controllo vieta. L'agente riceve il motivo e riscrive." },
+      data.keySet ? null : h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Senza la chiave TypeSafe Jev non giudica: restano solo le regole esatte. Aggiungila in Collegamenti → Chiavi API.")),
+      adding ? editor(typeof editing === "string" ? data.added.find((rule) => rule.key === editing) : null)
+        : h("div", { class: "doc-add" }, btn("Aggiungi un controllo", { icon: "plus", onclick: () => draw(null) })),
+      groups,
+      h("p", { class: "muted" }, "Percorsi locali e righe di attribuzione nei commenti sono bloccati sempre: sono regole esatte, non controlli di Jev.")));
+  };
+
+  root.append(skeleton("rows", 4));
+  api("/api/doc/rules").then((result) => { data = result; draw(); }, (error) => {
+    root.replaceChildren(panel({ icon: "shield", title: "Controlli di doc" }, h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))));
+  });
+  return root;
+}
+
 function renderSettings() {
   const settings = S.data.settings;
   const discord = S.data.discord;
@@ -2995,6 +3130,7 @@ function renderSettings() {
         h("div", { class: "field full" }, h("span", { class: "label" }, "Provider"), providers))),
     panel({ icon: "book", title: "Memoria condivisa", hint: "Cose che tutti gli agenti sanno: chi sei, i progetti, le regole della casa." },
       h("textarea", { name: "sharedMemory", class: "tall" }, settings.sharedMemory))),
+    h("div", { class: "settings-pane stack", "data-settings-tab": "controlli", role: "tabpanel" }, docChecksPane()),
     h("div", { class: "settings-pane stack", "data-settings-tab": "accesso", role: "tabpanel" },
     instanceAccessPanel(),
     panel({ icon: "key", title: "Chiavi SSH", hint: "Chi entra nei desktop via SSH passando dalla macchina host. Valgono già le chiavi che entrano nella macchina host; qui aggiungi le altre, una per riga." },
@@ -3024,7 +3160,7 @@ function renderSettings() {
       renderSettings();
     }
   });
-  const tabs = [["collegamenti", "Collegamenti", "link"], ["canali", "Canali", "radio"], ["agenti", "Agenti", "users"], ["preferenze", "Preferenze", "sliders"], ["accesso", "Accesso", "key"]];
+  const tabs = [["collegamenti", "Collegamenti", "link"], ["canali", "Canali", "radio"], ["agenti", "Agenti", "users"], ["controlli", "Controlli", "shield"], ["preferenze", "Preferenze", "sliders"], ["accesso", "Accesso", "key"]];
   const nav = h("div", { class: "tabs settings-tabs", role: "tablist", "aria-label": "Sezioni impostazioni" });
   const showTab = (id, updateRoute = false) => {
     for (const pane of form.querySelectorAll(".settings-pane")) pane.hidden = pane.dataset.settingsTab !== id;
@@ -3034,7 +3170,7 @@ function renderSettings() {
       button.setAttribute("aria-selected", String(active));
       button.tabIndex = active ? 0 : -1;
     }
-    form.querySelector(".savebar").hidden = ["collegamenti", "preferenze"].includes(id);
+    form.querySelector(".savebar").hidden = ["collegamenti", "controlli", "preferenze"].includes(id);
     if (updateRoute) history.replaceState(null, "", `#/settings/${id}`);
     revealSelection(nav);
   };

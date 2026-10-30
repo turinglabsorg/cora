@@ -14,7 +14,7 @@ import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDoc, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
@@ -3815,6 +3815,85 @@ describe("doc in the Cora harness", () => {
       app.boxes.shell = shell;
       app.boxes.readFile = readFile;
     }
+  });
+
+  test("the owner turns doc's checks off and adds their own, and doc reads them", async () => {
+    const listed = (await call("/api/doc/rules")).data;
+    assert.deepEqual(listed.builtins.map((rule) => [rule.on, rule.key, rule.enabled]), [["reply", "effort", true], ["reply", "secret_request", true], ["comment", "local_state", true]]);
+    assert.deepEqual(listed.added, []);
+    const saved = await call("/api/doc/rules", { method: "PUT", body: {
+      off: ["reply:secret_request", "reply:unknown"],
+      add: [{ name: "Clienti per nome", on: ["reply", "email"], question: "Il testo nomina un cliente o un suo referente?", fix: "Togli il nome del cliente.", keywords: "ACME, , Rossi" }],
+    } });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(saved.data.builtins.find((rule) => rule.key === "secret_request").enabled, false);
+    const [rule] = saved.data.added;
+    assert.deepEqual({ ...rule }, { key: "clienti_per_nome", name: "Clienti per nome", on: ["reply"], question: "Il testo nomina un cliente o un suo referente?", reason: "breaks the rule \"Clienti per nome\"", fix: "Togli il nome del cliente.", keywords: ["acme", "rossi"], threshold: 0.8, enabled: true });
+    const file = join(home, "doc-rules.json");
+    assert.equal(statSync(file).mode & 0o777, 0o600, "only Cora's user reads the rules");
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).off, ["reply:secret_request"]);
+
+    let step = 0, refused = "";
+    replies.set("Dora", (body) => {
+      step += 1;
+      if (step === 1) return { tool_calls: [{ function: { name: "say", arguments: { text: "Per collegarlo INCOLLA-QUI-IL-TOKEN di GitHub, il controllo ora è spento." } } }] };
+      if (step === 2) return { tool_calls: [{ function: { name: "say", arguments: { text: "Il preventivo per ACME è pronto, lo firmano domani in ufficio." } } }] };
+      if (step === 3) {
+        refused = lastTool(body);
+        return { tool_calls: [{ function: { name: "say", arguments: { text: "Il preventivo è pronto, lo firmano domani in ufficio." } } }] };
+      }
+      return { content: "PASS" };
+    });
+    discord.say({ content: "Dora, aggiornami sul preventivo" });
+    await waitFor(() => posts().includes("Il preventivo è pronto, lo firmano domani in ufficio."), { what: "the rewrite without the client" });
+    await quiet();
+    assert.ok(posts().includes("Per collegarlo INCOLLA-QUI-IL-TOKEN di GitHub, il controllo ora è spento."), "a check turned off stops nothing");
+    assert.ok(!posts().some((text) => text.includes("ACME")), "the owner's own check stops the client's name");
+    assert.match(refused, /breaks the rule "Clienti per nome" \(0\.95\).*Togli il nome del cliente\./);
+
+    assert.equal((await call("/api/doc/rules", { method: "PUT", body: { add: [{ name: "Vuoto", on: ["reply"], question: "" }] } })).status, 400);
+    assert.equal((await call("/api/doc/rules", { method: "PUT", body: { add: Array.from({ length: 21 }, (_, index) => ({ name: `R${index}`, on: ["reply"], question: "Q?" })) } })).status, 400);
+    assert.equal((await call("/api/doc/rules", { method: "PUT", body: { off: [], add: [{ ...rule, enabled: false }] } })).data.added[0].enabled, false, "a check of the owner's can rest without being deleted");
+    await call("/api/doc/rules", { method: "PUT", body: { off: [], add: [] } });
+  });
+
+  test("a rule is tried on every brain in use before it is saved: each one breaks it, is stopped and writes it again", async (t) => {
+    const clea = app.store.createAgent({ name: "Clea", model: "claude/claude-sonnet-5-5", subscriptionId: subscriptionIds.claude, channelIds: [] });
+    t.after(() => { app.store.updateAgent(clea.id, { enabled: false }); replies.delete("*"); cli.set({ reply: "PASS" }); });
+    const prompts = [];
+    replies.set("*", (body) => {
+      const prompt = String(body.messages.at(-1).content);
+      prompts.push(prompt);
+      return { content: /Scrivilo di nuovo/.test(prompt) ? "Il preventivo è pronto e firmato." : "Il preventivo per ACME è pronto, firmano domani." };
+    });
+    cli.set({ from: cli.calls().filter((item) => item.flavor === "claude").length, runs: [
+      { reply: "«Ho chiuso il contratto con ACME stamattina.»" },
+      { reply: "Ho chiuso il contratto stamattina." },
+    ] });
+    const rule = { name: "Clienti", on: ["reply"], question: "Il testo nomina un cliente?", fix: "Togli il nome del cliente." };
+    const started = await call("/api/doc/rules/test", { method: "POST", body: { rule } });
+    assert.equal(started.status, 202);
+    assert.equal(started.data.total, 2, "Dora's Ollama model and Clea's Claude Code");
+    let job;
+    await waitFor(async () => (job = (await call(`/api/doc/rules/test/${started.data.id}`)).data).status === "done", { what: "the rule test", timeout: 60000 });
+    const byLabel = Object.fromEntries(job.results.map((result) => [result.label, result]));
+    assert.deepEqual(Object.keys(byLabel).sort(), ["Claude Code · claude-sonnet-5-5", "Ollama · test-model"]);
+    for (const result of job.results) {
+      assert.equal(result.status, "done", JSON.stringify(result));
+      assert.equal(result.caught, true, "Jev stops the example");
+      assert.equal(result.fixed, true, "and lets the rewrite through");
+      assert.ok(result.exampleScore >= 0.8 && result.rewriteScore < 0.8);
+    }
+    assert.equal(byLabel["Claude Code · claude-sonnet-5-5"].example, "Ho chiuso il contratto con ACME stamattina.", "quotes around the example are dropped");
+    assert.deepEqual(byLabel["Ollama · test-model"].agents, ["Dora"]);
+    assert.match(prompts.find((prompt) => /Scrivilo di nuovo/.test(prompt)), /\[Cora\] doc: your last reply breaks the rule "Clienti" \(0\.95\).*Togli il nome del cliente\./s, "the brain gets doc's reason as an agent would");
+    assert.deepEqual((await call("/api/doc/rules")).data.added, [], "trying a rule saves nothing");
+
+    const key = app.brain.doc.key;
+    app.brain.doc.key = "";
+    try {
+      assert.equal((await call("/api/doc/rules/test", { method: "POST", body: { rule } })).status, 409, "without the TypeSafe key nothing can be tried");
+    } finally { app.brain.doc.key = key; }
   });
 
   test("the TypeSafe key is set from the panel, and without doc nothing is checked and nothing fails", async () => {

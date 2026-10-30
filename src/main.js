@@ -86,7 +86,7 @@ export function startCora(overrides = {}) {
     if (listener && channels.active === "discord") discord.start();
   };
   bots.onChange = pickListener;
-  const doc = new Doc({ root: findDoc(cfg.docDir), key: cfg.typesafeKey, usageLog: join(cfg.home, "doc-usage.jsonl") });
+  const doc = new Doc({ root: findDoc(cfg.docDir), key: cfg.typesafeKey, usageLog: join(cfg.home, "doc-usage.jsonl"), rulesFile: join(cfg.home, "doc-rules.json") });
   const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc });
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching() });

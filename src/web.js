@@ -17,6 +17,7 @@ import { isWebRoom, roomAgentId } from "./rooms.js";
 import { nextRuns } from "./scheduler.js";
 import { SHARED } from "./store.js";
 import { contextSources } from "./context.js";
+import { brainsInUse, testRule } from "./rule-test.js";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
 const COOKIE = "cora_session";
@@ -90,6 +91,33 @@ function parseCookies(header) {
   return out;
 }
 
+const RULE_KEY = /^[a-z][a-z0-9_]{0,40}$/;
+const RULE_TARGETS = ["reply", "comment"];
+
+/** An owner's doc rule as the panel sends it, checked and filled in; doc reads the result. */
+export function cleanDocRule(input, taken = new Set()) {
+  const name = String(input?.name || "").trim().slice(0, 60);
+  const question = String(input?.question || "").trim();
+  const on = [...new Set(Array.isArray(input?.on) ? input.on.filter((target) => RULE_TARGETS.includes(target)) : [])];
+  if (!name) throw new HttpError(400, "dai un nome al controllo");
+  if (!question || question.length > 500) throw new HttpError(400, "scrivi cosa deve riconoscere Jev, in al massimo 500 caratteri");
+  if (!on.length) throw new HttpError(400, "scegli se controlla i messaggi in chat, i commenti o entrambi");
+  const slug = name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 34);
+  let key = RULE_KEY.test(String(input?.key || "")) ? String(input.key) : /^[a-z]/.test(slug) ? slug : `rule_${slug}`.replace(/_$/, "");
+  for (let index = 2; taken.has(key) || !RULE_KEY.test(key); index += 1) key = `${key.replace(/_\d+$/, "").slice(0, 36)}_${index}`;
+  const keywords = (Array.isArray(input?.keywords) ? input.keywords : String(input?.keywords || "").split(","))
+    .map((word) => String(word).trim().toLowerCase()).filter(Boolean).slice(0, 10).map((word) => word.slice(0, 40));
+  const threshold = Number(input?.threshold);
+  return {
+    key, name, on, question,
+    reason: `breaks the rule "${name}"`,
+    fix: String(input?.fix || "").trim().slice(0, 300) || "Write it again without it.",
+    keywords,
+    threshold: threshold >= 0.5 && threshold <= 0.95 ? threshold : 0.8,
+    enabled: input?.enabled !== false,
+  };
+}
+
 async function readJson(req, limit = 256 * 1024) {
   const chunks = [];
   let size = 0;
@@ -107,6 +135,8 @@ async function readJson(req, limit = 256 * 1024) {
 }
 
 export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null }) {
+  // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
+  const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
   const failures = [];
   // On usecora.space the cloud signs people in; this panel only checks the pass it hands over.
@@ -336,6 +366,54 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { provider, configured: true });
     }
     if (path === "/api/doc/probe" && method === "POST") return send(res, 200, brain.doc ? await brain.doc.probe() : { installed: false, runs: false, jev: false });
+    if (path === "/api/doc/rules" && (method === "GET" || method === "PUT")) {
+      const doc = brain.doc;
+      if (!doc?.supportsRules) throw new HttpError(409, doc?.installed ? "questa versione di doc non ha i controlli configurabili: aggiornala" : "doc non è installato su questa macchina");
+      const builtins = await doc.builtins();
+      if (method === "PUT") {
+        const body = await readJson(req, 64 * 1024);
+        const known = new Set(builtins.map((rule) => `${rule.on}:${rule.key}`));
+        const off = [...new Set((Array.isArray(body.off) ? body.off : []).filter((entry) => known.has(entry)))];
+        if (!Array.isArray(body.add) || body.add.length > 20) throw new HttpError(400, "al massimo 20 controlli tuoi");
+        const taken = new Set(builtins.map((rule) => rule.key));
+        const add = body.add.map((rule) => {
+          const clean = cleanDocRule(rule, taken);
+          taken.add(clean.key);
+          return clean;
+        });
+        doc.saveRules({ off, add });
+      }
+      return send(res, 200, {
+        builtins: builtins.map((rule) => ({ ...rule, enabled: !doc.rules.off.includes(`${rule.on}:${rule.key}`) && !doc.rules.off.includes(rule.key) })),
+        added: doc.rules.add,
+        keySet: Boolean(doc.key),
+        brains: brainsInUse(store.agents(), store.settings.defaultModel),
+      });
+    }
+    if (path === "/api/doc/rules/test" && method === "POST") {
+      const doc = brain.doc;
+      if (!doc?.supportsRules) throw new HttpError(409, "doc non può provare i controlli su questa macchina");
+      if (!doc.key) throw new HttpError(409, "per provare un controllo serve la chiave TypeSafe");
+      const body = await readJson(req, 16 * 1024);
+      const rule = cleanDocRule(body.rule);
+      const brains = brainsInUse(store.agents(), store.settings.defaultModel);
+      if (!brains.length) throw new HttpError(409, "nessun agente attivo con cui provarlo");
+      for (const [id, job] of ruleTests) if (Date.now() - job.startedAt > 30 * 60000) ruleTests.delete(id);
+      if ([...ruleTests.values()].filter((job) => job.status === "running").length >= 3) throw new HttpError(429, "ci sono già prove in corso: aspetta che finiscano");
+      const id = randomBytes(8).toString("hex");
+      const job = { status: "running", startedAt: Date.now(), total: brains.length, target: rule.on.includes("reply") ? "reply" : "comment", results: [] };
+      ruleTests.set(id, job);
+      testRule({ rule, brains, doc, llm, onResult: (result) => job.results.push(result), signal: AbortSignal.timeout(10 * 60000) })
+        .catch(() => {})
+        .finally(() => { job.status = "done"; });
+      return send(res, 202, { id, total: job.total, target: job.target });
+    }
+    const ruleTestMatch = /^\/api\/doc\/rules\/test\/([a-f0-9]{16})$/.exec(path);
+    if (ruleTestMatch && method === "GET") {
+      const job = ruleTests.get(ruleTestMatch[1]);
+      if (!job) throw new HttpError(404, "prova non trovata");
+      return send(res, 200, { status: job.status, total: job.total, target: job.target, results: job.results });
+    }
     if (path === "/api/subscriptions/resident/check" && method === "POST") {
       await subscriptions.discoverResidents();
       return send(res, 200, subscriptions.list().filter((record) => record.resident));

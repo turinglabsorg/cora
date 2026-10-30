@@ -1048,3 +1048,29 @@ details.raw summary .ico { width: 15px; height: 15px; }
 }
 
 @media (max-width: 600px) { .task-history-filters > select:first-child { flex-basis: 100%; } }
+
+/* doc's checks: two groups of rows with a rocker each, the owner's own marked amber; the editor tries a rule on every harness */
+.doc-group { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); overflow: hidden; }
+.doc-group + .doc-group { margin-top: 16px; }
+.doc-group-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--line); }
+.doc-group-head h3 { margin: 0; font: 500 16px/1.3 var(--display); }
+.doc-group-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+.doc-check { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.doc-group-head + .doc-check { border-top: 0; }
+.doc-check .switch { flex: 1; min-width: 0; }
+.doc-check .switch-text { min-width: 0; overflow-wrap: anywhere; }
+.doc-check.own { box-shadow: inset 3px 0 0 var(--amber-line); }
+.doc-check-actions { display: flex; gap: 4px; flex: none; }
+.doc-add { display: flex; margin-bottom: 16px; }
+.doc-editor { padding: 18px; margin-bottom: 16px; border: 1px dashed var(--amber-line); border-radius: var(--r-md); background: var(--amber-wash); }
+.doc-editor textarea { min-height: 72px; }
+.doc-targets { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+.doc-editor .row > .btn:last-child { margin-left: auto; }
+.doc-trials { display: flex; flex-direction: column; gap: 8px; }
+.doc-trials:empty { display: none; }
+.doc-trial { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel); }
+.doc-trial-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.doc-trial-head small { color: var(--muted); }
+.doc-trial-verdict { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+.doc-trial details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.doc-trial details p { display: grid; gap: 2px; margin: 8px 0 0; font-size: 13px; overflow-wrap: anywhere; }
