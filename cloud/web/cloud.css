@@ -287,21 +287,24 @@ main { display: block; }
 .place p b { display: block; font: 500 10px/1.6 var(--mono); letter-spacing: 0.12em; color: var(--amber); }
 .place p.owner b { color: #ff9b85; }
 
-/* the patch bay */
-.patch { position: relative; }
-.patch svg { width: 100%; height: auto; overflow: visible; }
-.patch-plate { fill: #0b0b0b; stroke: var(--line); }
-.jack circle { fill: #1c1c1c; stroke: var(--line-strong); stroke-width: 1.5; }
-.jack .hole { fill: #000; stroke: none; }
-.jack text { font: 500 11px var(--mono); letter-spacing: 0.12em; fill: var(--soft); }
-.cable { fill: none; stroke-width: 5; stroke-linecap: round; opacity: 0.9; filter: drop-shadow(0 6px 6px rgba(0, 0, 0, 0.6)); stroke-dasharray: 520; stroke-dashoffset: 520; }
-.js .patch.in .cable { animation: plug 1.4s cubic-bezier(0.6, 0, 0.2, 1) forwards; animation-delay: var(--d); }
-html:not(.js) .cable { stroke-dashoffset: 0; }
-.patch-labels { display: flex; justify-content: space-between; padding: 12px 6px 0; font: 500 10px/1 var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--amber); }
+/* the brains: every provider an agent can run on */
+.byoi-list { display: grid; gap: 10px; }
+.byoi-label { margin: 18px 0 0; font: 500 10px/1 var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--amber); }
+.byoi-label:first-child { margin-top: 0; }
+.byoi-list ul { margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 16px; background: #0b0b0b; overflow: hidden; }
+.byoi-list li { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; grid-template-areas: "mark name led" "mark how led"; column-gap: 16px; align-items: center; padding: 14px 18px; border-top: 1px solid var(--hair); }
+.byoi-list li:first-child { border-top: 0; }
+.byoi-mark { grid-area: mark; display: grid; place-items: center; width: 30px; height: 30px; color: var(--text); transition: color 0.2s; }
+.byoi-mark svg { width: 26px; height: 26px; }
+.byoi-list li b { grid-area: name; font: 600 17px/1.25 var(--display); letter-spacing: -0.01em; }
+.byoi-list li > span:not(.byoi-mark) { grid-area: how; font: 400 12px/1.4 var(--mono); color: var(--muted); }
+.byoi-led { grid-area: led; width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); transition: background 0.2s, box-shadow 0.2s; }
+.byoi-list li:hover .byoi-mark { color: var(--amber); }
+.byoi-list li:hover .byoi-led { background: var(--amber); box-shadow: 0 0 10px var(--amber-glow); }
+@media (min-width: 640px) { .byoi-list li { grid-template-columns: 30px minmax(0, 0.8fr) minmax(0, 1.2fr) auto; grid-template-areas: "mark name how led"; } }
 @keyframes spin { 0% { transform: scaleX(1); } 50% { transform: scaleX(0.06); } 100% { transform: scaleX(1); } }
 @keyframes beat { 0% { transform: scale(1); } 30% { transform: scale(1.06); } 100% { transform: scale(1); } }
 @keyframes ring { 0% { opacity: 0.75; transform: scale(1); } 100% { opacity: 0; transform: scale(2.25); } }
-@keyframes plug { to { stroke-dashoffset: 0; } }
 
 /* the Cora harness: the loop that finishes the job */
 .harness .section-head h2 { max-width: 16ch; }
@@ -426,13 +429,6 @@ html:not(.js) .cable { stroke-dashoffset: 0; }
 @media (min-width: 1040px) { .byoi h2 { font-size: clamp(60px, 6.2vw, 94px); } }
 .byoi h2 em { font-style: normal; color: var(--amber); }
 
-/* brains */
-.brains { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--line); }
-.brains li { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 24px; padding: 22px 0; border-bottom: 1px solid var(--line); transition: padding 0.3s; }
-.brains li:hover { padding-left: 12px; }
-.brains b { font: 600 clamp(34px, 6vw, 70px)/1 var(--display); letter-spacing: -0.045em; transition: color 0.25s; }
-.brains li:hover b { color: var(--amber); }
-.brains span { font: 400 12px/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
 
 /* your space */
 .space { text-align: left; }
@@ -540,7 +536,6 @@ span.avatar .mark { width: 34px; height: 34px; }
   .js .pulse-chip.still { display: flex; opacity: 1; transform: none; }
   @media (max-width: 719px) { .js .pulse-chip.still { transform: translateX(-50%); } .js .pulse-chip.still:not(:first-child) { display: none; } }
   .js .reveal, .js .teletype .tt-line { opacity: 1; transform: none; }
-  .cable { stroke-dashoffset: 0; }
   html { scroll-behavior: auto; }
 }
 
