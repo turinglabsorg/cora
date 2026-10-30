@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { asksToStop, claimsWork, cleanReply } from "../src/brain.js";
+import { asksToStop, claimsWork, cleanReply, deliveryNote } from "../src/brain.js";
 import { Discord, splitMessage } from "../src/discord.js";
 import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
@@ -59,6 +59,17 @@ describe("work an agent says it did", () => {
     }
     for (const text of ["Ricevuto, ci guardo.", "Posso iniziare a compilare il file.", "Ho capito, procedo?", "Non ho creato il file: mi manca il permesso.", "Non l'ho ancora salvato.", "Il file non è stato creato.", "Vuoi che lo salvi?", "I have not created it yet.", "Ho visto che il file non esiste.", "Non ho preso nota.", "Non me lo sono segnato.", "Vuoi che me lo segni?", "Il file non è stato salvato in /tmp.", "Il file creato in precedenza è vuoto.", ""]) {
       assert.equal(claimsWork(text), null, `«${text}» does not`);
+    }
+  });
+});
+
+describe("a final reply that only says a message went out", () => {
+  test("is told from an answer", () => {
+    for (const text of ["Messaggio già in #general.", "Messaggio inviato in #general.", "Fatto.", "Ho già risposto.", "Risposta pubblicata qui sopra.", "Message sent.", "I've already replied above."]) {
+      assert.ok(deliveryNote(text), `«${text}» is a delivery note`);
+    }
+    for (const text of ["Ciao Sebastiano!", "Fatto: il deploy è su main ca03272.", "Ho trovato il messaggio di errore nel log: manca la chiave.", "La bozza HTML è pronta.", `Messaggio inviato.\nEcco i dettagli del report.`, ""]) {
+      assert.ok(!deliveryNote(text), `«${text}» is not`);
     }
   });
 });

@@ -75,7 +75,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "say",
-    description: "Write directly through Cora. Without channel_id, post in this conversation; with channel_id, post in an authorized channel from list_channels. Address a colleague as @Name: Cora resolves it to their real Discord mention when their bot can read that channel. No grog CLI, shell command, installation or extra login is needed. Use it for replies, progress and reports to another channel. Check the returned delivery result; do not post the same result again in your final reply.",
+    description: "Write directly through Cora. Without channel_id, post in this conversation; with channel_id, post in an authorized channel from list_channels. Address a colleague as @Name: Cora resolves it to their real Discord mention when their bot can read that channel. No grog CLI, shell command, installation or extra login is needed. Your final reply is posted in this conversation anyway: here, use say only for a short first note before working and for progress; with channel_id, for replies and reports in another channel. Check the returned delivery result; do not post the same result again in your final reply.",
     parameters: {
       type: "object",
       properties: { text: { type: "string" }, channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" } },
@@ -405,7 +405,7 @@ export async function executeTool(call, ctx) {
           message_ids: messages.map((item) => String(item.id || item.message_id || "")).filter(Boolean),
           mentions: [...new Set(messages.flatMap((item) => [...String(item.content || "").matchAll(/<@!?(\d+)>/g)].map((match) => match[1])))],
         };
-        const status = target === channelId ? "posted in this conversation; keep working" : `posted directly to ${target}; do not duplicate this report in your final reply`;
+        const status = target === channelId ? "posted in this conversation. Your final reply is posted here too: if there is work left, keep working and write only what is new; if this message already says it all, end with just PASS" : `posted directly to ${target}; do not duplicate this report in your final reply`;
         return { text: `${status}\nCora delivery receipt: ${JSON.stringify(receipt)}` };
       }
       case "ask_owner": {

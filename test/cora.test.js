@@ -2338,6 +2338,34 @@ describe("talking with the agents", () => {
     assert.ok(!posts("Olga").some((text) => text.includes("salvato in /home/agent")), "the false claim is not posted");
   });
 
+  test("Cora harness: an agent that answers with say and then only notes the message went out posts the answer once", async () => {
+    let receipt = "", step = 0;
+    replies.set("Olga", (body) => {
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "tool") receipt = String(last.content);
+      if (++step === 1) return { tool_calls: [{ function: { name: "say", arguments: { text: "Ciao Sebastiano." } } }] };
+      return { content: "Messaggio già in #general." };
+    });
+    discord.say({ content: "Olga, ciao!" });
+    await waitFor(() => posts("Olga").includes("Ciao Sebastiano."), { what: "the greeting" });
+    await quiet();
+    assert.ok(!posts("Olga").includes("Messaggio già in #general."), "the delivery note is not posted");
+    assert.match(receipt, /Your final reply is posted here too.*end with just PASS/, "and the say receipt tells her so");
+
+    // A first note and then a real answer are both posted.
+    step = 0;
+    replies.set("Olga", () => {
+      step += 1;
+      if (step === 1) return { tool_calls: [{ function: { name: "say", arguments: { text: "Ci guardo." } } }] };
+      if (step === 2) return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
+      return { content: "Non hai routine in programma." };
+    });
+    discord.say({ content: "Olga, che routine ho?" });
+    await waitFor(() => posts("Olga").includes("Non hai routine in programma."), { what: "the answer after the first note" });
+    await quiet();
+    assert.ok(posts("Olga").indexOf("Ci guardo.") < posts("Olga").indexOf("Non hai routine in programma."));
+  });
+
   test("Hermes on a router's model talks to the router, with a key it is handed and never writes down", async (t) => {
     await call("/api/state");
     assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/orcarouter/vendor/router-model" } })).status, 200);

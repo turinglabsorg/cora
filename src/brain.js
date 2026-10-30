@@ -87,6 +87,24 @@ export function claimsWork(text) {
 }
 
 /**
+ * A final reply that only says a message went out ("Messaggio già in #general.",
+ * "Messaggio inviato.", "Fatto."). After a say into the same conversation the
+ * chat already has the message, and the note would be a second, empty answer.
+ */
+const DELIVERY_NOTE = [
+  /^(?:fatto|done|inviato|sent|posted)[.!]?$/iu,
+  /^(?:ho|l['’]ho)\s+(?:già\s+)?(?:risposto|salutato)(?![\p{L}])|^i(?:'ve|’ve| have)\s+(?:already\s+)?(?:replied|answered)\b/iu,
+];
+const NOTE_SUBJECT = /(?:^|[^\p{L}])(?:messaggio|risposta|saluto|message|reply|answer)(?![\p{L}])/iu;
+const NOTE_SENT = /(?:^|[^\p{L}])(?:(?:inviat|mandat|pubblicat|postat|scritt|consegnat)[oa]|già|sent|posted|delivered|already)(?![\p{L}])/iu;
+
+export function deliveryNote(text) {
+  const value = String(text || "").trim();
+  if (!value || value.length > 100 || value.includes("\n")) return false;
+  return DELIVERY_NOTE.some((pattern) => pattern.test(value)) || (NOTE_SUBJECT.test(value) && NOTE_SENT.test(value));
+}
+
+/**
  * The owner telling an agent to stop. Deliberately narrow: "basta che" is a way
  * of saying "just", not of calling something off, and "fine" lives inside too
  * many ordinary words to be read as an order.
@@ -257,6 +275,7 @@ export class Brain {
       "- Puoi rivolgerti agli altri agenti per nome; è normale discutere, essere in disaccordo, scherzare.",
       "- Se il messaggio non ti riguarda o non hai niente di utile o divertente da aggiungere, rispondi esattamente PASS. Mai quando ti nominano o ti scrivono in privato: lì rispondi sempre.",
       "- Se per rispondere devi lavorare (strumenti, ricerche, più passaggi), prima scrivi subito due parole con say (es. «Ci guardo») e poi lavora; alla fine scrivi il risultato.",
+      "- La tua risposta finale viene pubblicata in questa conversazione: per rispondere qui scrivila e basta, senza say. Se con say hai già detto tutto, rispondi solo PASS, senza note come «messaggio inviato».",
       "- Mentre lavori, i nuovi messaggi della chat ti arrivano insieme ai risultati degli strumenti: leggili e, se cambiano la richiesta, cambia piano.",
       "- Non ripetere quello che ha già detto qualcun altro.",
       "- Il proprietario ti parla da più posti (le chat, il pannello): per te è un'unica conversazione. Ricordi quello che vi siete detti altrove e rispondi dove ti scrive.",
@@ -516,6 +535,8 @@ export class Brain {
     // Told to stop, an agent stops: no more tools, no more rounds, whatever it has is the answer.
     let halted = false;
     let lastUpdate = Date.now();
+    // The last tool was a say into this conversation: a final "message sent" adds nothing.
+    let saidHere = false;
     const sayTracked = say ? async (text, target = channel.id) => {
       lastUpdate = Date.now();
       progress = String(text);
@@ -590,6 +611,7 @@ export class Brain {
       });
       trace.add({ type: "tool", name, args: args || {}, result: output.text, ok, ms: Date.now() - started, image: Boolean(output.image) });
       if (allowed) did.push(`${name} ${summarizeArgs(name, args || {})} → ${String(output.text).slice(0, 2400)}`);
+      saidHere = allowed && ok && name === "say" && String(args?.channel_id || channel.id) === channel.id;
       let review = "";
       if (task && goal && !steering.length && allowed && !waitingForOwner && !MEMORY_TOOLS.has(name) && !["say", "ask_owner", "notify", "list_channels"].includes(name) && !halted && !asked && ++progressCalls >= this.progressEvery) {
         progressCalls = 0;
@@ -691,7 +713,7 @@ export class Brain {
     const done = (raw, steps) => {
       closed = true;
       const reply = cleanReply(raw, agent);
-      const text = !control.handoff && reply && !spokenMessages.includes(reply.trim()) ? reply : null;
+      const text = !control.handoff && reply && !spokenMessages.includes(reply.trim()) && !(saidHere && deliveryNote(reply)) ? reply : null;
       trace.finish({ status: halted ? "stopped" : text ? "done" : "pass", output: raw });
       return { text, steps, traceId: trace.id, asked, stopped: halted, spoken: spokenMessages.length > 0, handledMessageIds: [...new Set([...answeredMessageIds, ...(text || asked ? deliveredMessageIds : [])])] };
     };
@@ -707,7 +729,7 @@ export class Brain {
     const verdict = (raw) => {
       if (halted || !task || !worked || looping || asked || nudges >= NUDGES || Date.now() > deadline - 20000) return null;
       const text = cleanReply(raw, agent);
-      if (!text && spokenMessages.length) return null;
+      if ((!text || (saidHere && deliveryNote(text))) && spokenMessages.length) return null;
       if (!text) return { kind: "silent", prompt: "[Cora] Hai lavorato ma non hai scritto niente. Se il lavoro è finito, scrivi il risultato per chi aspetta; se manca qualcosa, continua adesso con gli strumenti." };
       if (unfinished(text)) return { kind: "unfinished", text, prompt: "[Cora] Non hai finito: quello che hai scritto è un aggiornamento, non il risultato. Continua adesso con gli strumenti, senza chiedere se andare avanti e senza annunciare: fallo. Quando è tutto fatto e verificato, scrivi il risultato." };
       if (!confirmed) return { kind: "confirm", text, prompt: "[Cora] Prima di chiudere: il compito che ti hanno dato è finito davvero e verificato? Se manca qualcosa, continua adesso con gli strumenti. Se è tutto fatto, rispondi solo DONE." };
@@ -768,7 +790,8 @@ export class Brain {
     const claimVerdict = (raw) => {
       if (claimChecked || changed || looping || asked || Date.now() > deadline - 20000) return null;
       const text = cleanReply(raw, agent);
-      const claims = [text, ...spokenMessages].map(claimsWork);
+      // "Messaggio inviato" after a say is what say did, not a claim without a tool.
+      const claims = [spokenMessages.length && deliveryNote(text) ? "" : text, ...spokenMessages].map(claimsWork);
       if (!claims.includes("change") && (acted || !claims.includes("look"))) return null;
       claimChecked = true;
       const done = acted
