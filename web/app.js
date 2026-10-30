@@ -2952,7 +2952,7 @@ function docChecksPane() {
             : [badge("Funziona", "on", "check"), h("span", {}, tr("Fermato ({score}), poi riscritto e passato ({again}).", { score: points(result.exampleScore), again: points(result.rewriteScore) }))];
       return h("div", { class: "doc-trial" },
         h("div", { class: "doc-trial-head" }, h("b", {}, raw(result.label)), h("small", {}, raw(result.agents.join(", ")))),
-        h("div", { class: "doc-trial-verdict" }, verdict),
+        h("div", { class: "doc-trial-verdict" }, verdict, result.retried ? h("small", {}, "esempio al secondo tentativo") : null),
         result.example ? h("details", {}, h("summary", {}, "Cosa ha scritto"),
           h("p", {}, h("span", { class: "label" }, "Esempio"), raw(result.example)),
           result.rewrite ? h("p", {}, h("span", { class: "label" }, "Riscritto"), raw(result.rewrite)) : null) : null);

@@ -264,6 +264,7 @@ export const EN = {
   "Funziona": "Works",
   "Fermato ({score}), poi riscritto e passato ({again}).": "Stopped ({score}), then rewritten and passed ({again}).",
   "Cosa ha scritto": "What it wrote",
+  "esempio al secondo tentativo": "example on the second try",
   "Esempio": "Example",
   "Riscritto": "Rewritten",
   "Prova con tutti gli harness": "Try it on every harness",

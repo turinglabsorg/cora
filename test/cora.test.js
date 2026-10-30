@@ -3864,7 +3864,8 @@ describe("doc in the Cora harness", () => {
     replies.set("*", (body) => {
       const prompt = String(body.messages.at(-1).content);
       prompts.push(prompt);
-      return { content: /Scrivilo di nuovo/.test(prompt) ? "Il preventivo è pronto e firmato." : "Il preventivo per ACME è pronto, firmano domani." };
+      // Like a weaker model, the first example follows the rule instead of breaking it.
+      return { content: /Scrivilo di nuovo/.test(prompt) ? "Il preventivo è pronto e firmato." : /non fa quello che il controllo cerca/.test(prompt) ? "Il preventivo per ACME è pronto, firmano domani." : "Ricordo a tutti di non scrivere i nomi dei clienti." };
     });
     cli.set({ from: cli.calls().filter((item) => item.flavor === "claude").length, runs: [
       { reply: "«Ho chiuso il contratto con ACME stamattina.»" },
@@ -3886,6 +3887,9 @@ describe("doc in the Cora harness", () => {
     }
     assert.equal(byLabel["Claude Code · claude-sonnet-5-5"].example, "Ho chiuso il contratto con ACME stamattina.", "quotes around the example are dropped");
     assert.deepEqual(byLabel["Ollama · test-model"].agents, ["Dora"]);
+    assert.equal(byLabel["Ollama · test-model"].retried, true, "an example that broke nothing is asked for once more");
+    assert.equal(byLabel["Ollama · test-model"].example, "Il preventivo per ACME è pronto, firmano domani.");
+    assert.ok(!byLabel["Claude Code · claude-sonnet-5-5"].retried, "a good first example is kept");
     assert.match(prompts.find((prompt) => /Scrivilo di nuovo/.test(prompt)), /\[Cora\] doc: your last reply breaks the rule "Clienti" \(0\.95\).*Togli il nome del cliente\./s, "the brain gets doc's reason as an agent would");
     assert.deepEqual((await call("/api/doc/rules")).data.added, [], "trying a rule saves nothing");
 
