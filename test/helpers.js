@@ -487,7 +487,7 @@ process.stdin.on("end", async () => {
   // Grok and Muse read the prompt from a file Cora deletes after the run: keep it as the run's input.
   const promptFile = argv.indexOf("--prompt-file") >= 0 ? argv[argv.indexOf("--prompt-file") + 1] : "";
   if (promptFile) stdin = fs.readFileSync(promptFile, "utf8");
-  const env = Object.fromEntries(["HOME", "GROK_HOME", "GROK_AUTH_PATH", "GROK_CLAUDE_MCPS_ENABLED", "GROK_CLAUDE_HOOKS_ENABLED", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TBH_CREDENTIAL_BACKEND"].map((key) => [key, process.env[key] || ""]));
+  const env = Object.fromEntries(["HOME", "GROK_HOME", "GROK_AUTH_PATH", "GROK_CLAUDE_MCPS_ENABLED", "GROK_CLAUDE_HOOKS_ENABLED", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TBH_CREDENTIAL_BACKEND", "MISE_DATA_DIR"].map((key) => [key, process.env[key] || ""]));
   const record = { flavor, argv, stdin, env, tools: null, output: null, hermesConfig, grokConfig, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
   if (control.hang) {
     fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ ...record, pid: process.pid }) + "\\n");

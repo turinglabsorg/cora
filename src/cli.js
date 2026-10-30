@@ -325,6 +325,21 @@ export function grokConfig() {
 }
 
 /**
+ * mise's own folders, as the owner's HOME would give them. On Omarchy `grok` is a
+ * mise wrapper (`mise x npm:@xai-official/grok -- grok`): with the empty HOME a turn
+ * runs in, mise would look for its tools there and refuse to start.
+ */
+function miseFolders() {
+  const under = (variable, fallback) => join(process.env[variable] || join(homedir(), fallback), "mise");
+  return {
+    MISE_CONFIG_DIR: process.env.MISE_CONFIG_DIR || under("XDG_CONFIG_HOME", ".config"),
+    MISE_DATA_DIR: process.env.MISE_DATA_DIR || under("XDG_DATA_HOME", ".local/share"),
+    MISE_STATE_DIR: process.env.MISE_STATE_DIR || under("XDG_STATE_HOME", ".local/state"),
+    MISE_CACHE_DIR: process.env.MISE_CACHE_DIR || under("XDG_CACHE_HOME", ".cache"),
+  };
+}
+
+/**
  * One agent turn on Grok Build. Grok has no per-run MCP flag and keeps every session
  * on disk, prompts and a search index included, so each turn gets a Grok home of its
  * own that is gone when the turn ends: Cora's MCP server in its config.toml, the
@@ -352,7 +367,7 @@ export async function runGrok({ bin, model, system, prompt, mcp, toolNames, work
   ];
   const tools = mcp && toolNames.length;
   const env = {
-    HOME: empty, GROK_HOME: runHome, GROK_AUTH_PATH: auth, GROK_DISABLE_AUTOUPDATER: "1", GROK_MEMORY: "0",
+    HOME: empty, GROK_HOME: runHome, GROK_AUTH_PATH: auth, GROK_DISABLE_AUTOUPDATER: "1", GROK_MEMORY: "0", ...miseFolders(),
     ...Object.fromEntries(GROK_IMPORTS.map((name) => [name, "0"])),
     CORA_BRIDGE_URL: tools ? mcp.url : "", CORA_BRIDGE_TOKEN: tools ? mcp.token : "",
   };

@@ -14,7 +14,7 @@ import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
 
@@ -1424,6 +1424,7 @@ describe("agents in Discord", () => {
     assert.equal(run.env.HOME, join(run.env.GROK_HOME, "home"), "an empty HOME: the owner's ~/.claude never reaches Grok");
     assert.equal(run.env.GROK_CLAUDE_MCPS_ENABLED, "0");
     assert.equal(run.env.GROK_CLAUDE_HOOKS_ENABLED, "0");
+    assert.equal(run.env.MISE_DATA_DIR, process.env.MISE_DATA_DIR || join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "mise"), "a mise-wrapped grok (Omarchy) still finds its tools under the empty HOME");
     assert.match(run.grokConfig, /\[mcp_servers\.cora\][\s\S]*CORA_BRIDGE_TOKEN = "\$\{CORA_BRIDGE_TOKEN\}"/, "the run token never lands in the file");
     assert.deepEqual(run.secretEnv, []);
     const memories = await call(`/api/agents/${created.data.id}/memories`);
