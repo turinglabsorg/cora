@@ -13,9 +13,9 @@ import { identityCli } from "./subscription-fixtures.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
-import { chmodSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
 
 const PASSWORD = "correct horse battery staple";
@@ -183,6 +183,8 @@ before(async () => {
     hermesBaseUrl: `${ollama.url}/v1`,
     claudeBin: cli.claude,
     codexBin: cli.codex,
+    grokBin: cli.grok,
+    museBin: cli.muse,
     codexModelsFile: cli.models,
     ownerInstructions: join(home, "owner-AGENTS.md"),
     sshAuthorizedKeys: join(home, "authorized_keys"),
@@ -195,7 +197,7 @@ before(async () => {
     startBoxes: false,
   });
   await app.ready;
-  for (const provider of ["claude", "codex"]) {
+  for (const provider of ["claude", "codex", "grok", "muse"]) {
     const identity = app.store.createSubscription({ provider, label: `Fixture ${provider}` });
     app.store.updateSubscription(identity.id, { status: "ready" });
     subscriptionIds[provider] = identity.id;
@@ -304,24 +306,24 @@ describe("per-agent subscription authentication", () => {
     assert.equal(restarted.app.store.subscriptions().length, 2);
   });
 
-  test("shared subscriptions serialize work, queued cancellation is prompt and login cannot race a running account", async (t) => {
+  test("turns on a shared subscription run side by side, a cancelled one stops at once, and login cannot race a running account", async (t) => {
     const fixture = await subscriptionApp(t);
     const record = await connectIdentity(fixture, "claude");
     let release;
     const hold = new Promise((resolve) => { release = resolve; });
-    let entered = false;
-    const first = fixture.app.subscriptions.run(record.id, "claude", null, async () => { entered = true; await hold; return "first"; });
-    await waitFor(() => entered);
-    let secondEntered = false;
+    const entered = new Set();
+    // Nico asked in three threads at once: three turns on one account, none waiting for another.
+    const turns = ["general", "alienwatch", "ai-nation"].map((thread) => fixture.app.subscriptions.run(record.id, "claude", null, async () => { entered.add(thread); await hold; return thread; }));
+    await waitFor(() => entered.size === 3, { what: "three turns running at once on one account" });
     const controller = new AbortController();
-    const second = fixture.app.subscriptions.run(record.id, "claude", controller.signal, async () => { secondEntered = true; });
-    const stopped = assert.rejects(second, /cancelled/);
     controller.abort(new Error("cancelled"));
-    await stopped;
-    assert.equal(secondEntered, false);
-    assert.equal((await fixture.request(`/api/subscriptions/${record.id}/login`, { method: "POST" })).status, 400);
+    let cancelledEntered = false;
+    await assert.rejects(fixture.app.subscriptions.run(record.id, "claude", controller.signal, async () => { cancelledEntered = true; }), /cancelled/);
+    assert.equal(cancelledEntered, false);
+    assert.equal((await fixture.request(`/api/subscriptions/${record.id}/login`, { method: "POST" })).status, 400, "no login while turns use the account");
     release();
-    assert.equal(await first, "first");
+    assert.deepEqual(await Promise.all(turns), ["general", "alienwatch", "ai-nation"]);
+    assert.ok(!fixture.app.subscriptions.running.has(record.id), "the account is free again once they end");
   });
 
   test("refuses a Claude CLI that ignores its profile; a successful retry and unused-account removal recover", async (t) => {
@@ -983,7 +985,7 @@ describe("agents in Discord", () => {
     assert.ok(state.data.models.some((model) => model.id === "claude/claude-opus-5-5"));
     assert.ok(state.data.models.some((model) => model.id === "codex/gpt-6-sol"));
     assert.ok(!state.data.models.some((model) => model.id === "codex/hidden"));
-    assert.deepEqual(state.data.providers, { claude: true, codex: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true });
+    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true });
   });
 
   test("creates two agents through the API", async () => {
@@ -1154,7 +1156,7 @@ describe("agents in Discord", () => {
     assert.ok(app.store.memories(SHARED).length >= 1);
   });
 
-  test("an agent runs one task at a time: a routine landing on a busy agent is skipped, not run beside it", async () => {
+  test("a thread runs one task at a time: a routine landing on a thread already at work is skipped, not run beside it", async () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Tosca", model: "ollama/test-model", chattiness: 0, tools: true, channelIds: [CHANNEL] } });
     assert.equal(created.status, 201);
     const slow = await call(`/api/agents/${created.data.id}/routines`, { method: "POST", body: { name: "Lunga", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Controlla tutto" } });
@@ -1179,12 +1181,36 @@ describe("agents in Discord", () => {
     assert.equal(second.status, 202);
     await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Tosca" && item.content === "Finito."), { what: "the first routine finishing", timeout: 20000 });
     await quiet();
-    assert.equal(together, 1, "never two sessions of the same agent at once");
+    assert.equal(together, 1, "never two sessions of the same agent in one thread");
     const routines = (await call("/api/state")).data.routines.filter((r) => r.agentId === created.data.id);
     assert.ok(routines.some((r) => r.lastStatus === "skipped"), "the one that landed on a busy agent says it was skipped");
     const skipped = routines.find((r) => r.lastStatus === "skipped");
     assert.match(skipped.lastOutput || "", /stava già lavorando/);
     await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { enabled: false } });
+  });
+
+  test("an agent works in several threads at once, each with its own computer: asked in two places, it is two instances", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Nilo", model: "ollama/test-model", chattiness: 0, tools: true, channelIds: [CHANNEL] } });
+    assert.equal(created.status, 201);
+    const id = created.data.id;
+    const here = await call(`/api/agents/${id}/routines`, { method: "POST", body: { name: "Qui", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Lavora qui" } });
+    const there = await call(`/api/agents/${id}/routines`, { method: "POST", body: { name: "Là", schedule: "0 10 * * *", channelId: `web-${id}`, prompt: "Lavora là" } });
+    let running = 0;
+    let together = 0;
+    const computers = [];
+    replies.set("Nilo", async (body) => {
+      running += 1;
+      together = Math.max(together, running);
+      computers.push(body.tools.some((tool) => tool.function.name === "shell"));
+      await sleep(1500);
+      running -= 1;
+      return { content: "Fatto." };
+    });
+    await Promise.all([here, there].map((routine) => call(`/api/routines/${routine.data.id}/run`, { method: "POST" })));
+    await waitFor(async () => (await call("/api/state")).data.routines.filter((routine) => routine.agentId === id).every((routine) => routine.lastStatus === "posted"), { what: "both threads done", timeout: 20000 });
+    assert.equal(together, 2, "one instance per thread, side by side");
+    assert.deepEqual(computers.slice(0, 2), [true, true], "each instance has the agent's computer, not only the first");
+    await call(`/api/agents/${id}`, { method: "PUT", body: { enabled: false } });
   });
 
   test("what a turn spends is counted and served by day, for the heatmap", async () => {
@@ -1374,6 +1400,71 @@ describe("agents in Discord", () => {
     assert.ok(trace.steps.some((step) => step.type === "thinking" && step.text === "**Controllo l'ora** sul mio computer con date."));
     assert.ok(trace.steps.some((step) => step.type === "tool" && step.name === "shell" && step.args.command === "date"));
     assert.deepEqual(summary.tools, ["shell"]);
+    await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
+  });
+
+  test("an agent on Grok Build uses cora's tools over MCP, in a Grok home of Cora's own and none of the owner's setup", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Greta", model: "grok/grok-4.7", subscriptionId: subscriptionIds.grok, chattiness: 0, tools: false } });
+    assert.equal(created.status, 201);
+    cli.set({ tool: "remember", args: { fact: "La riunione con i fornitori è giovedì" }, reply: "Segnato.", thinking: "Lo salvo." });
+    discord.say({ content: "Greta, ricordati che la riunione con i fornitori è giovedì" });
+    const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Greta"), { what: "Greta's reply" });
+    assert.match(post.content, /^Segnato\. \[saved \[mem_/);
+    const run = cli.calls().find((item) => item.flavor === "grok" && /^Sei Greta\./.test(item.argv[item.argv.indexOf("--system-prompt-override") + 1] || ""));
+    assert.equal(run.argv[run.argv.indexOf("-m") + 1], "grok-4.7");
+    assert.equal(run.argv[run.argv.indexOf("--tools") + 1], "search_tool,use_tool", "Grok's own shell, files and web are off");
+    assert.equal(run.argv[run.argv.indexOf("--output-format") + 1], "streaming-messages-json");
+    assert.ok(run.argv.includes("--always-approve") && run.argv.includes("--no-memory") && run.argv.includes("--no-subagents"));
+    assert.match(run.stdin, /Greta, ricordati che la riunione con i fornitori è giovedì/, "the prompt arrives in a file, not in an argument");
+    assert.ok(run.tools.includes("remember") && !run.tools.includes("shell"));
+    const account = join(home, "subscriptions", subscriptionIds.grok);
+    assert.equal(dirname(run.env.GROK_HOME), join(home, "cli-work", subscriptionIds.grok), "a Grok home for this turn alone");
+    assert.ok(!existsSync(run.env.GROK_HOME), "gone with the turn, and with it every session Grok keeps on disk");
+    assert.equal(run.env.GROK_AUTH_PATH, join(account, "auth.json"), "the account's login, read where it lives");
+    assert.equal(run.env.HOME, join(run.env.GROK_HOME, "home"), "an empty HOME: the owner's ~/.claude never reaches Grok");
+    assert.equal(run.env.GROK_CLAUDE_MCPS_ENABLED, "0");
+    assert.equal(run.env.GROK_CLAUDE_HOOKS_ENABLED, "0");
+    assert.match(run.grokConfig, /\[mcp_servers\.cora\][\s\S]*CORA_BRIDGE_TOKEN = "\$\{CORA_BRIDGE_TOKEN\}"/, "the run token never lands in the file");
+    assert.deepEqual(run.secretEnv, []);
+    const memories = await call(`/api/agents/${created.data.id}/memories`);
+    assert.ok(memories.data.facts.some((memory) => memory.text === "La riunione con i fornitori è giovedì"));
+    const [summary] = (await call(`/api/agents/${created.data.id}/traces`)).data;
+    const trace = (await call(`/api/traces/${summary.id}`)).data;
+    assert.ok(trace.steps.some((step) => step.type === "thinking" && step.text === "Lo salvo."));
+    assert.ok(trace.steps.some((step) => step.type === "text" && step.text === "Prima controllo."), "text between tool calls is kept");
+    assert.equal(trace.steps.find((step) => step.type === "tool").name, "remember");
+    await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
+  });
+
+  test("an agent on Muse Code uses cora's tools over MCP, with Cora's system prompt and Meta's training off", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Mila", model: "muse/muse-wonder-1.0", subscriptionId: subscriptionIds.muse, chattiness: 0, tools: false } });
+    assert.equal(created.status, 201);
+    cli.set({ tool: "remember", args: { fact: "Il fornitore di carta è Rossi" }, reply: "Fatto." });
+    discord.say({ content: "Mila, ricordati che il fornitore di carta è Rossi" });
+    const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Mila"), { what: "Mila's reply" });
+    assert.match(post.content, /^Fatto\. \[saved \[mem_/);
+    const run = cli.calls().find((item) => item.flavor === "muse" && (item.argv.find((arg) => arg.startsWith("run.system_prompt=")) || "").includes("Sei Mila."));
+    assert.equal(run.argv[0], "exec");
+    assert.equal(run.argv[run.argv.indexOf("--model") + 1], "muse-wonder-1.0");
+    assert.equal(run.argv[run.argv.indexOf("--preset") + 1], "empty", "no built-in tools: only Cora's");
+    assert.equal(run.argv[run.argv.indexOf("--contributor-mode") + 1], "off", "Meta does not train on the agent's turns");
+    assert.equal(run.argv[run.argv.indexOf("--approval-mode") + 1], "never");
+    for (const flag of ["--json", "--no-foreign-personal-context", "--disable-reminders", "--no-session-log", "--disable-web-tools"]) assert.ok(run.argv.includes(flag), flag);
+    assert.match(JSON.parse(run.argv.find((arg) => arg.startsWith("run.system_prompt=")).slice("run.system_prompt=".length)), /^Sei Mila\./);
+    assert.match(run.argv.find((arg) => arg.startsWith("mcpServers.cora=")), /"CORA_BRIDGE_TOKEN":"\$\{CORA_BRIDGE_TOKEN\}"/, "the run token stays out of the arguments");
+    assert.match(run.stdin, /Mila, ricordati che il fornitore di carta è Rossi/);
+    const account = join(home, "subscriptions", subscriptionIds.muse);
+    assert.equal(run.env.XDG_CONFIG_HOME, account);
+    assert.equal(run.env.XDG_DATA_HOME, join(account, "data"));
+    assert.equal(run.env.TBH_CREDENTIAL_BACKEND, "file", "the login stays in a file, never in a Keychain a service cannot reach");
+    assert.ok(run.tools.includes("remember") && !run.tools.includes("shell"));
+    const memories = await call(`/api/agents/${created.data.id}/memories`);
+    assert.ok(memories.data.facts.some((memory) => memory.text === "Il fornitore di carta è Rossi"));
+    const [summary] = (await call(`/api/agents/${created.data.id}/traces`)).data;
+    const trace = (await call(`/api/traces/${summary.id}`)).data;
+    assert.ok(trace.steps.some((step) => step.type === "text" && step.text === "Prima controllo."), "what it wrote before the tool is its reasoning");
+    assert.equal(trace.steps.find((step) => step.type === "tool").name, "remember");
+    assert.match(trace.output, /^Fatto\./);
     await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
   });
 
@@ -2580,9 +2671,9 @@ describe("what runs the models", () => {
     const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
     await panel.run("boot()");
     await panel.navigate(`#/agent/${agent.id}/cervello`);
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 4);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 6);
     assert.deepEqual(panel.app.querySelectorAll(".harness-row").map((node) => node.querySelector(".harness-name").textContent),
-      ["Cora's harness", "Claude Code", "Codex", "Hermes"], "every harness, as a list and not a dropdown");
+      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Hermes"], "every harness, as a list and not a dropdown");
     // It opens on the side the agent is already on: the cloud.
     const places = panel.app.querySelector(".segmented");
     assert.deepEqual(places.children.map((node) => node.textContent), ["On this machine", "In the cloud"]);
@@ -2632,11 +2723,12 @@ describe("what runs the models", () => {
       return reply({});
     } });
     await panel.run("boot()");
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 4);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 6);
     const side = () => panel.app.querySelector(".brain-side");
     const row = (name) => panel.app.querySelectorAll(".harness-row").find((node) => node.querySelector(".harness-name").textContent.startsWith(name));
     assert.ok(!row("Cora's harness").querySelector(".harness-flag"), "a missing router does not make Cora's harness missing");
     assert.equal(row("Codex").querySelector(".harness-flag").textContent, "not installed");
+    assert.equal(row("Grok Build").querySelector(".harness-flag").textContent, "not installed", "a machine without Grok says so instead of hiding it");
 
     // Its own cloud: listed, but not choosable, and the default that points there neither.
     panel.app.querySelector(".segmented").children[1].click();
@@ -3397,7 +3489,7 @@ describe("thread goal lifecycle", () => {
       const changed = await call(`/api/routines/${r.id}`, change === "delete" ? { method: "DELETE" } : { method: "PUT", body: change === "pause" ? { enabled: false } : { schedule: "35 13-23 * * *" } });
       assert.equal(changed.status, 200);
       try {
-        await waitFor(() => !app.orchestrator.atWork.has(iris.id), { timeout: 2000, what: "active routine cancellation" });
+        await waitFor(() => !app.orchestrator.threadWork.has(r.channelId), { timeout: 2000, what: "active routine cancellation" });
       } finally { release(); await pending; }
       const trace = app.store.traces(iris.id, 1)[0];
       assert.equal(trace.status, "stopped");
@@ -3468,8 +3560,7 @@ describe("thread goal lifecycle", () => {
     });
     app.boxes.shell = async () => {
       commands++;
-      assert.ok(!app.orchestrator.atWork.has(iris.id), "the old worker has released its lock");
-      assert.equal(app.orchestrator.threadWork.get(CHANNEL), ivo.id);
+      assert.equal(app.orchestrator.threadWork.get(CHANNEL), ivo.id, "the old worker has released the thread to the new one");
       return { code: 0, output: "Document read and verified." };
     };
     try {
@@ -3513,7 +3604,7 @@ describe("thread goal lifecycle", () => {
       await sleep(150);
       assert.ok(!app.store.memories(iris.id).some((memory) => memory.text === "MUST NOT BE WRITTEN"));
       releaseEvaluation();
-      await waitFor(() => !app.orchestrator.atWork.has(iris.id));
+      await waitFor(() => !app.orchestrator.threadWork.has(r.channelId));
     } finally { releaseActor(); releaseEvaluation(); await pending; }
     assert.equal(app.store.traces(iris.id, 1)[0].status, "stopped");
     assert.equal(app.store.routine(r.id).enabled, false);

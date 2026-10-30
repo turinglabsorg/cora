@@ -35,6 +35,8 @@ export const config = {
   hermesBaseUrl: setting("HERMES_BASE_URL") || "http://127.0.0.1:11434/v1",
   claudeBin: setting("CLAUDE_BIN") || "claude",
   codexBin: setting("CODEX_BIN") || "codex",
+  grokBin: setting("GROK_BIN") || "grok",
+  museBin: setting("MUSE_BIN") || "muse",
   codexModelsFile: setting("CODEX_MODELS") || "",
   hushBin: setting("HUSH_BIN") || "hush",
   vapidKey: env.VAPID_KEY || "",

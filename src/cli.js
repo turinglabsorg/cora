@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -120,42 +121,55 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
     }), { mode: 0o600 });
     args.push("--mcp-config", mcpFile, "--allowedTools", toolNames.map((name) => `mcp__cora__${name}`).join(","));
   }
-  let data = null;
-  const texts = textSteps(onStep);
-  const onLine = (line) => {
-    const event = JSON.parse(line);
-    if (event.type === "result") data = event;
-    if (event.type !== "assistant") return;
-    for (const block of event.message?.content || []) {
-      if (block.type === "thinking" || block.type === "redacted_thinking") {
-        texts.flush();
-        onStep?.(block.thinking?.trim() ? { type: "thinking", text: block.thinking } : { type: "thinking", hidden: true });
-      } else if (block.type === "text" && block.text?.trim()) {
-        texts.text(block.text);
-      } else if (block.type === "tool_use") {
-        texts.flush();
-      }
-    }
-  };
+  const stream = messageStream(onStep);
   try {
-    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine, authEnv, signal });
+    const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine: stream.onLine, authEnv, signal });
     signal?.throwIfAborted();
     if (out.timedOut) throw new Error(`claude: no answer within ${Math.round(timeoutMs / 1000)}s`);
-    if (!data) throw new Error(`claude: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`);
-    if (data.is_error) throw new Error(`claude: ${String(data.result || data.subtype || "error").slice(0, 240)}`);
-    texts.finish(data.result);
-    const used = data.usage || {};
-    return {
-      text: String(data.result || ""),
-      // Cached input was still read for this turn: it counts as what the turn cost.
-      usage: {
-        in: (Number(used.input_tokens) || 0) + (Number(used.cache_read_input_tokens) || 0) + (Number(used.cache_creation_input_tokens) || 0),
-        out: Number(used.output_tokens) || 0,
-      },
-    };
+    return stream.answer("claude", out);
   } finally {
     rmSync(mcpFile, { force: true });
   }
+}
+
+/**
+ * Claude Code's stream-json, which Grok Build speaks too: thinking, text and
+ * tool use as they come, then one result with the answer and the tokens.
+ */
+function messageStream(onStep) {
+  let data = null;
+  const texts = textSteps(onStep);
+  return {
+    onLine(line) {
+      const event = JSON.parse(line);
+      if (event.type === "result") data = event;
+      if (event.type !== "assistant") return;
+      for (const block of event.message?.content || []) {
+        if (block.type === "thinking" || block.type === "redacted_thinking") {
+          texts.flush();
+          onStep?.(block.thinking?.trim() ? { type: "thinking", text: block.thinking } : { type: "thinking", hidden: true });
+        } else if (block.type === "text" && block.text?.trim()) {
+          texts.text(block.text);
+        } else if (block.type === "tool_use") {
+          texts.flush();
+        }
+      }
+    },
+    answer(name, out) {
+      if (!data) throw new Error(`${name}: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`);
+      if (data.is_error) throw new Error(`${name}: ${String(data.result || data.subtype || "error").slice(0, 240)}`);
+      texts.finish(data.result);
+      const used = data.usage || {};
+      return {
+        text: String(data.result || ""),
+        // Cached input was still read for this turn: it counts as what the turn cost.
+        usage: {
+          in: (Number(used.input_tokens) || 0) + (Number(used.cache_read_input_tokens) || 0) + (Number(used.cache_creation_input_tokens) || 0),
+          out: Number(used.output_tokens) || 0,
+        },
+      };
+    },
+  };
 }
 
 /**
@@ -288,5 +302,141 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     return { text, usage: used };
   } finally {
     rmSync(outFile, { force: true });
+  }
+}
+
+/** The owner's Claude Code and Cursor setup Grok would otherwise bring along: agents, hooks, MCP servers, rules, skills. */
+const GROK_IMPORTS = ["CLAUDE", "CURSOR"].flatMap((source) => ["AGENTS", "HOOKS", "MCPS", "RULES", "SKILLS"].map((kind) => `GROK_${source}_${kind}_ENABLED`));
+
+/**
+ * Grok's config for Cora's runs: only Cora's MCP server, whose session arrives
+ * per run through ${...} placeholders Grok fills in from the environment, so
+ * runs in parallel share it.
+ */
+export function grokConfig() {
+  return [
+    "# Written by Cora: Grok Build runs Cora's agents with Cora's tools only.",
+    "[mcp_servers.cora]",
+    `command = ${tomlString(process.execPath)}`,
+    `args = [${tomlString(MCP_SCRIPT)}]`,
+    'env = { CORA_BRIDGE_URL = "${CORA_BRIDGE_URL}", CORA_BRIDGE_TOKEN = "${CORA_BRIDGE_TOKEN}" }',
+    "",
+  ].join("\n");
+}
+
+/**
+ * One agent turn on Grok Build. Grok has no per-run MCP flag and keeps every session
+ * on disk, prompts and a search index included, so each turn gets a Grok home of its
+ * own that is gone when the turn ends: Cora's MCP server in its config.toml, the
+ * account's login read where it lives (GROK_AUTH_PATH), so turns on one account run
+ * side by side and the machine's own login works without a copy. An empty HOME and
+ * the import switches keep the owner's Claude and Cursor setup out, and search_tool
+ * and use_tool are its only tools: through them the model reaches Cora's and nothing
+ * else. `home` keeps what Grok last said it can run, for the model list.
+ */
+export async function runGrok({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", authEnv, residentAuth = false, home, signal }) {
+  if (!authEnv || (!authEnv.GROK_HOME && !residentAuth)) throw new Error("subscription da collegare");
+  const auth = join(authEnv.GROK_HOME || join(homedir(), ".grok"), "auth.json");
+  const id = randomBytes(6).toString("hex");
+  const runHome = join(workDir, `grok-${id}`);
+  const empty = join(runHome, "home");
+  mkdirSync(empty, { recursive: true, mode: 0o700 });
+  writeFileSync(join(runHome, "config.toml"), grokConfig(), { mode: 0o600 });
+  const promptFile = join(runHome, "prompt.md");
+  writeFileSync(promptFile, prompt, { mode: 0o600 });
+  const args = [
+    "--prompt-file", promptFile, "--output-format", "streaming-messages-json", "-m", model,
+    "--system-prompt-override", system, "--tools", "search_tool,use_tool", "--always-approve",
+    "--no-auto-update", "--no-memory", "--no-subagents", "--disable-web-search",
+    ...(effort ? ["--effort", effort] : []),
+  ];
+  const tools = mcp && toolNames.length;
+  const env = {
+    HOME: empty, GROK_HOME: runHome, GROK_AUTH_PATH: auth, GROK_DISABLE_AUTOUPDATER: "1", GROK_MEMORY: "0",
+    ...Object.fromEntries(GROK_IMPORTS.map((name) => [name, "0"])),
+    CORA_BRIDGE_URL: tools ? mcp.url : "", CORA_BRIDGE_TOKEN: tools ? mcp.token : "",
+  };
+  const stream = messageStream(onStep);
+  try {
+    const out = await run(bin, args, { cwd: workDir, timeoutMs, onLine: stream.onLine, env, authEnv, signal });
+    signal?.throwIfAborted();
+    if (out.timedOut) throw new Error(`grok: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    return stream.answer("grok", out);
+  } finally {
+    if (home) {
+      try {
+        mkdirSync(home, { recursive: true, mode: 0o700 });
+        copyFileSync(join(runHome, "models_cache.json"), join(home, "models_cache.json"));
+      } catch {}
+    }
+    rmSync(runHome, { recursive: true, force: true });
+  }
+}
+
+/** Muse Code with nothing of its own: no built-in tools, rules from other agents, reminder agents, web or session log. */
+const MUSE_FLAGS = [
+  "--json", "--preset", "empty", "--no-foreign-personal-context", "--disable-reminders", "--disable-request-user-input",
+  "--disable-web-tools", "--no-session-log", "--approval-mode", "never",
+  // Meta trains on a subscriber's turns unless told not to.
+  "--contributor-mode", "off",
+];
+
+/**
+ * One agent turn on Muse Code, one-shot. Cora's system prompt replaces Muse's own,
+ * and its MCP server is handed over for this run only, so the account's settings
+ * never change. Credentials stay in a file: on a Mac a service cannot always
+ * reach the Keychain, and on Linux the file is all there is.
+ */
+export async function runMuse({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", authEnv, residentAuth = false, signal }) {
+  if (!authEnv || (!authEnv.XDG_CONFIG_HOME && !residentAuth)) throw new Error("subscription da collegare");
+  mkdirSync(workDir, { recursive: true, mode: 0o700 });
+  const id = randomBytes(6).toString("hex");
+  const promptFile = join(workDir, `muse-${id}.md`);
+  writeFileSync(promptFile, prompt, { mode: 0o600 });
+  const tools = mcp && toolNames.length;
+  const server = { command: process.execPath, args: [MCP_SCRIPT], env: { CORA_BRIDGE_URL: "${CORA_BRIDGE_URL}", CORA_BRIDGE_TOKEN: "${CORA_BRIDGE_TOKEN}" } };
+  const args = [
+    "exec", ...MUSE_FLAGS, "--model", model, ...(effort ? ["--reasoning-effort", effort] : []),
+    "-c", `run.system_prompt=${JSON.stringify(system)}`,
+    ...(tools ? ["-c", `mcpServers.cora=${JSON.stringify(server)}`] : []),
+    "--prompt-file", promptFile,
+  ];
+  const env = { MUSE_NO_AUTO_UPDATE: "1", TBH_CREDENTIAL_BACKEND: "file", ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
+  const texts = textSteps(onStep);
+  let said = "";
+  let answer = null;
+  let failure = "";
+  const used = { in: 0, out: 0 };
+  const onLine = (line) => {
+    const event = JSON.parse(line);
+    const payload = event.payload || {};
+    const type = String(event.payload_type || "");
+    if (type === "run.output.delta") said += payload.text || "";
+    else if (type === "task.lifecycle.proposed" && String(payload.event?.task_kind || "").startsWith("tool.")) {
+      // What it wrote before reaching for a tool was its reasoning, not the answer.
+      if (said.trim()) texts.text(said);
+      said = "";
+      texts.flush();
+    } else if (type === "task.lifecycle.failed") failure = String(payload.event?.reason || failure);
+    else if (type === "run.usage") {
+      for (const item of payload.models || []) {
+        used.in += Number(item.input_tokens) || 0;
+        used.out += (Number(item.output_tokens) || 0) + (Number(item.reasoning_tokens) || 0);
+      }
+    } else if (type.startsWith("run.terminal.")) {
+      if (payload.terminal === "completed") answer = String(payload.text ?? said);
+      else failure = String(payload.reason || payload.terminal || failure);
+    }
+  };
+  try {
+    const out = await run(bin, args, { cwd: workDir, timeoutMs, onLine, env, authEnv, signal });
+    signal?.throwIfAborted();
+    if (out.timedOut) throw new Error(`muse: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    // stdout is the event stream; the reason a run stopped is its last line on stderr.
+    if (answer === null) throw new Error(`muse: ${(failure || out.stderr.trim().split("\n").pop() || "").slice(0, 240) || `exit ${out.code}`}`);
+    texts.finish(answer);
+    return { text: answer, usage: used };
+  } finally {
+    rmSync(promptFile, { force: true });
   }
 }

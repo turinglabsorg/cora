@@ -76,7 +76,6 @@ export class Orchestrator {
     this.dmAgent = new Map();
     this.routineRuns = new Set();
     // An agent has one computer, so it runs one task at a time: what it is on, by agent id.
-    this.atWork = new Map();
     this.threadWork = new Map();
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
     this.releaseAfterMs = RELEASE_AFTER_MS;
@@ -591,7 +590,7 @@ export class Orchestrator {
 
   /** True when no channel has a round running or scheduled, and no agent is still working. */
   quiet() {
-    return !this.atWork.size && !this.threadWork.size && [...this.states.values()].every((state) => !state.running && !state.nextRoundAt && !state.pending && !state.working?.size);
+    return !this.threadWork.size && [...this.states.values()].every((state) => !state.running && !state.nextRoundAt && !state.pending && !state.working?.size);
   }
 
   async runRound(state) {
@@ -697,15 +696,13 @@ export class Orchestrator {
       }
     };
     const work = async (agent, isForced) => {
-      // Already on a task elsewhere: it still answers, but it does not take its computer
-      // for a second job at the same time.
-      const busyWith = this.atWork.get(agent.id);
-      const computer = agent.tools && (queued ? queued.kind === "owner" : state.ownerOrigin) && !busyWith && !this.threadWork.has(state.id);
+      // Every thread gets its own instance of the agent, computer included: one task per
+      // thread, and as many threads at once as people talk to it in.
+      const computer = agent.tools && (queued ? queued.kind === "owner" : state.ownerOrigin) && !this.threadWork.has(state.id);
       for (const [id, item] of state.humanQueue) {
         if ((id === queued?.id || snapshot.includes(item)) && (!item.addressed?.length || item.addressed.includes(agent.id))) state.humanQueue.delete(id);
       }
       const started = Date.now();
-      if (computer) this.atWork.set(agent.id, `una richiesta ${this.channelMeta(state.id).where || "in chat"}`);
       if (computer) this.threadWork.set(state.id, agent.id);
       const say = (text, target = state.id) => this.postDirect(agent, state, target, text);
       // An agent at work shows it the way a person does: the typing indicator, kept alive
@@ -729,7 +726,6 @@ export class Orchestrator {
         else return;
       } finally {
         working.stop();
-        if (computer) this.atWork.delete(agent.id);
         if (computer) this.threadWork.delete(state.id);
       }
       if (!result.text) {
@@ -831,8 +827,8 @@ export class Orchestrator {
       this.log({ type: "warning", agentId: agent.id, channelId: trace.channelId, text: "Il lavoro non riparte: il bot dell'agente non ha accesso al canale." });
       return;
     }
-    if (this.atWork.has(agent.id) || this.threadWork.has(trace.channelId)) return;
-    this.atWork.set(agent.id, "il compito interrotto");
+    // Each interrupted thread picks up on its own: an agent working in three threads resumes all three.
+    if (this.threadWork.has(trace.channelId)) return;
     this.threadWork.set(trace.channelId, agent.id);
     const state = this.state(trace.channelId);
     state.working ??= new Set();
@@ -853,7 +849,6 @@ export class Orchestrator {
       for (const id of result.handledMessageIds || []) state.humanQueue.delete(id);
     } finally {
       state.working.delete(agent.id);
-      this.atWork.delete(agent.id);
       this.threadWork.delete(state.id);
       if (state.humanQueue.size) this.schedule(state, 300);
     }
@@ -1197,9 +1192,9 @@ export class Orchestrator {
       return { status: "blocked" };
     }
     if (this.store.routine(routine.id)?.updatedAt !== routine.updatedAt) return { status: "stopped" };
-    // One agent, one computer: a routine that lands on a busy agent waits for its next turn
-    // instead of opening a second session on the same work.
-    const busyWith = this.atWork.get(agent.id) || (this.threadWork.has(routine.channelId) ? "un compito già attivo in questo thread" : null);
+    // One task per thread: a routine that lands on a thread already at work waits for its next
+    // turn instead of opening a second session on the same work. Other threads do not matter.
+    const busyWith = this.threadWork.has(routine.channelId) ? "un compito già attivo in questo thread" : null;
     if (busyWith) {
       this.store.recordRoutineRun(routine.id, "skipped", `saltata: stava già lavorando a ${busyWith}`);
       this.log({ type: "routine-skip", agentId: agent.id, channelId: routine.channelId, text: `${routine.name}: stava già lavorando` });
@@ -1209,7 +1204,6 @@ export class Orchestrator {
     const run = this.store.beginRoutineRun(routine, { manual, resumeRunId });
     if (!run) return { status: "busy" };
     this.routineRuns.add(routine.id);
-    this.atWork.set(agent.id, `la routine «${routine.name}»`);
     this.threadWork.set(routine.channelId, agent.id);
     this.log({ type: "routine-start", agentId: agent.id, channelId: routine.channelId, text: routine.name, manual });
     const state = this.state(routine.channelId);
@@ -1255,7 +1249,6 @@ export class Orchestrator {
       clearInterval(typing);
       this.routineRuns.delete(routine.id);
       state.working.delete(agent.id);
-      this.atWork.delete(agent.id);
       this.threadWork.delete(routine.channelId);
       if (state.humanQueue.size) this.schedule(state, 300);
     }

@@ -186,7 +186,7 @@ test("concurrent manual requests share one attempt and rescheduling cannot archi
   assert.equal(f.app.store.pendingRoutineRuns().length, 1);
   await f.request(`/api/routines/${reminder.id}`, { method: "PUT", body: { runAt: "2055-01-01T10:00:00Z" } });
   gate.resolve();
-  await waitFor(() => !f.app.orchestrator.atWork.has(f.agent.id));
+  await waitFor(() => !f.app.orchestrator.threadWork.has(reminder.channelId));
   assert.equal(f.app.store.routine(reminder.id).runAt, "2055-01-01T10:00:00.000Z");
   assert.equal(f.app.store.routine(reminder.id).lastStatus, null);
   assert.equal(f.app.store.routineArchive().total, 0);

@@ -14,7 +14,8 @@ const path = require("node:path");
 const readline = require("node:readline");
 const provider = path.basename(process.argv[1]);
 const argv = process.argv.slice(2);
-const directory = process.env.CODEX_HOME || process.env.CLAUDE_CONFIG_DIR;
+// Grok runs in Cora's own home and reads the login where GROK_AUTH_PATH says; Muse keeps it in XDG_CONFIG_HOME.
+const directory = process.env.CODEX_HOME || process.env.CLAUDE_CONFIG_DIR || (process.env.GROK_AUTH_PATH ? path.dirname(process.env.GROK_AUTH_PATH) : process.env.GROK_HOME) || process.env.XDG_CONFIG_HOME;
 if (!directory) process.exit(9);
 const marker = path.join(directory, "fixture-account.json");
 const state = () => JSON.parse(fs.readFileSync(${JSON.stringify(control)}, "utf8"));
@@ -35,6 +36,15 @@ if (argv.includes("app-server")) {
       const timer = setInterval(() => { if (state().complete) { clearInterval(timer); save(); line({ method: "account/login/completed", params: { success: true } }); } }, 50);
     }
   });
+} else if (argv[0] === "login" && (provider === "grok" || provider === "muse")) {
+  const code = state().evilUrl ? "EVIL-CODE" : "TEST-ONLY";
+  const url = state().evilUrl || (provider === "grok" ? "https://accounts.x.ai/oauth2/device?user_code=" + code : "https://auth.meta.com/oauth/device/?code=" + code);
+  process.stdout.write("Open this page to sign in:\\n  " + url + "\\nconfirm this code matches:\\n  " + code + "\\n\\nWaiting for approval...\\n");
+  const timer = setInterval(() => { if (state().complete) { clearInterval(timer); save(); process.stdout.write("Logged in.\\n"); process.exit(0); } }, 50);
+} else if (argv[0] === "models" && provider === "grok") {
+  process.stdout.write(saved() ? "You are logged in with grok.com.\\n\\nAvailable models:\\n  * grok-4.7 (default)\\n" : "You are not authenticated.\\n");
+} else if (argv[0] === "usage" && provider === "muse") {
+  process.stdout.write(saved() ? "Tier: Muse Code High Usage\\nWindow: 0% used\\n" : "muse usage: not logged in: run \`muse login\` first\\n");
 } else if (argv[0] === "auth" && argv[1] === "status") {
   const account = saved();
   line({ loggedIn: Boolean(account), authMethod: account ? "claude.ai" : "none", email: account?.email || "", subscriptionType: account?.planType || "", configDirectory: state().wrongDirectory ? "/global-profile" : directory });
@@ -54,19 +64,20 @@ if (argv.includes("app-server")) {
     const account = saved();
     const record = { provider, directory, argv, account: account?.email, inheritedKeys: Object.keys(process.env).filter((key) => /TOKEN|API_KEY|AUTH_TOKEN/.test(key)) };
     fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(record) + "\\n");
-    if (!account) { process.stderr.write("Login expired · Please run /login"); process.exit(1); }
+    if (!account) { process.stderr.write(provider === "grok" ? "Not signed in. Run \`grok login\` to authenticate." : "Login expired · Please run /login"); process.exit(1); }
     const text = "Identity: " + account.email;
-    if (provider === "claude") line({ type: "result", result: text });
+    if (provider === "claude" || provider === "grok") line({ type: "result", result: text });
+    else if (provider === "muse") line({ payload_type: "run.terminal.completed", payload: { terminal: "completed", text } });
     else { fs.writeFileSync(argv[argv.indexOf("-o") + 1], text); line({ type: "item.completed", item: { type: "agent_message", text } }); }
   });
 }
 `;
-  for (const provider of ["claude", "codex"]) {
+  for (const provider of ["claude", "codex", "grok", "muse"]) {
     writeFileSync(join(root, provider), source);
     chmodSync(join(root, provider), 0o755);
   }
   return {
-    claude: join(root, "claude"), codex: join(root, "codex"),
+    claude: join(root, "claude"), codex: join(root, "codex"), grok: join(root, "grok"), muse: join(root, "muse"),
     set: (value) => writeFileSync(control, JSON.stringify(value)),
     calls: () => { try { return readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); } catch { return []; } },
   };

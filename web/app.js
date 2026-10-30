@@ -29,16 +29,20 @@ function setLanguage(lang) {
 const PROVIDERS = {
   claude: "Claude (abbonamento)",
   codex: "ChatGPT (abbonamento)",
+  grok: "Grok (abbonamento)",
+  muse: "Meta Muse (abbonamento)",
   ollama: "Ollama Cloud",
   orcarouter: "OrcaRouter",
   hermes: "Hermes Agent",
 };
 // Who runs the loop is one choice; which model thinks is another. Cora's own harness
-// drives Ollama and the routers; Claude Code, Codex and Hermes drive themselves.
+// drives Ollama and the routers; Claude Code, Codex, Grok Build, Muse Code and Hermes drive themselves.
 const HARNESSES = {
   cora: { label: "Harness di Cora", hint: "Cora guida il modello e gli passa gli strumenti.", providers: ["ollama", "orcarouter"] },
   claude: { label: "Claude Code", hint: "Claude guida sé stesso con il tuo abbonamento.", providers: ["claude"] },
   codex: { label: "Codex", hint: "Codex guida sé stesso con il tuo abbonamento.", providers: ["codex"] },
+  grok: { label: "Grok Build", hint: "Grok guida sé stesso con il tuo abbonamento.", providers: ["grok"] },
+  muse: { label: "Muse Code", hint: "Muse guida sé stesso con il tuo abbonamento Meta.", providers: ["muse"] },
   hermes: { label: "Hermes", hint: "Hermes guida sé stesso sui modelli del suo endpoint, di solito quelli di questa macchina.", providers: ["hermes"] },
 };
 const harnessOf = (model) => {
@@ -57,18 +61,26 @@ const CONNECTIONS = [
   ["orcarouter", "OrcaRouter"],
   ["claude", "Claude Code"],
   ["codex", "Codex"],
+  ["grok", "Grok Build"],
+  ["muse", "Muse Code"],
   ["hermes", "Hermes Agent"],
 ];
 const PROVIDER_HINTS = {
   claude: "Claude Code non trovato su questa macchina",
   codex: "Codex non trovato su questa macchina",
+  grok: "Grok Build non trovato su questa macchina",
+  muse: "Muse Code non trovato su questa macchina",
   ollama: "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush",
   ollamaLocal: "nessun Ollama in ascolto su questa macchina",
   ollamaCloud: "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush",
   orcarouter: "manca CORA_ORCAROUTER_API_KEY in hush",
   hermes: "Hermes non trovato su questa macchina",
 };
-const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", ollama: "Ollama", orcarouter: "OrcaRouter", hermes: "Hermes" };
+const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", grok: "Grok", muse: "Meta", ollama: "Ollama", orcarouter: "OrcaRouter", hermes: "Hermes" };
+/** Each subscription's mark, so two accounts are told apart at a glance. */
+const SUBSCRIPTION_ICONS = { claude: "spark", codex: "chip", grok: "terminal", muse: "layers" };
+/** The account's name and the program that uses it, as Settings lists them. */
+const SUBSCRIPTION_NAMES = { claude: "Claude", codex: "ChatGPT / Codex", grok: "Grok / Grok Build", muse: "Meta / Muse Code" };
 const PRESETS = [
   ["Ogni mattina 9:00", "0 9 * * *"],
   ["Ogni sera 21:00", "0 21 * * *"],
@@ -903,6 +915,8 @@ const harnessReady = (harness) => harnessProviders(harness).length > 0;
 const HARNESS_NEEDS = {
   claude: "Claude Code non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   codex: "Codex non è installato su questa macchina: installalo sul server con l'utente di Cora.",
+  grok: "Grok Build non è installato su questa macchina: installalo sul server con l'utente di Cora.",
+  muse: "Muse Code non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   hermes: "Hermes non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   ollama: "Nessun Ollama su questa macchina e nessuna chiave Ollama Cloud.",
   orcarouter: "Nessuna chiave OrcaRouter.",
@@ -922,7 +936,7 @@ const HERMES_MIN_CONTEXT = 64000;
 const HERMES_TOO_SHORT = "troppo poco contesto per Hermes, che ne vuole almeno 64K";
 
 /** The harnesses that run on someone's subscription: the account is part of the choice. */
-const SUBSCRIPTION_HARNESSES = ["claude", "codex"];
+const SUBSCRIPTION_HARNESSES = ["claude", "codex", "grok", "muse"];
 
 const modelsOf = (harness, place) => {
   const providers = harnessProviders(harness);
@@ -1280,7 +1294,7 @@ function pickedModel(data, name) {
 }
 
 /** The program each subscription runs through, which is what has to be installed. */
-const CLI_NAMES = { claude: "Claude Code", codex: "Codex" };
+const CLI_NAMES = { claude: "Claude Code", codex: "Codex", grok: "Grok Build", muse: "Muse Code" };
 const SUBSCRIPTION_STATES = { disconnected: "Da collegare", connecting: "Accesso in corso", ready: "Collegata", error: "Accesso non riuscito" };
 
 function subscriptionPicker(currentId, { manage = false } = {}) {
@@ -1360,7 +1374,7 @@ function subscriptionPicker(currentId, { manage = false } = {}) {
     const state = record?.status || "disconnected";
     const status = h("span", { class: `subscription-status ${state}`, role: "status" }, h("i", { "aria-hidden": "true" }), SUBSCRIPTION_STATES[state]);
     content.append(h("header", { class: "subscription-head" },
-      h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(provider === "claude" ? "spark" : "chip")),
+      h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(SUBSCRIPTION_ICONS[provider])),
       h("div", { class: "grow" }, h("span", { class: "label" }, "Abbonamento"), h("h3", {}, raw(name))),
       record && !choosing ? status : null));
     if (actionError) content.append(h("p", { class: "subscription-error", role: "alert" }, icon("alert"), tr(actionError)));
@@ -1413,13 +1427,17 @@ function subscriptionPicker(currentId, { manage = false } = {}) {
         const open = btn(tr("Apri {provider}", { provider: name }), { icon: "external", cls: "primary", href: record.login.url, target: "_blank" });
         const steps = h("ol", { class: "subscription-steps" });
         if (record.login.userCode) {
-          steps.append(step("1", "Copia il codice", h("div", { class: "subscription-code" },
+          // Grok and Meta open the page with the code already in it: there it only has to match.
+          const confirmOnly = record.login.url.includes(record.login.userCode);
+          steps.append(step("1", confirmOnly ? "Il codice da confermare" : "Copia il codice", h("div", { class: "subscription-code" },
             h("strong", { tabindex: "0", "aria-label": "Codice dispositivo" }, raw(record.login.userCode)),
             btn("", { icon: "copy", cls: "ghost", title: "Copia codice", onclick: async () => {
               try { await navigator.clipboard.writeText(record.login.userCode); toast("Copiato"); }
               catch { toast("Non riesco a copiare: selezionalo a mano", true); }
             } }))),
-          step("2", tr("Accedi a {provider}", { provider: name }), h("p", {}, "Incolla il codice nella pagina ufficiale e autorizza il collegamento."), open));
+          step("2", tr("Accedi a {provider}", { provider: name }), h("p", {}, confirmOnly
+            ? "Controlla che la pagina ufficiale mostri lo stesso codice e autorizza il collegamento."
+            : "Incolla il codice nella pagina ufficiale e autorizza il collegamento."), open));
         } else {
           steps.append(step("1", tr("Accedi a {provider}", { provider: name }), h("p", {}, "Apri la pagina ufficiale e autorizza il collegamento."), open));
           if (record.login.manualCode) steps.append(step("2", "Torna qui con il codice", field("Codice di autorizzazione", authCode),
@@ -1480,7 +1498,7 @@ function subscriptionPicker(currentId, { manage = false } = {}) {
       if (provider) selections.set(provider, selectedId);
       const previous = provider;
       provider = value;
-      const needs = provider === "claude" || provider === "codex";
+      const needs = SUBSCRIPTION_HARNESSES.includes(provider);
       root.hidden = !needs;
       input.disabled = !needs;
       if (previous !== provider) {
@@ -2702,7 +2720,8 @@ function transportChoice(kind) {
 }
 
 function subscriptionPlanLabel(plan) {
-  return ({ free: "Free", pro: "Pro", plus: "Plus", max: "Max", team: "Team", enterprise: "Enterprise", business: "Business", self_serve_business_prolite: "Business" })[plan] || tr("Abbonamento attivo");
+  // Meta names its tiers itself ("Muse Code High Usage"): those are shown as they come.
+  return ({ free: "Free", pro: "Pro", plus: "Plus", max: "Max", team: "Team", enterprise: "Enterprise", business: "Business", self_serve_business_prolite: "Business" })[plan] || (/\s/.test(plan) ? plan : tr("Abbonamento attivo"));
 }
 
 function instanceAccessPanel() {
@@ -2785,12 +2804,14 @@ function connectionsPanel() {
   });
   const residentList = h("div", { class: "resident-accounts" });
   const drawResidents = () => {
-    residentList.replaceChildren(...["claude", "codex"].map((provider) => {
+    // Claude and Codex are always listed; a newer CLI once it is installed or has an account here.
+    const listed = SUBSCRIPTION_HARNESSES.filter((provider) => provider === "claude" || provider === "codex" || S.data.providers?.[provider] || S.data.subscriptions?.some((item) => item.resident && item.provider === provider));
+    residentList.replaceChildren(...listed.map((provider) => {
       const record = S.data.subscriptions?.find((item) => item.resident && item.provider === provider);
       const connected = record?.status === "ready";
       return h("div", { class: "resident-account" },
-        h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(provider === "claude" ? "spark" : "chip")),
-        h("div", { class: "grow" }, h("b", {}, provider === "codex" ? "ChatGPT / Codex" : "Claude"),
+        h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(SUBSCRIPTION_ICONS[provider])),
+        h("div", { class: "grow" }, h("b", {}, raw(SUBSCRIPTION_NAMES[provider])),
           h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato"))
             : !S.data.providers?.[provider] ? tr("{cli} non installato su questa macchina", { cli: CLI_NAMES[provider] })
               : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
@@ -2808,7 +2829,7 @@ function connectionsPanel() {
     }
     scan.disabled = false;
   } });
-  const managed = ["claude", "codex"].map((provider) => {
+  const managed = SUBSCRIPTION_HARNESSES.filter((provider) => provider === "claude" || provider === "codex" || S.data.providers?.[provider]).map((provider) => {
     const existing = S.data.subscriptions?.find((item) => !item.resident && item.provider === provider);
     const picker = subscriptionPicker(existing?.id, { manage: true });
     picker.setProvider(provider);

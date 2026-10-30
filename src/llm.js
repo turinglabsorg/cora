@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { runClaude, runCodex, runHermes } from "./cli.js";
+import { runClaude, runCodex, runGrok, runHermes, runMuse } from "./cli.js";
+import { isSubscriptionProvider } from "./harnesses.js";
 
 const REQUEST_TIMEOUT_MS = 240000;
 
@@ -102,6 +103,8 @@ export function graphicsCards({ bin = "nvidia-smi", timeoutMs = 4000 } = {}) {
 export const PROVIDERS = {
   claude: "Claude (abbonamento)",
   codex: "ChatGPT (abbonamento)",
+  grok: "Grok (abbonamento)",
+  muse: "Meta Muse (abbonamento)",
   ollama: "Ollama Cloud",
   orcarouter: "OrcaRouter",
   hermes: "Hermes Agent",
@@ -123,6 +126,19 @@ const CLAUDE_MODELS = [
   { name: "claude-sonnet-5-5", label: "Sonnet 5.5" },
   { name: "claude-haiku-5-5", label: "Haiku 5.5" },
   { name: "claude-fable-5-1", label: "Fable 5.1" },
+];
+
+/** What Grok runs when its own cache has not been written yet. */
+const GROK_MODELS = [
+  { id: "grok-4.7", label: "Grok 4.7" },
+  { id: "grok-4.7-build-fast", label: "Grok 4.7 Build Fast" },
+  { id: "grok-4.6", label: "Grok 4.6" },
+];
+
+/** Muse Code lists its models only inside a session: these are Meta's catalog ids. */
+const MUSE_MODELS = [
+  { name: "muse-wonder-1.0", label: "Muse Wonder 1.0" },
+  { name: "muse-spark-1.3", label: "Muse Spark 1.3" },
 ];
 
 function callId() {
@@ -147,13 +163,17 @@ export function onPath(bin) {
 }
 
 export class LLM {
-  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
+  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", grokBin = "grok", museBin = "muse", grokHome = "", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
     this.hermes = { bin: hermesBin, home: hermesHome || join(homedir(), ".cora", "hermes-home"), baseUrl: String(hermesBaseUrl).replace(/\/$/, "") };
     this.ollamaUrl = ollamaUrl;
     this.ollamaKey = ollamaKey;
     this.routers = { orcarouter: { url: String(orcaUrl).replace(/\/$/, ""), key: orcaKey } };
     this.claudeBin = claudeBin;
     this.codexBin = codexBin;
+    this.grokBin = grokBin;
+    this.museBin = museBin;
+    // Grok's own home for the machine's login: Cora's MCP server lives in its config, never in the owner's.
+    this.grokHome = grokHome || join(homedir(), ".cora", "grok-home");
     this.cliWorkDir = cliWorkDir;
     this.bridge = bridge;
     this.subscriptions = subscriptions;
@@ -251,6 +271,8 @@ export class LLM {
     return {
       claude: onPath(this.claudeBin),
       codex: onPath(this.codexBin),
+      grok: onPath(this.grokBin),
+      muse: onPath(this.museBin),
       ollama: Boolean(this.ollamaKey) || this.localOllama,
       // An Ollama on this machine is not an Ollama Cloud account: it lists the cloud
       // models either way, and only a paired machine (or a key) can run them.
@@ -353,10 +375,9 @@ export class LLM {
     return splitModel(model).provider === "claude";
   }
 
-  /** Claude Code, Codex and Hermes run the whole tool loop themselves; Ollama and the routers go through the Cora harness. */
+  /** The CLIs run the whole tool loop themselves; Ollama and the routers go through the Cora harness. */
   isAgentic(model) {
-    const { provider } = splitModel(model);
-    return provider === "claude" || provider === "codex" || provider === "hermes";
+    return ["claude", "codex", "grok", "muse", "hermes"].includes(splitModel(model).provider);
   }
 
   /**
@@ -387,6 +408,12 @@ export class LLM {
     }
     if (available.codex) {
       for (const slug of this.codexModels()) models.push({ id: `codex/${slug}`, provider: "codex", label: slug, tools: true, vision: true, thinking: true });
+    }
+    if (available.grok) {
+      for (const model of this.grokModels()) models.push({ id: `grok/${model.id}`, provider: "grok", label: model.label, tools: true, vision: false, thinking: true });
+    }
+    if (available.muse) {
+      for (const model of MUSE_MODELS) models.push({ id: `muse/${model.name}`, provider: "muse", label: model.label, tools: true, vision: false, thinking: false });
     }
     if (available.ollama) {
       // One place decides what a model is and what it can do, asking the model when the
@@ -476,6 +503,19 @@ export class LLM {
     return ["gpt-6-sol", "gpt-6-luna"];
   }
 
+  /** What Grok last told this machine it can run, from its own cache: Cora's home first, then the owner's. */
+  grokModels() {
+    for (const file of [join(this.grokHome, "models_cache.json"), join(process.env.GROK_HOME || join(homedir(), ".grok"), "models_cache.json")]) {
+      try {
+        const listed = Object.entries(JSON.parse(readFileSync(file, "utf8")).models || {})
+          .filter(([, model]) => !model?.info?.hidden)
+          .map(([id, model]) => ({ id, label: String(model?.info?.name || id) }));
+        if (listed.length) return listed;
+      } catch {}
+    }
+    return GROK_MODELS;
+  }
+
   async capabilities(model, host = "") {
     const known = (await this.listModels({ host })).find((item) => item.id === model);
     if (known) return known;
@@ -490,7 +530,7 @@ export class LLM {
   async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal, host = "" }) {
     const { provider, name } = splitModel(model);
     subscriptionId ||= this.subscriptions?.defaultId(provider);
-    if (["claude", "codex"].includes(provider) && (!this.subscriptions || !subscriptionId)) throw new Error("subscription da collegare");
+    if (isSubscriptionProvider(provider) && (!this.subscriptions || !subscriptionId)) throw new Error("subscription da collegare");
     const runSignal = timeoutMs ? AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]) : signal;
     // A failed attempt is only retried when the agent had not started working: re-running a
     // turn that already used a tool would do its side effects twice.
@@ -505,8 +545,14 @@ export class LLM {
         model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal, signal: runSignal,
       };
       try {
-        if (provider === "claude" || provider === "codex") {
-          const invoke = (authEnv, residentAuth) => (provider === "claude" ? runClaude : runCodex)({ bin: provider === "claude" ? this.claudeBin : this.codexBin, ...options, authEnv, residentAuth,
+        if (isSubscriptionProvider(provider)) {
+          const cli = {
+            claude: { run: runClaude, bin: this.claudeBin },
+            codex: { run: runCodex, bin: this.codexBin },
+            grok: { run: runGrok, bin: this.grokBin },
+            muse: { run: runMuse, bin: this.museBin },
+          }[provider];
+          const invoke = (authEnv, residentAuth) => cli.run({ bin: cli.bin, ...options, authEnv, residentAuth, home: this.grokHome,
             workDir: authEnv ? join(this.cliWorkDir, subscriptionId) : this.cliWorkDir });
           return await this.subscriptions.run(subscriptionId, provider, runSignal, invoke);
         }

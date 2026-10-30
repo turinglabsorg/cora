@@ -3,11 +3,12 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { plainKeys } from "./box.js";
+import { HARNESSES, SUBSCRIPTION_PROVIDERS, isSubscriptionProvider } from "./harnesses.js";
 
 export const SHARED = "_shared";
 export const CONTEXT_LIMITS = { fileChars: 30000, totalChars: 60000, files: 20 };
 /** The providers a model id can name (provider/model). */
-export const MODEL_PROVIDERS = ["claude", "codex", "ollama", "orcarouter", "hermes"];
+export const MODEL_PROVIDERS = [...SUBSCRIPTION_PROVIDERS, "ollama", "orcarouter", "hermes"];
 
 function checkModel(value) {
   const model = cleanText(value, 160).trim();
@@ -393,7 +394,7 @@ export class Store {
       for (const record of this.subscriptions()) {
         if (!record.legacyHost) continue;
         delete record.legacyHost;
-        Object.assign(record, { status: "disconnected", email: "", plan: "", issue: "", label: record.provider === "claude" ? "Claude" : "ChatGPT", updatedAt: new Date().toISOString() });
+        Object.assign(record, { status: "disconnected", email: "", plan: "", issue: "", label: HARNESSES[record.provider]?.label || record.provider, updatedAt: new Date().toISOString() });
         this.stmt("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(record), record.id);
       }
       for (const agent of this.cachedAgents) {
@@ -605,17 +606,17 @@ export class Store {
     return this.subscriptions().find((record) => record.provider === provider && record.resident) || null;
   }
 
-  ensureResidentSubscriptions() {
-    for (const provider of ["claude", "codex"]) {
+  ensureResidentSubscriptions(providers = SUBSCRIPTION_PROVIDERS) {
+    for (const provider of providers) {
       if (this.residentSubscription(provider)) continue;
-      const record = this.createSubscription({ provider, label: provider === "claude" ? "Claude" : "ChatGPT" });
+      const record = this.createSubscription({ provider, label: HARNESSES[provider].label });
       record.resident = true;
       this.stmt("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(record), record.id);
     }
   }
 
   createSubscription({ provider, label }) {
-    if (!["claude", "codex"].includes(provider)) throw new ValidationError("provider subscription non valido");
+    if (!isSubscriptionProvider(provider)) throw new ValidationError("provider subscription non valido");
     const name = cleanText(label, 80).replace(/[\r\n]/g, " ").trim();
     if (!name) throw new ValidationError("nome subscription richiesto");
     const at = new Date().toISOString();
@@ -646,7 +647,7 @@ export class Store {
 
   checkAgentSubscription(agent, { unchanged = false } = {}) {
     const provider = (agent.model || this.settings.defaultModel).split("/")[0];
-    const needsSubscription = ["claude", "codex"].includes(provider);
+    const needsSubscription = isSubscriptionProvider(provider);
     if (!agent.subscriptionId) {
       const resident = this.settings.useResidentSubscriptions && this.residentSubscription(provider);
       if (needsSubscription && !unchanged && resident?.status !== "ready") throw new ValidationError("scegli una subscription collegata per questo modello");

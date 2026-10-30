@@ -128,7 +128,7 @@ export class Scheduler {
       const interrupted = pending.find((run) => run.routineId === routine.id && run.status === "interrupted");
       if (interrupted) {
         const trace = interrupted.traceId && this.store.trace(interrupted.traceId);
-        if (trace && routine.updatedAt === interrupted.routineUpdatedAt && !this.orchestrator.atWork.has(agent.id) && !this.orchestrator.threadWork.has(routine.channelId)) {
+        if (trace && routine.updatedAt === interrupted.routineUpdatedAt && !this.orchestrator.threadWork.has(routine.channelId)) {
           this.orchestrator.runRoutine(routine, { resumeTrace: trace, resumeRunId: interrupted.id }).catch((error) => this.log({ type: "error", text: `ripresa ${routine.name}: ${error.message}` }));
         }
         continue;

@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startCora } from "../src/main.js";
 import { fakeDocker, tempHome, waitFor } from "./helpers.js";
 import { identityCli } from "./subscription-fixtures.js";
 
-async function fixture(t, { storeSecret } = {}) {
+async function fixture(t, { storeSecret, harnesses = ["claude", "codex"] } = {}) {
   const home = tempHome();
   const identity = identityCli();
   const residentDirectories = {};
-  for (const provider of ["claude", "codex"]) {
+  for (const provider of harnesses) {
     const directory = join(home, `resident-${provider}`);
     mkdirSync(directory);
     writeFileSync(join(directory, "fixture-account.json"), JSON.stringify({ type: "chatgpt", email: `${provider}-resident@example.test`, planType: "pro" }));
@@ -20,6 +20,9 @@ async function fixture(t, { storeSecret } = {}) {
     adminPassword: "fixture-password", sessionKey: "fixture-session", residentDirectories,
     discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
     claudeBin: identity.claude, codexBin: identity.codex, hermesBin: "/missing/hermes", botTokenFor: () => "",
+    // Grok and Muse are not installed unless a test asks for them.
+    grokBin: harnesses.includes("grok") ? identity.grok : "/missing/grok", museBin: harnesses.includes("muse") ? identity.muse : "/missing/muse",
+    grokHome: join(home, "grok-home"),
     docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys", storeSecret,
   });
   await app.ready;
@@ -31,7 +34,7 @@ async function fixture(t, { storeSecret } = {}) {
     const response = await fetch(`${base}${path}`, { method, headers: { ...(auth ? { Cookie: cookie } : {}), ...(csrf ? { "X-Cora": "1" } : {}), "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: response.status, data: await response.json() };
   };
-  return { app, identity, request, residentDirectories };
+  return { app, home, identity, request, residentDirectories };
 }
 
 test("resident subscriptions are detected, default for both CLIs, and never receive login or logout", async (t) => {
@@ -83,7 +86,7 @@ test("turning off resident defaults blocks them without falling back from an exp
   assert.match((await app.llm.runAgent(options)).text, /codex-resident@example.test/);
 });
 
-test("disabling resident subscriptions also rejects work queued before the setting changed", async (t) => {
+test("disabling resident subscriptions refuses new work at once, while work already running finishes", async (t) => {
   const { app, request } = await fixture(t);
   const resident = app.store.residentSubscription("codex");
   const entered = Promise.withResolvers();
@@ -94,14 +97,12 @@ test("disabling resident subscriptions also rejects work queued before the setti
     return "active work completed";
   });
   await entered.promise;
-  let executed = false;
-  const queued = app.subscriptions.run(resident.id, "codex", undefined, async () => { executed = true; });
-  const rejected = assert.rejects(queued, /subscription da ricollegare/);
   await request("/api/settings", { method: "PUT", body: { useResidentSubscriptions: false } });
+  let executed = false;
+  await assert.rejects(app.subscriptions.run(resident.id, "codex", undefined, async () => { executed = true; }), /subscription da collegare/);
+  assert.equal(executed, false);
   release.resolve();
   assert.equal(await active, "active work completed");
-  await rejected;
-  assert.equal(executed, false);
 });
 
 test("API keys are stored through hush before taking effect, never returned and protected by auth and CSRF", async (t) => {
@@ -130,4 +131,45 @@ test("failed secret storage leaves the running provider unchanged and returns a 
   assert.equal(saved.status, 502);
   assert.equal(app.llm.providers().orcarouter, false);
   assert.doesNotMatch(JSON.stringify(saved), /fixture-private/);
+});
+
+test("Grok and Muse accounts sign in with a device code, say who they are, run in their own folder and leave when removed", async (t) => {
+  const { app, home, identity, request, residentDirectories } = await fixture(t, { harnesses: ["claude", "codex", "grok", "muse"] });
+  const state = (await request("/api/state")).data;
+  assert.equal(state.subscriptions.length, 4, "an installed Grok and Muse bring their machine accounts along");
+  assert.equal(state.subscriptions.find((item) => item.provider === "muse").plan, "Muse Code High Usage", "Muse's own tier, from muse usage");
+  for (const provider of ["grok", "muse"]) {
+    assert.equal(state.subscriptions.find((item) => item.provider === provider).status, "ready");
+    const result = await app.llm.runAgent({ model: `${provider}/test`, tools: [], system: "Test", prompt: "Identity?", timeoutMs: 3000 });
+    assert.match(result.text, new RegExp(`${provider}-resident@example.test`), "the machine's own login answers");
+    assert.equal(identity.calls().at(-1).directory, residentDirectories[provider]);
+  }
+  // Grok's machine login is read where it is; Cora's MCP server never lands in the machine's Grok home.
+  assert.ok(!existsSync(join(residentDirectories.grok, "config.toml")));
+
+  for (const provider of ["grok", "muse"]) {
+    identity.set({ complete: false });
+    const created = await request("/api/subscriptions", { method: "POST", body: { provider, label: `Team ${provider}` } });
+    assert.equal(created.status, 201);
+    const started = await request(`/api/subscriptions/${created.data.id}/login`, { method: "POST" });
+    assert.equal(started.data.status, "connecting");
+    assert.equal(started.data.login.userCode, "TEST-ONLY");
+    assert.equal(started.data.login.url, provider === "grok" ? "https://accounts.x.ai/oauth2/device?user_code=TEST-ONLY" : "https://auth.meta.com/oauth/device/?code=TEST-ONLY");
+    assert.equal(started.data.login.manualCode, false, "the owner confirms the code on the provider's page; nothing comes back to paste");
+    identity.set({ complete: true });
+    await waitFor(() => app.store.subscription(created.data.id).status === "ready", { what: `${provider} account ready` });
+    const account = join(home, "subscriptions", created.data.id);
+    const result = await app.llm.runAgent({ model: `${provider}/test`, subscriptionId: created.data.id, tools: [], system: "Test", prompt: "Identity?", timeoutMs: 3000 });
+    assert.match(result.text, new RegExp(`${created.data.id}@example.test`), "the account's own login answers, not the machine's");
+    assert.equal(identity.calls().at(-1).directory, account);
+    assert.equal((await request(`/api/subscriptions/${created.data.id}`, { method: "DELETE" })).status, 200);
+    assert.equal(app.store.subscription(created.data.id), null);
+    assert.ok(!existsSync(account), "its folder, login included, is gone");
+  }
+
+  identity.set({ complete: false, evilUrl: "https://evil.example/oauth/device?code=EVIL-CODE" });
+  const created = await request("/api/subscriptions", { method: "POST", body: { provider: "muse", label: "Phished" } });
+  const started = await request(`/api/subscriptions/${created.data.id}/login`, { method: "POST" });
+  assert.equal(started.data.login, undefined, "a sign-in page on any other host is never shown");
+  assert.notEqual(started.data.status, "ready");
 });

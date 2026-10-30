@@ -406,7 +406,7 @@ export function tempHome() {
 }
 
 /**
- * Stand-in `claude` and `codex` CLIs. They log their arguments, start the MCP
+ * Stand-in `claude`, `codex`, `grok`, `muse` and `hermes` CLIs. They log their arguments, start the MCP
  * server cora hands them, call the tool named in CORA_FAKE_TOOL (with
  * CORA_FAKE_ARGS) and answer with CORA_FAKE_REPLY plus the tool's output.
  */
@@ -437,6 +437,7 @@ process.stdin.on("data", (d) => { stdin += d; });
 process.stdin.on("end", async () => {
   let server = null;
   let hermesConfig = null;
+  let grokConfig = null;
   if (flavor === "claude") {
     const index = argv.indexOf("--mcp-config");
     if (index >= 0) server = JSON.parse(fs.readFileSync(argv[index + 1], "utf8")).mcpServers.cora;
@@ -451,6 +452,25 @@ process.stdin.on("end", async () => {
         env: { CORA_BRIDGE_URL: fill(pick(/CORA_BRIDGE_URL: (.*)$/m)), CORA_BRIDGE_TOKEN: fill(pick(/CORA_BRIDGE_TOKEN: (.*)$/m)) },
       };
     }
+  } else if (flavor === "grok") {
+    // Grok reads its MCP servers from config.toml in GROK_HOME and fills \${...} from its own environment.
+    const toml = fs.readFileSync(path.join(process.env.GROK_HOME, "config.toml"), "utf8");
+    grokConfig = toml;
+    const fill = (value) => value.replace(/\\$\\{(\\w+)\\}/g, (_, key) => process.env[key] || "");
+    if ((argv[argv.indexOf("--tools") + 1] || "").split(",").includes("use_tool")) {
+      server = {
+        command: JSON.parse(toml.match(/^command = (.*)$/m)[1]), args: JSON.parse(toml.match(/^args = (.*)$/m)[1]),
+        env: { CORA_BRIDGE_URL: fill("\${CORA_BRIDGE_URL}"), CORA_BRIDGE_TOKEN: fill("\${CORA_BRIDGE_TOKEN}") },
+      };
+    }
+  } else if (flavor === "muse") {
+    // Muse takes the server for this run in -c and fills \${...} in its env from its own environment.
+    const item = argv.find((arg) => arg.startsWith("mcpServers.cora="));
+    if (item) {
+      const config = JSON.parse(item.slice("mcpServers.cora=".length));
+      const fill = (value) => value.replace(/\\$\\{(\\w+)\\}/g, (_, key) => process.env[key] || "");
+      server = { command: config.command, args: config.args, env: Object.fromEntries(Object.entries(config.env).map(([key, value]) => [key, fill(value)])) };
+    }
   } else {
     const value = (key) => { const item = argv.find((arg) => arg.startsWith("mcp_servers.cora." + key + "=")); return item ? item.slice(("mcp_servers.cora." + key + "=").length) : null; };
     if (value("command")) {
@@ -464,7 +484,11 @@ process.stdin.on("end", async () => {
     process.stderr.write("Selected model is at capacity. Please try a different model.\\n");
     process.exit(1);
   }
-  const record = { flavor, argv, stdin, tools: null, output: null, hermesConfig, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
+  // Grok and Muse read the prompt from a file Cora deletes after the run: keep it as the run's input.
+  const promptFile = argv.indexOf("--prompt-file") >= 0 ? argv[argv.indexOf("--prompt-file") + 1] : "";
+  if (promptFile) stdin = fs.readFileSync(promptFile, "utf8");
+  const env = Object.fromEntries(["HOME", "GROK_HOME", "GROK_AUTH_PATH", "GROK_CLAUDE_MCPS_ENABLED", "GROK_CLAUDE_HOOKS_ENABLED", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TBH_CREDENTIAL_BACKEND"].map((key) => [key, process.env[key] || ""]));
+  const record = { flavor, argv, stdin, env, tools: null, output: null, hermesConfig, grokConfig, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
   if (control.hang) {
     fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ ...record, pid: process.pid }) + "\\n");
     setInterval(() => {}, 1000);
@@ -497,6 +521,28 @@ process.stdin.on("end", async () => {
   const line = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
   if (flavor === "hermes") {
     process.stdout.write(answer + "\\n");
+  } else if (flavor === "grok") {
+    const session = "fixture-" + process.pid;
+    fs.mkdirSync(path.join(process.env.GROK_HOME, "sessions", "work", session), { recursive: true });
+    line({ type: "system", subtype: "init", session_id: session, tools: ["search_tool", "use_tool"] });
+    line({ type: "assistant", message: { content: [{ type: "thinking", thinking: control.thinking || "Penso." }] } });
+    if (control.tool) {
+      line({ type: "assistant", message: { content: [{ type: "text", text: "Prima controllo." }] } });
+      line({ type: "assistant", message: { content: [{ type: "tool_use", name: "use_tool", input: { tool_name: "cora__" + control.tool, tool_input: control.args || {} } }] } });
+    }
+    line({ type: "assistant", message: { content: [{ type: "text", text: answer }] } });
+    line({ type: "result", subtype: "success", is_error: false, result: answer, usage: { input_tokens: 70, cache_read_input_tokens: 30, output_tokens: 12 } });
+  } else if (flavor === "muse") {
+    const event = (payload_type, payload) => line({ schema_version: 1, payload_type, payload });
+    if (control.tool) {
+      event("run.output.delta", { text: "Prima " });
+      event("run.output.delta", { text: "controllo." });
+      event("task.lifecycle.proposed", { event: { kind: "proposed", task_kind: "tool.mcp__cora__" + control.tool } });
+      event("tool.result", { text: record.output, correlation_facts: { tool_name: "mcp__cora__" + control.tool, outcome: "success" } });
+    }
+    event("run.output.delta", { text: answer });
+    event("run.usage", { models: [{ model: "muse-wonder-1.0", input_tokens: 80, cached_tokens: 20, output_tokens: 9, reasoning_tokens: 3 }] });
+    event("run.terminal.completed", { terminal: "completed", text: answer, reason: null });
   } else if (flavor === "claude") {
     line({ type: "system", subtype: "init" });
     line({ type: "assistant", message: { content: [{ type: "thinking", thinking: control.thinking || "" }] } });
@@ -517,7 +563,7 @@ process.stdin.on("end", async () => {
   }
 });
 `;
-  for (const name of ["claude", "codex", "hermes"]) {
+  for (const name of ["claude", "codex", "grok", "muse", "hermes"]) {
     writeFileSync(join(dir, name), source);
     chmodSync(join(dir, name), 0o755);
   }
@@ -526,6 +572,8 @@ process.stdin.on("end", async () => {
   return {
     claude: join(dir, "claude"),
     codex: join(dir, "codex"),
+    grok: join(dir, "grok"),
+    muse: join(dir, "muse"),
     hermes: join(dir, "hermes"),
     models,
     set(value) { writeFileSync(control, JSON.stringify(value)); },
