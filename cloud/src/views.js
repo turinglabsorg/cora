@@ -80,12 +80,12 @@ const ACCOUNT_ERRORS = {
 const ACCOUNT_NOTICES = { requested: "Request received. We will let you know when it is on air." };
 
 const PRIVACY = [
-  ["Who", "usecora.space is run by Turing Labs. It is the sign-in service for Cora spaces."],
+  ["Who", "usecora.space is run by DigitalOracles LTD. It is the sign-in service for Cora spaces."],
   ["What we keep", "When you sign in with Google or GitHub we keep your name, email address, profile picture and the account id that service gives us, plus the spaces you own and any space request you send. We never see your Google or GitHub password."],
   ["What a space keeps", "Agents, memories, chats and computers live inside each space, run for its owner. The sign-in service does not read them."],
   ["Waitlist", "If you join the waitlist we keep the email address and the company you give us, only to tell you when spaces open. Ask us and we remove it."],
   ["Cookies", "One keeps you signed in, and an anonymous visit counter (stored only as a hash) counts page views. No ads, no third-party trackers."],
-  ["Deleting", "From your account page you can delete your account at any time, once it owns no space. For anything else, reach Turing Labs through github.com/turinglabsorg."],
+  ["Deleting", "From your account page you can delete your account at any time, once it owns no space. For anything else, reach DigitalOracles LTD through digitaloracles.com."],
 ];
 
 const MARK = `<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="3"><circle cx="32" cy="32" r="18.5"/><g transform="rotate(-24 32 32)"><ellipse cx="32" cy="32" rx="18.5" ry="5.6" stroke-opacity="0.38"/><path d="M13.5 32A18.5 5.6 0 0 0 50.5 32"/></g></g></svg>`;
@@ -145,7 +145,7 @@ ${page === "landing" ? `<link rel="canonical" href="${BASE}/">` : ""}
 ${body}
 <footer class="foot">
   <div class="foot-brand">${MARK}<span>Cora</span></div>
-  <div class="foot-links"><span>Made by Turing Labs</span><a href="${REPO}">Source on GitHub</a><a href="${BASE}/privacy">Privacy</a></div>
+  <div class="foot-links"><a href="https://digitaloracles.com">Made by DigitalOracles LTD</a><a href="${REPO}">Source on GitHub</a><a href="${BASE}/privacy">Privacy</a></div>
 </footer>
 </body>
 </html>`;

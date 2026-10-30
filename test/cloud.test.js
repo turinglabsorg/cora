@@ -172,6 +172,8 @@ describe("usecora.space", () => {
     assert.equal(landing.status, 200);
     assert.match(landing.body, /AI agents that live/);
     assert.match(landing.body, /Bring your own<\/em> intelligence/);
+    assert.match(landing.body, /<a href="https:\/\/digitaloracles\.com">Made by DigitalOracles LTD<\/a>/);
+    assert.doesNotMatch(landing.body, /Made by Turing Labs/);
     assert.doesNotMatch(landing.body, /href="[^"]*\/(login|account)/, "the landing has no sign-in until it opens");
     assert.match(landing.headers["content-security-policy"], /frame-ancestors 'none'/);
     assert.match(landing.headers["content-security-policy"], /script-src 'self'/);
@@ -180,6 +182,9 @@ describe("usecora.space", () => {
     const www = await request("/privacy?x=1", { host: `www.${DOMAIN}` });
     assert.equal(www.status, 302);
     assert.equal(www.headers.location, `${origin}/privacy?x=1`);
+    const privacy = await request("/privacy");
+    assert.match(privacy.body, /usecora\.space is run by DigitalOracles LTD\./);
+    assert.doesNotMatch(privacy.body, /Turing Labs/);
     const nobody = await request("/", { host: `nobody.${DOMAIN}` });
     assert.equal(nobody.status, 404);
     assert.match(nobody.body, /no space called nobody/);
