@@ -25,6 +25,21 @@ function normalize(text) {
   return String(text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
+const escapeName = (name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * "@Name" outside code turns into the real mention `<@id>` (the same markup on
+ * Discord and Slack) for each person in `people`, longest names first so
+ * "@Anna Maria" is not taken for "@Anna".
+ */
+function tagPeople(parts, people) {
+  const named = [...people].filter(([, id]) => id).sort(([a], [b]) => b.length - a.length);
+  for (const [name, id] of named) {
+    const tagged = new RegExp(`(^|[^\\p{L}\\p{N}_@.])@${escapeName(name)}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`, "giu");
+    for (let index = 0; index < parts.length; index += 2) parts[index] = parts[index].replace(tagged, `$1<@${id}>`);
+  }
+}
+
 export function mentions(text, name) {
   const escaped = normalize(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|[^\\p{L}\\p{N}])@?${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(normalize(text));
@@ -75,8 +90,10 @@ export class Orchestrator {
     // Discord DM channels, each owned by the one agent whose bot received the message.
     this.dmAgent = new Map();
     this.routineRuns = new Set();
-    // An agent has one computer, so it runs one task at a time: what it is on, by agent id.
+    // One task per thread: what each thread is on, by channel id.
     this.threadWork = new Map();
+    // The names people go by, by server (or "slack"): who wrote or was tagged since the start, on top of the archive.
+    this.knownPeople = new Map();
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
     this.releaseAfterMs = RELEASE_AFTER_MS;
   }
@@ -165,6 +182,11 @@ export class Orchestrator {
     if (who.strip) content = content.slice(who.strip);
     // People or bots named with a real Discord mention who are not agents (e.g. "@GROG ci sei?").
     const others = (raw.mentions || []).filter((user) => !this.bots?.agentIdForUser(user.id)).map((user) => user.global_name || user.username);
+    const space = raw.guild_id || this.channelMeta(raw.channel_id).guildId;
+    if (who.kind === "owner" || who.kind === "human") this.learnPerson(space, raw.author?.id, [who.authorName, raw.author?.global_name, raw.author?.username]);
+    for (const user of raw.mentions || []) {
+      if (!user.bot && !this.bots?.agentIdForUser(user.id)) this.learnPerson(space, user.id, [user.member?.nick, user.global_name, user.username]);
+    }
     return {
       id: raw.id,
       at: Date.parse(raw.timestamp || "") || Date.now(),
@@ -468,6 +490,7 @@ export class Orchestrator {
     for (const [match, userId] of [...text.matchAll(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g)]) {
       const agentId = this.skBots?.agentIdForUser(userId);
       const name = agentId ? this.store.agent(agentId)?.name : await client.userName(userId);
+      if (name && !agentId) this.learnPerson("slack", userId, [name]);
       if (name) text = text.split(match).join(`@${name}`);
     }
     text = text
@@ -928,6 +951,41 @@ export class Orchestrator {
     return this.postAs(agent, state, text, undefined, undefined, { ...options, passive: true });
   }
 
+  learnPerson(space, id, names) {
+    if (!space || !id) return;
+    if (!this.knownPeople.has(space)) this.knownPeople.set(space, new Map());
+    const people = this.knownPeople.get(space);
+    if (!people.has(id)) people.set(id, new Set());
+    for (const name of names) if (String(name || "").trim()) people.get(id).add(String(name).trim());
+  }
+
+  /**
+   * Who a message in this channel can tag, name → id: the people who wrote in
+   * this server's channels (in the whole workspace on Slack) or were tagged
+   * there. Agents are tagged through their own bots instead, and a name two
+   * people share tags nobody.
+   */
+  peopleFor(state) {
+    const slack = transportOf(state.id) === "slack";
+    const meta = this.channelMeta(state.id);
+    const space = slack ? "slack" : meta.guildId;
+    if (!space) return new Map();
+    const channelIds = slack ? [] : [state.id, meta.parentId, ...this.channels.list().filter((channel) => channel.guildId === space).map((channel) => channel.id)];
+    const found = this.store.people([...new Set(channelIds.filter(Boolean))], slack ? "sl:" : "").map((row) => [row.id, row.name]);
+    for (const [id, names] of this.knownPeople.get(space) || []) for (const name of names) found.push([id, name]);
+    const agents = new Set(this.store.agents().map((agent) => normalize(agent.name)));
+    // By name as written in the chat, and by the same name in any case or accent: null when two people share it.
+    const names = new Map();
+    const ids = new Map();
+    for (const [id, name] of found) {
+      const key = normalize(name);
+      if (agents.has(key)) continue;
+      ids.set(key, ids.has(key) && ids.get(key) !== id ? null : id);
+      names.set(name, key);
+    }
+    return new Map([...names].map(([name, key]) => [name, ids.get(key)]));
+  }
+
   async discordMentions(agent, state, text) {
     const parts = String(text || "").split(/(```[\s\S]*?```|`[^`\n]*`)/g);
     for (const other of this.agentsFor(state.id)) {
@@ -943,6 +1001,7 @@ export class Orchestrator {
         parts[index] = parts[index].replace(tagged, `$1<@${id}>`).replace(addressed, `$1<@${id}>`);
       }
     }
+    if (parts.some((part, index) => index % 2 === 0 && part.includes("@"))) tagPeople(parts, this.peopleFor(state));
     return parts.join("");
   }
 
@@ -1011,6 +1070,7 @@ export class Orchestrator {
         parts[index] = parts[index].replace(tagged, `$1<@${id}>`).replace(addressed, `$1<@${id}>`);
       }
     }
+    if (parts.some((part, index) => index % 2 === 0 && part.includes("@"))) tagPeople(parts, this.peopleFor(state));
     return parts.join("");
   }
 

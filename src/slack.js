@@ -7,6 +7,7 @@ const PAGE = 200;
 const FATAL = new Set(["invalid_auth", "account_inactive", "token_revoked", "token_expired", "not_authed", "invalid_app_token"]);
 const BOLD = "\u0001";
 const CODE = "\u0000";
+const MENTION = "\u0002";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -22,7 +23,10 @@ export function escapeSlack(text) {
  */
 export function toMrkdwn(text) {
   const spans = [];
-  const kept = escapeSlack(text).replace(/```[\s\S]*?```|`[^`\n]*`/g, (match) => `${CODE}${spans.push(match) - 1}${CODE}`);
+  // A mention Cora wrote (<@U…>) is markup Slack has to read, not text to escape.
+  const mentions = [];
+  const marked = String(text ?? "").replace(/<@[UW][A-Z0-9]+>/g, (match) => `${MENTION}${mentions.push(match) - 1}${MENTION}`);
+  const kept = escapeSlack(marked).replace(/```[\s\S]*?```|`[^`\n]*`/g, (match) => `${CODE}${spans.push(match) - 1}${CODE}`);
   const converted = kept
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, "<$2|$1>")
     .replace(/\*\*([^*\n]+)\*\*/g, `${BOLD}$1${BOLD}`)
@@ -30,7 +34,8 @@ export function toMrkdwn(text) {
     .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1_$2_")
     .replace(/^(\s*)[-*] /gm, "$1• ")
     .replace(/^(#{1,6})\s+(.+)$/gm, (_, __, title) => `${BOLD}${title}${BOLD}`);
-  return converted.replace(new RegExp(BOLD, "g"), "*").replace(new RegExp(`${CODE}(\\d+)${CODE}`, "g"), (_, index) => spans[Number(index)]);
+  return converted.replace(new RegExp(BOLD, "g"), "*").replace(new RegExp(`${CODE}(\\d+)${CODE}`, "g"), (_, index) => spans[Number(index)])
+    .replace(new RegExp(`${MENTION}(\\d+)${MENTION}`, "g"), (_, index) => mentions[Number(index)]);
 }
 
 /** A direct message conversation (D…) is private to one person and one bot. */

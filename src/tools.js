@@ -75,7 +75,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "say",
-    description: "Write directly through Cora. Without channel_id, post in this conversation; with channel_id, post in an authorized channel from list_channels. Address a colleague as @Name: Cora resolves it to their real Discord mention when their bot can read that channel. No grog CLI, shell command, installation or extra login is needed. Your final reply is posted in this conversation anyway: here, use say only for a short first note before working and for progress; with channel_id, for replies and reports in another channel. Check the returned delivery result; do not post the same result again in your final reply.",
+    description: "Write directly through Cora. Without channel_id, post in this conversation; with channel_id, post in an authorized channel from list_channels. Address a colleague or a person as @Name, with the name the chat shows: Cora turns it into their real mention (an agent's when its bot can read that channel, a person's when they wrote or were tagged on this server). No grog CLI, shell command, installation or extra login is needed. Your final reply is posted in this conversation anyway: here, use say only for a short first note before working and for progress; with channel_id, for replies and reports in another channel. Check the returned delivery result; do not post the same result again in your final reply.",
     parameters: {
       type: "object",
       properties: { text: { type: "string" }, channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" } },

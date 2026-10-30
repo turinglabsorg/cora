@@ -857,6 +857,23 @@ export class Store {
     })).reverse();
   }
 
+  /** The people who wrote in these channels (or in every channel whose id starts with `prefix`), once per name they wrote under. */
+  people(channelIds, prefix = "") {
+    const where = [];
+    const params = [];
+    if (channelIds.length) {
+      where.push(`channel_id IN (${channelIds.map(() => "?").join(",")})`);
+      params.push(...channelIds.map(String));
+    }
+    if (prefix) {
+      where.push("channel_id >= ? AND channel_id < ?");
+      params.push(prefix, `${prefix.slice(0, -1)}${String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)}`);
+    }
+    if (!where.length) return [];
+    return this.db.prepare(`SELECT DISTINCT author_id AS id, author_name AS name FROM messages
+      WHERE (${where.join(" OR ")}) AND kind IN ('owner', 'human') AND author_id IS NOT NULL AND author_id != ''`).all(...params);
+  }
+
   /** The newest request in each panel room that the owner has not answered yet (requests on Discord or Telegram are answered there). */
   pendingRequests() {
     return this.stmt(`SELECT m.* FROM messages m WHERE (m.channel_id = 'web' OR m.channel_id LIKE 'web-%') AND m.kind = 'agent' AND m.meta LIKE '%"request"%'

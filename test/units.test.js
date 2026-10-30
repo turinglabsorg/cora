@@ -113,6 +113,7 @@ describe("writing for Slack", () => {
     assert.equal(toMrkdwn("- uno\n- due"), "• uno\n• due");
     assert.equal(toMrkdwn("prima `**non** qui` dopo"), "prima `**non** qui` dopo");
     assert.equal(toMrkdwn("a < b & c"), "a &lt; b &amp; c");
+    assert.equal(toMrkdwn("<@U0000000102> guarda: a <b> & c"), "<@U0000000102> guarda: a &lt;b&gt; &amp; c", "a mention stays a mention");
   });
 });
 

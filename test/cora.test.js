@@ -1554,6 +1554,29 @@ describe("agents in Discord", () => {
     assert.equal(discord.state.botPosts.length - before, 1, "repeated tool calls return the original delivery instead of posting twice");
   });
 
+  test("people on the team become real Discord mentions too: who wrote on this server or was tagged there, never a shared name or another server's", async (t) => {
+    const postina = app.store.createAgent({ name: "Postina", model: "ollama/test-model", tools: false, chattiness: 0 });
+    t.after(() => app.store.deleteAgent(postina.id));
+    const state = app.orchestrator.state(CHANNEL);
+    // Old enough never to come back in a transcript.
+    const wrote = (id, name, channel = CHANNEL) => app.store.appendArchive(channel, { id: `person-${id}-${name}`, at: 1000, authorId: id, authorName: name, kind: "human", agentId: null, content: "ciao" });
+    wrote("700000000000000071", "Lia");
+    wrote("700000000000000073", "Anna");
+    wrote("700000000000000074", "Anna");
+    wrote("700000000000000075", "Postina");
+    wrote("700000000000000076", "Ugo", OTHER_CHANNEL);
+    // Tagged by the owner before ever writing.
+    app.orchestrator.toItem({
+      id: "person-mention", channel_id: CHANNEL, guild_id: GUILD, content: "chiedi a <@700000000000000072>", timestamp: new Date().toISOString(),
+      author: { id: OWNER, username: "sam", global_name: "Sam" }, mentions: [{ id: "700000000000000072", username: "bruno.r", global_name: "Bruno" }],
+    });
+    const text = "@Lia e @Bruno: è pronto. @Anna resta testo, `@Lia` resta codice, @Postina è un agente, @Ugo è di un altro server.";
+    await app.orchestrator.postAs(postina, state, text, undefined, undefined, { passive: true });
+    const delivered = discord.state.webhookPosts.filter((post) => post.username === "Postina").at(-1);
+    assert.equal(delivered.content, "<@700000000000000071> e <@700000000000000072>: è pronto. @Anna resta testo, `@Lia` resta codice, @Postina è un agente, @Ugo è di un altro server.");
+    assert.equal(state.history.at(-1).content, text, "readable names remain in the archive");
+  });
+
   test("an owner task shares a file through Cora and refuses a disabled recipient", async (t) => {
     const sender = app.store.createAgent({ name: "File sender", model: "ollama/test-model", tools: true, chattiness: 0 });
     const recipient = app.store.createAgent({ name: "File recipient", model: "ollama/test-model", tools: true, chattiness: 0 });
@@ -3222,6 +3245,15 @@ describe("agents in Slack", () => {
     assert.match(prompt, /@Kim chiedi a @Silvia in #clienti: il sito \(https:\/\/dopamina\.it\) & altro/);
     assert.doesNotMatch(prompt, /Kim ★/, "a colleague is not the owner");
     assert.equal(post.text, "*fatto* e <https://dopamina.it|il link>");
+    await quiet();
+  });
+
+  test("on Slack a person who wrote is tagged for real, and the mention survives mrkdwn", async () => {
+    slack.state.posts.length = 0;
+    replies.set("Silvia", () => ({ content: "@Kim ci penso io, a < b." }));
+    slack.say({ text: "Silvia, rispondi a Kim" });
+    const post = await waitFor(() => slack.postsIn(SLACK_CHANNEL)[0], { what: "Silvia's answer" });
+    assert.equal(post.text, `<@${SLACK_STRANGER}> ci penso io, a &lt; b.`);
     await quiet();
   });
 
