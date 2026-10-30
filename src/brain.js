@@ -160,13 +160,14 @@ export function effortOf(agent) {
 }
 
 export class Brain {
-  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null }) {
+  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null }) {
     // The orchestrator admits one task per thread. Its current goal belongs to that task only.
     this.channelGoals = new Map();
     this.activeTurns = new Map();
     this.progressEvery = 20;
     this.traces = traces;
     this.push = push;
+    this.doc = doc;
     this.ownerInstructionsPath = ownerInstructionsPath;
     this.ownerInstructionsCache = { mtime: 0, text: "" };
     this.store = store;
@@ -578,6 +579,32 @@ export class Brain {
       ].map(({ id, name, kind }) => [id, { id, name, kind }])).values()],
       formatWhen: (ms) => formatWhen(ms, this.timezone),
     };
+    /**
+     * doc, as the owner's coding agents have it: a comment a command would publish is
+     * checked first, and so is what the agent tells people. A message is stopped once
+     * per turn, so the rewrite goes out; a borderline comment goes through when the
+     * agent runs the very same command again.
+     */
+    let docTalkBlocked = false;
+    const docAsked = new Set();
+    const docRefusal = async (name, args) => {
+      if (!this.doc?.installed) return "";
+      if (name === "shell") {
+        const command = String(args?.command || "");
+        const verdict = await this.doc.publishGuard(command, (path) => this.boxes.readFile(agent.id, path, 256 * 1024));
+        if (!verdict || (verdict.decision === "ask" && docAsked.has(command))) return "";
+        if (verdict.decision === "ask") docAsked.add(command);
+        trace.add({ type: "note", text: `doc: ${verdict.decision === "deny" ? "commento bloccato" : "commento da ricontrollare"} — ${verdict.reason}` });
+        return `error: not run. ${verdict.reason}${verdict.decision === "ask" ? " If it is right as it is, run exactly the same command again." : ""}`;
+      }
+      const text = name === "say" ? args?.text : name === "ask_owner" ? args?.question : name === "notify" ? args?.message : "";
+      if (!text || docTalkBlocked) return "";
+      const reason = await this.doc.replyCheck(String(text));
+      if (!reason) return "";
+      docTalkBlocked = true;
+      trace.add({ type: "note", text: `doc: messaggio fermato — ${reason}` });
+      return `error: not sent. ${reason}`;
+    };
     const runTool = async (name, args) => {
       const before = await news();
       const started = Date.now();
@@ -592,9 +619,11 @@ export class Brain {
       if (allowed && LOOKUP_TOOLS.has(name)) looked.add(name);
       else if (allowed && !TALK_TOOLS.has(name)) changed += 1;
       const waitingForOwner = blockedWork && !OWN_TOOLS.has(name) && !["say", "ask_owner", "notify", "list_channels"].includes(name);
+      const refusal = allowed && !repeated && !halted && !waitingForOwner ? await docRefusal(name, args) : "";
       let output = waitingForOwner ? { text: `error: the progress review found a real dependency: ${blockedWork}. Do not repeat searches or writes. Report completed results and ask the owner for the precise missing decision with ask_owner.` } : halted ? { text: "error: the owner asked you to stop. Do not run anything else: say where you had got to, in one line." }
         : !allowed ? { text: `error: the tool ${name} is not available now` }
         : repeated ? { text: "error: you have already done exactly this several times with the same result. Stop repeating it: write what you have so far and what is blocking you." }
+        : refusal ? { text: refusal }
         : await executeTool({ name, args }, ctx);
       if (name === "screenshot" && allowed && !halted) {
         const observed = createHash("sha256").update(output.image || output.text).digest("hex");
@@ -799,12 +828,24 @@ export class Brain {
         : "in questo turno non hai usato nessuno strumento: quindi non sono successe";
       return { kind: "claim", text, prompt: `[Cora] Nella risposta dici di aver fatto delle cose, ma ${done}. Falle adesso con gli strumenti. Se parli di qualcosa fatto in un turno precedente, controllalo adesso con gli strumenti prima di confermarlo. Se non puoi farlo, scrivi chiaramente che non l'hai fatto.` };
     };
-    const HARNESS_NOTES = { confirm: "chiedo conferma che sia finito", claim: "dice di aver fatto cose che nessuno strumento ha fatto: lo rimando a farle" };
+    /** doc reads the final reply once: one it stops is written again, and the rewrite goes out. */
+    let docChecked = false;
+    const docVerdict = async (raw) => {
+      if (docChecked || !this.doc?.installed || halted || Date.now() > deadline - 20000) return null;
+      const text = cleanReply(raw, agent) || "";
+      if (text.length < 40 || spokenMessages.includes(text)) return null;
+      docChecked = true;
+      const reason = await this.doc.replyCheck(text);
+      if (!reason) return null;
+      trace.add({ type: "note", text: `doc: risposta fermata — ${reason}` });
+      return { kind: "doc", text, prompt: `[Cora] ${reason} Scrivi di nuovo la risposta finale, senza rifare il lavoro.` };
+    };
+    const HARNESS_NOTES = { confirm: "chiedo conferma che sia finito", claim: "dice di aver fatto cose che nessuno strumento ha fatto: lo rimando a farle", doc: "doc ha fermato la risposta: la faccio riscrivere" };
     /** With a goal it is the goal that decides; without one, the harness' own reading of the answer. */
     const nextStep = async (raw) => {
       await settleNews();
       if (halted) return null;
-      return claimVerdict(raw) || (goal ? goalVerdict(raw) : verdict(raw));
+      return (await docVerdict(raw)) || claimVerdict(raw) || (goal ? goalVerdict(raw) : verdict(raw));
     };
 
     control.settle = settleNews;

@@ -17,11 +17,15 @@ for pair in \
   SLACK_APP_TOKEN:SLACK_APP_TOKEN \
   OLLAMA_API_KEY:OLLAMA_API_KEY \
   ORCAROUTER_API_KEY:ORCAROUTER_API_KEY \
-  VAPID_KEY:VAPID_KEY
+  VAPID_KEY:VAPID_KEY \
+  TYPESAFE_API_KEY:TYPESAFE_API_KEY
 do
   name=${pair%%:*}
   var=${pair##*:}
-  for stored in "CORA_$name" "CORO_$name"; do
+  candidates="CORA_$name CORO_$name"
+  # doc's own key, when this machine already has one, serves until the panel stores Cora's.
+  [ "$name" = TYPESAFE_API_KEY ] && candidates="$candidates $name"
+  for stored in $candidates; do
     if hush info "$stored" >/dev/null 2>&1; then
       set -- hush run --name "$stored" --env "$var" --redact -- "$@"
       break

@@ -287,7 +287,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         providers: llm.providers(),
         ollamaCloud: llm.cloudAccount || { signedIn: false, signinUrl: "" },
         // Which keys are stored, apart from whether the thing they unlock is reachable some other way.
-        keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key) },
+        keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key) },
+        doc: { installed: Boolean(brain.doc?.installed), ...(brain.doc?.installed ? brain.doc.activity() : {}) },
         subscriptions: subscriptions.list(),
         boxImage: { name: config.boxImage, ready: imageReady },
         timezone: config.timezone,
@@ -316,19 +317,25 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (action === "cancel" && method === "POST") return send(res, 200, await subscriptions.cancel(id));
       if (action === "check" && method === "POST") return send(res, 200, await subscriptions.check(id));
     }
-    const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter)\/key$/.exec(path);
+    const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter|typesafe)\/key$/.exec(path);
     if (providerKeyMatch && method === "PUT") {
       const body = await readJson(req, 4096);
       const key = String(body.key || "").trim();
       if (!key || key.length > 2048 || /[\r\n\x00]/.test(key)) throw new HttpError(400, "chiave API non valida");
       const provider = providerKeyMatch[1];
-      try { await storeSecret(provider === "ollama" ? "CORA_OLLAMA_API_KEY" : "CORA_ORCAROUTER_API_KEY", key); }
+      try { await storeSecret({ ollama: "CORA_OLLAMA_API_KEY", orcarouter: "CORA_ORCAROUTER_API_KEY", typesafe: "CORA_TYPESAFE_API_KEY" }[provider], key); }
       catch { throw new HttpError(502, "impossibile salvare la chiave in modo sicuro"); }
+      // TypeSafe is not a model provider: its key is doc's, for the checks on what agents say.
+      if (provider === "typesafe") {
+        if (brain.doc) brain.doc.key = key;
+        return send(res, 200, { provider, configured: true });
+      }
       if (provider === "ollama") llm.ollamaKey = key;
       else llm.routers.orcarouter.key = key;
       llm.cache = { at: 0, models: [] };
       return send(res, 200, { provider, configured: true });
     }
+    if (path === "/api/doc/probe" && method === "POST") return send(res, 200, brain.doc ? await brain.doc.probe() : { installed: false, runs: false, jev: false });
     if (path === "/api/subscriptions/resident/check" && method === "POST") {
       await subscriptions.discoverResidents();
       return send(res, 200, subscriptions.list().filter((record) => record.resident));

@@ -30,6 +30,9 @@ export const config = {
   ollamaKey: env.OLLAMA_API_KEY || "",
   orcaUrl: (setting("ORCAROUTER_URL") || "https://api.orcarouter.ai/v1").replace(/\/$/, ""),
   orcaKey: env.ORCAROUTER_API_KEY || "",
+  // doc's checks on what agents publish and say; Jev judges with this instance's TypeSafe key.
+  docDir: setting("DOC_DIR") || "",
+  typesafeKey: env.TYPESAFE_API_KEY || "",
   hermesBin: setting("HERMES_BIN") || "hermes",
   hermesHome: setting("HERMES_HOME") || join(homedir(), ".cora", "hermes-home"),
   hermesBaseUrl: setting("HERMES_BASE_URL") || "http://127.0.0.1:11434/v1",

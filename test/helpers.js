@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -399,6 +399,46 @@ exit 0
 `);
   chmodSync(script, 0o755);
   return { path: script, log, dir };
+}
+
+/**
+ * A stand-in doc: the two modules Cora runs, with doc's input and answer shapes. It
+ * stops a reply carrying STIMA-DI-PROVA or INCOLLA-QUI-IL-TOKEN, denies a comment
+ * with a /home/ path and holds one marked DA-RICONTROLLARE; every call is logged.
+ */
+export function fakeDoc() {
+  const root = mkdtempSync(join(tmpdir(), "cora-doc-"));
+  const log = join(root, "calls.jsonl");
+  mkdirSync(join(root, "doc"));
+  writeFileSync(join(root, "doc", "__init__.py"), "");
+  const record = `import json, os, sys, time
+payload = json.load(sys.stdin)
+def note(outcome):
+    log = os.environ.get("DOC_USAGE_LOG")
+    if log:
+        with open(log, "a") as usage:
+            if os.environ.get("TYPESAFE_API_KEY"):
+                usage.write(json.dumps({"ts": int(time.time()), "purpose": "check", "input_tokens": 100, "ms": 5}) + "\\n")
+            usage.write(json.dumps({"ts": int(time.time()), "purpose": "check", "outcome": outcome, "agent": "claude"}) + "\\n")
+with open(${JSON.stringify(log)}, "a") as calls:
+    calls.write(json.dumps({"module": __name__.split(".")[-1] if __name__ != "__main__" else os.path.basename(__file__)[:-3], "payload": payload, "key": os.environ.get("TYPESAFE_API_KEY", "")}) + "\\n")
+`;
+  writeFileSync(join(root, "doc", "reply_check.py"), `${record}
+text = payload.get("last_assistant_message") or ""
+blocked = "STIMA-DI-PROVA" in text or "INCOLLA-QUI-IL-TOKEN" in text or ("giorni di sviluppo" in text and os.environ.get("TYPESAFE_API_KEY"))
+note("blocked" if blocked else "passed")
+if blocked:
+    print(json.dumps({"decision": "block", "reason": "doc: your last reply breaks a rule (0.99), which the user's rules forbid. Rewrite it."}))
+`);
+  writeFileSync(join(root, "doc", "publish_guard.py"), `${record}
+command = (payload.get("tool_input") or {}).get("command") or ""
+decision = "deny" if "/home/" in command else "ask" if "DA-RICONTROLLARE" in command else ""
+note(decision or "allow")
+if decision:
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": "doc: this comment breaks the publishing rules: it contains local paths."}}))
+`);
+  const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+  return { root, calls };
 }
 
 export function tempHome() {

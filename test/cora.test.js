@@ -13,10 +13,11 @@ import { identityCli } from "./subscription-fixtures.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
+import { Doc } from "../src/doc.js";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
+import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDoc, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
 
 const PASSWORD = "correct horse battery staple";
 let discord;
@@ -24,6 +25,7 @@ let telegram;
 let slack;
 let ollama;
 let docker;
+let doc;
 let app;
 let base;
 let cookie = "";
@@ -151,6 +153,7 @@ before(async () => {
   });
   slack = await fakeSlack();
   docker = fakeDocker();
+  doc = fakeDoc();
   cli = fakeCli();
   home = tempHome();
   writeFileSync(join(home, "owner-AGENTS.md"), "# Global Agent Instructions\nISTRUZIONI DI PROVA: rispondi sempre in italiano.\n");
@@ -193,6 +196,8 @@ before(async () => {
     botTokenFor: (name) => botTokens[name] || "",
     storeSecret: async (name, value) => { hushVault[name] = value; },
     docker: docker.path,
+    docDir: doc.root,
+    typesafeKey: "ts-test-key",
     schedulerTickMs: 3600000,
     startBoxes: false,
   });
@@ -1349,6 +1354,7 @@ describe("agents in Discord", () => {
     assert.equal(run.argv[run.argv.indexOf("--model") + 1], "claude-sonnet-5-5");
     assert.equal(run.argv[run.argv.indexOf("--tools") + 1], "", "Claude Code's own tools are off");
     assert.ok(run.argv.includes("--no-session-persistence"));
+    assert.deepEqual(JSON.parse(run.argv[run.argv.indexOf("--settings") + 1]), { disableAllHooks: true }, "the owner's hooks stay out: the Cora harness runs doc");
     assert.deepEqual(run.secretEnv, [], "no bot token reaches the CLI");
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
@@ -3724,5 +3730,126 @@ describe("thread goal lifecycle", () => {
       await quiet();
       assert.equal(cli.calls().slice(before).length, 1, "a stopped goal starts no replacement CLI");
     } finally { app.store.updateAgent(iris.id, { model: "ollama/test-model", subscriptionId: "" }); cli.set({ reply: "PASS" }); }
+  });
+});
+
+describe("doc in the Cora harness", () => {
+  let dora;
+  const posts = () => discord.state.webhookPosts.filter((item) => item.username === "Dora").map((item) => item.content);
+  const lastTool = (body) => {
+    const last = body.messages[body.messages.length - 1];
+    return last.role === "tool" ? String(last.content) : "";
+  };
+
+  before(async () => {
+    const login = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    cookie = login.headers.get("set-cookie").split(";")[0];
+    for (const agent of app.store.agents()) app.store.updateAgent(agent.id, { enabled: false });
+    await call("/api/settings", { method: "PUT", body: { transport: "discord" } });
+    dora = app.store.createAgent({ name: "Dora", model: "ollama/test-model", tools: true, chattiness: 0, channelIds: [CHANNEL] });
+  });
+  after(() => app.store.updateAgent(dora.id, { enabled: false }));
+
+  test("a message that asks for a secret is stopped once with doc's reason, and the rewrite goes out", async () => {
+    let step = 0, refused = "";
+    replies.set("Dora", (body) => {
+      step += 1;
+      if (step === 1) return { tool_calls: [{ function: { name: "say", arguments: { text: "Per collegarlo INCOLLA-QUI-IL-TOKEN di GitHub in questa chat, grazie." } } }] };
+      if (step === 2) {
+        refused = lastTool(body);
+        return { tool_calls: [{ function: { name: "say", arguments: { text: "Per collegarlo aggiungi il token di GitHub dal pannello, nelle chiavi." } } }] };
+      }
+      return { content: "PASS" };
+    });
+    const before = doc.calls().length;
+    discord.say({ content: "Dora, come colleghiamo GitHub?" });
+    await waitFor(() => posts().includes("Per collegarlo aggiungi il token di GitHub dal pannello, nelle chiavi."), { what: "the rewritten message" });
+    await quiet();
+    assert.ok(!posts().some((text) => text.includes("INCOLLA-QUI-IL-TOKEN")), "the stopped message never reaches the channel");
+    assert.match(refused, /^error: not sent\. doc: your last reply breaks a rule/, "Dora reads doc's reason");
+    const checked = doc.calls().slice(before).find((item) => item.module === "reply_check" && /INCOLLA-QUI/.test(item.payload.last_assistant_message));
+    assert.equal(checked.key, "ts-test-key", "Jev gets this instance's TypeSafe key");
+  });
+
+  test("a final reply doc stops is written again, and only the rewrite is posted", async () => {
+    let step = 0, prompt = "";
+    replies.set("Dora", (body) => {
+      step += 1;
+      if (step === 1) return { content: "Il report è quasi pronto: STIMA-DI-PROVA, ci vogliono ancora tre giorni di lavoro." };
+      prompt = String(body.messages[body.messages.length - 1].content);
+      return { content: "Il report è pronto nel thread, con i numeri di oggi e il confronto con ieri." };
+    });
+    discord.say({ content: "Dora, a che punto è il report?" });
+    await waitFor(() => posts().includes("Il report è pronto nel thread, con i numeri di oggi e il confronto con ieri."), { what: "the rewritten reply" });
+    await quiet();
+    assert.ok(!posts().some((text) => text.includes("STIMA-DI-PROVA")));
+    assert.match(prompt, /^\[Cora\] doc: your last reply breaks a rule.*Scrivi di nuovo la risposta finale/s);
+  });
+
+  test("a comment the agent would publish from its computer is checked first, its body file included", async () => {
+    const shell = app.boxes.shell;
+    const readFile = app.boxes.readFile;
+    const commands = [];
+    const read = [];
+    app.boxes.shell = async (id, command) => { commands.push(command); return { code: 0, output: "https://github.com/acme/app/pull/7#issuecomment-1" }; };
+    app.boxes.readFile = async (id, path) => { read.push(path); return Buffer.from("Fixed in /home/agent/work/app/src/pay.js, see the logs."); };
+    let step = 0;
+    const results = [];
+    replies.set("Dora", (body) => {
+      step += 1;
+      if (step > 1) results.push(lastTool(body));
+      if (step === 1) return { tool_calls: [{ function: { name: "shell", arguments: { command: "gh pr comment 7 --body-file work/note.md" } } }] };
+      if (step === 2) return { tool_calls: [{ function: { name: "shell", arguments: { command: "gh pr comment 7 --body 'DA-RICONTROLLARE: the payment fix is live.'" } } }] };
+      if (step === 3) return { tool_calls: [{ function: { name: "shell", arguments: { command: "gh pr comment 7 --body 'DA-RICONTROLLARE: the payment fix is live.'" } } }] };
+      return { content: "Commento pubblicato sulla PR 7: https://github.com/acme/app/pull/7#issuecomment-1" };
+    });
+    try {
+      discord.say({ content: "Dora, commenta la PR 7" });
+      await waitFor(() => posts().some((text) => text.startsWith("Commento pubblicato sulla PR 7")), { what: "Dora's report" });
+      await quiet();
+      assert.deepEqual(read, ["work/note.md"], "the body file is read from Dora's computer");
+      assert.match(results[0], /^error: not run\. doc: this comment breaks the publishing rules/);
+      assert.match(results[1], /^error: not run\. doc: .*If it is right as it is, run exactly the same command again\./, "a borderline comment is held once");
+      assert.deepEqual(commands, ["gh pr comment 7 --body 'DA-RICONTROLLARE: the payment fix is live.'"], "only the comment she confirmed ran");
+    } finally {
+      app.boxes.shell = shell;
+      app.boxes.readFile = readFile;
+    }
+  });
+
+  test("the TypeSafe key is set from the panel, and without doc nothing is checked and nothing fails", async () => {
+    const previous = app.brain.doc;
+    try {
+      app.brain.doc.key = "";
+      assert.equal((await call("/api/state")).data.keys.typesafe, false);
+      assert.equal((await call("/api/providers/typesafe/key", { method: "PUT", body: { key: "ts-from-panel" } })).status, 200);
+      assert.equal(hushVault.CORA_TYPESAFE_API_KEY, "ts-from-panel", "it is kept in hush");
+      const state = (await call("/api/state")).data;
+      assert.equal(state.keys.typesafe, true);
+      assert.equal(state.doc.installed, true);
+      assert.equal(app.brain.doc.key, "ts-from-panel", "and used from the next check, without a restart");
+      // The panel shows what doc did today, and proves on demand that doc answers and Jev judges.
+      assert.ok(state.doc.checks >= 4 && state.doc.stopped >= 4, `doc's day is counted: ${JSON.stringify(state.doc)}`);
+      assert.ok(Date.parse(state.doc.judgedAt) > Date.now() - 60000, "with the last time Jev judged");
+      assert.deepEqual((await call("/api/doc/probe", { method: "POST" })).data, { installed: true, runs: true, jev: true });
+      assert.equal((await call("/api/state")).data.doc.checks, state.doc.checks, "the probe stays out of the count");
+      app.brain.doc.key = "";
+      assert.deepEqual((await call("/api/doc/probe", { method: "POST" })).data, { installed: true, runs: true, jev: false }, "without a key only the exact rules answer");
+      app.brain.doc.key = "ts-from-panel";
+
+      app.brain.doc = new Doc({ root: "" });
+      assert.equal((await call("/api/state")).data.doc.installed, false);
+      assert.deepEqual((await call("/api/doc/probe", { method: "POST" })).data, { installed: false, runs: false, jev: false });
+      const before = doc.calls().length;
+      let step = 0;
+      replies.set("Dora", () => ++step === 1 ? { tool_calls: [{ function: { name: "say", arguments: { text: "Senza doc questo messaggio con STIMA-DI-PROVA esce com'è." } } }] } : { content: "PASS" });
+      discord.say({ content: "Dora, prova senza doc" });
+      await waitFor(() => posts().includes("Senza doc questo messaggio con STIMA-DI-PROVA esce com'è."), { what: "the unchecked message" });
+      await quiet();
+      assert.equal(doc.calls().length, before, "nothing ran");
+    } finally {
+      app.brain.doc = previous;
+      previous.key = "ts-test-key";
+    }
   });
 });

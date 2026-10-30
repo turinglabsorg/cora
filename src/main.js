@@ -17,6 +17,7 @@ import { Boxes, plainKeys } from "./box.js";
 import { config, resolveDiscordToken } from "./config.js";
 import { Discord } from "./discord.js";
 import { LLM } from "./llm.js";
+import { Doc, findDoc } from "./doc.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
 import { Store } from "./store.js";
@@ -85,7 +86,8 @@ export function startCora(overrides = {}) {
     if (listener && channels.active === "discord") discord.start();
   };
   bots.onChange = pickListener;
-  const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push });
+  const doc = new Doc({ root: findDoc(cfg.docDir), key: cfg.typesafeKey, usageLog: join(cfg.home, "doc-usage.jsonl") });
+  const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc });
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching() });
   // DMs to an agent's own bot reach the orchestrator, where that one agent answers.

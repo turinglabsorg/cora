@@ -2835,6 +2835,26 @@ function connectionsPanel() {
     picker.setProvider(provider);
     return picker.node;
   });
+  // doc runs on this machine or it does not: the card says which, and proves it on demand.
+  const docStatus = () => {
+    const doc = S.data.doc || {};
+    const intro = h("p", {}, "La usa doc per controllare quello che gli agenti scrivono in chat e pubblicano, con Jev di TypeSafe. Senza chiave restano solo le regole esatte.");
+    if (!doc.installed) return h("div", { class: "stack-sm" }, intro, h("p", { class: "muted" }, "doc non è installato su questa macchina: per ora non controlla niente."));
+    const result = h("p", { class: "muted", role: "status" });
+    const probe = btn("Verifica adesso", { icon: "shield", onclick: async () => {
+      probe.disabled = true;
+      result.textContent = tr("Verifico…");
+      const outcome = await guard(api("/api/doc/probe", { method: "POST" }));
+      probe.disabled = false;
+      if (!outcome) { result.textContent = ""; return; }
+      result.textContent = tr(outcome.runs && outcome.jev ? "doc risponde e Jev di TypeSafe giudica: è operativo."
+        : outcome.runs ? S.data.keys?.typesafe ? "doc risponde, ma Jev non ha giudicato: controlla la chiave." : "doc risponde con le regole esatte. Per i giudizi di Jev serve la chiave."
+          : "doc non ha risposto su questa macchina.");
+    } });
+    return h("div", { class: "stack-sm" }, intro,
+      h("p", { class: "muted" }, tr("doc è attivo: {checks} controlli nelle ultime 24 ore, {stopped} fermati.", { checks: doc.checks || 0, stopped: doc.stopped || 0 })),
+      probe, result);
+  };
   const keyPanel = (provider, name) => {
     // A local Ollama is not a key: the card is about the key, and says what else counts.
     const configured = Boolean(S.data.keys?.[provider]);
@@ -2846,7 +2866,7 @@ function connectionsPanel() {
       key.value = "";
       const result = await guard(api(`/api/providers/${provider}/key`, { method: "PUT", body: { key: value } }), "Chiave salvata");
       if (result) {
-        S.data.providers[provider] = true;
+        if (provider !== "typesafe") S.data.providers[provider] = true;
         S.data.keys = { ...S.data.keys, [provider]: true };
         status.replaceChildren(icon("check"), tr("Configurata"));
         status.className = "badge on";
@@ -2858,7 +2878,8 @@ function connectionsPanel() {
     const status = badge(configured ? "Configurata" : "Da configurare", configured ? "on" : "", configured ? "check" : "key");
     key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
     const cloud = S.data.ollamaCloud || {};
-    const about = provider !== "ollama" ? h("p", {}, "La chiave vale per tutti gli agenti di questa istanza.")
+    const about = provider === "typesafe" ? docStatus()
+      : provider !== "ollama" ? h("p", {}, "La chiave vale per tutti gli agenti di questa istanza.")
       : h("div", { class: "stack-sm" },
         h("p", {}, "Serve solo per i modelli di Ollama Cloud. L'Ollama di questa macchina non ne ha bisogno."),
         configured ? null
@@ -2871,7 +2892,7 @@ function connectionsPanel() {
   return h("div", { class: "stack" },
     panel({ icon: "monitor", title: "Subscription del dispositivo", hint: "Gli account trovati sul server Cora.", actions: scan }, residentToggle, residentList),
     panel({ icon: "link", title: "Altri account", hint: "Collegali dal browser e scegli quale usare nel profilo di ogni agente." }, h("div", { class: "connection-grid" }, managed)),
-    panel({ icon: "key", title: "Chiavi API", hint: "Ollama e OrcaRouter. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"))));
+    panel({ icon: "key", title: "Chiavi API", hint: "Ollama, OrcaRouter e TypeSafe. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"), keyPanel("typesafe", "TypeSafe"))));
 }
 
 function renderSettings() {

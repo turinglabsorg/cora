@@ -108,7 +108,8 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   const id = randomBytes(6).toString("hex");
   const mcpFile = join(workDir, `mcp-${id}.json`);
-  const args = ["-p", "--output-format", "stream-json", "--verbose", ...(effort ? ["--effort", effort] : []), "--model", model, "--system-prompt", system, "--tools", "", "--no-session-persistence", "--strict-mcp-config"];
+  // The owner's own hooks stay out: the Cora harness runs doc's checks itself, for every model.
+  const args = ["-p", "--output-format", "stream-json", "--verbose", ...(effort ? ["--effort", effort] : []), "--model", model, "--system-prompt", system, "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--settings", JSON.stringify({ disableAllHooks: true })];
   // Claude Code has a goal mode of its own: `/goal <condition>` makes it check after each
   // turn whether the condition holds and go back to work until it does, inside one session.
   // Sent as two streamed messages, the goal first, so the task keeps all its context.
