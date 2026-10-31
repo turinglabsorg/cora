@@ -206,6 +206,12 @@ function cleanUrl(value) {
   }
 }
 
+/** A panel user as an account record keeps them: id and display name only. */
+function panelPerson(person) {
+  if (!person?.id) return null;
+  return { id: String(person.id).slice(0, 64), name: cleanText(person.name || "", 80).replace(/[\r\n]/g, " ").trim() };
+}
+
 function cleanText(value, max) {
   return String(value ?? "").slice(0, max);
 }
@@ -615,12 +621,12 @@ export class Store {
     }
   }
 
-  createSubscription({ provider, label }) {
+  createSubscription({ provider, label, connectedBy = null }) {
     if (!isSubscriptionProvider(provider)) throw new ValidationError("provider subscription non valido");
     const name = cleanText(label, 80).replace(/[\r\n]/g, " ").trim();
     if (!name) throw new ValidationError("nome subscription richiesto");
     const at = new Date().toISOString();
-    const record = { id: newId("sub"), provider, label: name, status: "disconnected", email: "", plan: "", createdAt: at, updatedAt: at };
+    const record = { id: newId("sub"), provider, label: name, status: "disconnected", email: "", plan: "", connectedBy: panelPerson(connectedBy), createdAt: at, updatedAt: at };
     this.stmt("INSERT INTO subscriptions(id, provider, data) VALUES (?, ?, ?)").run(record.id, provider, JSON.stringify(record));
     return record;
   }
@@ -634,6 +640,8 @@ export class Store {
       next.status = input.status;
     }
     for (const key of ["email", "plan"]) if (input[key] !== undefined) next[key] = cleanText(input[key], key === "email" ? 254 : 80);
+    // Who signed this account in, so the panel can say whose it is: "your account", "Sara's account".
+    if (input.connectedBy !== undefined) next.connectedBy = panelPerson(input.connectedBy);
     if (input.issue !== undefined) next.issue = input.issue === "isolation" ? "isolation" : "";
     if (input.status === "ready" || input.status === "connecting") next.issue = "";
     this.stmt("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(next), id);

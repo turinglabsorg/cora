@@ -328,7 +328,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (path === "/api/subscriptions" && method === "POST") {
       const body = await readJson(req, 4096);
       if (store.subscriptions().length >= 50) throw new HttpError(409, "troppe subscription: rimuovi quelle inutilizzate");
-      return send(res, 201, store.createSubscription({ provider: body.provider, label: body.label }));
+      return send(res, 201, store.createSubscription({ provider: body.provider, label: body.label, connectedBy: { id: user.id, name: user.name || user.email } }));
     }
     const subscriptionMatch = /^\/api\/subscriptions\/(sub_[a-f0-9]{12})(?:\/(login|code|cancel|check))?$/.exec(path);
     if (subscriptionMatch) {
@@ -339,7 +339,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         await subscriptions.remove(id);
         return send(res, 200, { ok: true });
       }
-      if (action === "login" && method === "POST") return send(res, 202, await subscriptions.start(id));
+      if (action === "login" && method === "POST") return send(res, 202, await subscriptions.start(id, { id: user.id, name: user.name || user.email }));
       if (action === "code" && method === "POST") {
         const body = await readJson(req, 8192);
         return send(res, 202, subscriptions.submitCode(id, body.code));

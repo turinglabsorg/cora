@@ -3,7 +3,9 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startCora } from "../src/main.js";
+import { passKeys, signPass } from "../src/pass.js";
 import { fakeDocker, tempHome, waitFor } from "./helpers.js";
+import { panelHarness } from "./panel.js";
 import { identityCli } from "./subscription-fixtures.js";
 
 async function fixture(t, { storeSecret, harnesses = ["claude", "codex"] } = {}) {
@@ -172,4 +174,74 @@ test("Grok and Muse accounts sign in with a device code, say who they are, run i
   const started = await request(`/api/subscriptions/${created.data.id}/login`, { method: "POST" });
   assert.equal(started.data.login, undefined, "a sign-in page on any other host is never shown");
   assert.notEqual(started.data.status, "ready");
+});
+
+test("an account says whose it is, and a member's new agent starts on the account they signed in", async (t) => {
+  const keys = passKeys("fixture-connections-signing-seed-0123456789abcdef");
+  const home = tempHome();
+  const identity = identityCli();
+  const resident = join(home, "resident-codex");
+  mkdirSync(resident);
+  writeFileSync(join(resident, "fixture-account.json"), JSON.stringify({ type: "chatgpt", email: "server@example.test", planType: "pro" }));
+  const app = startCora({ home, host: "127.0.0.1", port: 0, insecureCookies: true,
+    adminPassword: "fixture-password", sessionKey: "fixture-session-whose", residentDirectories: { codex: resident },
+    cloudUrl: "https://usecora.test", cloudKey: keys.publicKey, cloudSpace: "alpha",
+    discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", claudeBin: identity.claude, codexBin: identity.codex, hermesBin: "/missing/hermes",
+    grokBin: "/missing/grok", museBin: "/missing/muse", botTokenFor: () => "",
+    docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
+  });
+  await app.ready;
+  t.after(() => app.stop());
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const login = async (who) => {
+    const pass = signPass(keys.privateKey, { aud: "alpha.usecora.test", emailVerified: true, ...who });
+    return (await fetch(`${base}/auth/cloud?${new URLSearchParams({ pass })}`, { redirect: "manual" })).headers.get("set-cookie")?.split(";")[0] || "";
+  };
+  const request = async (cookie, path, { method = "GET", body } = {}) => {
+    const response = await fetch(`${base}${path}`, { method, headers: { Cookie: cookie, "X-Cora": "1", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, data: await response.json() };
+  };
+  const owner = await login({ sub: "ac_owner", role: "owner", name: "Owner", email: "owner@example.test" });
+  await request(owner, "/api/access", { method: "PUT", body: { domains: ["company.test"] } });
+  const sara = await login({ sub: "ac_sara", role: "member", name: "Sara", email: "sara@company.test" });
+  assert.ok(owner && sara);
+  await waitFor(() => app.store.residentSubscription("codex")?.status === "ready");
+
+  // Sara signs her own ChatGPT account in from the panel: the account remembers who did.
+  const created = await request(sara, "/api/subscriptions", { method: "POST", body: { provider: "codex", label: "ChatGPT" } });
+  assert.deepEqual(created.data.connectedBy, { id: "ac_sara", name: "Sara" });
+  await request(sara, `/api/subscriptions/${created.data.id}/login`, { method: "POST" });
+  identity.set({ complete: true });
+  await waitFor(() => app.store.subscription(created.data.id).status === "ready");
+  const listed = (await request(owner, "/api/subscriptions")).data.find((record) => record.id === created.data.id);
+  assert.deepEqual(listed.connectedBy, { id: "ac_sara", name: "Sara" });
+
+  const picker = async (cookie, options) => {
+    const panel = panelHarness({ language: "en", fetch: (path, init) => fetch(`${base}${path}`, { ...init, headers: { ...init?.headers, Cookie: cookie } }) });
+    await panel.run("boot()");
+    await waitFor(() => panel.run("Boolean(S.data && S.data.subscriptions && S.data.currentUser)"));
+    return panel.run(`(() => { const picker = subscriptionPicker("", ${JSON.stringify(options)}); picker.setProvider("codex"); return { text: picker.node.textContent, value: picker.value() }; })()`);
+  };
+  // A new agent Sara makes runs on her account, and the panel says so.
+  const fresh = await picker(sara, { isNew: true });
+  assert.equal(fresh.value, created.data.id);
+  assert.match(fresh.text, /Your account/);
+  assert.match(fresh.text, /This agent will use your account\./);
+  // An agent already on the server's account tells Sara it is not hers, and where hers is.
+  const existing = await picker(sara, {});
+  assert.equal(existing.value, "");
+  assert.match(existing.text, /Server account · default/);
+  assert.match(existing.text, /This agent will use the server's account, not yours\. To use yours, choose “Change account”\./);
+  // The owner's new agents keep the server's account, and Sara's is shown as hers, not theirs.
+  const owners = await picker(owner, { isNew: true });
+  assert.equal(owners.value, "");
+  assert.match(owners.text, /This agent will use the server's account\./);
+  const chosen = await (async () => {
+    const panel = panelHarness({ language: "en", fetch: (path, init) => fetch(`${base}${path}`, { ...init, headers: { ...init?.headers, Cookie: owner } }) });
+    await panel.run("boot()");
+    await waitFor(() => panel.run("Boolean(S.data && S.data.subscriptions && S.data.currentUser)"));
+    return panel.run(`(() => { const picker = subscriptionPicker(${JSON.stringify(created.data.id)}, {}); picker.setProvider("codex"); return picker.node.textContent; })()`);
+  })();
+  assert.match(chosen, /Sara's account/);
+  assert.match(chosen, /This agent will use Sara's account\./);
 });

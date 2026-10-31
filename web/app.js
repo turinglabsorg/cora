@@ -39,10 +39,10 @@ const PROVIDERS = {
 // drives Ollama and the routers; Claude Code, Codex, Grok Build, Muse Code and Hermes drive themselves.
 const HARNESSES = {
   cora: { label: "Harness di Cora", hint: "Cora guida il modello e gli passa gli strumenti.", providers: ["ollama", "orcarouter"] },
-  claude: { label: "Claude Code", hint: "Claude guida sé stesso con il tuo abbonamento.", providers: ["claude"] },
-  codex: { label: "Codex", hint: "Codex guida sé stesso con il tuo abbonamento.", providers: ["codex"] },
-  grok: { label: "Grok Build", hint: "Grok guida sé stesso con il tuo abbonamento.", providers: ["grok"] },
-  muse: { label: "Muse Code", hint: "Muse guida sé stesso con il tuo abbonamento Meta.", providers: ["muse"] },
+  claude: { label: "Claude Code", hint: "Claude guida sé stesso con l'account scelto qui sotto.", providers: ["claude"] },
+  codex: { label: "Codex", hint: "Codex guida sé stesso con l'account scelto qui sotto.", providers: ["codex"] },
+  grok: { label: "Grok Build", hint: "Grok guida sé stesso con l'account scelto qui sotto.", providers: ["grok"] },
+  muse: { label: "Muse Code", hint: "Muse guida sé stesso con l'account Meta scelto qui sotto.", providers: ["muse"] },
   hermes: { label: "Hermes", hint: "Hermes guida sé stesso sui modelli del suo endpoint, di solito quelli di questa macchina.", providers: ["hermes"] },
 };
 const harnessOf = (model) => {
@@ -1297,7 +1297,18 @@ function pickedModel(data, name) {
 const CLI_NAMES = { claude: "Claude Code", codex: "Codex", grok: "Grok Build", muse: "Muse Code" };
 const SUBSCRIPTION_STATES = { disconnected: "Da collegare", connecting: "Accesso in corso", ready: "Collegata", error: "Accesso non riuscito" };
 
-function subscriptionPicker(currentId, { manage = false } = {}) {
+/** Whose an account is, as the person looking at the panel reads it. */
+function isOwnAccount(record) {
+  return Boolean(!record.resident && record.connectedBy?.id && record.connectedBy.id === S.data.currentUser?.id);
+}
+function accountOwner(record) {
+  if (record.resident) return tr("Account del server");
+  if (isOwnAccount(record)) return tr("Il tuo account");
+  if (record.connectedBy?.name) return tr("Account di {name}", { name: record.connectedBy.name });
+  return tr("Account collegato");
+}
+
+function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   let provider = "";
   let selectedId = currentId || "";
   let choosing = !selectedId;
@@ -1404,7 +1415,7 @@ function subscriptionPicker(currentId, { manage = false } = {}) {
           draw();
         } },
         h("span", { class: `subscription-option-dot ${item.status}`, "aria-hidden": "true" }),
-        h("span", { class: "grow" }, h("b", {}, item.resident ? "Subscription residente" : raw(item.email || item.label)), h("small", {}, item.resident && item.email ? raw(`${item.email} · `) : null, SUBSCRIPTION_STATES[item.status], count ? raw(` · ${count === 1 ? tr("Usato da un agente") : tr("Usato da {count} agenti", { count })}`) : null)),
+        h("span", { class: "grow" }, h("b", {}, item.resident ? "Account del server" : raw(item.email || item.label)), h("small", {}, item.resident ? (item.email ? raw(`${item.email} · `) : null) : raw(`${accountOwner(item)} · `), SUBSCRIPTION_STATES[item.status], count ? raw(` · ${count === 1 ? tr("Usato da un agente") : tr("Usato da {count} agenti", { count })}`) : null)),
         icon(item.id === selectedId ? "check" : "next"));
         list.append(option);
       }
@@ -1413,11 +1424,19 @@ function subscriptionPicker(currentId, { manage = false } = {}) {
         record ? btn("Indietro", { cls: "ghost", onclick: changeAccount }) : null));
     } else if (record?.status === "ready") {
       authCode.value = "";
-      if (record.resident) content.append(h("span", { class: "subscription-source" }, "Subscription residente · predefinita"));
+      content.append(h("span", { class: "subscription-source" }, record.resident ? "Account del server · predefinito" : raw(accountOwner(record))));
+      // A member must see when an agent runs on the server's account rather than their own.
+      const ownReady = records.some((item) => isOwnAccount(item) && item.status === "ready");
+      const uses = manage ? "Disponibile per gli agenti di questa istanza."
+        : record.resident ? (S.data.currentUser?.role === "owner" ? "Questo agente userà l'account del server."
+          : ownReady ? "Questo agente userà l'account del server, non il tuo. Per usare il tuo, scegli «Cambia account»."
+            : "Questo agente userà l'account del server. Per usare il tuo, collegalo da «Cambia account».")
+        : isOwnAccount(record) ? "Questo agente userà il tuo account."
+          : record.connectedBy?.name ? tr("Questo agente userà l'account di {name}.", { name: record.connectedBy.name }) : "Questo agente userà questo account.";
       content.append(h("div", { class: "subscription-identity" },
         h("span", { class: "subscription-connected", "aria-hidden": "true" }, icon("check")),
         h("div", { class: "grow" }, h("b", {}, raw(record.email || record.label)),
-          h("p", {}, manage ? "Disponibile per gli agenti di questa istanza." : "Questo agente userà il tuo abbonamento."))));
+          h("p", {}, uses))));
       content.append(h("div", { class: "subscription-footer" },
         btn("Cambia account", { cls: "ghost", onclick: changeAccount }),
         btn("", { icon: "refresh", cls: "ghost", title: "Verifica collegamento", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) })));
@@ -1502,7 +1521,9 @@ function subscriptionPicker(currentId, { manage = false } = {}) {
       root.hidden = !needs;
       input.disabled = !needs;
       if (previous !== provider) {
-        selectedId = selections.has(provider) ? selections.get(provider) : ((S.data.subscriptions || []).find((item) => item.id === currentId && item.provider === provider)?.id) || "";
+        // A new agent starts on the account its creator signed in themselves, when there is one.
+        const own = isNew ? (S.data.subscriptions || []).find((item) => item.provider === provider && item.status === "ready" && isOwnAccount(item)) : null;
+        selectedId = selections.has(provider) ? selections.get(provider) : ((S.data.subscriptions || []).find((item) => item.id === currentId && item.provider === provider)?.id) || own?.id || "";
         choosing = !selectedId && (manage || !S.data.settings.useResidentSubscriptions);
         actionError = "";
         authCode.value = "";
@@ -1571,7 +1592,7 @@ function agentForm(agent, { only = "" } = {}) {
   const harnessPick = wantsBrain ? h("select", {}, Object.entries(HARNESSES).map(([key, item]) =>
     h("option", { value: key, selected: key === harness }, tr(item.label)))) : null;
   const harnessHint = wantsBrain ? h("small", { class: "muted" }, tr(HARNESSES[harness].hint)) : null;
-  const subscription = wantsBrain ? subscriptionPicker(agent.subscriptionId) : null;
+  const subscription = wantsBrain ? subscriptionPicker(agent.subscriptionId, { isNew }) : null;
   if (wantsBrain) {
     const syncSubscription = () => {
       const select = model.querySelector("select");

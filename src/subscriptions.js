@@ -213,7 +213,7 @@ export class Subscriptions {
     login.ready?.();
   }
 
-  async start(id) {
+  async start(id, actor = null) {
     await this.stopping.get(id);
     const record = this.require(id);
     if (record.resident) throw new ValidationError("le subscription residenti si gestiscono sul server");
@@ -231,7 +231,7 @@ export class Subscriptions {
     login.timer = setTimeout(() => this.finish(id, "error"), LOGIN_MS);
     login.timer.unref();
     this.logins.set(id, login);
-    this.changed(id, { status: "connecting" });
+    this.changed(id, { status: "connecting", ...(actor ? { connectedBy: actor } : {}) });
     try {
       if (record.provider === "codex") {
         const rpc = new CodexAccount(this.bins.codex, env, directory, (method, params) => {
