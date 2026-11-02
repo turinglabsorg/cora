@@ -78,7 +78,11 @@ export const TOOL_DEFS = [
     description: "Write directly through Cora. Without channel_id, post in this conversation; with channel_id, post in an authorized channel from list_channels. Address a colleague or a person as @Name, with the name the chat shows: Cora turns it into their real mention (an agent's when its bot can read that channel, a person's when they wrote or were tagged on this server). No grog CLI, shell command, installation or extra login is needed. Your final reply is posted in this conversation anyway: here, use say only for a short first note before working and for progress; with channel_id, for replies and reports in another channel. Check the returned delivery result; do not post the same result again in your final reply.",
     parameters: {
       type: "object",
-      properties: { text: { type: "string" }, channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" } },
+      properties: {
+        text: { type: "string" },
+        channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" },
+        voice: { type: "boolean", description: "true: the same words also go out as a voice message in your own voice (Soniox), after the text. A voice message you received is already answered out loud: use this when someone asks for a voice message or when hearing it helps" },
+      },
       required: ["text"],
     },
   },
@@ -410,7 +414,7 @@ export async function executeTool(call, ctx) {
         if (!ctx.say) return { text: "error: there is no conversation to post to right now" };
         const target = String(args.channel_id || channelId || "");
         if (target !== channelId && !ctx.postingChannels?.some((channel) => channel.id === target)) return { text: "error: destination not authorized; choose a channel from list_channels" };
-        const sent = await ctx.say(text.slice(0, 4000), target);
+        const sent = await ctx.say(text.slice(0, 4000), target, { voice: args.voice === true });
         const messages = Array.isArray(sent) ? sent : [];
         const receipt = {
           channel_id: target,
@@ -418,6 +422,7 @@ export async function executeTool(call, ctx) {
           message_ids: messages.map((item) => String(item.id || item.message_id || "")).filter(Boolean),
           mentions: [...new Set(messages.flatMap((item) => [...String(item.content || "").matchAll(/<@!?(\d+)>/g)].map((match) => match[1])))],
         };
+        if (args.voice === true) receipt.voice = sent?.voice?.messages ? "sent" : `not sent: ${sent?.voice?.error || "unavailable"}`;
         const status = target === channelId ? "posted in this conversation. Your final reply is posted here too: if there is work left, keep working and write only what is new; if this message already says it all, end with just PASS" : `posted directly to ${target}; do not duplicate this report in your final reply`;
         return { text: `${status}\nCora delivery receipt: ${JSON.stringify(receipt)}` };
       }

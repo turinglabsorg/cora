@@ -83,10 +83,29 @@ function decodeFrames(buffer) {
 export const MAIN_TOKEN = "test-token";
 
 /** A stand-in Discord: REST for channels/webhooks/messages and a Gateway over WebSocket. */
+/** A Discord multipart post: payload_json, plus the first file's name, type and bytes. */
+function discordForm(req, body) {
+  const type = String(req.headers["content-type"] || "");
+  if (!type.startsWith("multipart/")) return JSON.parse(body.toString("utf8"));
+  const boundary = /boundary=([^;]+)/.exec(type)[1];
+  const parts = body.toString("latin1").split(`--${boundary}`);
+  let payload = {};
+  for (const part of parts) {
+    const head = part.slice(0, part.indexOf("\r\n\r\n"));
+    const content = part.slice(head.length + 4, part.length - 2);
+    if (/name="payload_json"/.test(head)) payload = { ...JSON.parse(Buffer.from(content, "latin1").toString("utf8")), ...payload };
+    const file = /filename="([^"]+)"/.exec(head);
+    if (file) payload = { ...payload, file: file[1], fileType: /Content-Type: ([^\r]+)/i.exec(head)?.[1] || "", fileBytes: Buffer.from(content, "latin1") };
+  }
+  return payload;
+}
+
 export async function fakeDiscord() {
   const state = {
     webhookPosts: [],
     botPosts: [],
+    // Attachment bytes people sent, served at /attachments/<name>.
+    files: new Map(),
     typing: 0,
     sockets: new Set(),
     socketUser: new Map(),
@@ -113,6 +132,11 @@ export async function fakeDiscord() {
     const body = await readBody(req);
     let match;
     if (url.pathname === "/gateway/bot") return json(res, 200, { url: `ws://127.0.0.1:${server.address().port}/gateway`, session_start_limit: { remaining: 999 } });
+    if ((match = /^\/attachments\/(.+)$/.exec(url.pathname)) && state.files.has(match[1])) {
+      const file = state.files.get(match[1]);
+      res.writeHead(200, { "Content-Type": file.type });
+      return res.end(file.data);
+    }
     if ((match = /^\/channels\/(\d+)\/messages$/.exec(url.pathname)) && req.method === "GET") {
       const only = state.privateTo.get(match[1]);
       const asking = String(req.headers.authorization || "").replace(/^Bot /, "");
@@ -125,12 +149,7 @@ export async function fakeDiscord() {
       return json(res, 200, { id: "500000000000000001", token: "webhook-token", name: "cora", application_id: BOT, channel_id: match[1] });
     }
     if ((match = /^\/webhooks\/(\d+)\/([^/]+)$/.exec(url.pathname)) && req.method === "POST") {
-      let payload;
-      if (String(req.headers["content-type"]).startsWith("multipart/")) {
-        const text = body.toString("latin1");
-        const json = /name="payload_json"\r\n\r\n([\s\S]*?)\r\n--/.exec(text)?.[1];
-        payload = { ...JSON.parse(json || "{}"), file: /filename="([^"]+)"/.exec(text)?.[1] };
-      } else payload = JSON.parse(body.toString("utf8"));
+      const payload = discordForm(req, body);
       const channelId = url.searchParams.get("thread_id") || CHANNEL;
       const message = {
         id: id(), channel_id: channelId, guild_id: GUILD, content: payload.content, webhook_id: match[1],
@@ -167,7 +186,7 @@ export async function fakeDiscord() {
     }
     if ((match = /^\/channels\/(\d+)\/messages$/.exec(url.pathname)) && req.method === "POST") {
       if (state.deniedPosts.get(match[1])?.has(token)) return json(res, 403, { message: "Missing Access", code: 50001 });
-      const payload = JSON.parse(body.toString("utf8"));
+      const payload = discordForm(req, body);
       const message = { id: id(), channel_id: match[1], guild_id: GUILD, content: payload.content, author: { id: caller.id, username: caller.username, bot: true }, timestamp: new Date().toISOString() };
       state.botPosts.push({ ...payload, channelId: match[1], token });
       json(res, 200, message);
@@ -256,11 +275,16 @@ export async function fakeDiscord() {
       for (const [socket, user] of state.socketUser) if (user?.id === botUserId) send(socket, { op: 0, t: "MESSAGE_CREATE", s: ++seq, d: message });
       return message;
     },
+    /** A file someone sends, served by this stand-in: what goes in a message's `attachments`. */
+    attachment(filename, data, contentType) {
+      state.files.set(filename, { data, type: contentType });
+      return { id: id(), filename, url: `http://127.0.0.1:${port}/attachments/${filename}`, content_type: contentType, size: data.length };
+    },
     /** A human (or bot) writes in a channel. */
-    say({ content, author = OWNER, username = "Sam", channel = CHANNEL, guild = GUILD, bot = false, attachments = [], mentions = [], type = 0 }) {
+    say({ content, author = OWNER, username = "Sam", channel = CHANNEL, guild = GUILD, bot = false, attachments = [], mentions = [], type = 0, flags = 0 }) {
       counter += 1;
       const message = {
-        id: id(), type, channel_id: channel, guild_id: guild, content, attachments, embeds: [], mentions,
+        id: id(), type, flags, channel_id: channel, guild_id: guild, content, attachments, embeds: [], mentions,
         author: { id: author, username, global_name: username, bot }, timestamp: new Date(Date.now() + counter).toISOString(),
       };
       // Like the real Discord, the message is in the channel's history before the gateway delivers it.
@@ -463,6 +487,70 @@ else:
   return { root, calls };
 }
 
+/** A short 16-bit mono WAV: a tone of `seconds`, what the fake Soniox speaks. */
+export function toneWav(seconds = 0.6, rate = 24000) {
+  const samples = Math.round(seconds * rate);
+  const wav = Buffer.alloc(44 + samples * 2);
+  wav.write("RIFF", 0); wav.writeUInt32LE(36 + samples * 2, 4); wav.write("WAVE", 8);
+  wav.write("fmt ", 12); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(rate, 24); wav.writeUInt32LE(rate * 2, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+  wav.write("data", 36); wav.writeUInt32LE(samples * 2, 40);
+  for (let index = 0; index < samples; index++) wav.writeInt16LE(Math.round(Math.sin(index / 9) * 8000 * Math.min(1, index / 2000)), 44 + index * 2);
+  return wav;
+}
+
+/**
+ * Stand-in Soniox: the files and async transcription API, the voice catalog, the key check and
+ * text to speech. `state.transcripts` is what the next transcriptions say; requests are recorded.
+ */
+export async function fakeSoniox({ key = "soniox-test" } = {}) {
+  const state = { transcripts: [], text: "testo trascritto", language: "it", uploads: [], transcriptions: [], speech: [], deleted: [], next: 1 };
+  const server = http.createServer(async (req, res) => {
+    const body = await readBody(req);
+    const json = (status, value) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(value === undefined ? "" : JSON.stringify(value)); };
+    if (req.headers.authorization !== `Bearer ${key}`) return json(401, { message: "invalid api key" });
+    const url = new URL(req.url, "http://x");
+    let match;
+    if (req.method === "GET" && url.pathname === "/v1/models") return json(200, { models: [{ id: "stt-async-v5" }] });
+    if (req.method === "GET" && url.pathname === "/v1/tts-models") {
+      return json(200, { models: [{ id: "tts-rt-v2", voices: [
+        { id: "Grace", gender: "female", languages: ["en"], description: "Unhurried American guide voice." },
+        { id: "Giulia", gender: "female", languages: ["it"], description: "A young Italian female voice." },
+        { id: "Marco", gender: "male", languages: ["it"], description: "A young Italian male voice." },
+      ] }] });
+    }
+    if (req.method === "POST" && url.pathname === "/v1/files") {
+      const id = `file-${state.next++}`;
+      state.uploads.push({ id, bytes: body.length, type: String(req.headers["content-type"] || "") });
+      return json(201, { id, filename: "voice", size: body.length });
+    }
+    if (req.method === "POST" && url.pathname === "/v1/transcriptions") {
+      const request = JSON.parse(body.toString("utf8"));
+      const id = `tr-${state.next++}`;
+      state.transcriptions.push({ id, ...request, text: state.transcripts.length ? state.transcripts.shift() : state.text });
+      return json(201, { id, status: "queued" });
+    }
+    if ((match = /^\/v1\/transcriptions\/([\w-]+)(\/transcript)?$/.exec(url.pathname))) {
+      const transcription = state.transcriptions.find((item) => item.id === match[1]);
+      if (!transcription) return json(404, { message: "not found" });
+      if (req.method === "DELETE") { state.deleted.push(match[1]); return json(204); }
+      if (match[2]) return json(200, { id: transcription.id, text: transcription.text, tokens: [{ text: transcription.text, language: state.language }] });
+      return json(200, { id: transcription.id, status: "completed", audio_duration_ms: 1200 });
+    }
+    if (req.method === "DELETE" && (match = /^\/v1\/files\/([\w-]+)$/.exec(url.pathname))) { state.deleted.push(match[1]); return json(204); }
+    if (req.method === "POST" && url.pathname === "/tts") {
+      const request = JSON.parse(body.toString("utf8"));
+      state.speech.push(request);
+      res.writeHead(200, { "Content-Type": request.audio_format === "mp3" ? "audio/mpeg" : "application/octet-stream" });
+      return res.end(request.audio_format === "mp3" ? Buffer.concat([Buffer.from("ID3"), Buffer.alloc(600, 1)]) : toneWav());
+    }
+    json(404, { message: "no route" });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  return { url: base, ttsUrl: `${base}/tts`, key, state, close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
 export function tempHome() {
   return mkdtempSync(join(tmpdir(), "cora-home-"));
 }
@@ -661,6 +749,8 @@ export async function fakeTelegram() {
     nextUpdate: 1,
     nextMessage: 5000,
     waiting: new Set(),
+    // Files people sent, by file_id: what getFile and /file/ serve.
+    files: new Map(),
   };
   const ok = (res, result) => {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -674,8 +764,9 @@ export async function fakeTelegram() {
     const body = await readBody(req);
     const url = new URL(req.url, "http://x");
     if (url.pathname.startsWith("/file/")) {
-      res.writeHead(200, { "Content-Type": "image/jpeg" });
-      return res.end(Buffer.from("fake-jpeg"));
+      const sent = state.files.get(url.pathname.split("/").pop());
+      res.writeHead(200, { "Content-Type": sent ? "application/octet-stream" : "image/jpeg" });
+      return res.end(sent || Buffer.from("fake-jpeg"));
     }
     const match = /^\/bot([^/]+)\/(\w+)$/.exec(url.pathname);
     if (!match) return fail(res, 404, "Not Found");
@@ -686,7 +777,7 @@ export async function fakeTelegram() {
     if (String(req.headers["content-type"]).startsWith("multipart/")) {
       const text = body.toString("latin1");
       for (const [, name, value] of text.matchAll(/name="(\w+)"\r\n\r\n([^\r]*)\r\n/g)) params[name] = value;
-      params.file = /name="(photo|document)"; filename="([^"]+)"/.exec(text)?.slice(1, 3) || null;
+      params.file = /name="(photo|document|voice|audio)"; filename="([^"]+)"/.exec(text)?.slice(1, 3) || null;
     } else if (body.length) params = JSON.parse(body.toString("utf8"));
     const message = (extra) => ({ message_id: state.nextMessage++, date: Math.floor(Date.now() / 1000), chat: { id: Number(params.chat_id) }, from: { ...bot, is_bot: true }, ...extra });
     switch (method) {
@@ -703,7 +794,9 @@ export async function fakeTelegram() {
       }
       case "sendMessage":
       case "sendPhoto":
-      case "sendDocument": {
+      case "sendDocument":
+      case "sendVoice":
+      case "sendAudio": {
         state.sent.push({ token, method, ...params });
         return ok(res, message({ text: params.text || params.caption || "" }));
       }
@@ -711,7 +804,10 @@ export async function fakeTelegram() {
       case "setMyName": state.names.push({ token, name: params.name }); return ok(res, true);
       case "getChatAdministrators": return ok(res, [{ status: "creator", user: { id: Number(TG_OWNER), first_name: "Seb" } }]);
       case "getChatMember": return ok(res, { status: state.members.has(`${params.chat_id}:${params.user_id}`) ? "member" : "left" });
-      case "getFile": return ok(res, { file_id: params.file_id, file_path: "photos/1.jpg", file_size: 9 });
+      case "getFile": {
+        const sent = state.files.get(params.file_id);
+        return ok(res, sent ? { file_id: params.file_id, file_path: `voice/${params.file_id}`, file_size: sent.length } : { file_id: params.file_id, file_path: "photos/1.jpg", file_size: 9 });
+      }
       default: return fail(res, 400, `Bad Request: unknown method ${method}`);
     }
   });
@@ -720,6 +816,8 @@ export async function fakeTelegram() {
     url: `http://127.0.0.1:${port}`,
     state,
     addBot(token, user) { state.bots.set(token, user); },
+    /** A file someone sends (a voice note, say): its file_id for a message. */
+    file(id, data) { state.files.set(id, data); return id; },
     push(message) {
       state.updates.push({ update_id: state.nextUpdate++, message: { message_id: state.nextMessage++, date: Math.floor(Date.now() / 1000), ...message } });
       for (const waiter of state.waiting) {
@@ -763,6 +861,10 @@ export async function fakeSlack() {
       [SLACK_DM, { id: SLACK_DM, name: "", is_im: true }],
     ]),
     history: new Map(),
+    // Files people shared, served at /files/<name> to any app's bot token.
+    files: new Map(),
+    // What getUploadURLExternal was asked for, in order.
+    slots: [],
     nextTs: 100,
   };
   const ok = (res, body) => {
@@ -785,9 +887,14 @@ export async function fakeSlack() {
     const url = new URL(req.url, "http://x");
     const body = await readBody(req);
     if (url.pathname.startsWith("/upload/")) {
-      state.uploads.push({ fileId: url.pathname.slice(8), bytes: body.length });
+      state.uploads.push({ fileId: url.pathname.slice(8), bytes: body.length, type: /Content-Type: ([^\r]+)/i.exec(body.toString("latin1"))?.[1] || "" });
       res.writeHead(200);
       return res.end("ok");
+    }
+    if (url.pathname.startsWith("/files/") && state.files.has(url.pathname.slice(7))) {
+      if (!appFor(req)) { res.writeHead(403); return res.end(); }
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      return res.end(state.files.get(url.pathname.slice(7)));
     }
     const method = url.pathname.replace("/api/", "");
     const params = Object.fromEntries(new URLSearchParams(body.toString("utf8")));
@@ -824,6 +931,7 @@ export async function fakeSlack() {
         state.reactions.push({ action: method.split(".")[1], channel: params.channel, ts: params.timestamp, name: params.name, app: app.name });
         return ok(res, {});
       case "files.getUploadURLExternal":
+        state.slots.push({ filename: params.filename, length: Number(params.length), app: app.name });
         return ok(res, { upload_url: `http://127.0.0.1:${server.address().port}/upload/F1`, file_id: "F1" });
       case "files.completeUploadExternal": {
         const shared = ts();
@@ -867,6 +975,11 @@ export async function fakeSlack() {
     join(botToken, channelId) {
       state.apps.get(botToken)?.channels.add(channelId);
     },
+    /** A file someone shares (an audio clip, say), as it appears in a message's `files`. */
+    file(name, data, mimetype, extra = {}) {
+      state.files.set(name, data);
+      return { id: `F${state.files.size}${name.length}`, name, mimetype, size: data.length, url_private: `http://127.0.0.1:${port}/files/${name}`, ...extra };
+    },
     /** Deliver an event to every app in that channel, the way Slack does. */
     say({ text, channel = SLACK_CHANNEL, user = SLACK_OWNER, threadTs = "", files = null, botId = "", username = "" }) {
       const event = {
@@ -874,7 +987,10 @@ export async function fakeSlack() {
         channel_type: channel.startsWith("D") ? "im" : "channel",
       };
       if (threadTs) event.thread_ts = threadTs;
-      if (files) event.files = files;
+      if (files) {
+        event.files = files;
+        event.subtype = "file_share";
+      }
       if (botId) {
         event.bot_id = botId;
         event.subtype = "bot_message";

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { plainKeys } from "./box.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS, isSubscriptionProvider } from "./harnesses.js";
+import { VOICE_LANGUAGES } from "./voice.js";
 
 export const SHARED = "_shared";
 export const CONTEXT_LIMITS = { fileChars: 30000, totalChars: 60000, files: 20 };
@@ -251,6 +252,9 @@ export function sanitizeAgent(input, previous = {}) {
     tools: Boolean(merged.tools),
     think: Boolean(merged.think),
     effort: EFFORTS.includes(merged.effort) ? merged.effort : merged.think && merged.effort === undefined ? "high" : "",
+    // Its voice (a Soniox voice id) and the language it speaks; empty means the instance's language and Soniox's first voice for it.
+    voice: cleanText(merged.voice, 40).replace(/[^\w .-]/g, "").trim(),
+    voiceLanguage: VOICE_LANGUAGES.includes(merged.voiceLanguage) ? merged.voiceLanguage : "",
     lastSleepAt: previous.lastSleepAt || null,
     sshPort: previous.sshPort || null,
     createdAt: previous.createdAt || new Date().toISOString(),
@@ -840,6 +844,7 @@ export class Store {
     if (item.file) meta.file = item.file;
     if (item.request) meta.request = item.request;
     if (item.passive) meta.passive = true;
+    if (item.voice) meta.voice = true;
     this.stmt("INSERT OR IGNORE INTO messages(id, channel_id, at, author_id, author_name, kind, agent_id, content, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(String(item.id), String(channelId), Number(item.at) || Date.now(), item.authorId || null, String(item.authorName || "?"), String(item.kind || "human"), item.agentId || null, cleanText(item.content, 4000), Object.keys(meta).length ? JSON.stringify(meta) : null);
   }

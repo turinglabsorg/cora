@@ -22,6 +22,7 @@ import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
 import { Store } from "./store.js";
 import { Subscriptions } from "./subscriptions.js";
+import { Voice } from "./voice.js";
 import { createWeb } from "./web.js";
 
 export function startCora(overrides = {}) {
@@ -87,9 +88,10 @@ export function startCora(overrides = {}) {
   };
   bots.onChange = pickListener;
   const doc = new Doc({ root: findDoc(cfg.docDir), key: cfg.typesafeKey, usageLog: join(cfg.home, "doc-usage.jsonl"), rulesFile: join(cfg.home, "doc-rules.json") });
+  const voice = new Voice({ key: cfg.sonioxKey, api: cfg.sonioxApi, ttsUrl: cfg.sonioxTtsUrl, ffmpeg: cfg.ffmpeg });
   const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc });
   const filesDir = join(cfg.home, "files");
-  const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching() });
+  const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching(), voice });
   // DMs to an agent's own bot reach the orchestrator, where that one agent answers.
   bots.onDirect = (agentId, raw) => orchestrator.onDirectMessage(agentId, raw).catch((error) => activity({ type: "error", agentId, text: `dm: ${error.message}` }));
   // Every agent bot that may read content also listens: a private channel is heard if one of them is in it.
@@ -100,7 +102,7 @@ export function startCora(overrides = {}) {
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
   const scheduler = new Scheduler({ store, orchestrator, brain, timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -200,7 +202,7 @@ export function startCora(overrides = {}) {
     await bridge.stop();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, server: web.server };
 }
 
 const isMain = (() => {

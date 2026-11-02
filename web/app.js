@@ -132,6 +132,7 @@ const ICONS = {
   pin: '<path d="M12 16.5V22M8 3.5h8l-1 6 3.5 4.5v2h-13v-2L9 9.5z"/>',
   share: '<circle cx="18" cy="5.5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="18.5" r="2.5"/><path d="m8.2 10.8 7.6-4.1M8.2 13.2l7.6 4.1"/>',
   play: '<path d="M7 4.5v15l12.5-7.5z"/>',
+  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/>',
   pause: '<path d="M8 5v14M16 5v14"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
   refresh: '<path d="M20 11.5A8 8 0 1 0 17.7 17M20 4.5v7h-7"/>',
@@ -1639,6 +1640,7 @@ function agentForm(agent, { only = "" } = {}) {
         h("div", { class: "field" }, h("span", { class: "label" }, tr("Canali {transport}", { transport: TRANSPORTS[S.data.transport].label })), channelChips(agent.channelIds || []),
           h("small", {}, "Nessuno selezionato = li ascolta tutti.")),
         switchInput("enabled", "In onda", agent.enabled ?? true, "Spento non ascolta e non parla, da nessuna parte."))),
+    voicePanel(agent),
     h("div", { class: "savebar" },
       isNew ? null : armedButton("Elimina", "Conferma", { onconfirm: async () => {
         if (await guard(api(`/api/agents/${agent.id}`, { method: "DELETE" }), `${agent.name} eliminato`)) {
@@ -1660,6 +1662,9 @@ function agentForm(agent, { only = "" } = {}) {
       channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
       enabled: form.elements.enabled.checked,
       personality: data.get("personality"),
+      // A voice select left disabled (no Soniox yet) keeps what the agent had.
+      voice: data.has("voice") ? data.get("voice") : agent.voice || "",
+      voiceLanguage: data.has("voiceLanguage") ? data.get("voiceLanguage") : agent.voiceLanguage || "",
       ...(wantsBrain ? {
         model: pickedModel(data, "model"),
         subscriptionId: subscription.value(),
@@ -1675,6 +1680,60 @@ function agentForm(agent, { only = "" } = {}) {
     else renderAgent();
   });
   return form;
+}
+
+const VOICE_LANGUAGE_NAMES = { it: "Italiano", en: "English", es: "Español", fr: "Français", de: "Deutsch", pt: "Português" };
+
+/** The agent's voice: the language it speaks, a Soniox voice heard before it is chosen, and when it answers out loud. */
+function voicePanel(agent) {
+  const language = h("select", { name: "voiceLanguage" },
+    h("option", { value: "", selected: !agent.voiceLanguage }, "La lingua dell'istanza"),
+    Object.entries(VOICE_LANGUAGE_NAMES).map(([code, name]) => h("option", { value: code, selected: agent.voiceLanguage === code }, raw(name))));
+  const voice = h("select", { name: "voice" }, h("option", { value: agent.voice || "", selected: true }, agent.voice ? raw(agent.voice) : "Automatica"));
+  const about = h("small", { class: "voice-about" });
+  const player = h("audio", { class: "voice-preview", controls: true, hidden: true });
+  let catalog = [];
+  const spoken = () => language.value || S.data.settings.language || "it";
+  // The voices native in the language first, then the ones with no accent of their own.
+  const fits = () => catalog.filter((item) => !item.languages.length || item.languages.includes(spoken()))
+    .sort((a, b) => Number(b.languages.includes(spoken())) - Number(a.languages.includes(spoken())));
+  const fill = () => {
+    const chosen = voice.value;
+    voice.replaceChildren(h("option", { value: "" }, "Automatica"),
+      fits().map((item) => h("option", { value: item.id, selected: item.id === chosen }, raw(`${item.id}${item.gender ? ` · ${item.gender}` : ""}`))));
+    if (chosen && !fits().some((item) => item.id === chosen)) voice.value = "";
+    const picked = catalog.find((item) => item.id === voice.value);
+    about.textContent = picked ? picked.description : tr("Automatica: la prima voce di Soniox per la sua lingua.");
+  };
+  const listen = btn("Ascolta", { icon: "play", cls: "ghost", onclick: async () => {
+    const heard = voice.value || fits()[0]?.id || catalog[0]?.id;
+    if (!heard) return;
+    listen.disabled = true;
+    try {
+      const response = await fetch("/api/voices/preview", { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" }, body: JSON.stringify({ voice: heard, language: spoken() }) });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || tr("Anteprima non riuscita"));
+      player.src = URL.createObjectURL(await response.blob());
+      player.hidden = false;
+      await player.play().catch(() => {});
+    } catch (error) { toast(error.message, true); }
+    listen.disabled = false;
+  } });
+  language.addEventListener("change", fill);
+  voice.addEventListener("change", fill);
+  const body = h("div", { class: "stack-sm" },
+    h("div", { class: "voice-row" }, field("Lingua", language), field("Voce", voice)),
+    about, h("div", { class: "voice-listen" }, listen, player));
+  api("/api/voices").then((data) => {
+    if (!data.configured) {
+      for (const control of [voice, language]) control.disabled = true;
+      listen.disabled = true;
+      about.replaceChildren(tr("Per dare una voce agli agenti collega Soniox in "), h("a", { href: "#/settings/collegamenti" }, tr("Impostazioni → Collegamenti")), ".");
+      return;
+    }
+    catalog = data.voices;
+    fill();
+  }).catch(() => { about.textContent = tr("Le voci di Soniox non rispondono: riprova tra poco."); });
+  return panel({ icon: "mic", title: "Voce", hint: "Ascolta i messaggi vocali: a un vocale risponde sempre a voce, con la sua." }, body);
 }
 
 function tokenForm({ placeholder, path, ok }) {
@@ -2241,6 +2300,7 @@ function argsSummary(args) {
 function chatFile(file) {
   const url = `/api/files/${file.id}`;
   if (/^image\//.test(file.type)) return h("a", { href: url, target: "_blank", rel: "noopener", class: "chat-file" }, h("img", { src: url, alt: file.name, loading: "lazy" }));
+  if (/^audio\//.test(file.type)) return h("audio", { src: url, controls: true, preload: "metadata", class: "chat-file audio" });
   return h("a", { href: url, class: "chat-file doc" }, icon("file"), raw(file.name));
 }
 
@@ -2887,7 +2947,7 @@ function connectionsPanel() {
       key.value = "";
       const result = await guard(api(`/api/providers/${provider}/key`, { method: "PUT", body: { key: value } }), "Chiave salvata");
       if (result) {
-        if (provider !== "typesafe") S.data.providers[provider] = true;
+        if (provider !== "typesafe" && provider !== "soniox") S.data.providers[provider] = true;
         S.data.keys = { ...S.data.keys, [provider]: true };
         status.replaceChildren(icon("check"), tr("Configurata"));
         status.className = "badge on";
@@ -2900,6 +2960,7 @@ function connectionsPanel() {
     key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
     const cloud = S.data.ollamaCloud || {};
     const about = provider === "typesafe" ? docStatus()
+      : provider === "soniox" ? h("p", {}, "Gli agenti ascoltano i messaggi vocali e rispondono con una voce loro. La voce di ogni agente si sceglie nel suo profilo.")
       : provider !== "ollama" ? h("p", {}, "La chiave vale per tutti gli agenti di questa istanza.")
       : h("div", { class: "stack-sm" },
         h("p", {}, "Serve solo per i modelli di Ollama Cloud. L'Ollama di questa macchina non ne ha bisogno."),
@@ -2913,7 +2974,7 @@ function connectionsPanel() {
   return h("div", { class: "stack" },
     panel({ icon: "monitor", title: "Subscription del dispositivo", hint: "Gli account trovati sul server Cora.", actions: scan }, residentToggle, residentList),
     panel({ icon: "link", title: "Altri account", hint: "Collegali dal browser e scegli quale usare nel profilo di ogni agente." }, h("div", { class: "connection-grid" }, managed)),
-    panel({ icon: "key", title: "Chiavi API", hint: "Ollama, OrcaRouter e TypeSafe. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"), keyPanel("typesafe", "TypeSafe"))));
+    panel({ icon: "key", title: "Chiavi API", hint: "Ollama, OrcaRouter, TypeSafe e Soniox. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"), keyPanel("typesafe", "TypeSafe"), keyPanel("soniox", "Soniox"))));
 }
 
 // doc's built-in Jev checks, in the panel's words; a check doc adds later shows its own reason.

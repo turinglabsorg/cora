@@ -16,6 +16,7 @@ import { telegramBotEnvName } from "./telegram-bots.js";
 import { isWebRoom, roomAgentId } from "./rooms.js";
 import { nextRuns } from "./scheduler.js";
 import { SHARED } from "./store.js";
+import { VOICE_LANGUAGES } from "./voice.js";
 import { contextSources } from "./context.js";
 import { brainsInUse, testRule } from "./rule-test.js";
 
@@ -134,7 +135,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -317,7 +318,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         providers: llm.providers(),
         ollamaCloud: llm.cloudAccount || { signedIn: false, signinUrl: "" },
         // Which keys are stored, apart from whether the thing they unlock is reachable some other way.
-        keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key) },
+        keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key), soniox: Boolean(voice?.enabled) },
         doc: { installed: Boolean(brain.doc?.installed), ...(brain.doc?.installed ? brain.doc.activity() : {}) },
         subscriptions: subscriptions.list(),
         boxImage: { name: config.boxImage, ready: imageReady },
@@ -347,14 +348,23 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (action === "cancel" && method === "POST") return send(res, 200, await subscriptions.cancel(id));
       if (action === "check" && method === "POST") return send(res, 200, await subscriptions.check(id));
     }
-    const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter|typesafe)\/key$/.exec(path);
+    const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter|typesafe|soniox)\/key$/.exec(path);
     if (providerKeyMatch && method === "PUT") {
       const body = await readJson(req, 4096);
       const key = String(body.key || "").trim();
       if (!key || key.length > 2048 || /[\r\n\x00]/.test(key)) throw new HttpError(400, "chiave API non valida");
       const provider = providerKeyMatch[1];
-      try { await storeSecret({ ollama: "CORA_OLLAMA_API_KEY", orcarouter: "CORA_ORCAROUTER_API_KEY", typesafe: "CORA_TYPESAFE_API_KEY" }[provider], key); }
+      // A Soniox key is tried before it is kept: a wrong one never reaches hush.
+      if (provider === "soniox") {
+        if (!voice) throw new HttpError(409, "la voce non è disponibile su questa istanza");
+        try { await voice.check(key); } catch { throw new HttpError(400, "Soniox non accetta questa chiave"); }
+      }
+      try { await storeSecret({ ollama: "CORA_OLLAMA_API_KEY", orcarouter: "CORA_ORCAROUTER_API_KEY", typesafe: "CORA_TYPESAFE_API_KEY", soniox: "CORA_SONIOX_API_KEY" }[provider], key); }
       catch { throw new HttpError(502, "impossibile salvare la chiave in modo sicuro"); }
+      if (provider === "soniox") {
+        voice.setKey(key);
+        return send(res, 200, { provider, configured: true });
+      }
       // TypeSafe is not a model provider: its key is doc's, for the checks on what agents say.
       if (provider === "typesafe") {
         if (brain.doc) brain.doc.key = key;
@@ -364,6 +374,23 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       else llm.routers.orcarouter.key = key;
       llm.cache = { at: 0, models: [] };
       return send(res, 200, { provider, configured: true });
+    }
+    // The voices agents can speak with, and a sample of one, for the agent's Voice panel.
+    if (path === "/api/voices" && method === "GET") {
+      if (!voice?.enabled) return send(res, 200, { configured: false, languages: VOICE_LANGUAGES, voices: [] });
+      try { return send(res, 200, { configured: true, languages: VOICE_LANGUAGES, voices: await voice.voices() }); }
+      catch (error) { throw new HttpError(502, error.message); }
+    }
+    if (path === "/api/voices/preview" && method === "POST") {
+      if (!voice?.enabled) throw new HttpError(409, "collega Soniox in Impostazioni → Collegamenti");
+      const body = await readJson(req, 4096);
+      const language = VOICE_LANGUAGES.includes(body.language) ? body.language : "it";
+      const sample = String(body.text || "").trim().slice(0, 300) || (language === "en" ? "Hi, this is my voice. I answer like this when you talk to me." : "Ciao, questa è la mia voce. Ti rispondo così quando mi parli.");
+      try {
+        const audio = await voice.synthesize(sample, { voice: String(body.voice || "").slice(0, 40), language, format: "mp3" });
+        res.writeHead(200, { "Content-Type": "audio/mpeg", "Content-Length": audio.length, "Cache-Control": "no-store" });
+        return res.end(audio);
+      } catch (error) { throw new HttpError(502, error.message); }
     }
     if (path === "/api/doc/probe" && method === "POST") return send(res, 200, brain.doc ? await brain.doc.probe() : { installed: false, runs: false, jev: false });
     if (path === "/api/doc/rules" && (method === "GET" || method === "PUT")) {
@@ -681,7 +708,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const file = join(config.filesDir, match[1]);
       if (!existsSync(file)) throw new HttpError(404, "file non trovato");
       const meta = JSON.parse(readFileSync(`${file}.json`, "utf8"));
-      const inline = /^image\/(png|jpeg|gif|webp)$/.test(meta.type);
+      // Pictures and the agents' voice messages play in the page; everything else downloads.
+      const inline = /^(image\/(png|jpeg|gif|webp)|audio\/(mpeg|ogg))$/.test(meta.type);
       return send(res, 200, readFileSync(file), {
         "Content-Type": inline ? meta.type : "application/octet-stream",
         "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="${meta.name.replace(/"/g, "")}"`,

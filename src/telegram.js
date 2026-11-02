@@ -196,6 +196,26 @@ export class Telegram extends EventEmitter {
     return sent;
   }
 
+  /**
+   * A voice note (Ogg/Opus, the round player), or an audio file when only an MP3 is there.
+   * `name` is the agent's name on top, as in `say`.
+   */
+  async voiceNote(chatId, { ogg, mp3, duration, name = "" }) {
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    if (name) {
+      form.set("caption", `<b>${escapeHtml(name)}</b>`);
+      form.set("parse_mode", "HTML");
+    }
+    if (ogg) {
+      form.set("voice", new Blob([ogg], { type: "audio/ogg" }), "voice.ogg");
+      if (duration) form.set("duration", String(Math.max(1, Math.round(duration))));
+      return [await this.request("sendVoice", {}, { form, timeoutMs: 120000 })];
+    }
+    form.set("audio", new Blob([mp3], { type: "audio/mpeg" }), "voice.mp3");
+    return [await this.request("sendAudio", {}, { form, timeoutMs: 120000 })];
+  }
+
   typing(chatId) {
     this.request("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
   }

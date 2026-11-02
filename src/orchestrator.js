@@ -6,6 +6,8 @@ import { SALOTTO, isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { MEMORY_TOOLS } from "./tools.js";
 import { userName } from "./telegram.js";
 import { asksToStop } from "./brain.js";
+import { VOICE_MESSAGE } from "./discord.js";
+import { AUDIO_LIMIT_BYTES, VOICE_LANGUAGES, speakable } from "./voice.js";
 
 const MAX_PARALLEL_AGENTS = 4;
 const HUMAN_DEBOUNCE_MS = 1200;
@@ -16,10 +18,15 @@ const CATCH_UP_MS = 15 * 60 * 1000;
 /** How long a round holds its channel before the agents still working carry on in the background. */
 const RELEASE_AFTER_MS = 20000;
 const IMAGE_LIMIT_BYTES = 5 * 1024 * 1024;
+// What a voice message becomes in the chat; the archive keeps 4000 characters of a message.
+const TRANSCRIPT_LIMIT = 3500;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Slack message subtypes that still carry words for the agents.
 const SLACK_SUBTYPES = new Set(["bot_message", "file_share", "me_message", "thread_broadcast"]);
+
+const isAudio = (type) => String(type || "").startsWith("audio/");
+const slackAudio = (file) => isAudio(file.mimetype) || file.subtype === "slack_audio" || file.media_display_type === "audio";
 
 function normalize(text) {
   return String(text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
@@ -70,8 +77,11 @@ function describeMessage(raw, nameFor = () => null) {
 }
 
 export class Orchestrator {
-  constructor({ store, discord, brain, log, bots = null, channels, telegram = null, tgBots = null, slack = null, skBots = null, emit = () => {}, filesDir = null, notifier = null, watching = () => false }) {
+  constructor({ store, discord, brain, log, bots = null, channels, telegram = null, tgBots = null, slack = null, skBots = null, voice = null, emit = () => {}, filesDir = null, notifier = null, watching = () => false }) {
     this.notifier = notifier;
+    this.voice = voice;
+    // Messages being read right now (a voice message takes seconds): the other bots' copies wait for nothing.
+    this.arriving = new Set();
     this.watching = watching;
     this.requestsByAgent = new Map();
     this.bots = bots;
@@ -234,7 +244,11 @@ export class Orchestrator {
         })
         .then((messages) => {
           const archived = new Map(this.store.recentMessages(state.id, this.store.settings.historySize).map((item) => [item.id, item]));
-          const items = messages.filter((raw) => raw.id !== exclude).map((raw) => ({ ...this.toItem(raw), ...(archived.get(raw.id)?.passive ? { passive: true } : {}) }));
+          // A voice message comes back as the words it was heard as, not as its attachment.
+          const items = messages.filter((raw) => raw.id !== exclude).map((raw) => {
+            const kept = archived.get(raw.id);
+            return { ...this.toItem(raw), ...(kept?.passive ? { passive: true } : {}), ...(kept?.voice ? { content: kept.content, voice: true } : {}) };
+          });
           const existing = state.history;
           state.history = [];
           state.seen = new Set();
@@ -274,10 +288,69 @@ export class Orchestrator {
     if (viaAgentId) state.heardFrom.add(viaAgentId);
     // Several bots may hear the same channel: the first delivery wins, the rest are the same message.
     if (state.seen.has(raw.id) || this.store.hasMessage(raw.id)) return;
-    await this.ensureHistory(state, { exclude: raw.id });
-    const item = this.toItem(raw);
-    if (item.kind === "owner" || item.kind === "human") await this.attachImages(item, raw);
-    this.ingest(state, item);
+    await this.arrive(raw.id, async () => {
+      await this.ensureHistory(state, { exclude: raw.id });
+      const item = this.toItem(raw);
+      if (item.kind === "owner" || item.kind === "human") {
+        await this.attachImages(item, raw);
+        await this.hearDiscord(state, item, raw);
+      }
+      this.ingest(state, item);
+    });
+  }
+
+  /** One delivery of a message at a time: while it is being read, another bot's copy is the same message. */
+  async arrive(id, work) {
+    if (this.arriving.has(id)) return;
+    this.arriving.add(id);
+    try {
+      await work();
+    } finally {
+      this.arriving.delete(id);
+    }
+  }
+
+  /** The languages a voice message here is likely in: the agents' own and the instance's. */
+  languagesFor(state) {
+    return [...new Set([...this.agentsFor(state.id).map((agent) => agent.voiceLanguage), this.store.settings.language || "it"].filter(Boolean))];
+  }
+
+  /**
+   * A voice message, heard: Soniox writes down what was said and the agents read
+   * those words where the attachment was. The message is marked as spoken, and a
+   * spoken message gets a spoken answer. Without Soniox it stays an attachment.
+   */
+  async hear(state, item, { placeholder, filename, size = 0, read }) {
+    if (!this.voice?.enabled || (item.kind !== "owner" && item.kind !== "human")) return;
+    let line;
+    try {
+      if (size > AUDIO_LIMIT_BYTES) throw new Error("è troppo lungo");
+      const audio = await read();
+      if (!audio?.length) throw new Error("non riesco a scaricarlo");
+      const heard = await this.voice.transcribe(audio, { filename, languages: this.languagesFor(state), reference: item.id });
+      item.spokenIn = heard.language;
+      const words = heard.text.length > TRANSCRIPT_LIMIT ? `${heard.text.slice(0, TRANSCRIPT_LIMIT)}…` : heard.text;
+      line = words ? `[messaggio vocale: «${words}»]` : "[messaggio vocale senza parole]";
+    } catch (error) {
+      this.log({ type: "error", channelId: state.id, text: `vocale: ${error.message}` });
+      line = `[messaggio vocale che non sono riuscito ad ascoltare: ${error.message.slice(0, 160)}]`;
+    }
+    item.voice = true;
+    item.content = item.content.includes(placeholder) ? item.content.replace(placeholder, () => line) : `${item.content} ${line}`.trim();
+  }
+
+  /** A Discord voice message (or any audio file) in a message. */
+  async hearDiscord(state, item, raw) {
+    const attachments = raw.attachments || [];
+    const audio = (raw.flags & VOICE_MESSAGE) ? attachments[0] : attachments.find((attachment) => isAudio(attachment.content_type));
+    if (!audio?.url) return;
+    await this.hear(state, item, {
+      placeholder: `[allegato: ${audio.filename} ${audio.url}]`, filename: audio.filename, size: audio.size,
+      read: async () => {
+        const response = await fetch(audio.url, { signal: AbortSignal.timeout(30000) });
+        return response.ok ? Buffer.from(await response.arrayBuffer()) : null;
+      },
+    });
   }
 
   /**
@@ -294,11 +367,14 @@ export class Orchestrator {
     if (raw.author?.bot || this.bots?.agentIdForUser(raw.author?.id) || this.discord.isOwnMessage(raw)) return;
     this.dmAgent.set(raw.channel_id, agentId);
     const state = this.state(raw.channel_id);
-    await this.ensureHistory(state);
-    const item = this.toItem(raw);
-    if (item.kind !== "owner" && item.kind !== "human") return;
-    await this.attachImages(item, raw);
-    this.ingest(state, item);
+    await this.arrive(raw.id, async () => {
+      await this.ensureHistory(state);
+      const item = this.toItem(raw);
+      if (item.kind !== "owner" && item.kind !== "human") return;
+      await this.attachImages(item, raw);
+      await this.hearDiscord(state, item, raw);
+      this.ingest(state, item);
+    });
   }
 
   /**
@@ -465,6 +541,13 @@ export class Orchestrator {
       const data = photo && await this.telegram.download(photo.file_id, IMAGE_LIMIT_BYTES).catch(() => null);
       if (data) item.images = [data.toString("base64")];
     }
+    const audio = message.voice || message.audio;
+    if (audio?.file_id) {
+      await this.hear(state, item, {
+        placeholder: "[messaggio vocale]", filename: message.voice ? "voice.ogg" : audio.file_name || "audio.mp3", size: audio.file_size,
+        read: () => this.telegram.download(audio.file_id, AUDIO_LIMIT_BYTES),
+      });
+    }
     this.ingest(state, item);
   }
 
@@ -500,7 +583,7 @@ export class Orchestrator {
       .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
     if (text.trim()) parts.push(text.trim());
     for (const file of event.files || []) {
-      parts.push(String(file.mimetype || "").startsWith("image/") ? "[immagine]" : `[allegato: ${file.name || "file"}]`);
+      parts.push(String(file.mimetype || "").startsWith("image/") ? "[immagine]" : slackAudio(file) ? "[messaggio vocale]" : `[allegato: ${file.name || "file"}]`);
     }
     return parts.join(" ").slice(0, 3000) || "(messaggio vuoto)";
   }
@@ -524,6 +607,13 @@ export class Orchestrator {
     return item;
   }
 
+  /** A Slack audio clip (or audio file), read with the token of the app that heard it. */
+  async hearSlack(state, item, event, client) {
+    const audio = (event.files || []).find(slackAudio);
+    if (!audio) return;
+    await this.hear(state, item, { placeholder: "[messaggio vocale]", filename: audio.name || "audio.webm", size: audio.size, read: () => client.download(audio, AUDIO_LIMIT_BYTES) });
+  }
+
   /**
    * A message in a Slack conversation, delivered by whichever agent's app is in
    * it: in a private channel only those agents can answer. A reply inside a
@@ -545,9 +635,13 @@ export class Orchestrator {
     const id = `sl_${event.channel}_${event.ts}`;
     // Every app in the channel hears the same message: the first delivery wins.
     if (state.seen.has(id) || this.store.hasMessage(id)) return;
-    await this.ensureHistory(state);
-    await this.claimSlackOwner(event, client);
-    this.ingest(state, await this.slackItem(event, client));
+    await this.arrive(id, async () => {
+      await this.ensureHistory(state);
+      await this.claimSlackOwner(event, client);
+      const item = await this.slackItem(event, client);
+      await this.hearSlack(state, item, event, client);
+      this.ingest(state, item);
+    });
   }
 
   /** A direct message to an agent's own Slack app: a private conversation only that agent answers. */
@@ -565,6 +659,7 @@ export class Orchestrator {
     await this.ensureHistory(state);
     const item = await this.slackItem(event, client);
     if (item.kind !== "owner" && item.kind !== "human") return;
+    await this.hearSlack(state, item, event, client);
     this.ingest(state, item);
   }
 
@@ -727,7 +822,14 @@ export class Orchestrator {
       }
       const started = Date.now();
       if (computer) this.threadWork.set(state.id, agent.id);
-      const say = (text, target = state.id) => this.postDirect(agent, state, target, text);
+      // A voice message gets a spoken answer: the final reply, or what was said here with say when that was all.
+      const spoken = Boolean(queued?.voice);
+      let saidHere = "";
+      const say = async (text, target = state.id, { voice = false } = {}) => {
+        const sent = await this.postDirect(agent, state, target, text, { voice, language: voice && spoken ? queued.spokenIn : "" });
+        if (target === state.id) saidHere = sent.voice ? "" : text;
+        return sent;
+      };
       // An agent at work shows it the way a person does: the typing indicator, kept alive
       // for as long as the turn lasts. Where the platform has none — Slack gives bots
       // nothing — it marks the message it took instead. No line in the channel either way.
@@ -752,6 +854,7 @@ export class Orchestrator {
         if (computer) this.threadWork.delete(state.id);
       }
       if (!result.text) {
+        if (spoken && saidHere) await this.speak(agent, state, saidHere, queued.spokenIn);
         for (const id of result.handledMessageIds || []) state.humanQueue.delete(id);
         this.log({ type: "pass", agentId: agent.id, channelId: state.id, ms: Date.now() - started, traceId: result.traceId });
         return;
@@ -762,7 +865,7 @@ export class Orchestrator {
         if (!isForced) postedOptional += 1;
         if (posted > 0) await sleep(700 + Math.random() * 1500);
         try {
-          await this.postAs(agent, state, result.text, undefined, result.traceId);
+          await this.postAs(agent, state, result.text, undefined, result.traceId, { voice: spoken, language: queued?.spokenIn });
           for (const id of result.handledMessageIds || []) state.humanQueue.delete(id);
           posted += 1;
         } catch (error) {
@@ -864,7 +967,7 @@ export class Orchestrator {
       const result = await this.brain.resumeTurn({
         agent, trace, channel: this.channelMeta(state.id),
         postFile: (file, caption) => this.postAs(agent, state, caption, file),
-        say: (text, target = state.id) => this.postDirect(agent, state, target, text),
+        say: (text, target = state.id, { voice = false } = {}) => this.postDirect(agent, state, target, text, { voice }),
         inbox: this.inbox(state, state.history), routine,
         onMessageHandled: (ids) => { for (const id of ids) state.humanQueue.delete(id); },
       });
@@ -1005,7 +1108,68 @@ export class Orchestrator {
     return parts.join("");
   }
 
-  async postAs(agent, state, text, file, traceId, { ping = "", request, passive = false } = {}) {
+  /** Post as the agent; with `voice`, the same words follow in its voice (`sent.voice` says how that went). */
+  async postAs(agent, state, text, file, traceId, { voice = false, language = "", ...options } = {}) {
+    const sent = await this.deliver(agent, state, text, file, traceId, options);
+    if (voice && text) sent.voice = await this.speak(agent, state, text, language);
+    return sent;
+  }
+
+  /**
+   * The agent's words in its own voice, after the written ones: a voice message on
+   * Discord and Telegram, an audio clip on Slack and in the panel. A voice that fails
+   * leaves the written reply as it is.
+   */
+  async speak(agent, state, text, language = "") {
+    if (!this.voice?.enabled) return { error: "Soniox is not connected: the owner adds its key in Settings → Connections" };
+    if (!speakable(text)) return { error: "nothing in this message can be said aloud" };
+    try {
+      const tongue = (VOICE_LANGUAGES.includes(language) && language) || agent.voiceLanguage || this.store.settings.language || "it";
+      const note = await this.voice.voiceNote(text, { voice: await this.voice.voiceFor(agent, tongue), language: tongue });
+      const messages = await this.postVoice(agent, state, note);
+      this.log({ type: "say", agentId: agent.id, channelId: state.id, text: `[vocale${note.duration ? ` ${Math.round(note.duration)}s` : ""}] ${text.slice(0, 200)}` });
+      return { messages };
+    } catch (error) {
+      this.log({ type: "error", agentId: agent.id, channelId: state.id, text: `voce: ${error.message}` });
+      return { error: error.message };
+    }
+  }
+
+  async postVoice(agent, state, note) {
+    const clip = { name: this.store.settings.language === "en" ? "voice-message.mp3" : "messaggio-vocale.mp3", data: note.mp3, type: "audio/mpeg" };
+    if (isWebRoom(state.id)) return this.postWeb(agent, state, "", clip, undefined, { passive: true, silent: true });
+    const chatId = telegramChatId(state.id);
+    if (chatId) {
+      const own = this.tgBots?.client(agent.id);
+      if (own && await this.tgBots.inChat(agent.id, chatId)) {
+        try { return await own.voiceNote(chatId, note); }
+        catch (error) { this.log({ type: "warning", agentId: agent.id, channelId: state.id, text: `vocale col bot Telegram suo: ${error.message}; lo mando col bot principale` }); }
+      }
+      return this.telegram.voiceNote(chatId, { ...note, name: agent.name });
+    }
+    if (slackIds(state.id)) {
+      const info = this.channels.info(state.id);
+      const own = this.skBots?.client(agent.id);
+      if (own && (info.direct || await this.skBots.inChannel(agent.id, info.channelId))) return [await own.upload(info.channelId, clip, { threadTs: info.threadTs })];
+      if (!this.slack?.user) throw new Error("no Slack app in this conversation");
+      return [await this.slack.upload(info.channelId, clip, { threadTs: info.threadTs, name: agent.name, avatarUrl: agent.avatarUrl })];
+    }
+    // Discord: a real voice message needs the agent's own bot (webhooks cannot send one); otherwise an audio file.
+    const own = this.bots?.client(agent.id);
+    const shared = () => this.discord.post(state.id, { username: agent.name, avatarUrl: agent.avatarUrl, content: "", file: clip });
+    if (!own) return shared();
+    if (note.ogg) {
+      try { return await own.voiceNote(state.id, note); }
+      catch (error) { this.log({ type: "warning", agentId: agent.id, channelId: state.id, text: `vocale Discord: ${error.message}; lo mando come file audio` }); }
+    }
+    try { return await own.say(state.id, { content: "", file: clip }); }
+    catch (error) {
+      if (this.dmAgent.has(state.id) || state.mainBlind) throw error;
+      return shared();
+    }
+  }
+
+  async deliver(agent, state, text, file, traceId, { ping = "", request, passive = false } = {}) {
     if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request, passive });
     const chatId = telegramChatId(state.id);
     const slack = slackIds(state.id);
@@ -1107,7 +1271,7 @@ export class Orchestrator {
   }
 
   /** A message in a panel room: archived like a Discord one and pushed live to the panel. */
-  postWeb(agent, state, text, file, traceId, { request, passive = false } = {}) {
+  postWeb(agent, state, text, file, traceId, { request, passive = false, silent = false } = {}) {
     const item = {
       id: `web_${randomBytes(8).toString("hex")}`,
       at: Date.now(),
@@ -1127,7 +1291,7 @@ export class Orchestrator {
     this.emit({ type: "web-message", room: state.id, item });
     this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
     // Nobody has the panel open: the reply reaches the owner's phone.
-    if (this.notifier?.enabled && !this.watching() && !item.request) {
+    if (this.notifier?.enabled && !this.watching() && !item.request && !silent) {
       const url = state.id === "web" ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
       this.notifier.notify({ title: agent.name, body: text || `📎 ${file?.name}`, url, tag: state.id }).catch(() => {});
     }
@@ -1276,7 +1440,7 @@ export class Orchestrator {
       const result = await this.brain[resumeTrace ? "resumeTurn" : "routineTurn"]({
         agent, routine: snapshot, history: state.history, channel, trace: resumeTrace,
         postFile: (file, caption) => this.postAs(agent, state, caption, file, undefined, { passive: true }),
-        say: (text, target = state.id) => this.postDirect(agent, state, target, text, { passive: true }),
+        say: (text, target = state.id, { voice = false } = {}) => this.postDirect(agent, state, target, text, { passive: true, voice }),
         inbox: this.inbox(state, state.history),
         onTrace: (traceId) => this.store.attachRoutineTrace(run.id, traceId),
         onMessageHandled: (ids) => { for (const id of ids) state.humanQueue.delete(id); },

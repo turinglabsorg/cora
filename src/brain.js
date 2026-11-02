@@ -319,6 +319,7 @@ export class Brain {
       `Ultimi messaggi ${channel.where || `in #${channel.name}`}${channel.note ? ` (${channel.note})` : ""}:\n<chat>\n${transcript}\n</chat>`,
       instruction,
       replyTo ? `Messaggio umano a cui rispondere adesso: ${replyTo.authorName}: ${replyTo.content}\nGli eventuali risultati di routine successivi sono solo contesto, non una nuova richiesta di eseguirle.` : "",
+      replyTo?.voice ? `${replyTo.authorName} ti ha mandato un messaggio vocale: la tua risposta finale gli arriva scritta e anche a voce, letta con la tua voce. Scrivila come la diresti: frasi brevi, niente tabelle né elenchi lunghi; link e codice restano solo nello scritto.` : "",
     ].filter(Boolean).join("\n\n");
     const request = replyTo || history.filter((item) => item.kind === "owner" || item.kind === "human").at(-1);
     const requestIndex = request ? history.findIndex((item) => item.id === request.id) : -1;
@@ -538,10 +539,10 @@ export class Brain {
     let lastUpdate = Date.now();
     // The last tool was a say into this conversation: a final "message sent" adds nothing.
     let saidHere = false;
-    const sayTracked = say ? async (text, target = channel.id) => {
+    const sayTracked = say ? async (text, target = channel.id, options = {}) => {
       lastUpdate = Date.now();
       progress = String(text);
-      const result = await say(text, target);
+      const result = await say(text, target, options);
       spokenMessages.push(String(text).trim());
       if (spokenMessages.length > 20) spokenMessages.shift();
       for (const id of deliveredMessageIds) answeredMessageIds.add(id);
@@ -555,10 +556,10 @@ export class Brain {
         asked = true;
         return posted;
       } : null,
-      say: sayTracked ? (text, target = channel.id) => {
+      say: sayTracked ? (text, target = channel.id, options = {}) => {
         const key = `${ownerRevision}\0${target}\0${String(text).trim()}`;
         if (!deliveries.has(key)) {
-          const delivery = sayTracked(text, target);
+          const delivery = sayTracked(text, target, options);
           deliveries.set(key, delivery);
           delivery.catch(() => { if (deliveries.get(key) === delivery) deliveries.delete(key); });
         }

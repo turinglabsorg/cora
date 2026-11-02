@@ -18,6 +18,8 @@ const TEXT_CHANNEL_TYPES = new Set([0, 5]);
 const THREAD_TYPES = new Set([10, 11, 12]);
 const WEBHOOK_NAME = "cora";
 const MAX_CONTENT = 1990;
+/** Message flag IS_VOICE_MESSAGE. */
+export const VOICE_MESSAGE = 1 << 13;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -480,10 +482,21 @@ export class Discord extends EventEmitter {
     return user;
   }
 
+  /**
+   * A voice message as this bot: Discord draws it as a player with its waveform. It
+   * carries no text, and webhooks cannot send one, so it goes out only as a bot user.
+   */
+  async voiceNote(channelId, { ogg, duration, waveform }) {
+    const file = { name: "voice-message.ogg", data: ogg, type: "audio/ogg", meta: { duration_secs: Math.max(0.1, Math.round(duration * 100) / 100), waveform: waveform.toString("base64") } };
+    const message = await this.sendPayload(`/channels/${channelId}/messages`, { flags: VOICE_MESSAGE }, file, true);
+    this.rememberOwn(message);
+    return [message];
+  }
+
   async sendPayload(path, payload, file, auth) {
     if (!file) return this.request("POST", path, { body: payload, auth });
     const form = new FormData();
-    form.append("payload_json", JSON.stringify({ ...payload, attachments: [{ id: 0, filename: file.name }] }));
+    form.append("payload_json", JSON.stringify({ ...payload, attachments: [{ id: 0, filename: file.name, ...(file.meta || {}) }] }));
     form.append("files[0]", new Blob([file.data], { type: file.type || "application/octet-stream" }), file.name);
     return this.request("POST", path, { form, auth });
   }

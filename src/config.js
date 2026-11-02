@@ -30,6 +30,11 @@ export const config = {
   ollamaKey: env.OLLAMA_API_KEY || "",
   orcaUrl: (setting("ORCAROUTER_URL") || "https://api.orcarouter.ai/v1").replace(/\/$/, ""),
   orcaKey: env.ORCAROUTER_API_KEY || "",
+  // Soniox: agents hear voice messages and answer in a voice of their own. ffmpeg makes the voice notes.
+  sonioxKey: env.SONIOX_API_KEY || "",
+  sonioxApi: setting("SONIOX_API") || "https://api.soniox.com",
+  sonioxTtsUrl: setting("SONIOX_TTS_URL") || "https://tts-rt.soniox.com/tts",
+  ffmpeg: setting("FFMPEG") || firstExisting(["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg", "ffmpeg"]),
   // doc's checks on what agents publish and say; Jev judges with this instance's TypeSafe key.
   docDir: setting("DOC_DIR") || "",
   typesafeKey: env.TYPESAFE_API_KEY || "",

@@ -644,6 +644,7 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .msg .text a:hover, .msg .text a:focus-visible { text-decoration-color: var(--amber); }
 .chat-file { display: block; margin-top: 8px; }
 .chat-file img { display: block; max-width: 100%; max-height: 360px; border-radius: var(--r-sm); border: 1px solid var(--line); }
+.chat-file.audio { width: min(100%, 320px); height: 36px; }
 .chat-file.doc { display: inline-flex; align-items: center; gap: 6px; color: var(--amber); font: 400 12px/1.4 var(--mono); }
 .chat-note {
   align-self: center; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 12px; border-radius: 999px;
@@ -1074,3 +1075,11 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .doc-trial-verdict { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
 .doc-trial details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .doc-trial details p { display: grid; gap: 2px; margin: 8px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+
+/* The agent's voice */
+.voice-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.voice-about { color: var(--muted); }
+.voice-about a { color: var(--amber); }
+.voice-listen { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.voice-preview { height: 36px; max-width: 100%; }
+@media (max-width: 720px) { .voice-row { grid-template-columns: minmax(0, 1fr); } }
