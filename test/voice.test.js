@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { childEnv } from "../src/cli.js";
 import { startCora } from "../src/main.js";
 import { Store } from "../src/store.js";
 import { Voice, accentOf, speakable, wavShape } from "../src/voice.js";
@@ -49,6 +50,18 @@ test("a Soniox key is tried before it is kept, then the agents' voices can be ch
   const changed = await request(`/api/agents/${created.data.id}`, { method: "PUT", body: { voiceLanguage: "klingon", voice: "Giulia<script>" } });
   assert.deepEqual([changed.data.voiceLanguage, changed.data.voice], ["", "Giuliascript"], "an unknown language falls back to the instance's, a voice id keeps only its characters");
   assert.equal(app.voice.enabled, true);
+});
+
+test("an agent's CLI never inherits the Soniox key or any other Cora secret", () => {
+  const names = ["SONIOX_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "TYPESAFE_API_KEY", "CORA_SK_BOT_ADA", "CORA_SK_APP_ADA", "CORA_BOT_ADA", "CORA_TG_BOT_ADA"];
+  for (const name of names) process.env[name] = "fixture-secret";
+  try {
+    const env = childEnv();
+    assert.deepEqual(names.filter((name) => name in env), []);
+    assert.equal(env.PATH, process.env.PATH);
+  } finally {
+    for (const name of names) delete process.env[name];
+  }
 });
 
 test("a Soniox voice's language is the accent its description names", () => {
