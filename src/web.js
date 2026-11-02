@@ -342,7 +342,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         providers: llm.providers(),
         ollamaCloud: llm.cloudAccount || { signedIn: false, signinUrl: "" },
         // Which keys are stored, apart from whether the thing they unlock is reachable some other way.
-        keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key), soniox: Boolean(voice?.enabled) },
+        keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key), soniox: Boolean(voice?.enabled), deepseek: Boolean(llm.deepseek?.key) },
         doc: { installed: Boolean(brain.doc?.installed), ...(brain.doc?.installed ? brain.doc.activity() : {}) },
         subscriptions: subscriptions.list(),
         boxImage: { name: config.boxImage, ready: imageReady },
@@ -372,7 +372,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (action === "cancel" && method === "POST") return send(res, 200, await subscriptions.cancel(id));
       if (action === "check" && method === "POST") return send(res, 200, await subscriptions.check(id));
     }
-    const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter|typesafe|soniox)\/key$/.exec(path);
+    const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter|typesafe|soniox|deepseek)\/key$/.exec(path);
     if (providerKeyMatch && method === "PUT") {
       const body = await readJson(req, 4096);
       const key = String(body.key || "").trim();
@@ -383,7 +383,14 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (!voice) throw new HttpError(409, "la voce non è disponibile su questa istanza");
         try { await voice.check(key); } catch { throw new HttpError(400, "Soniox non accetta questa chiave"); }
       }
-      try { await storeSecret({ ollama: "CORA_OLLAMA_API_KEY", orcarouter: "CORA_ORCAROUTER_API_KEY", typesafe: "CORA_TYPESAFE_API_KEY", soniox: "CORA_SONIOX_API_KEY" }[provider], key); }
+      // So is a DeepSeek key, against DeepSeek's own model list.
+      if (provider === "deepseek") {
+        const answer = await fetch(`${config.deepseekApi || "https://api.deepseek.com"}/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15000) }).catch(() => null);
+        if (!answer) throw new HttpError(502, "DeepSeek non risponde: riprova tra poco");
+        await answer.body?.cancel().catch(() => {});
+        if (!answer.ok) throw new HttpError(400, "DeepSeek non accetta questa chiave");
+      }
+      try { await storeSecret({ ollama: "CORA_OLLAMA_API_KEY", orcarouter: "CORA_ORCAROUTER_API_KEY", typesafe: "CORA_TYPESAFE_API_KEY", soniox: "CORA_SONIOX_API_KEY", deepseek: "CORA_DEEPSEEK_API_KEY" }[provider], key); }
       catch { throw new HttpError(502, "impossibile salvare la chiave in modo sicuro"); }
       if (provider === "soniox") {
         voice.setKey(key);
@@ -395,6 +402,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 200, { provider, configured: true });
       }
       if (provider === "ollama") llm.ollamaKey = key;
+      else if (provider === "deepseek") llm.deepseek.key = key;
       else llm.routers.orcarouter.key = key;
       llm.cache = { at: 0, models: [] };
       return send(res, 200, { provider, configured: true });

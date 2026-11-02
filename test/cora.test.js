@@ -182,6 +182,7 @@ before(async () => {
     orcaUrl: orca.url,
     orcaKey: "sk-orca-test",
     hermesBin: cli.hermes,
+    deepseekBin: cli.dsh,
     hermesHome: join(home, "hermes-home"),
     hermesBaseUrl: `${ollama.url}/v1`,
     claudeBin: cli.claude,
@@ -990,7 +991,7 @@ describe("agents in Discord", () => {
     assert.ok(state.data.models.some((model) => model.id === "claude/claude-opus-5-5"));
     assert.ok(state.data.models.some((model) => model.id === "codex/gpt-6-sol"));
     assert.ok(!state.data.models.some((model) => model.id === "codex/hidden"));
-    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true });
+    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true, deepseek: false, deepseekInstalled: true }, "dsh is here, its key is not");
   });
 
   test("creates two agents through the API", async () => {
@@ -2729,9 +2730,9 @@ describe("what runs the models", () => {
     const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
     await panel.run("boot()");
     await panel.navigate(`#/agent/${agent.id}/cervello`);
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 6);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 7);
     assert.deepEqual(panel.app.querySelectorAll(".harness-row").map((node) => node.querySelector(".harness-name").textContent),
-      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Hermes"], "every harness, as a list and not a dropdown");
+      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Hermes", "DeepSeek Harnessno key"], "every harness, as a list and not a dropdown; dsh is here without its key");
     // It opens on the side the agent is already on: the cloud.
     const places = panel.app.querySelector(".segmented");
     assert.deepEqual(places.children.map((node) => node.textContent), ["On this machine", "In the cloud"]);
@@ -2781,12 +2782,13 @@ describe("what runs the models", () => {
       return reply({});
     } });
     await panel.run("boot()");
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 6);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 7);
     const side = () => panel.app.querySelector(".brain-side");
     const row = (name) => panel.app.querySelectorAll(".harness-row").find((node) => node.querySelector(".harness-name").textContent.startsWith(name));
     assert.ok(!row("Cora's harness").querySelector(".harness-flag"), "a missing router does not make Cora's harness missing");
     assert.equal(row("Codex").querySelector(".harness-flag").textContent, "not installed");
     assert.equal(row("Grok Build").querySelector(".harness-flag").textContent, "not installed", "a machine without Grok says so instead of hiding it");
+    assert.equal(row("DeepSeek Harness").querySelector(".harness-flag").textContent, "not installed");
 
     // Its own cloud: listed, but not choosable, and the default that points there neither.
     panel.app.querySelector(".segmented").children[1].click();

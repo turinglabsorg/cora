@@ -30,6 +30,11 @@ export const config = {
   ollamaKey: env.OLLAMA_API_KEY || "",
   orcaUrl: (setting("ORCAROUTER_URL") || "https://api.orcarouter.ai/v1").replace(/\/$/, ""),
   orcaKey: env.ORCAROUTER_API_KEY || "",
+  // DeepSeek Harness (dsh) on the instance's own DeepSeek key, in a DSH_HOME of Cora's.
+  deepseekKey: env.DEEPSEEK_API_KEY || "",
+  deepseekBin: setting("DSH_BIN") || "dsh",
+  deepseekHome: setting("DSH_HOME") || "",
+  deepseekApi: (setting("DEEPSEEK_API") || "https://api.deepseek.com").replace(/\/$/, ""),
   // Soniox: agents hear voice messages and answer in a voice of their own. ffmpeg makes the voice notes.
   sonioxKey: env.SONIOX_API_KEY || "",
   sonioxApi: setting("SONIOX_API") || "https://api.soniox.com",

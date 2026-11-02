@@ -9,7 +9,7 @@ import { VOICE_LANGUAGES } from "./voice.js";
 export const SHARED = "_shared";
 export const CONTEXT_LIMITS = { fileChars: 30000, totalChars: 60000, files: 20 };
 /** The providers a model id can name (provider/model). */
-export const MODEL_PROVIDERS = [...SUBSCRIPTION_PROVIDERS, "ollama", "orcarouter", "hermes"];
+export const MODEL_PROVIDERS = [...SUBSCRIPTION_PROVIDERS, "ollama", "orcarouter", "hermes", "deepseek"];
 
 function checkModel(value) {
   const model = cleanText(value, 160).trim();

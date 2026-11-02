@@ -588,6 +588,7 @@ process.stdin.on("end", async () => {
   let server = null;
   let hermesConfig = null;
   let grokConfig = null;
+  let dshPatch = null;
   if (flavor === "claude") {
     const index = argv.indexOf("--mcp-config");
     if (index >= 0) server = JSON.parse(fs.readFileSync(argv[index + 1], "utf8")).mcpServers.cora;
@@ -612,6 +613,14 @@ process.stdin.on("end", async () => {
         command: JSON.parse(toml.match(/^command = (.*)$/m)[1]), args: JSON.parse(toml.match(/^args = (.*)$/m)[1]),
         env: { CORA_BRIDGE_URL: fill("\${CORA_BRIDGE_URL}"), CORA_BRIDGE_TOKEN: fill("\${CORA_BRIDGE_TOKEN}") },
       };
+    }
+  } else if (flavor === "dsh") {
+    // dsh boots its headless profile with Cora's --patch overlay: the MCP row runs the server, its env from dsh's own environment.
+    dshPatch = fs.readFileSync(argv[argv.indexOf("--patch") + 1], "utf8");
+    const command = dshPatch.match(/^        command: (.*)$/m);
+    if (command) {
+      server = { command: JSON.parse(command[1]), args: JSON.parse(dshPatch.match(/^        args: (.*)$/m)[1]),
+        env: { CORA_BRIDGE_URL: process.env.CORA_BRIDGE_URL || "", CORA_BRIDGE_TOKEN: process.env.CORA_BRIDGE_TOKEN || "" } };
     }
   } else if (flavor === "muse") {
     // Muse takes the server for this run in -c and fills \${...} in its env from its own environment.
@@ -638,7 +647,8 @@ process.stdin.on("end", async () => {
   const promptFile = argv.indexOf("--prompt-file") >= 0 ? argv[argv.indexOf("--prompt-file") + 1] : "";
   if (promptFile) stdin = fs.readFileSync(promptFile, "utf8");
   const env = Object.fromEntries(["HOME", "GROK_HOME", "GROK_AUTH_PATH", "GROK_CLAUDE_MCPS_ENABLED", "GROK_CLAUDE_HOOKS_ENABLED", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TBH_CREDENTIAL_BACKEND", "MISE_DATA_DIR"].map((key) => [key, process.env[key] || ""]));
-  const record = { flavor, argv, stdin, env, tools: null, output: null, hermesConfig, grokConfig, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
+  if (flavor === "dsh") Object.assign(env, { DSH_HOME: process.env.DSH_HOME || "", DSH_TELEMETRY_MODE: process.env.DSH_TELEMETRY_MODE || "", DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY ? "set" : "" });
+  const record = { flavor, argv, stdin, env, tools: null, output: null, hermesConfig, grokConfig, dshPatch, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", secretEnv: Object.keys(process.env).filter((key) => key.startsWith("CORA_BOT_") || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
   if (control.hang) {
     fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ ...record, pid: process.pid }) + "\\n");
     setInterval(() => {}, 1000);
@@ -682,6 +692,19 @@ process.stdin.on("end", async () => {
     }
     line({ type: "assistant", message: { content: [{ type: "text", text: answer }] } });
     line({ type: "result", subtype: "success", is_error: false, result: answer, usage: { input_tokens: 70, cache_read_input_tokens: 30, output_tokens: 12 } });
+  } else if (flavor === "dsh") {
+    line({ type: "session", sessionId: "session-fixture", cwd: process.cwd() });
+    line({ type: "status", phase: "turn_start", turn: 1 });
+    if (control.thinking) line({ type: "thinking", text: control.thinking });
+    if (control.tool) {
+      line({ type: "text", text: "Prima controllo." });
+      line({ type: "tool_call", callId: "toolu_1", tool: "mcp__cora__" + control.tool, input: control.args || {} });
+      line({ type: "tool_result", callId: "toolu_1", status: "completed", result: record.output });
+    }
+    line({ type: "text", text: answer });
+    line({ type: "status", phase: "step_end", turn: 1, step: 1, usage: { inputTokens: 90, outputTokens: 11, totalTokens: 101 } });
+    line({ type: "status", phase: "turn_end", turn: 1, reason: { kind: "completed" } });
+    line({ type: "final", text: answer });
   } else if (flavor === "muse") {
     const event = (payload_type, payload) => line({ schema_version: 1, payload_type, payload });
     if (control.tool) {
@@ -713,7 +736,7 @@ process.stdin.on("end", async () => {
   }
 });
 `;
-  for (const name of ["claude", "codex", "grok", "muse", "hermes"]) {
+  for (const name of ["claude", "codex", "grok", "muse", "hermes", "dsh"]) {
     writeFileSync(join(dir, name), source);
     chmodSync(join(dir, name), 0o755);
   }
@@ -725,6 +748,7 @@ process.stdin.on("end", async () => {
     grok: join(dir, "grok"),
     muse: join(dir, "muse"),
     hermes: join(dir, "hermes"),
+    dsh: join(dir, "dsh"),
     models,
     set(value) { writeFileSync(control, JSON.stringify(value)); },
     calls() {

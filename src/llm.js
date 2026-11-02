@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { runClaude, runCodex, runGrok, runHermes, runMuse } from "./cli.js";
+import { runClaude, runCodex, runDeepSeek, runGrok, runHermes, runMuse } from "./cli.js";
 import { isSubscriptionProvider } from "./harnesses.js";
 
 const REQUEST_TIMEOUT_MS = 240000;
@@ -108,6 +108,7 @@ export const PROVIDERS = {
   ollama: "Ollama Cloud",
   orcarouter: "OrcaRouter",
   hermes: "Hermes Agent",
+  deepseek: "DeepSeek Harness",
 };
 
 /** Routers that speak the OpenAI chat format: every model behind one key, run on the Cora harness. */
@@ -120,6 +121,12 @@ const CLOUD_NAME = /(^|[:-])cloud$/i;
 
 /** Model families that take images, for routers whose model list does not say. */
 const VISION = /(gpt-4o|gpt-4\.1|gpt-5|o3|o4|claude|gemini|grok-4|pixtral|vision|-vl|llava|qwen.*vl)/i;
+
+// The models dsh's own catalog ships for DeepSeek's API.
+const DEEPSEEK_MODELS = [
+  { name: "deepseek-flash", label: "DeepSeek V4.1 Flash" },
+  { name: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+];
 
 const CLAUDE_MODELS = [
   { name: "claude-opus-5-5", label: "Opus 5.5" },
@@ -163,8 +170,10 @@ export function onPath(bin) {
 }
 
 export class LLM {
-  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", grokBin = "grok", museBin = "muse", grokHome = "", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
+  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", grokBin = "grok", museBin = "muse", grokHome = "", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", deepseekBin = "dsh", deepseekKey = "", deepseekHome = "", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
     this.hermes = { bin: hermesBin, home: hermesHome || join(homedir(), ".cora", "hermes-home"), baseUrl: String(hermesBaseUrl).replace(/\/$/, "") };
+    // DeepSeek Harness runs on the instance's own DeepSeek key, in a DSH_HOME of Cora's.
+    this.deepseek = { bin: deepseekBin, key: deepseekKey, home: deepseekHome || join(homedir(), ".cora", "dsh-home") };
     this.ollamaUrl = ollamaUrl;
     this.ollamaKey = ollamaKey;
     this.routers = { orcarouter: { url: String(orcaUrl).replace(/\/$/, ""), key: orcaKey } };
@@ -280,6 +289,8 @@ export class LLM {
       ollamaCloud: Boolean(this.ollamaKey) || Boolean(this.cloudAccount?.signedIn),
       orcarouter: Boolean(this.routers.orcarouter.key),
       hermes: onPath(this.hermes.bin),
+      deepseek: onPath(this.deepseek.bin) && Boolean(this.deepseek.key),
+      deepseekInstalled: onPath(this.deepseek.bin),
     };
   }
 
@@ -377,7 +388,7 @@ export class LLM {
 
   /** The CLIs run the whole tool loop themselves; Ollama and the routers go through the Cora harness. */
   isAgentic(model) {
-    return ["claude", "codex", "grok", "muse", "hermes"].includes(splitModel(model).provider);
+    return ["claude", "codex", "grok", "muse", "hermes", "deepseek"].includes(splitModel(model).provider);
   }
 
   /**
@@ -411,6 +422,9 @@ export class LLM {
     }
     if (available.grok) {
       for (const model of this.grokModels()) models.push({ id: `grok/${model.id}`, provider: "grok", label: model.label, tools: true, vision: false, thinking: true });
+    }
+    if (available.deepseek) {
+      for (const model of DEEPSEEK_MODELS) models.push({ id: `deepseek/${model.name}`, provider: "deepseek", label: model.label, tools: true, vision: false, thinking: true });
     }
     if (available.muse) {
       for (const model of MUSE_MODELS) models.push({ id: `muse/${model.name}`, provider: "muse", label: model.label, tools: true, vision: false, thinking: false });
@@ -564,6 +578,7 @@ export class LLM {
           }
           return await runHermes({ bin: this.hermes.bin, ...options, home: endpoint.home, baseUrl: endpoint.baseUrl, model: endpoint.model, apiKey: endpoint.key });
         }
+        if (provider === "deepseek") return await runDeepSeek({ bin: this.deepseek.bin, ...options, home: this.deepseek.home, apiKey: this.deepseek.key });
         throw new Error(`${provider} is not a CLI provider`);
       } finally {
         run?.dispose();

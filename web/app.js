@@ -34,9 +34,10 @@ const PROVIDERS = {
   ollama: "Ollama Cloud",
   orcarouter: "OrcaRouter",
   hermes: "Hermes Agent",
+  deepseek: "DeepSeek Harness",
 };
 // Who runs the loop is one choice; which model thinks is another. Cora's own harness
-// drives Ollama and the routers; Claude Code, Codex, Grok Build, Muse Code and Hermes drive themselves.
+// drives Ollama and the routers; Claude Code, Codex, Grok Build, Muse Code, Hermes and DeepSeek Harness drive themselves.
 const HARNESSES = {
   cora: { label: "Harness di Cora", hint: "Cora guida il modello e gli passa gli strumenti.", providers: ["ollama", "orcarouter"] },
   claude: { label: "Claude Code", hint: "Claude guida sé stesso con l'account scelto qui sotto.", providers: ["claude"] },
@@ -44,6 +45,7 @@ const HARNESSES = {
   grok: { label: "Grok Build", hint: "Grok guida sé stesso con l'account scelto qui sotto.", providers: ["grok"] },
   muse: { label: "Muse Code", hint: "Muse guida sé stesso con l'account Meta scelto qui sotto.", providers: ["muse"] },
   hermes: { label: "Hermes", hint: "Hermes guida sé stesso sui modelli del suo endpoint, di solito quelli di questa macchina.", providers: ["hermes"] },
+  deepseek: { label: "DeepSeek Harness", hint: "dsh, l'harness di DeepSeek, guida sé stesso con la chiave DeepSeek di questa Cora.", providers: ["deepseek"] },
 };
 const harnessOf = (model) => {
   const provider = String(model || "").split("/")[0];
@@ -64,6 +66,7 @@ const CONNECTIONS = [
   ["grok", "Grok Build"],
   ["muse", "Muse Code"],
   ["hermes", "Hermes Agent"],
+  ["deepseek", "DeepSeek Harness"],
 ];
 const PROVIDER_HINTS = {
   claude: "Claude Code non trovato su questa macchina",
@@ -75,8 +78,9 @@ const PROVIDER_HINTS = {
   ollamaCloud: "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush",
   orcarouter: "manca CORA_ORCAROUTER_API_KEY in hush",
   hermes: "Hermes non trovato su questa macchina",
+  deepseek: "serve dsh su questa macchina e la chiave DeepSeek",
 };
-const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", grok: "Grok", muse: "Meta", ollama: "Ollama", orcarouter: "OrcaRouter", hermes: "Hermes" };
+const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", grok: "Grok", muse: "Meta", ollama: "Ollama", orcarouter: "OrcaRouter", hermes: "Hermes", deepseek: "DeepSeek" };
 /** Each subscription's mark, so two accounts are told apart at a glance. */
 const SUBSCRIPTION_ICONS = { claude: "spark", codex: "chip", grok: "terminal", muse: "layers" };
 /** The account's name and the program that uses it, as Settings lists them. */
@@ -919,6 +923,7 @@ const HARNESS_NEEDS = {
   grok: "Grok Build non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   muse: "Muse Code non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   hermes: "Hermes non è installato su questa macchina: installalo sul server con l'utente di Cora.",
+  deepseek: "DeepSeek Harness ha bisogno di dsh sul server (npm i -g @deepseek-ai/dsh) e della chiave DeepSeek in Impostazioni → Collegamenti.",
   ollama: "Nessun Ollama su questa macchina e nessuna chiave Ollama Cloud.",
   orcarouter: "Nessuna chiave OrcaRouter.",
 };
@@ -1030,7 +1035,8 @@ function brainPanel(agent) {
       },
         h("span", { class: "harness-led", "aria-hidden": "true" }),
         h("span", { class: "harness-text" },
-          h("span", { class: "harness-name" }, tr(item.label), ready ? null : h("span", { class: "harness-flag" }, tr("non installato"))),
+          // DeepSeek Harness can be installed and still lack its key: the flag says which.
+          h("span", { class: "harness-name" }, tr(item.label), ready ? null : h("span", { class: "harness-flag" }, tr(key === "deepseek" && S.data.providers?.deepseekInstalled ? "senza chiave" : "non installato"))),
           h("span", { class: "harness-hint" }, tr(item.hint))));
     }));
   }
@@ -3008,7 +3014,8 @@ function connectionsPanel() {
       key.value = "";
       const result = await guard(api(`/api/providers/${provider}/key`, { method: "PUT", body: { key: value } }), "Chiave salvata");
       if (result) {
-        if (provider !== "typesafe" && provider !== "soniox") S.data.providers[provider] = true;
+        if (provider === "deepseek") S.data.providers.deepseek = Boolean(S.data.providers.deepseekInstalled);
+        else if (provider !== "typesafe" && provider !== "soniox") S.data.providers[provider] = true;
         S.data.keys = { ...S.data.keys, [provider]: true };
         status.replaceChildren(icon("check"), tr("Configurata"));
         status.className = "badge on";
@@ -3022,6 +3029,7 @@ function connectionsPanel() {
     const cloud = S.data.ollamaCloud || {};
     const about = provider === "typesafe" ? docStatus()
       : provider === "soniox" ? h("p", {}, "Gli agenti ascoltano i messaggi vocali e rispondono con una voce loro. La voce di ogni agente si sceglie nel suo profilo.")
+      : provider === "deepseek" ? h("p", {}, S.data.providers?.deepseekInstalled ? "La usa DeepSeek Harness, per gli agenti che scelgono quell'harness nel loro Cervello." : "La usa DeepSeek Harness, che su questa macchina non è ancora installato.")
       : provider !== "ollama" ? h("p", {}, "La chiave vale per tutti gli agenti di questa istanza.")
       : h("div", { class: "stack-sm" },
         h("p", {}, "Serve solo per i modelli di Ollama Cloud. L'Ollama di questa macchina non ne ha bisogno."),
@@ -3035,7 +3043,7 @@ function connectionsPanel() {
   return h("div", { class: "stack" },
     panel({ icon: "monitor", title: "Subscription del dispositivo", hint: "Gli account trovati sul server Cora.", actions: scan }, residentToggle, residentList),
     panel({ icon: "link", title: "Altri account", hint: "Collegali dal browser e scegli quale usare nel profilo di ogni agente." }, h("div", { class: "connection-grid" }, managed)),
-    panel({ icon: "key", title: "Chiavi API", hint: "Ollama, OrcaRouter, TypeSafe e Soniox. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"), keyPanel("typesafe", "TypeSafe"), keyPanel("soniox", "Soniox"))));
+    panel({ icon: "key", title: "Chiavi API", hint: "Ollama, OrcaRouter, DeepSeek, TypeSafe e Soniox. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"), keyPanel("deepseek", "DeepSeek"), keyPanel("typesafe", "TypeSafe"), keyPanel("soniox", "Soniox"))));
 }
 
 // doc's built-in Jev checks, in the panel's words; a check doc adds later shows its own reason.

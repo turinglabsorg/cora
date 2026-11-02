@@ -7,7 +7,7 @@
  * rather than in a channel.
  */
 
-const HARNESS_NAMES = { claude: "Claude Code", codex: "Codex", grok: "Grok Build", muse: "Muse Code", hermes: "Hermes", ollama: "Ollama", orcarouter: "OrcaRouter" };
+const HARNESS_NAMES = { claude: "Claude Code", codex: "Codex", grok: "Grok Build", muse: "Muse Code", hermes: "Hermes", deepseek: "DeepSeek Harness", ollama: "Ollama", orcarouter: "OrcaRouter" };
 const KINDS = {
   reply: { piece: "un messaggio breve e realistico per la chat del team", short: "messaggio" },
   comment: { piece: "un commento breve e realistico per una pull request su GitHub", short: "commento" },

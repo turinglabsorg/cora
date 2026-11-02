@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const MCP_SCRIPT = fileURLToPath(new URL("./mcp-server.js", import.meta.url));
-const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "TYPESAFE_API_KEY", "SONIOX_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "VAPID_KEY"];
+const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "TYPESAFE_API_KEY", "SONIOX_API_KEY", "DEEPSEEK_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "VAPID_KEY"];
 const CODEX_CORA_INSTRUCTIONS = [
   "You are running inside Cora. Codex's read-only sandbox protects the local CLI host; its native shell, filesystem editing and browser tools are disabled.",
   "The mcp__cora tools are provided by Cora separately. When available, mcp__cora.shell executes on the agent's own Linux desktop, where files can be written and authorized remote connectors can be called. The local host sandbox does not make those connectors read-only.",
@@ -239,6 +239,119 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   // failed turn, never something to say in the agent's name.
   if (NO_REPLY.test(text)) throw new Error(`hermes: ${model} returned no content`);
   return { text };
+}
+
+/**
+ * The rows of dsh's headless profile Cora switches off: every tool that acts on this
+ * machine (the agent works on its own computer through Cora's tools), the owner's
+ * instructions and skills dsh would read from disk, dsh's own goal tools (Cora checks
+ * the work itself), the extra call that titles a session, and the session files.
+ */
+export const DSH_OFF = [
+  "tool-bash", "tool-pwsh", "tool-jobs", "tool-fs", "tool-fs-search", "tool-web", "tool-workflow", "tool-working-directory",
+  "tool-subagent", "tool-subagent-fork", "tool-subagent-control", "tool-subagent-list-agents", "tool-skill", "skill-filesystem",
+  "agent-instructions", "tool-goal", "mcp-resources", "session-title-llm",
+  "session-persistence-jsonl", "session-projection-cache", "session-checkpoint-policy",
+];
+// Cora's effort levels on DeepSeek's: "" leaves DeepSeek's default (high).
+const DSH_EFFORTS = { low: "low", medium: "high", high: "max" };
+
+/**
+ * The overlay one dsh run boots with, on top of its headless profile. The system
+ * prompt travels with the task instead: dsh reads {{…}} in its own prompt as
+ * variables, and the owner's instructions may hold any text.
+ */
+export function dshPatch({ model, effort = "", mcp = false, workDir }) {
+  const lines = [
+    "- id: agent-default-model",
+    "  config:",
+    "    provider: deepseek-official",
+    `    model: ${JSON.stringify(model)}`,
+    ...(DSH_EFFORTS[effort] ? [`    reasoningEffort: ${DSH_EFFORTS[effort]}`] : []),
+    "- id: system-prompt",
+    "  config:",
+    "    personaPrefix: You are an agent of Cora, running on the {{model}} model through DeepSeek Harness.",
+    "- id: session-telemetry-otel",
+    "  config:",
+    "    mode: DISABLED",
+    ...DSH_OFF.flatMap((id) => [`- id: ${id}`, "  disabled: true"]),
+  ];
+  if (mcp) {
+    lines.push(
+      "- insert:",
+      "    - id: mcp-cora",
+      "      name: '@deepseek-ai/dsh-mcp-client'",
+      "      config:",
+      "        serverName: cora",
+      "        transport: stdio",
+      `        command: ${JSON.stringify(process.execPath)}`,
+      `        args: [${JSON.stringify(MCP_SCRIPT)}]`,
+      "        env:",
+      "          CORA_BRIDGE_URL: !!js process.env.CORA_BRIDGE_URL",
+      "          CORA_BRIDGE_TOKEN: !!js process.env.CORA_BRIDGE_TOKEN",
+      `        cwd: ${JSON.stringify(workDir)}`,
+      "        toolCallTimeoutMs: 3600000",
+      "        failOnStartupError: true",
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** dsh is a Node program: it runs on Cora's own Node, whatever `node` the PATH would pick. */
+function dshScript(bin) {
+  const found = bin.includes("/") ? bin : (process.env.PATH || "").split(":").map((dir) => join(dir, bin)).find((path) => path && existsSync(path));
+  if (!found || !existsSync(found)) throw new Error("deepseek: dsh non è installato su questa macchina");
+  return realpathSync(found);
+}
+
+/**
+ * One agent turn on DeepSeek Harness (dsh), headless, with the instance's DeepSeek
+ * key: Cora's tools arrive over MCP and dsh's own are off. `home` is Cora's own
+ * DSH_HOME, never the owner's, and nothing is sent to DeepSeek's telemetry.
+ */
+export async function runDeepSeek({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", home, apiKey, signal }) {
+  if (!apiKey) throw new Error("deepseek: la chiave DeepSeek non è collegata");
+  const script = dshScript(bin);
+  mkdirSync(workDir, { recursive: true, mode: 0o700 });
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  const tools = Boolean(mcp && toolNames.length);
+  const patchFile = join(workDir, `dsh-${randomBytes(6).toString("hex")}.yml`);
+  writeFileSync(patchFile, dshPatch({ model, effort, mcp: tools, workDir }), { mode: 0o600 });
+  const env = {
+    DSH_HOME: home, DEEPSEEK_API_KEY: apiKey, DSH_TELEMETRY_MODE: "DISABLED", DSH_PERMISSION_MODE: "read-only",
+    ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}),
+  };
+  const input = `<istruzioni_di_sistema>\n${system}\n</istruzioni_di_sistema>\n\n${prompt}`;
+  const texts = textSteps(onStep);
+  const used = { in: 0, out: 0 };
+  let final = null;
+  let failure = "";
+  const onLine = (line) => {
+    const event = JSON.parse(line);
+    if (event.type === "thinking") {
+      texts.flush();
+      onStep?.(String(event.text || "").trim() ? { type: "thinking", text: event.text } : { type: "thinking", hidden: true });
+    } else if (event.type === "text" && String(event.text || "").trim()) texts.text(event.text);
+    else if (event.type === "tool_call") texts.flush();
+    else if (event.type === "status" && event.phase === "step_end") {
+      used.in += Number(event.usage?.inputTokens) || 0;
+      used.out += Number(event.usage?.outputTokens) || 0;
+    } else if (event.type === "status" && event.phase === "turn_end" && event.reason?.kind === "error") failure = String(event.reason.error?.message || "error");
+    else if (event.type === "error") failure = String(event.message || "error");
+    else if (event.type === "final") final = event;
+  };
+  try {
+    const out = await run(process.execPath, [script, "--profile", "headless", "--patch", patchFile, "--json", "-"], { input, cwd: workDir, timeoutMs, onLine, env, signal });
+    signal?.throwIfAborted();
+    if (out.timedOut) throw new Error(`deepseek: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    const text = String(final?.text || "");
+    if (out.code !== 0 || !final) throw new Error(`deepseek: ${(failure || out.stderr.replace(/^dsh: /gm, "") || `exit ${out.code}`).trim().slice(-240)}`);
+    if (!text.trim()) throw new Error(`deepseek: ${model} returned no content`);
+    texts.finish(text);
+    return { text, usage: used };
+  } finally {
+    rmSync(patchFile, { force: true });
+  }
 }
 
 /** One agent turn on the Codex CLI with the owner's ChatGPT subscription; its own shell and browser tools are off. */
