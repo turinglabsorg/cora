@@ -306,7 +306,7 @@ export class Brain {
     return `Le tue ultime conversazioni in altri posti. È la stessa conversazione con le stesse persone, solo su un'altra superficie: quello che vi siete detti lì vale anche qui.\n${blocks.join("\n")}`;
   }
 
-  async chatTurn({ agent, history, channel, forced, computer, postFile, say, inbox, replyTo = null, onMessageHandled }) {
+  async chatTurn({ agent, history, channel, forced, computer, authorized = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
     const transcript = formatTranscript(history, agent, this.timezone);
     const last = replyTo || history[history.length - 1];
     const query = history.slice(-6).map((item) => item.content).join(" ");
@@ -319,6 +319,7 @@ export class Brain {
       `Ultimi messaggi ${channel.where || `in #${channel.name}`}${channel.note ? ` (${channel.note})` : ""}:\n<chat>\n${transcript}\n</chat>`,
       instruction,
       replyTo ? `Messaggio umano a cui rispondere adesso: ${replyTo.authorName}: ${replyTo.content}\nGli eventuali risultati di routine successivi sono solo contesto, non una nuova richiesta di eseguirle.` : "",
+      authorized && replyTo ? `Il proprietario ha autorizzato ${replyTo.authorName} a farti lavorare sul tuo computer: per le sue richieste agisci come per il proprietario, senza chiedergli il via libera.` : "",
       replyTo?.voice ? `${replyTo.authorName} ti ha mandato un messaggio vocale: la tua risposta finale gli arriva scritta e anche a voce, letta con la tua voce. Scrivila come la diresti: frasi brevi, niente tabelle né elenchi lunghi; link e codice restano solo nello scritto.` : "",
     ].filter(Boolean).join("\n\n");
     const request = replyTo || history.filter((item) => item.kind === "owner" || item.kind === "human").at(-1);

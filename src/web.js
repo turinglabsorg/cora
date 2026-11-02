@@ -150,6 +150,20 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   } : null;
   const firstUse = passLedger();
 
+  /**
+   * Who may put the agents to work besides the owner: the people who wrote in the chats
+   * (owners and agents left out), the permissions given, and whether this user can change them.
+   */
+  const permissionsView = (user) => {
+    const { settings } = store;
+    const owners = { discord: settings.ownerIds, telegram: settings.telegramOwnerIds, slack: settings.slackOwnerIds };
+    const grants = new Map(settings.permissions.map((grant) => [grant.id, grant]));
+    const people = store.speakers(300)
+      .filter((person) => !owners[person.transport]?.includes(person.userId))
+      .map((person) => ({ id: `${person.transport}:${person.userId}`, transport: person.transport, name: person.name, last: person.last, messages: person.messages }));
+    for (const grant of settings.permissions) if (!people.some((person) => person.id === grant.id)) people.push({ id: grant.id, transport: grant.id.split(":")[0], name: grant.name || grant.id, last: 0, messages: 0 });
+    return { canManage: user.role === "owner", people: people.map((person) => ({ ...person, agents: grants.get(person.id)?.agents || [] })) };
+  };
   const localOwner = () => store.panelUser("local-owner") || store.registerPanelUser({ id: "local-owner", name: "Owner", email: "", role: "owner", source: "local" });
   const sessionHash = (token) => createHash("sha256").update(token).digest("hex");
   const sessionCookie = (identity = localOwner()) => {
@@ -252,7 +266,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const user = sessionUser(req);
     if (!user) throw new HttpError(401, "login richiesto");
     if (!["GET", "HEAD"].includes(method) && path !== "/api/logout") {
-      const action = path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
+      const action = path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
     if (path === "/api/logout" && method === "POST") {
@@ -272,6 +286,16 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!store.contextDocument(id)) throw new HttpError(404, "file di contesto non trovato");
       if (method === "PUT") return send(res, 200, store.saveContextDocument(await readJson(req), { id, userId: user.id }));
       if (method === "DELETE") { store.deleteContextDocument(id); return send(res, 200, { ok: true }); }
+    }
+    if (path === "/api/permissions") {
+      if (method === "PUT") {
+        if (user.role !== "owner") throw new HttpError(403, "solo l'owner può dare permessi agli agenti");
+        const body = await readJson(req, 65536);
+        if (!Array.isArray(body.grants)) throw new HttpError(400, "permessi non validi");
+        const names = new Map(store.speakers(1000).map((person) => [`${person.transport}:${person.userId}`, person.name]));
+        store.updateSettings({ permissions: body.grants.map((grant) => ({ ...grant, name: names.get(String(grant?.id)) || grant?.name })) });
+      } else if (method !== "GET") throw new HttpError(405, "metodo non supportato");
+      return send(res, 200, permissionsView(user));
     }
     if (path === "/api/access" || path.startsWith("/api/access/")) {
       if (user.role !== "owner") throw new HttpError(403, "solo l'owner può gestire gli accessi");
@@ -449,7 +473,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const before = channels.active;
       const residentsBefore = store.settings.useResidentSubscriptions;
       const keysBefore = store.settings.sshKeys.join("\n");
-      const settings = store.updateSettings(await readJson(req));
+      // Permissions change only through /api/permissions, which only the owner may call.
+      const { permissions: _ignored, ...changes } = await readJson(req);
+      const settings = store.updateSettings(changes);
       if (settings.useResidentSubscriptions && !residentsBefore) await subscriptions.discoverResidents();
       if (settings.sshKeys.join("\n") !== keysBefore) {
         for (const agent of store.agents()) {

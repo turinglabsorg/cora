@@ -45,6 +45,8 @@ const DEFAULT_SETTINGS = {
   language: "it",
   // Where notices from usecora.space (waitlist sign-ups) are posted: a channel with this name.
   noticeChannel: "waitlist",
+  // People in the chats the owner lets put agents to work on their computers: { id: "<transport>:<user id>", name, agents: ["*"] | [agent ids] }.
+  permissions: [],
 };
 const SSH_PORT_BASE = 2201;
 export const TRANSPORTS = ["discord", "telegram", "slack"];
@@ -262,6 +264,24 @@ export function sanitizeAgent(input, previous = {}) {
   };
 }
 
+const PERSON_ID = /^(discord:\d{5,25}|telegram:\d{1,20}|slack:[UW][A-Z0-9]{4,})$/;
+const AGENT_ID = /^ag_[0-9a-f]{12}$/;
+
+/** One permission per person; one with no agent left is no permission. "*" means every agent, now and later. */
+function cleanPermissions(list) {
+  const seen = new Set();
+  const grants = [];
+  for (const grant of Array.isArray(list) ? list : []) {
+    const id = String(grant?.id || "");
+    if (!PERSON_ID.test(id) || seen.has(id)) continue;
+    const agents = [...new Set((Array.isArray(grant.agents) ? grant.agents : []).map(String).filter((agent) => agent === "*" || AGENT_ID.test(agent)))];
+    if (!agents.length) continue;
+    seen.add(id);
+    grants.push({ id, name: cleanText(grant.name, 80).trim(), agents: agents.includes("*") ? ["*"] : agents.slice(0, 50) });
+  }
+  return grants.slice(0, 100);
+}
+
 export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
   const merged = { ...DEFAULT_SETTINGS, ...previous, ...input };
   return {
@@ -289,6 +309,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     language: ["it", "en"].includes(merged.language) ? merged.language : "it",
     noticeChannel: cleanText(merged.noticeChannel, 100).trim().replace(/^#/, ""),
     sshKeys: plainKeys(Array.isArray(merged.sshKeys) ? merged.sshKeys.join("\n") : merged.sshKeys).slice(0, 30),
+    permissions: cleanPermissions(merged.permissions),
   };
 }
 
@@ -885,6 +906,14 @@ export class Store {
     if (!where.length) return [];
     return this.db.prepare(`SELECT DISTINCT author_id AS id, author_name AS name FROM messages
       WHERE (${where.join(" OR ")}) AND kind IN ('owner', 'human') AND author_id IS NOT NULL AND author_id != ''`).all(...params);
+  }
+
+  /** Everyone who wrote in a chat (not the panel), once per platform and person, newest first: who the owner can give permissions to. */
+  speakers(limit = 200) {
+    return this.db.prepare(`SELECT CASE WHEN channel_id LIKE 'tg:%' THEN 'telegram' WHEN channel_id LIKE 'sl:%' THEN 'slack' ELSE 'discord' END AS transport,
+      author_id AS userId, author_name AS name, MAX(at) AS last, COUNT(*) AS messages FROM messages
+      WHERE kind IN ('owner', 'human') AND author_id IS NOT NULL AND author_id != '' AND channel_id NOT LIKE 'web%'
+      GROUP BY transport, author_id ORDER BY last DESC LIMIT ?`).all(limit);
   }
 
   /** The newest request in each panel room that the owner has not answered yet (requests on Discord or Telegram are answered there). */

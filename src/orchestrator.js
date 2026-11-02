@@ -156,6 +156,18 @@ export class Orchestrator {
     return !owners.length || owners.includes(userId);
   }
 
+  /**
+   * Whether the owner lets the person who wrote this put the agent to work on
+   * its computer, as if they had asked themselves (Settings → Permissions).
+   */
+  authorized(item, agent, state) {
+    if (item?.kind !== "human" || !item.authorId) return false;
+    const transport = transportOf(state.id);
+    if (transport === "web") return false;
+    const id = `${transport}:${item.authorId}`;
+    return this.store.settings.permissions.some((grant) => grant.id === id && (grant.agents.includes("*") || grant.agents.includes(agent.id)));
+  }
+
   nameForUser(userId) {
     const agentId = this.bots?.agentIdForUser(userId);
     if (agentId) return this.store.agent(agentId)?.name || null;
@@ -816,7 +828,9 @@ export class Orchestrator {
     const work = async (agent, isForced) => {
       // Every thread gets its own instance of the agent, computer included: one task per
       // thread, and as many threads at once as people talk to it in.
-      const computer = agent.tools && (queued ? queued.kind === "owner" : state.ownerOrigin) && !this.threadWork.has(state.id);
+      // Someone the owner authorized gets the computer the owner would: no "can I?" in between.
+      const authorized = this.authorized(queued, agent, state);
+      const computer = agent.tools && (queued ? queued.kind === "owner" || authorized : state.ownerOrigin) && !this.threadWork.has(state.id);
       for (const [id, item] of state.humanQueue) {
         if ((id === queued?.id || snapshot.includes(item)) && (!item.addressed?.length || item.addressed.includes(agent.id))) state.humanQueue.delete(id);
       }
@@ -837,7 +851,7 @@ export class Orchestrator {
       let result;
       try {
         result = await this.brain.chatTurn({
-          agent, history: snapshot, channel, forced: isForced, computer,
+          agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer,
           replyTo: queued,
           postFile: (file, caption) => this.postAs(agent, state, caption, file),
           say,

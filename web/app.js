@@ -2805,6 +2805,67 @@ function subscriptionPlanLabel(plan) {
   return ({ free: "Free", pro: "Pro", plus: "Plus", max: "Max", team: "Team", enterprise: "Enterprise", business: "Business", self_serve_business_prolite: "Business" })[plan] || (/\s/.test(plan) ? plan : tr("Abbonamento attivo"));
 }
 
+/**
+ * Settings → Permissions: the people in the chats the owner lets put the agents to work
+ * on their computers, on every agent or on the ones chosen, so the agents stop asking
+ * the owner for the go-ahead each time. Every change is saved at once; members only read.
+ */
+function permissionsPane() {
+  const body = h("div", { class: "stack" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  let data = null;
+  let busy = false;
+  const grants = () => data.people.filter((person) => person.agents.length).map(({ id, name, agents }) => ({ id, name, agents }));
+  const save = async (next) => {
+    if (busy) return;
+    busy = true;
+    for (const control of body.querySelectorAll("button, select")) control.disabled = true;
+    try {
+      data = await api("/api/permissions", { method: "PUT", body: { grants: next } });
+      toast("Permessi aggiornati");
+    } catch (error) { toast(error.message, true); }
+    busy = false;
+    draw();
+  };
+  const change = (id, agents) => save([...grants().filter((grant) => grant.id !== id), ...(agents.length ? [{ id, agents }] : [])]);
+  const where = (person) => h("small", {}, icon(TRANSPORTS[person.transport]?.icon || "user"), raw(TRANSPORTS[person.transport]?.label || person.transport),
+    person.last ? raw(` · ${tr("ultimo messaggio")} ${new Date(person.last).toLocaleDateString(LOCALE, { day: "numeric", month: "short" })}`) : null);
+  const row = (person) => {
+    const all = person.agents.includes("*");
+    const agents = S.data.agents;
+    const chip = (label, on, onclick) => h("button", { type: "button", class: `chip${on ? " on" : ""}`, "aria-pressed": String(on), disabled: !data.canManage, onclick }, label);
+    const toggle = (agent) => {
+      const chosen = all ? agents.map((item) => item.id) : person.agents;
+      change(person.id, chosen.includes(agent.id) ? chosen.filter((id) => id !== agent.id) : [...chosen, agent.id]);
+    };
+    return h("div", { class: "permission" },
+      h("div", { class: "permission-who" }, h("span", { class: "access-user-mark" }, icon("user")),
+        h("div", { class: "grow" }, h("b", {}, raw(person.name)), where(person)),
+        data.canManage ? btn("", { icon: "trash", cls: "ghost", title: tr("Togli il permesso a {name}", { name: person.name }), onclick: () => change(person.id, []) }) : null),
+      h("div", { class: "chips", role: "group", "aria-label": tr("Agenti che {name} può far lavorare", { name: person.name }) },
+        chip(tr("Tutti gli agenti"), all, () => !all && change(person.id, ["*"])),
+        agents.map((agent) => chip(raw(agent.name), all || person.agents.includes(agent.id), () => toggle(agent)))));
+  };
+  const draw = () => {
+    const granted = data.people.filter((person) => person.agents.length);
+    const others = data.people.filter((person) => !person.agents.length);
+    const pick = h("select", { "aria-label": tr("Persona da autorizzare") },
+      h("option", { value: "" }, others.length ? "Scegli una persona…" : "Nessun altro ha scritto nei canali"),
+      others.map((person) => h("option", { value: person.id }, raw(`${person.name} · ${TRANSPORTS[person.transport]?.label || person.transport}`))));
+    const add = btn("Autorizza", { icon: "plus", cls: "primary", disabled: !others.length, onclick: () => {
+      if (!pick.value) { pick.focus(); return; }
+      change(pick.value, ["*"]);
+    } });
+    body.replaceChildren(
+      granted.length ? h("div", { class: "permissions" }, granted.map(row))
+        : h("p", { class: "access-no-rules" }, "Per ora solo tu fai lavorare gli agenti sul loro computer: per gli altri ti chiedono il via libera."),
+      data.canManage ? h("div", { class: "access-add" }, pick, add)
+        : h("p", { class: "access-note" }, icon("info"), h("span", {}, "Solo l'owner dà e toglie i permessi.")));
+  };
+  api("/api/permissions").then((value) => { data = value; draw(); })
+    .catch((error) => body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))));
+  return panel({ icon: "user", title: "Chi può far lavorare gli agenti", hint: "Oltre a te: le persone che scrivono nei canali e possono chiedere agli agenti un lavoro sul loro computer senza che ti chiedano il via libera." }, body);
+}
+
 function instanceAccessPanel() {
   const current = S.data.currentUser;
   const identity = h("div", { class: "access-identity" }, icon("user"),
@@ -3212,6 +3273,7 @@ function renderSettings() {
         h("div", { class: "field full" }, h("span", { class: "label" }, "Provider"), providers))),
     panel({ icon: "book", title: "Memoria condivisa", hint: "Cose che tutti gli agenti sanno: chi sei, i progetti, le regole della casa." },
       h("textarea", { name: "sharedMemory", class: "tall" }, settings.sharedMemory))),
+    h("div", { class: "settings-pane stack", "data-settings-tab": "permessi", role: "tabpanel" }, permissionsPane()),
     h("div", { class: "settings-pane stack", "data-settings-tab": "controlli", role: "tabpanel" }, docChecksPane()),
     h("div", { class: "settings-pane stack", "data-settings-tab": "accesso", role: "tabpanel" },
     instanceAccessPanel(),
@@ -3242,7 +3304,7 @@ function renderSettings() {
       renderSettings();
     }
   });
-  const tabs = [["collegamenti", "Collegamenti", "link"], ["canali", "Canali", "radio"], ["agenti", "Agenti", "users"], ["controlli", "Controlli", "shield"], ["preferenze", "Preferenze", "sliders"], ["accesso", "Accesso", "key"]];
+  const tabs = [["collegamenti", "Collegamenti", "link"], ["canali", "Canali", "radio"], ["agenti", "Agenti", "users"], ["permessi", "Permessi", "user"], ["controlli", "Controlli", "shield"], ["preferenze", "Preferenze", "sliders"], ["accesso", "Accesso", "key"]];
   const nav = h("div", { class: "tabs settings-tabs", role: "tablist", "aria-label": "Sezioni impostazioni" });
   const showTab = (id, updateRoute = false) => {
     for (const pane of form.querySelectorAll(".settings-pane")) pane.hidden = pane.dataset.settingsTab !== id;
@@ -3252,7 +3314,7 @@ function renderSettings() {
       button.setAttribute("aria-selected", String(active));
       button.tabIndex = active ? 0 : -1;
     }
-    form.querySelector(".savebar").hidden = ["collegamenti", "controlli", "preferenze"].includes(id);
+    form.querySelector(".savebar").hidden = ["collegamenti", "permessi", "controlli", "preferenze"].includes(id);
     if (updateRoute) history.replaceState(null, "", `#/settings/${id}`);
     revealSelection(nav);
   };
