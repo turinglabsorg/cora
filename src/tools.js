@@ -128,8 +128,8 @@ export const TOOL_DEFS = [
   },
   {
     name: "list_routines",
-    description: "List your active or paused routines and one-time reminders: id, kind, cron or due date, where you post, and last result. Use routine_history for past runs and archived tasks.",
-    parameters: { type: "object", properties: {} },
+    description: "List your active or paused routines and one-time reminders: id, kind, cron or due date, where you post, last result and the start of each prompt. Pass id to read one of them whole, with its full prompt, before you change it: edit that text and send it back with set_routine or set_reminder, keeping everything you are not asked to change. Use routine_history for past runs and archived tasks.",
+    parameters: { type: "object", properties: { id: { type: "string", description: "one routine or reminder to read in full" } } },
   },
   {
     name: "set_routine",
@@ -157,9 +157,11 @@ export const TOOL_DEFS = [
   },
   {
     name: "routine_history",
-    description: "Read your persistent routine/reminder execution history or archived task definitions. Includes results, verification, dates and trace ids, even after a task was archived. Search before repeating past work. Paginate with offset.",
+    description: "Read your persistent routine/reminder execution history or archived task definitions. Includes results, verification, dates and trace ids, even after a task was archived. Each run keeps the prompt it ran with, so an older version of a prompt can be read back. Search before repeating past work. Paginate with offset.",
     parameters: { type: "object", properties: {
       query: { type: "string" }, kind: { type: "string", enum: ["routine", "reminder"] }, archived: { type: "boolean", description: "true for archived definitions, false for execution history" },
+      routine_id: { type: "string", description: "only this routine or reminder" },
+      full: { type: "boolean", description: "whole prompts and results instead of their first part (at most 3 items)" },
       limit: { type: "integer", minimum: 1, maximum: 50 }, offset: { type: "integer", minimum: 0 },
     } },
   },
@@ -355,13 +357,24 @@ export async function executeTool(call, ctx) {
       }
       case "list_routines": {
         const routines = store.routines(agent.id);
+        const line = (routine) => `[${routine.id}] ${routine.kind === "reminder" ? "reminder · " : ""}${routine.name} · ${routine.runAt || routine.schedule} · ${ctx.channelLabel(routine.channelId)} · ${routine.enabled ? "on" : "paused"}${routine.lastRunAt ? ` · last ${ctx.formatWhen(Date.parse(routine.lastRunAt))} ${routine.lastStatus}` : ""}`;
+        // One task asked by id comes back whole: an agent rewriting a prompt it has only partly seen loses the rest.
+        const id = String(args.id || "").trim();
+        if (id) {
+          const routine = routines.find((item) => item.id === id);
+          if (!routine) return { text: "error: you have no routine with that id" };
+          return { text: `${line(routine)}\nprompt (${routine.prompt.length} characters, complete):\n${routine.prompt}` };
+        }
         if (!routines.length) return { text: "you have no routines" };
-        return { text: routines.map((routine) => `- [${routine.id}] ${routine.kind === "reminder" ? "reminder · " : ""}${routine.name} · ${routine.runAt || routine.schedule} · ${ctx.channelLabel(routine.channelId)} · ${routine.enabled ? "on" : "paused"}${routine.lastRunAt ? ` · last ${ctx.formatWhen(Date.parse(routine.lastRunAt))} ${routine.lastStatus}` : ""}\n  ${routine.prompt.slice(0, 300)}`).join("\n") };
+        const PREVIEW = 300;
+        return { text: routines.map((routine) => `- ${line(routine)}\n  ${routine.prompt.slice(0, PREVIEW)}${routine.prompt.length > PREVIEW ? ` … (+${routine.prompt.length - PREVIEW} characters: list_routines with id "${routine.id}" shows all of it)` : ""}`).join("\n") };
       }
       case "routine_history": {
-        const options = { agentId: agent.id, kind: ["routine", "reminder"].includes(args.kind) ? args.kind : "", query: String(args.query || ""), limit: args.limit || 10, offset: args.offset || 0 };
+        const full = Boolean(args.full);
+        const options = { agentId: agent.id, routineId: String(args.routine_id || "").trim(), kind: ["routine", "reminder"].includes(args.kind) ? args.kind : "", query: String(args.query || ""), limit: full ? Math.min(Number(args.limit) || 3, 3) : args.limit || 10, offset: args.offset || 0 };
         const page = args.archived ? store.routineArchive(options) : store.routineHistory(options);
-        return { text: JSON.stringify({ ...page, items: page.items.map((item) => ({ ...item, prompt: item.prompt?.slice(0, 500), output: item.output?.slice(0, 2000), lastOutput: item.lastOutput?.slice(0, 2000) })) }) };
+        const cut = (text, max) => (full || !text || text.length <= max ? text : `${text.slice(0, max)} … (+${text.length - max} characters: ask again with full)`);
+        return { text: JSON.stringify({ ...page, items: page.items.map((item) => ({ ...item, prompt: cut(item.prompt, 500), output: cut(item.output, 2000), lastOutput: cut(item.lastOutput, 2000) })) }) };
       }
       case "set_routine":
       case "set_reminder": {

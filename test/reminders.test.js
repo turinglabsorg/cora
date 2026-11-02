@@ -137,6 +137,36 @@ test("agents can create reminders and search only their own persisted executions
   assert.equal((await executeTool({ name: "set_reminder", args: { id: foreign.id, enabled: false } }, ctx)).text.startsWith("error:"), true);
 });
 
+test("an agent reads a long routine whole before changing it, and an earlier run gives back the prompt it replaced", async (t) => {
+  const f = await fixture(t);
+  const ctx = { agent: f.agent, store: f.app.store, channelId: `web-${f.agent.id}`, channelLabel: (id) => id, formatWhen: (date) => new Date(date).toISOString() };
+  const rules = Array.from({ length: 30 }, (_, index) => `Regola ${index + 1}: controlla Instagram e TikTok per la fascia ${index + 1}.`).join("\n");
+  const prompt = `${rules}\nPubblica anche su X ogni fascia.\nULTIMA RIGA OPERATIVA: niente Dossier.`;
+  assert.ok(prompt.length > 1500);
+  assert.match((await executeTool({ name: "set_routine", args: { name: "Giro AW", schedule: "0 3 * * *", prompt } }, ctx)).text, /created/);
+  const routine = f.app.store.routines(f.agent.id)[0];
+  const listed = (await executeTool({ name: "list_routines", args: {} }, ctx)).text;
+  assert.doesNotMatch(listed, /ULTIMA RIGA OPERATIVA/);
+  assert.match(listed, new RegExp(`\\(\\+${prompt.length - 300} characters: list_routines with id "${routine.id}" shows all of it\\)`));
+  const whole = (await executeTool({ name: "list_routines", args: { id: routine.id } }, ctx)).text;
+  assert.ok(whole.endsWith(prompt), "the whole prompt, to the last line");
+  assert.match(whole, new RegExp(`prompt \\(${prompt.length} characters, complete\\)`));
+  await f.app.orchestrator.runRoutine(routine);
+  // The precise edit the owner asked for: one line out, every other line kept.
+  const edited = prompt.replace("Pubblica anche su X ogni fascia.\n", "");
+  assert.match((await executeTool({ name: "set_routine", args: { id: routine.id, prompt: edited } }, ctx)).text, /updated/);
+  assert.equal(f.app.store.routine(routine.id).prompt, edited);
+  const past = JSON.parse((await executeTool({ name: "routine_history", args: { routine_id: routine.id, full: true } }, ctx)).text);
+  assert.equal(past.items.length, 1);
+  assert.equal(past.items[0].prompt, prompt, "the run kept the prompt it ran with, whole");
+  const short = JSON.parse((await executeTool({ name: "routine_history", args: { routine_id: routine.id } }, ctx)).text);
+  assert.match(short.items[0].prompt, /… \(\+\d+ characters: ask again with full\)$/);
+  const other = f.app.store.createAgent({ name: "Altro" });
+  const foreign = f.app.store.createRoutine(other.id, { name: "PRIVATE OTHER", schedule: "0 9 * * *", prompt: "Private", channelId: "web" });
+  assert.equal((await executeTool({ name: "list_routines", args: { id: foreign.id } }, ctx)).text, "error: you have no routine with that id");
+  assert.equal(JSON.parse((await executeTool({ name: "routine_history", args: { routine_id: foreign.id, full: true } }, ctx)).text).total, 0);
+});
+
 test("archive API enforces auth and CSRF, validates exact dates, paginates and retains results after agent removal", async (t) => {
   const f = await fixture(t);
   assert.equal((await f.request("/api/routines/history", { auth: false })).status, 401);

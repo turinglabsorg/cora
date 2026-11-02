@@ -1041,9 +1041,10 @@ export class Store {
     });
   }
 
-  routineHistory({ agentId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
+  routineHistory({ agentId = "", routineId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
     const conditions = [], args = [];
     if (agentId) { conditions.push("agent_id = ?"); args.push(agentId); }
+    if (routineId) { conditions.push("routine_id = ?"); args.push(routineId); }
     if (kind) { conditions.push("json_extract(data, '$.kind') = ?"); args.push(kind); }
     if (query.trim()) { conditions.push("instr(lower(json_extract(data, '$.name') || ' ' || json_extract(data, '$.prompt') || ' ' || json_extract(data, '$.output')), lower(?)) > 0"); args.push(query.trim().slice(0, 200)); }
     const where = conditions.length ? " WHERE " + conditions.join(" AND ") : "";
@@ -1058,8 +1059,8 @@ export class Store {
     return { items, total, limit, offset };
   }
 
-  routineArchive({ agentId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
-    const matches = this.cachedRoutines.filter((routine) => routine.archivedAt && (!agentId || routine.agentId === agentId) && (!kind || (routine.kind || "routine") === kind)
+  routineArchive({ agentId = "", routineId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
+    const matches = this.cachedRoutines.filter((routine) => routine.archivedAt && (!agentId || routine.agentId === agentId) && (!routineId || routine.id === routineId) && (!kind || (routine.kind || "routine") === kind)
       && `${routine.name} ${routine.prompt} ${routine.lastOutput}`.toLowerCase().includes(query.trim().slice(0, 200).toLowerCase()))
       .sort((a, b) => b.archivedAt.localeCompare(a.archivedAt));
     limit = Math.max(1, Math.min(50, Math.floor(Number(limit) || 20)));
