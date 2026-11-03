@@ -253,6 +253,10 @@ test("the brain keeps no secret: credential shapes and values after a secret's w
     ["token per goal", "token per goal"],
     ["la segretaria2026 arriva", "la segretaria2026 arriva"],
     ["Il token: tk93hd82ks01.", "Il token: [segreto omesso]."],
+    ["- secret attiva ab12cd34ef56 (hush)", "- secret attiva [segreto omesso] (hush)"],
+    ["running on the new secret key zx98yw76vu54.", "running on the new secret key [segreto omesso]."],
+    ["chiave pubblicabile q1w2e3r4t5y6, limitata", "chiave pubblicabile [segreto omesso], limitata"],
+    ["la chiave del cliente Acme è nel vault", "la chiave del cliente Acme è nel vault"],
   ];
   for (const [text, expected] of cases) assert.equal(redactSecrets(text), expected, text);
 });

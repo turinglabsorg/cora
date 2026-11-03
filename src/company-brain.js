@@ -28,10 +28,12 @@ export function searchText(...parts) {
  * What looks like a credential, taken out of anything the brain keeps: every
  * agent reads the brain, so a secret has no place in it (its name in hush is
  * fine). Tokens by their known shapes, and any value of letters and digits
- * that follows "secret", "password", "token", "chiave" and the like.
+ * that follows "secret", "password", "token", "chiave" and the like, also
+ * with a word or two in between ("secret attiva …", "chiave pubblicabile …").
  */
 const SECRET_SHAPES = /\b(?:xox[abprs]-|xapp-|sk-(?:ant-|proj-)?|sk_live_|rk_live_|pk_live_|ghp_|gho_|ghs_|github_pat_|glpat-|AKIA|AIza|hf_)[A-Za-z0-9_-]{8,}/g;
-const SECRET_AFTER_WORD = /\b(secret|password|passwd|pwd|token|api[ _-]?key|chiave|segreto|passphrase)\b(\s*(?:[:=]|è|is)?\s*[`'"«]?)(?=[A-Za-z0-9_\-./+=]*\d)(?=[A-Za-z0-9_\-./+=]*[A-Za-z])[A-Za-z0-9_\-./+=]{7,}[A-Za-z0-9_+=-]/gi;
+const SECRET_AFTER_WORD = /\b(secret|password|passwd|pwd|token|api[ _-]?key|key|chiave|segreto|passphrase)\b((?:\s+\p{L}{2,14}(?![\p{L}\p{N}_-])){0,2}\s*(?:[:=]|è|is)?\s*[`'"«]?)(?=[A-Za-z0-9_\-./+=]*\d)(?=[A-Za-z0-9_\-./+=]*[A-Za-z])[A-Za-z0-9_\-./+=]{7,}[A-Za-z0-9_+=-]/giu;
+const SCRUB_VERSION = 2;
 export const SECRET_MARK = "[segreto omesso]";
 
 export function redactSecrets(text) {
@@ -190,7 +192,7 @@ export class CompanyBrain {
       const [row] = await db.query("SELECT value FROM brain_state WHERE key = 'sharedImported'");
       this.sharedImported = row?.value === true;
       const [scrubbed] = await db.query("SELECT value FROM brain_state WHERE key = 'secretsScrubbed'");
-      if (!scrubbed) await this.scrubSecrets(db);
+      if ((scrubbed?.value?.version || (scrubbed ? 1 : 0)) < SCRUB_VERSION) await this.scrubSecrets(db);
     } catch (error) {
       await db.close().catch(() => {});
       throw error;
@@ -200,7 +202,7 @@ export class CompanyBrain {
   }
 
   /**
-   * Once, for a brain written before secrets were kept out of it: what looks
+   * Once per version of the rule, for a brain written before it: what looks
    * like a credential goes from pages, revisions, notes and the searchable
    * chats. The chats themselves keep the original in Cora's own archive.
    */
@@ -232,7 +234,7 @@ export class CompanyBrain {
       await db.query("UPDATE brain_chunks SET text = $2, search = $3 WHERE id = $1", [row.id, text, searchText(row.author || "", text)]);
       changed.chunks += 1;
     }
-    await db.query("INSERT INTO brain_state (key, value) VALUES ('secretsScrubbed', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [JSON.stringify({ at: new Date().toISOString(), ...changed })]);
+    await db.query("INSERT INTO brain_state (key, value) VALUES ('secretsScrubbed', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [JSON.stringify({ version: SCRUB_VERSION, at: new Date().toISOString(), ...changed })]);
     return changed;
   }
 

@@ -117,7 +117,7 @@ test("the librarian turns the chats into the company brain, the agents read it, 
   const billing = (await call("/api/brain/pages/fatturazione")).data;
   assert.match(billing.body, /la password: \[segreto omesso\] \(in hush come ACME_PORTAL\)/, "a secret never stays in the brain, its name in hush does");
   assert.doesNotMatch(JSON.stringify(billing), /q8x2kd93hf0a/);
-  assert.equal((await app.companyBrain.state("secretsScrubbed")).pages, 0, "a new brain is scrubbed once, with nothing to scrub");
+  assert.deepEqual([(await app.companyBrain.state("secretsScrubbed")).version, (await app.companyBrain.state("secretsScrubbed")).pages], [2, 0], "a new brain is scrubbed once, with nothing to scrub");
 
   // A brain written before the rule: what it already holds is scrubbed.
   await app.companyBrain.q("UPDATE brain_pages SET body = body || $2 WHERE slug = $1", ["acme", "\n- Il token: tk93hd82ks01."]);
