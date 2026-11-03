@@ -96,6 +96,8 @@ const ICONS = {
   telegram: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M21 4 3 11l6 2.5L18 7l-7 8 7.5 5L21 4Z"/></svg>`,
   app: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10.5 18.5h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   context: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9l-6-6Zm0 0v6h6M8 13h8M8 17h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg>`,
+  mic: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  play: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>`,
   plug: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2v5m6-5v5M6 7h12v4a6 6 0 0 1-12 0V7Zm6 10v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   arrow: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
@@ -191,6 +193,28 @@ function places() {
     </div>`).join("")}</div>`;
 }
 
+/** A voice message's outline: `count` bars whose heights rise and fall like speech, the same every time. */
+function waveform(count, seed) {
+  return Array.from({ length: count }, (_, index) => {
+    const level = 0.5 + 0.32 * Math.sin(index * 0.9 + seed) + 0.18 * Math.sin(index * 2.3 + seed * 2);
+    return `<i style="--h:${Math.round(22 + Math.max(0, Math.min(1, level)) * 78)};--i:${index}"></i>`;
+  }).join("");
+}
+
+/** A voice message heard and answered out loud, in a Slack thread. */
+function voiceThread() {
+  return `<div class="voice-thread reveal" aria-hidden="true">
+    <div class="place-head">${ICONS.mic}<b>launch</b><span>Slack</span></div>
+    <div class="vline owner"><b>MAYA</b>
+      <div class="vnote"><span class="vplay">${ICONS.play}</span><span class="wave">${waveform(64, 1)}</span><time>0:07</time></div>
+      <p class="heard">“Iris, can you move tomorrow's call to Thursday morning?”</p></div>
+    <div class="vline agent"><b>IRIS</b>
+      <p>Done: Thursday at 10, invites updated for all four.</p>
+      <div class="vnote"><span class="vplay">${ICONS.play}</span><span class="wave">${waveform(56, 4)}</span><time>0:04</time></div>
+      <p class="heard">Said in Iris's own voice</p></div>
+  </div>`;
+}
+
 /** Every brain an agent can run on, in two groups; each agent picks its own. */
 function brains() {
   const groups = [
@@ -263,9 +287,9 @@ export function landing({ account, joined = false, waitlistError = "" }) {
     <div class="hero-copy">
       <p class="kicker rise" style="--i:0">Cora · resident AI agents</p>
       <h1 class="hero-title"><span class="rise" style="--i:1">AI agents that live</span><span class="rise" style="--i:2">in your team chat.</span></h1>
-      <p class="lead rise" style="--i:3">AI coworkers in your Discord, Telegram or their own app. Each has a memory, a schedule and its own computer. You bring the AI.</p>
+      <p class="lead rise" style="--i:3">AI coworkers in your Discord, Slack, Telegram or their own app. Each has a memory, a schedule, its own computer and a voice. You bring the AI.</p>
       <div class="rise" style="--i:4">${form("top")}</div>
-      <p class="hero-foot rise" style="--i:5"><span>Claude · ChatGPT · Grok · Meta · open models</span><span>Open source · MIT · <a href="${REPO}">self-host it</a></span></p>
+      <p class="hero-foot rise" style="--i:5"><span>Claude · ChatGPT · Grok · Meta · DeepSeek · open models</span><span>Open source · MIT · <a href="${REPO}">self-host it</a></span></p>
     </div>
   </section>
 
@@ -278,8 +302,15 @@ export function landing({ account, joined = false, waitlistError = "" }) {
 
   <section class="band" id="where">
     <div class="split">
-      <div class="section-head reveal"><p class="kicker">02 / Lives where your company is</p><h2>Already in your channels.</h2><p class="lead">Discord, Telegram or their own app. One conversation, wherever it happens.</p></div>
+      <div class="section-head reveal"><p class="kicker">02 / Lives where your company is</p><h2>Already in your channels.</h2><p class="lead">Discord, Slack, Telegram or their own app. One conversation, wherever it happens.</p></div>
       ${places()}
+    </div>
+  </section>
+
+  <section class="band voice" id="voice">
+    <div class="split">
+      <div class="section-head reveal"><p class="kicker">03 / Voice</p><h2>Talk to them.</h2><p class="lead">Send a voice message on Discord, Slack or Telegram. They hear it, and answer out loud in a voice of their own.</p><p class="voice-note">Every voice message gets a spoken answer, with the words written too. Pick each agent's voice and language, in six languages.</p></div>
+      ${voiceThread()}
     </div>
   </section>
 
@@ -287,7 +318,7 @@ export function landing({ account, joined = false, waitlistError = "" }) {
     <div class="split">
       <div class="byoi-head reveal">
         <span class="byoi-ico">${ICONS.plug}</span>
-        <p class="kicker">03 / Bring your own intelligence</p>
+        <p class="kicker">04 / Bring your own intelligence</p>
         <h2><em>Bring your own</em> intelligence.</h2>
         <p class="lead">Your Claude, ChatGPT, Grok or Meta subscription, or open models through Ollama, OrcaRouter, Hermes and DeepSeek Harness. Agent by agent, switch any time.</p>
       </div>
@@ -296,12 +327,12 @@ export function landing({ account, joined = false, waitlistError = "" }) {
   </section>
 
   <section class="band">
-    <div class="section-head reveal"><p class="kicker">04 / The desk</p><h2>Residents, not chatbots.</h2></div>
+    <div class="section-head reveal"><p class="kicker">05 / The desk</p><h2>Residents, not chatbots.</h2></div>
     <div class="strips">${strips}</div>
   </section>
 
   <section class="band day-band">
-    <div class="section-head reveal"><p class="kicker">05 / 24 hours on air</p><h2>A day in the life.</h2></div>
+    <div class="section-head reveal"><p class="kicker">06 / 24 hours on air</p><h2>A day in the life.</h2></div>
     <div class="day">
       <div class="ruler" aria-hidden="true">${ruler}<i class="now" data-now></i></div>
       <ol class="blips">${day}</ol>
@@ -310,7 +341,7 @@ export function landing({ account, joined = false, waitlistError = "" }) {
 
   <section class="band harness" id="harness">
     <div class="split">
-      <div class="section-head reveal"><p class="kicker">06 / The Cora harness</p><h2>Built to finish the job.</h2><p class="lead">Our own agent loop, for any model. Or run your agents on Claude Code, Codex, Grok Build or Muse Code with your subscriptions.</p></div>
+      <div class="section-head reveal"><p class="kicker">07 / The Cora harness</p><h2>Built to finish the job.</h2><p class="lead">Our own agent loop, for any model. Or run your agents on Claude Code, Codex, Grok Build or Muse Code with your subscriptions, or on DeepSeek Harness with your own DeepSeek key.</p></div>
       <ol class="harness-loop reveal" aria-label="The Cora harness">${HARNESS.map(([title, text], index) => `<li style="--i:${index}"><span class="loop-led"></span><b>${title}</b><span>${text}</span></li>`).join("")}</ol>
     </div>
     <aside class="context-note reveal" aria-label="Shared context">
@@ -320,7 +351,7 @@ export function landing({ account, joined = false, waitlistError = "" }) {
   </section>
 
   <section class="band space" id="join">
-    <div class="section-head reveal"><p class="kicker">07 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
+    <div class="section-head reveal"><p class="kicker">08 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
     <p class="frequency reveal"><span class="freq-name" data-names="yourcompany,acme,studio,night-shift,atelier">yourcompany</span><span class="freq-domain">.usecora.space</span></p>
     <div class="space-actions reveal">${form("bottom")}</div>
     <div class="self reveal">

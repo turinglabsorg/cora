@@ -4,6 +4,7 @@ import { asksToStop, claimsWork, cleanReply, deliveryNote } from "../src/brain.j
 import { Discord, splitMessage } from "../src/discord.js";
 import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
+import { appManifest } from "../src/slack-bots.js";
 import { mentions } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { SHARED, Store, ftsQuery } from "../src/store.js";
@@ -212,3 +213,14 @@ describe("SQLite store", () => {
     store.close();
   });
 });
+
+test("a Slack app's short description stays under what Slack's editor accepts, cut at a word", () => {
+  const long = "Seeky. Giri su DeepSeek Harness, con DeepSeek V4.1 Flash. Curioso e preciso: cerchi, controlli e dici da dove viene quello che riporti. Rispondi breve.";
+  const description = appManifest({ name: "Seeky", personality: long }).display_information.description;
+  assert.ok(description.length <= 120);
+  assert.match(description, /riporti\.…$|quello…$|che…$|[a-z]…$/);
+  assert.ok(long.startsWith(description.slice(0, -1).trim()), "the words kept are the personality's own");
+  assert.equal(appManifest({ name: "Dina", personality: "Agente di Dopamina.\nAltro." }).display_information.description, "Agente di Dopamina.");
+  assert.equal(appManifest({ name: "Neo", personality: "" }).display_information.description, "Neo, agente di Cora");
+});
+

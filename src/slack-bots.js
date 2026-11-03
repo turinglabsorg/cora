@@ -35,6 +35,12 @@ export function slackAppEnvName(agent) {
   return `CORA_SK_APP_${agentSlug(agent)}`;
 }
 
+/** Slack's short description: its editor refuses 140 characters (132 passed), so under 120, cut at a word. */
+export function shortDescription(agent) {
+  const line = String(agent.personality || "").split("\n")[0].trim() || `${agent.name}, agente di Cora`;
+  return line.length <= 120 ? line : `${line.slice(0, 119).replace(/\s+\S*$/, "")}…`;
+}
+
 /**
  * The manifest that creates this agent's Slack app in one paste: Socket Mode
  * on (no public URL), the scopes above, and the agent's own name, which is
@@ -44,7 +50,7 @@ export function appManifest(agent) {
   return {
     display_information: {
       name: agent.name,
-      description: (String(agent.personality || "").split("\n")[0] || `${agent.name}, agente di Cora`).slice(0, 140),
+      description: shortDescription(agent),
     },
     features: {
       bot_user: { display_name: agent.name, always_online: true },
