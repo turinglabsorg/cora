@@ -98,6 +98,7 @@ const ICONS = {
   context: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9l-6-6Zm0 0v6h6M8 13h8M8 17h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></svg>`,
   mic: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   play: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>`,
+  bulb: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.7.5 1.1 1.3 1.1 2.2v.5h5V16c0-.9.4-1.7 1.1-2.2A6 6 0 0 0 12 3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   plug: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2v5m6-5v5M6 7h12v4a6 6 0 0 1-12 0V7Zm6 10v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   arrow: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
@@ -215,6 +216,41 @@ function voiceThread() {
   </div>`;
 }
 
+/** The company brain's pages, laid out by hand: [label, kind, x, y, radius, waiting for review]. */
+const BRAIN_PAGES = [
+  ["Acme", "client", 205, 104, 14, false],
+  ["Giulia", "person", 305, 52, 9, false],
+  ["Net 60 days", "decision", 320, 140, 9, true],
+  ["Invoicing", "procedure", 228, 188, 9, false],
+  ["Spring launch", "project", 104, 140, 11, false],
+  ["Tone of voice", "topic", 58, 62, 8, false],
+  ["Maya", "person", 150, 40, 10, false],
+  ["Northwind", "client", 380, 92, 9, false],
+  ["Friday release", "procedure", 72, 204, 8, true],
+  ["Site 2027", "project", 336, 204, 10, false],
+];
+// Which pages link to which ([[slug]]), and the dashed ones that only name each other.
+const BRAIN_LINKS = [[0, 1], [0, 2], [0, 3], [0, 4], [0, 9], [0, 6], [4, 5], [4, 6], [2, 3], [7, 3, "mention"], [8, 4, "mention"], [9, 2]];
+
+/** The company brain as the panel's map shows it, and the morning review under it. */
+function brainMapCard() {
+  const edges = BRAIN_LINKS.map(([a, b, kind], index) => {
+    const [, , x1, y1] = BRAIN_PAGES[a];
+    const [, , x2, y2] = BRAIN_PAGES[b];
+    return `<line class="${kind || "link"}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" pathLength="1" style="--i:${index}"/>`;
+  }).join("");
+  const nodes = BRAIN_PAGES.map(([label, kind, x, y, r, pending], index) => `<g class="bn ${kind}" transform="translate(${x} ${y})" style="--i:${index}">${pending ? `<circle class="ring" r="${r + 4}"/>` : ""}<circle class="disc" r="${r}"/><circle class="core" r="${(r * 0.3).toFixed(1)}"/><text y="${r + 13}">${esc(label)}</text></g>`).join("");
+  return `<div class="brain-card reveal" aria-hidden="true">
+    <div class="place-head">${ICONS.bulb}<b>Brain</b><span>10 pages · map</span></div>
+    <svg class="brain-graph" viewBox="0 0 420 228">${edges}${nodes}</svg>
+    <div class="brain-review">
+      <p class="brain-review-head"><b>08:00</b><span>Morning review · 2 changes, already live</span></p>
+      <div class="brain-change"><i>+</i><span><b>Net 60 days</b>Acme pays at 60 days<small>from #billing · Maya, Oct 30</small></span><em class="ok">Approve</em></div>
+      <div class="brain-change"><i>~</i><span><b>Friday release</b>now before noon, not 18:00<small>from a note by Iris</small></span><em>Undo</em></div>
+    </div>
+  </div>`;
+}
+
 /** Every brain an agent can run on, in two groups; each agent picks its own. */
 function brains() {
   const groups = [
@@ -314,11 +350,18 @@ export function landing({ account, joined = false, waitlistError = "" }) {
     </div>
   </section>
 
+  <section class="band company-brain" id="brain">
+    <div class="split">
+      <div class="section-head reveal"><p class="kicker">04 / Company brain</p><h2>One brain for the whole company.</h2><p class="lead">Every night a librarian reads what was said in your channels and keeps the company's wiki: clients, projects, people, decisions and procedures, every fact with its source. Every agent reads it before asking you.</p><p class="voice-note">Changes count at once: each morning you approve or undo them in one tap, and nothing waits if you don't. Searched by words and by meaning, seen as a map of what links to what. Passwords and keys never go in.</p></div>
+      ${brainMapCard()}
+    </div>
+  </section>
+
   <section class="band byoi" id="byoi">
     <div class="split">
       <div class="byoi-head reveal">
         <span class="byoi-ico">${ICONS.plug}</span>
-        <p class="kicker">04 / Bring your own intelligence</p>
+        <p class="kicker">05 / Bring your own intelligence</p>
         <h2><em>Bring your own</em> intelligence.</h2>
         <p class="lead">Your Claude, ChatGPT, Grok or Meta subscription, or open models through Ollama, OrcaRouter, Hermes and DeepSeek Harness. Agent by agent, switch any time.</p>
       </div>
@@ -327,12 +370,12 @@ export function landing({ account, joined = false, waitlistError = "" }) {
   </section>
 
   <section class="band">
-    <div class="section-head reveal"><p class="kicker">05 / The desk</p><h2>Residents, not chatbots.</h2></div>
+    <div class="section-head reveal"><p class="kicker">06 / The desk</p><h2>Residents, not chatbots.</h2></div>
     <div class="strips">${strips}</div>
   </section>
 
   <section class="band day-band">
-    <div class="section-head reveal"><p class="kicker">06 / 24 hours on air</p><h2>A day in the life.</h2></div>
+    <div class="section-head reveal"><p class="kicker">07 / 24 hours on air</p><h2>A day in the life.</h2></div>
     <div class="day">
       <div class="ruler" aria-hidden="true">${ruler}<i class="now" data-now></i></div>
       <ol class="blips">${day}</ol>
@@ -341,7 +384,7 @@ export function landing({ account, joined = false, waitlistError = "" }) {
 
   <section class="band harness" id="harness">
     <div class="split">
-      <div class="section-head reveal"><p class="kicker">07 / The Cora harness</p><h2>Built to finish the job.</h2><p class="lead">Our own agent loop, for any model. Or run your agents on Claude Code, Codex, Grok Build or Muse Code with your subscriptions, or on DeepSeek Harness with your own DeepSeek key.</p></div>
+      <div class="section-head reveal"><p class="kicker">08 / The Cora harness</p><h2>Built to finish the job.</h2><p class="lead">Our own agent loop, for any model. Or run your agents on Claude Code, Codex, Grok Build or Muse Code with your subscriptions, or on DeepSeek Harness with your own DeepSeek key.</p></div>
       <ol class="harness-loop reveal" aria-label="The Cora harness">${HARNESS.map(([title, text], index) => `<li style="--i:${index}"><span class="loop-led"></span><b>${title}</b><span>${text}</span></li>`).join("")}</ol>
     </div>
     <aside class="context-note reveal" aria-label="Shared context">
@@ -351,7 +394,7 @@ export function landing({ account, joined = false, waitlistError = "" }) {
   </section>
 
   <section class="band space" id="join">
-    <div class="section-head reveal"><p class="kicker">08 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
+    <div class="section-head reveal"><p class="kicker">09 / Your space</p><h2>Your company's frequency.</h2><p class="lead">Hosted, ready to go. We open spaces a few at a time.</p></div>
     <p class="frequency reveal"><span class="freq-name" data-names="yourcompany,acme,studio,night-shift,atelier">yourcompany</span><span class="freq-domain">.usecora.space</span></p>
     <div class="space-actions reveal">${form("bottom")}</div>
     <div class="self reveal">

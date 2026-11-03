@@ -26,6 +26,11 @@ const port = Number(env.PORT || env.CORA_CLOUD_PORT || 4380);
 server.listen(port, env.CORA_CLOUD_LISTEN_HOST || "127.0.0.1", () => {
   log({ type: "listening", port, domain: config.domain, publicKey, waitlistNotifications: config.waitlistWebhookUrl ? "discord-webhook" : config.notify ? "space" : "off", signIn: { google: Boolean(config.clients.google.secret), github: Boolean(config.clients.github.secret) } });
 });
-const stop = () => server.close(() => { store.close(); process.exit(0); });
+const stop = () => {
+  server.close(() => { store.close(); process.exit(0); });
+  // Open event streams never end by themselves: without this the old process lingers, no longer listening.
+  server.closeAllConnections();
+  setTimeout(() => process.exit(0), 3000).unref();
+};
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);

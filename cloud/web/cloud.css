@@ -22,6 +22,12 @@
   --blue: #6fa8dc;
   --paper: #e9dfcc;
   --ink: #1d1b18;
+  --kind-client: #f2a93b;
+  --kind-project: #6fa8dc;
+  --kind-person: #8cc56a;
+  --kind-decision: #e0789a;
+  --kind-procedure: #b39ddb;
+  --kind-topic: #5cbfb0;
   --display: "Outfit", "Helvetica Neue", Arial, sans-serif;
   --body: "Manrope", "Helvetica Neue", Arial, sans-serif;
   --mono: "DM Mono", ui-monospace, Menlo, monospace;
@@ -559,6 +565,49 @@ span.avatar .mark { width: 34px; height: 34px; }
 .vnote time { flex: none; font: 500 11px/1 var(--mono); color: var(--muted); }
 .js .voice-thread.in .vline.agent .wave i { animation: speak 1.4s ease-in-out calc(var(--i) * 45ms) infinite; }
 @keyframes speak { 50% { transform: scaleY(0.4); } }
+
+/* The company brain: the panel's map in miniature, and the morning review under it. */
+.brain-card { display: grid; gap: 4px; padding: 14px 16px 16px; border-radius: 16px; border: 1px solid var(--line); background: linear-gradient(180deg, #141414, #0b0b0b); box-shadow: 0 30px 60px -30px rgba(0, 0, 0, 0.9); }
+.brain-card .place-head { margin-bottom: 0; }
+.brain-graph { display: block; width: 100%; height: auto; margin: 6px 0 2px; border-radius: 12px; background-color: var(--well); background-image: radial-gradient(circle, rgba(255, 255, 255, 0.06) 1px, transparent 1.2px); background-size: 18px 18px; overflow: visible; }
+.brain-graph line { stroke: var(--line-strong); stroke-width: 1.3; }
+.brain-graph line.mention { stroke-dasharray: 0.02 0.02; stroke-opacity: 0.7; }
+.brain-graph .bn { --kind: var(--muted); }
+.brain-graph .client { --kind: var(--kind-client); }
+.brain-graph .project { --kind: var(--kind-project); }
+.brain-graph .person { --kind: var(--kind-person); }
+.brain-graph .decision { --kind: var(--kind-decision); }
+.brain-graph .procedure { --kind: var(--kind-procedure); }
+.brain-graph .topic { --kind: var(--kind-topic); }
+.brain-graph .disc { fill: color-mix(in srgb, var(--kind) 22%, #000); stroke: var(--kind); stroke-width: 1.5; }
+.brain-graph .core { fill: var(--kind); }
+.brain-graph .ring { fill: none; stroke: var(--amber); stroke-width: 1.2; stroke-dasharray: 3 3; }
+.brain-graph text { fill: var(--soft); font: 500 10.5px/1 var(--body); text-anchor: middle; paint-order: stroke; stroke: var(--well); stroke-width: 3.5px; stroke-linejoin: round; }
+.js .brain-card .brain-graph line { stroke-dasharray: 1; stroke-dashoffset: 1; }
+.js .brain-card .brain-graph line.mention { stroke-dasharray: 0.02 0.02; stroke-dashoffset: 0; opacity: 0; }
+.js .brain-card .bn { opacity: 0; }
+.js .brain-card.in .brain-graph line { animation: brain-draw 0.9s ease-out calc(0.35s + var(--i) * 70ms) forwards; }
+.js .brain-card.in .brain-graph line.mention { animation: brain-fade 0.6s ease-out calc(0.6s + var(--i) * 70ms) forwards; }
+.js .brain-card.in .bn { animation: brain-fade 0.5s ease-out calc(var(--i) * 60ms) forwards; }
+.js .brain-card.in .bn .core { animation: brain-led 3.2s ease-in-out calc(1.4s + var(--i) * 310ms) infinite; }
+@keyframes brain-draw { to { stroke-dashoffset: 0; } }
+@keyframes brain-fade { to { opacity: 1; } }
+@keyframes brain-led { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.brain-review { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.brain-review-head { display: flex; align-items: baseline; gap: 10px; margin: 0; font: 500 10px/1.4 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.brain-review-head b { font-size: 13px; letter-spacing: 0.04em; color: var(--amber); }
+.brain-change { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--well); }
+.brain-change > i { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; font: 500 13px/1 var(--mono); font-style: normal; color: var(--ink); background: var(--green); }
+.brain-change + .brain-change > i { background: var(--amber); }
+.brain-change > span { flex: 1; min-width: 0; font-size: 13.5px; color: var(--soft); }
+.brain-change > span b { display: block; color: var(--text); font: 600 14px/1.3 var(--display); letter-spacing: -0.01em; }
+.brain-change small { display: block; margin-top: 3px; font: 400 10.5px/1.4 var(--mono); color: var(--faint); letter-spacing: 0.02em; }
+.brain-change em { flex: none; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--line-strong); font: 500 10px/1 var(--mono); font-style: normal; letter-spacing: 0.12em; text-transform: uppercase; color: var(--soft); }
+.brain-change em.ok { border-color: var(--amber); background: var(--amber); color: var(--ink); }
+@media (prefers-reduced-motion: reduce) {
+  .js .brain-card .bn, .js .brain-card .brain-graph line.mention { opacity: 1; }
+  .js .brain-card .brain-graph line { stroke-dashoffset: 0; }
+}
 
 .context-note { display: flex; align-items: flex-start; gap: 20px; margin-top: 40px; padding: 28px 0 0; border-top: 1px solid var(--line); max-width: 900px; }
 .context-note-mark { flex: none; display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 12px; color: var(--amber); background: var(--panel); }
