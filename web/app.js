@@ -1665,8 +1665,8 @@ function channelChips(selected) {
   return wrap;
 }
 
-function armedButton(label, armedLabel, { icon: name = "trash", onconfirm }) {
-  const button = btn(label, { icon: name, cls: "danger" });
+function armedButton(label, armedLabel, { icon: name = "trash", onconfirm, cls = "" }) {
+  const button = btn(label, { icon: name, cls: `danger${cls ? ` ${cls}` : ""}` });
   let armed = false;
   button.addEventListener("click", async () => {
     if (!armed) {
@@ -2188,14 +2188,11 @@ async function memoryTab(agent) {
     if (await guard(api(`/api/agents/${agent.id}/core`, { method: "PUT", body: { text: core.value } }), "Scheda salvata")) renderAgent();
   });
 
-  const input = h("textarea", { name: "text", placeholder: "Un fatto da ricordare. Es: «Sara odia le riunioni prima delle 10»." });
-  // With a company brain, what everyone should know goes there: an agent's memory is its own.
-  const addHint = data.brain
-    ? "A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre. Ciò che vale per tutta l'azienda sta nel Brain."
-    : "A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.";
-  const add = panel({ tag: "form", icon: "plus", title: "Nuovo ricordo", hint: addHint },
-    input,
-    h("div", { class: "row" }, data.brain ? null : switchInput("shared", "Condiviso", false), switchInput("pinned", "Fissato", false), h("span", { class: "spacer" }), btn("Aggiungi", { icon: "plus", type: "submit", cls: "primary" })));
+  // A new memory is a line at the top of the list, like a rule in Accesso: no panel of its own.
+  const input = h("input", { type: "text", name: "text", placeholder: "Un fatto da ricordare. Es: «Sara odia le riunioni prima delle 10».", "aria-label": tr("Nuovo ricordo"), autocomplete: "off" });
+  const add = h("form", { class: "memory-add" }, input,
+    h("div", { class: "memory-add-options" }, data.brain ? null : switchInput("shared", "Condiviso", false), switchInput("pinned", "Fissato", false),
+      btn("Aggiungi", { icon: "plus", type: "submit", cls: "primary" })));
   add.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!input.value.trim()) return;
@@ -2226,10 +2223,11 @@ async function memoryTab(agent) {
         if (await guard(api(`/api/agents/${agent.id}/diary/${entry.id}`, { method: "DELETE" }), "Pagina strappata")) renderAgent();
       } })))))
     : empty("moon", "Il diario si scrive di notte, quando dorme.");
+  // With a company brain, what everyone should know goes there: an agent's memory is its own.
   return [
     corePanel,
-    add,
-    panel({ icon: "book", title: "Ricordi", hint: data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length }) }, h("label", { class: "search" }, icon("search"), search), list),
+    panel({ icon: "book", title: "Ricordi", hint: `${data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length })} ${tr("A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.")}` },
+      add, h("label", { class: "search" }, icon("search"), search), list),
     panel({ icon: "moon", title: "Diario", hint: "Le ultime due pagine gli tornano in mente ogni giorno." }, diary),
   ];
 }
@@ -2288,13 +2286,13 @@ function routineForm(agent, routine = {}) {
     }, 250);
   };
   schedule.addEventListener("input", updatePreview);
-  const timing = h("div", { class: "field full task-timing" });
+  const timing = h("div", { class: "stack-sm task-timing" });
   const submit = btn("Crea routine", { icon: "check", type: "submit", cls: "primary" });
   const drawTiming = () => {
     schedule.required = kind === "routine";
     runAt.required = kind === "reminder";
     submit.replaceChildren(icon("check"), h("span", {}, kind === "reminder" ? isNew ? "Crea reminder" : "Salva reminder" : isNew ? "Crea routine" : "Salva routine"));
-    timing.replaceChildren(h("span", { class: "label" }, kind === "reminder" ? "Una sola volta" : "Quando"), ...(kind === "reminder"
+    timing.replaceChildren(...(kind === "reminder"
       ? [runAt, h("small", {}, "Data e ora nel fuso del tuo dispositivo. Il reminder viene archiviato solo dopo un successo verificato.")]
       : [h("div", { class: "chips" }, PRESETS.map(([label, expr]) => h("button", { type: "button", class: "chip", onclick: () => { schedule.value = expr; updatePreview(); } }, label))), schedule, preview,
         h("small", {}, tr("Formato cron: minuto ora giorno mese giorno-settimana (fuso {zone}).", { zone: S.data.timezone }))]));
@@ -2317,13 +2315,14 @@ function routineForm(agent, routine = {}) {
     channelSelect.append(h("option", { value: routine.channelId, selected: true }, tr("{channel} (non attivo)", { channel: channelName(routine.channelId) })));
   }
   const form = panel({ tag: "form", icon: isNew ? "plus" : "edit", title: isNew ? "Nuova attività" : tr("Modifica «{name}»", { name: routine.name }), hint: "Un compito, quando serve, con un risultato da ritrovare." },
-    isNew ? kindPicker : badge(kind === "reminder" ? "Reminder" : "Routine", "", "clock"),
-    h("div", { class: "grid2" },
-      field("Nome", h("input", { type: "text", name: "name", value: routine.name || "", required: true, placeholder: "es. Rassegna stampa" })),
-      field(S.data.transport === "telegram" ? "Chat" : "Canale", channelSelect),
-      timing,
-      field("Compito", h("textarea", { name: "prompt", class: "tall", required: true, placeholder: "Cosa deve fare, dove guardare, cosa riportare. Se non c'è niente da dire può restare in silenzio." }, routine.prompt || ""), null, "full"),
-      h("div", { class: "field full" }, switchInput("enabled", "Attiva", routine.enabled ?? true))),
+    setRows(
+      isNew ? setRow("Tipo", "Una routine si ripete; un reminder va una volta sola, poi in archivio.", kindPicker, { stack: true })
+        : setRow("Tipo", null, badge(kind === "reminder" ? "Reminder" : "Routine", "", "clock")),
+      setRow("Nome", "Come la ritrovi nell'elenco e nell'archivio.", h("input", { type: "text", name: "name", value: routine.name || "", required: true, placeholder: "es. Rassegna stampa" })),
+      setRow(S.data.transport === "telegram" ? "Chat" : "Canale", "Dove pubblica il risultato.", channelSelect),
+      setRow("Quando", null, timing, { stack: true }),
+      setRow("Compito", "Cosa deve fare, dove guardare, cosa riportare.", h("textarea", { name: "prompt", class: "tall", required: true, placeholder: "Cosa deve fare, dove guardare, cosa riportare. Se non c'è niente da dire può restare in silenzio." }, routine.prompt || ""), { stack: true }),
+      setRow("Attiva", "Spenta resta in elenco ma non parte.", switchInput("enabled", "", routine.enabled ?? true))),
     h("div", { class: "row end" },
       isNew ? null : btn("Annulla", { icon: "close", href: `#/agent/${agent.id}/routine`, cls: "ghost" }),
       submit));
@@ -2358,9 +2357,9 @@ async function routineTab(agent, routines) {
     if (routine) return routineForm(agent, routine);
   }
   const archived = params.get("view") === "archive";
-  const navigation = h("nav", { class: "tabs task-tabs", "aria-label": "Attività programmate" },
-    h("a", { href: `#/agent/${agent.id}/routine`, class: archived ? "" : "active" }, icon("clock"), "In programma"),
-    h("a", { href: `#/agent/${agent.id}/routine?view=archive`, class: archived ? "active" : "" }, icon("book"), "Archivio"));
+  const navigation = h("nav", { class: "segmented task-switch", "aria-label": "Attività programmate" },
+    h("a", { href: `#/agent/${agent.id}/routine`, class: archived ? "" : "on", "aria-current": archived ? null : "page" }, icon("clock"), "In programma"),
+    h("a", { href: `#/agent/${agent.id}/routine?view=archive`, class: archived ? "on" : "", "aria-current": archived ? "page" : null }, icon("book"), "Archivio"));
   if (archived) return [navigation, routineArchive(agent)];
   const items = () => S.data.routines.filter((routine) => routine.agentId === agent.id).sort((a, b) => Date.parse(a.nextRunAt || "9999-01-01") - Date.parse(b.nextRunAt || "9999-01-01")).map((routine) => {
     const reminder = routine.kind === "reminder";
@@ -2373,14 +2372,14 @@ async function routineTab(agent, routines) {
           h("b", {}, raw(routine.name), routine.enabled ? "" : " · in pausa"),
           h("span", { class: "row-meta" }, reminder ? "Reminder" : "Routine", h("code", {}, reminder ? taskTime(routine.runAt) : raw(routine.schedule)), "→", raw(channelName(routine.channelId)))),
         h("span", { class: "row-actions" },
-          btn("", { icon: "play", cls: "sm primary", title: reminder && ["blocked", "unverified", "error", "interrupted", "stopped"].includes(routine.lastStatus) ? "Riprova" : "Esegui ora", disabled: routine.running, onclick: async () => {
+          btn("", { icon: "play", cls: "sm", title: reminder && ["blocked", "unverified", "error", "interrupted", "stopped"].includes(routine.lastStatus) ? "Riprova" : "Esegui ora", disabled: routine.running, onclick: async () => {
             if (await guard(api(`/api/routines/${routine.id}/run`, { method: "POST" }), "Attività avviata")) scheduleRefresh();
           } }),
           btn("", { icon: "edit", cls: "sm", title: "Modifica", href: `#/agent/${agent.id}/routine?edit=${routine.id}` }),
-          btn("", { icon: routine.enabled ? "pause" : "play", cls: "sm ghost", title: routine.enabled ? "Metti in pausa" : "Riattiva", onclick: async () => {
+          btn("", { icon: routine.enabled ? "pause" : "power", cls: "sm", title: routine.enabled ? "Metti in pausa" : "Riattiva", onclick: async () => {
             if (await guard(api(`/api/routines/${routine.id}`, { method: "PUT", body: { enabled: !routine.enabled } }))) { await loadState(); drawTasks(); }
           } }),
-          armedButton("Archivia", "Conferma archiviazione", { onconfirm: async () => {
+          armedButton("Archivia", "Conferma archiviazione", { cls: "sm", onconfirm: async () => {
             if (await guard(api(`/api/routines/${routine.id}`, { method: "DELETE" }), "Attività archiviata")) { await loadState(); drawTasks(); }
           } }))),
       h("div", { class: "row-meta" }, status, routine.nextRunAt && routine.enabled ? tr("prossima {time}", { time: fmtTime(routine.nextRunAt, true) }) : "", routine.lastRunAt ? tr(" · ultima {time}", { time: fmtTime(routine.lastRunAt, true) }) : ""),
@@ -2409,7 +2408,7 @@ function routineArchive(agent = null) {
   const agents = h("select", { "aria-label": "Agente" }, h("option", { value: "" }, "Tutti gli agenti"), S.data.agents.map((item) => h("option", { value: item.id }, raw(item.name))));
   let offset = 0;
   let generation = 0;
-  const root = panel({ icon: "book", title: "Archivio", hint: "Compiti, risultati e verifiche. Una storia che resta anche dopo l'archiviazione." },
+  const root = panel({ icon: "book", title: "Storico", hint: "Compiti, risultati e verifiche. Una storia che resta anche dopo l'archiviazione." },
     h("form", { class: "task-history-filters", onsubmit: (event) => { event.preventDefault(); offset = 0; load(); } },
       mode, kind, agent ? null : agents, h("div", { class: "task-history-search" }, search, btn("Cerca", { icon: "search", type: "submit" }))), results);
   for (const select of [mode, kind, agents]) select.addEventListener("change", () => { offset = 0; load(); });
@@ -3515,23 +3514,28 @@ function renderBrain() {
   search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(pages, mapView ? 120 : 300); });
   const views = h("div", { class: "segmented", role: "tablist", "aria-label": tr("Come vedere il brain") },
     [["", "Elenco", "list"], ["mappa", "Mappa", "graph"]].map(([key, label, name]) => h("button", { type: "button", role: "tab", class: (key === "mappa") === mapView ? "on" : "", "aria-selected": String((key === "mappa") === mapView), onclick: () => { location.hash = key ? `#/brain/${key}` : "#/brain"; } }, icon(name), label)));
+  // The librarian's settings, in the rows of Settings: each saved as it changes.
   const settingsPanel = () => {
     const settings = S.data.settings;
-    const form = h("form", { class: "stack" },
-      h("div", { class: "grid2" },
-        h("div", { class: "field" }, h("span", { class: "label" }, "Modello del bibliotecario"), modelPicker("brainModel", settings.brainModel || "", { allowDefault: true }),
-          h("small", {}, "Legge le chat e scrive le pagine: un modello attento sui fatti e sulle fonti.")),
-        field("Modello per la ricerca", h("input", { type: "text", name: "brainEmbedModel", class: "mono", value: settings.brainEmbedModel || "", autocomplete: "off", spellcheck: "false" }), "Un modello di embedding dell'Ollama di questa macchina, es. bge-m3. Vuoto: ricerca solo per parole."),
-        field("Ora del bibliotecario", h("input", { type: "number", name: "librarianHour", min: 0, max: 23, value: settings.librarianHour, inputmode: "numeric" }), "prima lo fa il backup, poi aggiorna il brain"),
-        field("Ora della revisione", h("input", { type: "number", name: "reviewHour", min: 0, max: 23, value: settings.reviewHour, inputmode: "numeric" }), "ti arriva il riepilogo: sul telefono e in privato")),
-      h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Salva", { icon: "check", type: "submit", cls: "primary" })));
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const data = new FormData(form);
-      const saved = await guard(api("/api/settings", { method: "PUT", body: { brainModel: pickedModel(data, "brainModel"), brainEmbedModel: data.get("brainEmbedModel"), librarianHour: Number(data.get("librarianHour")), reviewHour: Number(data.get("reviewHour")) } }), "Impostazioni del brain salvate");
-      if (saved) await loadState();
+    const model = modelPicker("brainModel", settings.brainModel || "", { allowDefault: true });
+    const modelRow = setRow("Modello del bibliotecario", "Legge le chat e scrive le pagine: un modello attento sui fatti e sulle fonti.", model, { stack: true });
+    model.addEventListener("change", () => {
+      const value = model.querySelector("input").value.trim() || model.querySelector("select").value;
+      if (value !== (S.data.settings.brainModel || "")) saveSettings({ brainModel: value }, modelRow);
     });
-    return panel({ icon: "sliders", title: "Il bibliotecario", hint: "Ogni notte legge le chat e aggiorna il brain; la mattina ti dice cosa è cambiato. Le modifiche valgono subito, anche se non le rivedi." }, form);
+    const embed = h("input", { type: "text", class: "mono", value: settings.brainEmbedModel || "", autocomplete: "off", spellcheck: "false", "aria-label": tr("Modello per la ricerca") });
+    const embedRow = setRow("Modello per la ricerca", "Un modello di embedding dell'Ollama di questa macchina, es. bge-m3. Vuoto: ricerca solo per parole.", embed);
+    embed.addEventListener("change", () => saveSettings({ brainEmbedModel: embed.value.trim() }, embedRow));
+    const hourRow = (key, label, hint) => {
+      const select = h("select", { "aria-label": tr(label) }, Array.from({ length: 24 }, (_, index) => h("option", { value: index, selected: index === settings[key] }, raw(`${String(index).padStart(2, "0")}:00`))));
+      const row = setRow(label, hint, select);
+      select.addEventListener("change", () => saveSettings({ [key]: Number(select.value) }, row));
+      return row;
+    };
+    return panel({ icon: "sliders", title: "Il bibliotecario", hint: "Ogni notte legge le chat e aggiorna il brain; la mattina ti dice cosa è cambiato. Le modifiche valgono subito, anche se non le rivedi." },
+      setRows(modelRow, embedRow,
+        hourRow("librarianHour", "Ora del bibliotecario", "Prima fa il backup, poi aggiorna il brain."),
+        hourRow("reviewHour", "Ora della revisione", "Ti arriva il riepilogo: sul telefono e in privato.")));
   };
   function draw() {
     if (!state.enabled) {
@@ -3545,12 +3549,12 @@ function renderBrain() {
     const chips = h("div", { class: "chips", role: "group", "aria-label": tr("Tipo di pagina") },
       [["", "Tutte"], ...Object.entries(BRAIN_KINDS_PLURAL)].map(([key, label]) => h("button", { type: "button", class: `chip${kind === key ? " on" : ""}`, "aria-pressed": String(kind === key), onclick: () => { kind = key; search.value = ""; draw(); pages(); } }, label)));
     body.replaceChildren(
-      h("div", { class: "brain-stats" },
-        h("div", {}, h("b", {}, String(stats.pages)), h("small", {}, "pagine")),
-        h("div", {}, h("b", {}, String(stats.pending + stats.flagged)), h("small", {}, "da rivedere")),
-        h("div", {}, h("b", {}, String(stats.chunks)), h("small", {}, "messaggi cercabili")),
-        h("div", { class: "grow" }, h("b", {}, lastRun ? raw(fmtTime(lastRun.at, true)) : "—"),
-          h("small", {}, lastRun ? raw(tr("ultimo giro: {created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato"))),
+      h("div", { class: "stats" },
+        statCard({ icon: "book", value: String(stats.pages), label: "pagine" }),
+        statCard({ icon: "check", value: String(stats.pending + stats.flagged), label: "da rivedere", href: stats.pending + stats.flagged ? "#/brain/revisione" : null }),
+        statCard({ icon: "search", value: String(stats.chunks), label: "messaggi cercabili" }),
+        statCard({ icon: "clock", value: lastRun ? raw(fmtTime(lastRun.at, true)) : "—", label: "ultimo giro",
+          sub: lastRun ? raw(tr("{created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato" })),
       h("div", { class: "brain-search" }, search, h("div", { class: "brain-views" }, chips, views)),
       ...(mapView ? [mapBox] : state.canManage ? [list, settingsPanel()] : [list]));
   }
@@ -3786,7 +3790,6 @@ function renderContext() {
   const upload = btn("Carica file", { icon: "upgrade", onclick: () => fileInput.click() });
   const refresh = btn("Aggiorna", { icon: "refresh", cls: "ghost", onclick: load });
   shell([pageHead("Contesto", "Le istruzioni del server e i file che tutti gli agenti leggono.", [upload, newButton, refresh]),
-    h("p", { class: "context-intro" }, "Aggiungi istruzioni e file di riferimento per tutti gli agenti. Puoi anche ispezionare le sorgenti del server."),
     h("small", { class: "context-upload-hint" }, "File .md e .txt · 30.000 caratteri per file · 60.000 caratteri attivi in totale"), fileInput, body], { title: "Contesto" });
   newButton.disabled = upload.disabled = true;
   load();

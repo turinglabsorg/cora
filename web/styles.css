@@ -387,6 +387,11 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .segmented { display: inline-flex; padding: 3px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel-2); gap: 3px; }
 .segmented button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 7px 14px; border-radius: calc(var(--r-md) - 3px); font: inherit; font-size: 13px; }
 .segmented button:hover { color: var(--text); }
+.segmented a { display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: calc(var(--r-md) - 3px); color: var(--muted); font-size: 13px; text-decoration: none; }
+.segmented a:hover { color: var(--text); }
+.segmented a.on { background: var(--amber); color: var(--ink); font-weight: 600; }
+.segmented .ico { width: 15px; height: 15px; }
+.task-switch { align-self: flex-start; }
 .segmented button.on { background: var(--amber); color: var(--ink); font-weight: 600; }
 .brain-custom > summary { cursor: pointer; color: var(--muted); font-size: 13px; list-style: none; }
 .brain-custom > summary::-webkit-details-marker { display: none; }
@@ -524,6 +529,8 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .set-rows > .set-row:first-child { border-top: 0; padding-top: 2px; }
 .set-rows > .set-row:last-child { padding-bottom: 2px; }
 .set-row.stack { grid-template-columns: minmax(0, 1fr); }
+/* A row holding only an account picker that has nothing to ask disappears with it. */
+.set-row:has(> .subscription-picker[hidden]) { display: none; }
 .set-text { min-width: 0; }
 .set-text > b { display: flex; align-items: baseline; gap: 10px; font: 500 15px/1.35 var(--body); color: var(--text); }
 .set-text small b { color: var(--text); font-weight: 600; }
@@ -1039,6 +1046,8 @@ details.raw summary .ico { width: 15px; height: 15px; }
    longer histories scroll sideways and open on the latest week after mounting. */
 .heat-wrap { display: flex; flex-direction: column; gap: 22px; }
 .heat-block { display: flex; flex-direction: column; gap: 6px; }
+.heat-block .empty { flex-direction: row; justify-content: flex-start; gap: 10px; padding: 6px 0 2px; font-size: 13px; }
+.heat-block .empty .ico { width: 18px; height: 18px; }
 .heat-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .heat-head b { font: 600 13px/1.2 var(--sans); letter-spacing: 0.01em; }
 .heat-head .avatar { width: 22px; height: 22px; flex: 0 0 auto; }
@@ -1075,17 +1084,20 @@ details.raw summary .ico { width: 15px; height: 15px; }
 
 /* ---------- instruction context ---------- */
 .context-intro { margin: 0; color: var(--muted); max-width: 780px; font-size: 13px; line-height: 1.8; }
-.context-browser { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
-.context-files { display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel); }
-.context-file { display: flex; gap: 10px; align-items: center; width: 100%; padding: 14px 10px; border: 1px solid transparent; border-radius: var(--r-sm); background: transparent; color: var(--muted); text-align: left; cursor: pointer; }
-.context-file:hover { background: var(--panel-2); color: var(--text); }
-.context-file.active { border-color: var(--amber-line); background: var(--amber-wash); color: var(--amber); }
-.context-file b { display: block; font: 500 13px/1.5 var(--mono); overflow-wrap: anywhere; }
-.context-file small { display: block; margin-top: 4px; font-size: 10px; line-height: 1.6; color: var(--muted); }
-.context-file .ico { width: 16px; height: 16px; }
-.context-file-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--faint); flex: none; }
-.context-file-dot.applied { background: var(--green); }
-.context-file-dot.detected { background: var(--amber); }
+/* The sources list is drawn like the Settings list: the same items, the same lit entry. */
+.context-browser { display: grid; grid-template-columns: 272px minmax(0, 1fr); gap: 24px; align-items: start; }
+.context-files { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 2px; padding: 8px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 40px -28px rgba(0, 0, 0, 0.9); }
+.context-file { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 11px; align-items: center; width: 100%; padding: 6px 12px 6px 7px; border: 0; border-radius: var(--r-md); background: transparent; color: var(--muted); text-align: left; cursor: pointer; transition: background 0.15s ease, color 0.15s ease; }
+.context-file:hover { background: rgba(255, 255, 255, 0.03); color: var(--text); }
+.context-file.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--amber); color: var(--text); }
+.context-file.active b { color: var(--amber); }
+.context-file.active > .ico { color: var(--amber); border-color: var(--amber-line); background: var(--amber-wash); }
+.context-file b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 13px/1.35 var(--mono); color: var(--text); }
+.context-file small { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 10.5px/1.3 var(--mono); letter-spacing: 0.02em; color: var(--faint); }
+.context-file > .ico { box-sizing: border-box; width: 30px; height: 30px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--well); color: var(--muted); }
+.context-file-dot { width: 8px; height: 8px; border-radius: 50%; background: #2a2a2a; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06); flex: none; }
+.context-file-dot.applied { background: var(--green); box-shadow: 0 0 8px rgba(140, 197, 106, 0.55); }
+.context-file-dot.detected { background: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
 .context-document { min-width: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--panel); }
 .context-document > header { display: flex; align-items: flex-start; gap: 12px; padding: 24px 24px 16px; }
 .context-document h2 { margin: 0; font: 500 26px/1.3 var(--display); letter-spacing: -.03em; }
@@ -1101,7 +1113,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
 @media (max-width: 900px) {
   .tabbar { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
   .context-browser { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .context-files { flex-direction: row; overflow-x: auto; scrollbar-width: thin; }
+  .context-files { position: static; flex-direction: row; overflow-x: auto; scrollbar-width: thin; }
   .context-file { width: 210px; min-width: 210px; }
   .context-document > header { padding: 18px 18px 14px; flex-wrap: wrap; }
   .context-provenance { padding: 0 18px 14px; }
@@ -1109,7 +1121,9 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .context-text { padding: 18px; max-height: 65vh; font-size: 11px; }
 }
 
-.context-group { display: block; padding: 12px 10px 6px; }
+.context-group { display: block; padding: 14px 12px 6px; font: 500 10px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); }
+.context-group:first-child { padding-top: 8px; }
+.context-group::after { content: ""; display: block; height: 1px; margin-top: 8px; background: var(--line); }
 .context-draft { display: flex; gap: 10px; align-items: center; padding: 14px 10px; color: var(--amber); font-size: 13px; }
 .context-upload-hint { color: var(--muted); font-size: 11px; line-height: 1.6; }
 .context-editor { display: flex; flex-direction: column; gap: 18px; padding: 0 24px 24px; }
@@ -1130,7 +1144,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .context-document h2 { overflow-wrap: anywhere; }
 
 /* ---------- scheduled tasks and their history ---------- */
-.task-kind-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }
+.task-kind-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .task-kind { display: flex; align-items: center; gap: 12px; padding: 16px; text-align: left; color: var(--muted); background: var(--well); border: 1px solid var(--line); border-radius: var(--r-md); cursor: pointer; }
 .task-kind.active { color: var(--amber); border-color: var(--amber-line); background: var(--amber-wash); }
 .task-kind b, .task-kind small { display: block; }
@@ -1163,7 +1177,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .task-history-item > header > .tag { margin-left: 48px; }
   .task-history-search { flex-basis: 100%; }
   .routine-head { flex-wrap: wrap; }
-  .routine-head .row-actions { margin-left: 48px; flex-wrap: wrap; }
+  .routine-head .row-actions { width: auto; margin-left: 48px; flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
   .task-timing input[type=datetime-local] { min-width: 0; width: 100%; }
 }
 
@@ -1194,6 +1208,11 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .doc-trial-verdict { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
 .doc-trial details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .doc-trial details p { display: grid; gap: 2px; margin: 8px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+
+/* A new memory: a line at the top of the list. */
+.memory-add { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.memory-add > input { flex: 1 1 320px; min-width: 0; }
+.memory-add-options { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 
 /* The agent's voice */
 .voice-about { color: var(--muted); }
