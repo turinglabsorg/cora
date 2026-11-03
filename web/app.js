@@ -520,6 +520,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     ["salotto", "Salotto", "chat", section === "salotto"],
     ["banco", "Banco", "grid", section === "banco"],
     ["contesto", "Contesto", "book", section === "contesto"],
+    ["brain", "Brain", "bulb", section === "brain"],
     ["settings", "Impostazioni", "sliders", section === "settings"],
   ];
   const info = S.data ? transportInfo() : { icon: "radio", label: "Cora", where: tr("Caricamento…") };
@@ -2629,6 +2630,226 @@ async function enableNotifications() {
 }
 
 /* ---------- shared instruction context ---------- */
+/* ---------- company brain ---------- */
+const BRAIN_KINDS_LABEL = { client: "Cliente", project: "Progetto", person: "Persona", decision: "Decisione", procedure: "Procedura", topic: "Tema" };
+const BRAIN_KINDS_PLURAL = { client: "Clienti", project: "Progetti", person: "Persone", decision: "Decisioni", procedure: "Procedure", topic: "Temi" };
+const BRAIN_ACTIONS = { create: "Pagina nuova", update: "Modificata", archive: "Archiviata", restore: "Ripristinata", revert: "Annullata" };
+const BRAIN_REVIEWS = { pending: "Da rivedere", flagged: "Da verificare", approved: "Approvata", reverted: "Annullata" };
+
+/** Who wrote a brain revision, in the panel's words. */
+function brainAuthor(author) {
+  if (author === "librarian") return "il bibliotecario";
+  if (String(author).startsWith("owner:")) return raw(author.slice(6));
+  return raw(author);
+}
+
+/** A page's text as text: lines, bullets and [[slug]] links; nothing in it becomes HTML. */
+function brainText(text) {
+  const inline = (line) => line.split(/(\[\[[a-z0-9-]{2,60}\]\])/g).map((part) => {
+    const link = /^\[\[([a-z0-9-]{2,60})\]\]$/.exec(part);
+    return link ? h("a", { href: `#/brain/p/${link[1]}`, class: "brain-link" }, raw(link[1])) : raw(part);
+  });
+  const blocks = [];
+  let list = null;
+  for (const line of String(text || "").split("\n")) {
+    const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
+    if (bullet) {
+      if (!list) blocks.push(list = h("ul", {}));
+      list.append(h("li", {}, inline(bullet[1])));
+      continue;
+    }
+    list = null;
+    if (line.trim()) blocks.push(h("p", {}, inline(line)));
+  }
+  return h("div", { class: "brain-text" }, blocks);
+}
+
+/** The lines a change took out and put in, as the review shows them. */
+function brainDiff(before, after) {
+  const a = String(before || "").split("\n");
+  const b = String(after || "").split("\n");
+  const table = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i -= 1) for (let j = b.length - 1; j >= 0; j -= 1) table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+  const rows = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) { rows.push(["same", a[i]]); i += 1; j += 1; }
+    else if (j < b.length && (i >= a.length || table[i][j + 1] >= table[i + 1][j])) { rows.push(["add", b[j]]); j += 1; }
+    else { rows.push(["del", a[i]]); i += 1; }
+  }
+  return h("div", { class: "brain-diff" }, rows.filter(([, line]) => line.trim()).map(([kind, line]) => h("div", { class: `diff-${kind}` }, h("span", { "aria-hidden": "true" }, kind === "add" ? "+" : kind === "del" ? "−" : " "), raw(line))));
+}
+
+function brainSources(sources) {
+  if (!sources?.length) return null;
+  return h("ul", { class: "brain-sources" }, sources.map((source) => h("li", {},
+    h("span", { class: "brain-source-who" }, source.author ? raw(source.author) : source.type === "memory" ? "ricordo condiviso" : "qualcuno"),
+    h("small", {}, raw([source.channel, source.at ? fmtTime(source.at, true) : ""].filter(Boolean).join(" · "))),
+    source.quote ? h("q", {}, raw(source.quote)) : null)));
+}
+
+function renderBrain() {
+  const [, view, slug] = route();
+  if (view === "p" && slug) return renderBrainPage(slug);
+  if (view === "revisione") return renderBrainReview();
+  const body = h("div", { class: "stack" }, skeleton("rows", 4));
+  let state = null;
+  let kind = "";
+  const search = h("input", { type: "search", placeholder: tr("Cerca nel brain…"), "aria-label": tr("Cerca nel brain"), autocomplete: "off" });
+  const list = h("div", { class: "brain-list" });
+  const reviewButton = btn("Rivedi", { icon: "check", cls: "primary", href: "#/brain/revisione" });
+  const runButton = btn("Aggiorna adesso", { icon: "refresh", cls: "ghost", onclick: async () => {
+    runButton.disabled = true;
+    if (await guard(api("/api/brain/run", { method: "POST" }), "Il bibliotecario è al lavoro")) setTimeout(load, 4000);
+    runButton.disabled = false;
+  } });
+  async function pages() {
+    const query = search.value.trim();
+    list.replaceChildren(skeleton("rows", 3));
+    try {
+      const data = await api(`/api/brain/pages?${new URLSearchParams(query ? { q: query } : { kind })}`);
+      list.replaceChildren(...(data.pages.length ? data.pages.map((page) => h("a", { class: "brain-row", href: `#/brain/p/${page.slug}` },
+        h("div", { class: "grow" }, h("b", {}, raw(page.title)), page.summary ? h("small", {}, raw(page.summary)) : null),
+        h("div", { class: "brain-row-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.pending ? badge("Da rivedere", "warn") : null))) :
+        [empty("bulb", query ? "Niente nel brain su questo." : "Ancora nessuna pagina: il bibliotecario le scrive di notte dalle chat.")]));
+    } catch (error) { list.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+  }
+  let timer = null;
+  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(pages, 300); });
+  const settingsPanel = () => {
+    const settings = S.data.settings;
+    const form = h("form", { class: "stack" },
+      h("div", { class: "grid2" },
+        h("div", { class: "field" }, h("span", { class: "label" }, "Modello del bibliotecario"), modelPicker("brainModel", settings.brainModel || "", { allowDefault: true }),
+          h("small", {}, "Legge le chat e scrive le pagine: un modello attento sui fatti e sulle fonti.")),
+        field("Modello per la ricerca", h("input", { type: "text", name: "brainEmbedModel", class: "mono", value: settings.brainEmbedModel || "", autocomplete: "off", spellcheck: "false" }), "Un modello di embedding dell'Ollama di questa macchina, es. bge-m3. Vuoto: ricerca solo per parole."),
+        field("Ora del bibliotecario", h("input", { type: "number", name: "librarianHour", min: 0, max: 23, value: settings.librarianHour, inputmode: "numeric" }), "prima lo fa il backup, poi aggiorna il brain"),
+        field("Ora della revisione", h("input", { type: "number", name: "reviewHour", min: 0, max: 23, value: settings.reviewHour, inputmode: "numeric" }), "ti arriva il riepilogo: sul telefono e in privato")),
+      h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Salva", { icon: "check", type: "submit", cls: "primary" })));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      const saved = await guard(api("/api/settings", { method: "PUT", body: { brainModel: pickedModel(data, "brainModel"), brainEmbedModel: data.get("brainEmbedModel"), librarianHour: Number(data.get("librarianHour")), reviewHour: Number(data.get("reviewHour")) } }), "Impostazioni del brain salvate");
+      if (saved) await loadState();
+    });
+    return panel({ icon: "sliders", title: "Il bibliotecario", hint: "Ogni notte legge le chat e aggiorna il brain; la mattina ti dice cosa è cambiato. Le modifiche valgono subito, anche se non le rivedi." }, form);
+  };
+  function draw() {
+    if (!state.enabled) {
+      body.replaceChildren(panel({ icon: "bulb", title: "Il brain non è collegato" },
+        h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Questa Cora non ha ancora il suo database del brain: serve un Postgres con pgvector, in hush come CORA_BRAIN_DATABASE_URL."))));
+      return;
+    }
+    const { stats, lastRun } = state;
+    reviewButton.querySelector("span").textContent = stats.pending + stats.flagged ? tr("Rivedi ({count})", { count: stats.pending + stats.flagged }) : tr("Rivedi");
+    reviewButton.className = `btn${stats.pending + stats.flagged ? " primary" : " ghost"}`;
+    const chips = h("div", { class: "chips", role: "group", "aria-label": tr("Tipo di pagina") },
+      [["", "Tutte"], ...Object.entries(BRAIN_KINDS_PLURAL)].map(([key, label]) => h("button", { type: "button", class: `chip${kind === key ? " on" : ""}`, "aria-pressed": String(kind === key), onclick: () => { kind = key; search.value = ""; draw(); pages(); } }, label)));
+    body.replaceChildren(
+      h("div", { class: "brain-stats" },
+        h("div", {}, h("b", {}, String(stats.pages)), h("small", {}, "pagine")),
+        h("div", {}, h("b", {}, String(stats.pending + stats.flagged)), h("small", {}, "da rivedere")),
+        h("div", {}, h("b", {}, String(stats.chunks)), h("small", {}, "messaggi cercabili")),
+        h("div", { class: "grow" }, h("b", {}, lastRun ? raw(fmtTime(lastRun.at, true)) : "—"),
+          h("small", {}, lastRun ? raw(tr("ultimo giro: {created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato"))),
+      h("div", { class: "brain-search" }, search, chips),
+      list,
+      state.canManage ? settingsPanel() : null);
+  }
+  async function load() {
+    try {
+      state = await api("/api/brain");
+      if (!body.isConnected) return;
+      draw();
+      if (state.enabled) pages();
+    } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+  }
+  shell([pageHead("Brain", "Quello che sa l'azienda: clienti, progetti, persone, decisioni e procedure, con le fonti.", [reviewButton, runButton]), body], { title: "Brain" });
+  load();
+}
+
+async function renderBrainPage(slug) {
+  const body = h("div", { class: "stack" }, skeleton("rows", 3));
+  shell([body], { title: "Brain", back: "#/brain" });
+  let page;
+  let state;
+  try { [page, state] = await Promise.all([api(`/api/brain/pages/${encodeURIComponent(slug)}`), api("/api/brain")]); }
+  catch (error) { body.replaceChildren(empty("bulb", error.message, btn("Torna al brain", { icon: "back", href: "#/brain" }))); return; }
+  const editing = { on: false };
+  const draw = () => {
+    const actions = state.canManage ? [
+      btn(editing.on ? "Annulla" : "Modifica", { icon: editing.on ? "close" : "edit", cls: "ghost", onclick: () => { editing.on = !editing.on; draw(); } }),
+      page.status === "live" ? btn("Archivia", { icon: "trash", cls: "ghost", onclick: async () => {
+        const archived = await guard(api(`/api/brain/pages/${page.slug}`, { method: "DELETE" }), "Pagina archiviata");
+        if (archived) { page = archived; draw(); }
+      } }) : null,
+    ] : [];
+    let content;
+    if (editing.on) {
+      const form = h("form", { class: "stack" },
+        h("div", { class: "grid2" }, field("Titolo", h("input", { type: "text", name: "title", value: page.title })),
+          field("Tipo", h("select", { name: "kind" }, Object.entries(BRAIN_KINDS_LABEL).map(([key, label]) => h("option", { value: key, selected: page.kind === key }, label))))),
+        field("Riassunto", h("input", { type: "text", name: "summary", value: page.summary }), "una o due frasi: è ciò che gli agenti vedono a ogni turno"),
+        field("Testo", h("textarea", { name: "body", class: "tall mono" }, raw(page.body)), "righe che cominciano con - diventano elenchi; [[slug]] collega un'altra pagina"),
+        h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Salva", { icon: "check", type: "submit", cls: "primary" })));
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const data = new FormData(form);
+        const saved = await guard(api(`/api/brain/pages/${page.slug}`, { method: "PUT", body: { title: data.get("title"), kind: data.get("kind"), summary: data.get("summary"), body: data.get("body") } }), "Pagina salvata");
+        if (saved) { page = saved; editing.on = false; draw(); }
+      });
+      content = form;
+    } else content = [page.summary ? h("p", { class: "lead" }, raw(page.summary)) : null, brainText(page.body)];
+    body.replaceChildren(
+      pageHead(raw(page.title), h("span", { class: "brain-head-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.status === "archived" ? badge("Archiviata") : null, page.pending ? badge("Da rivedere", "warn") : null,
+        h("small", {}, tr("aggiornata {when}", { when: fmtTime(page.updatedAt, true) }))), actions),
+      panel({ cls: "brain-page" }, content),
+      panel({ icon: "clock", title: "Storia", hint: "Ogni modifica, chi l'ha fatta e da dove viene." },
+        h("ol", { class: "brain-history" }, page.revisions.map((revision) => h("li", {},
+          h("div", { class: "row" }, h("b", {}, BRAIN_ACTIONS[revision.action] || raw(revision.action)), badge(BRAIN_REVIEWS[revision.review] || raw(revision.review), revision.review === "approved" ? "on" : revision.review === "reverted" ? "" : "warn"),
+            h("small", { class: "grow" }, brainAuthor(revision.author), raw(` · ${fmtTime(revision.createdAt, true)}`))),
+          revision.note ? h("p", {}, raw(revision.note)) : null,
+          revision.conflict ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(revision.conflict))) : null,
+          brainSources(revision.sources))))));
+  };
+  draw();
+}
+
+async function renderBrainReview() {
+  const body = h("div", { class: "stack" }, skeleton("rows", 3));
+  const approveAll = btn("Approva tutto", { icon: "check", cls: "primary", onclick: () => decide({ all: true, decision: "approve" }, "Tutto approvato") });
+  shell([pageHead("Revisione del brain", "Cosa ha cambiato il bibliotecario. Vale già: approva quello che va bene, annulla quello che no.", [approveAll]), body], { title: "Revisione", back: "#/brain" });
+  let state;
+  async function decide(choice, done) {
+    for (const button of body.querySelectorAll("button")) button.disabled = true;
+    approveAll.disabled = true;
+    if (await guard(api("/api/brain/review", { method: "POST", body: choice }), done)) await load();
+    approveAll.disabled = false;
+  }
+  async function load() {
+    try {
+      const [{ queue }, brain] = await Promise.all([api("/api/brain/review"), state ? Promise.resolve(state) : api("/api/brain")]);
+      state = brain;
+      approveAll.hidden = !queue.length || !state.canManage;
+      if (!queue.length) { body.replaceChildren(empty("check", "Niente da rivedere: il brain è come l'hai lasciato.", btn("Torna al brain", { icon: "back", href: "#/brain" }))); return; }
+      body.replaceChildren(...queue.map((revision) => h("article", { class: `brain-change${revision.review === "flagged" ? " flagged" : ""}` },
+        h("header", { class: "row" },
+          h("a", { href: `#/brain/p/${revision.slug}`, class: "grow" }, h("b", {}, raw(revision.title))),
+          badge(BRAIN_ACTIONS[revision.action] || raw(revision.action), revision.action === "create" ? "on" : ""), revision.review === "flagged" ? badge("Da verificare", "warn", "alert") : null),
+        h("small", {}, brainAuthor(revision.author), raw(` · ${fmtTime(revision.createdAt, true)}${revision.note ? ` · ${revision.note}` : ""}`)),
+        revision.conflict ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(revision.conflict))) : null,
+        revision.previous && revision.previous.summary !== revision.summary ? brainDiff(revision.previous.summary, revision.summary) : null,
+        revision.previous ? brainDiff(revision.previous.body, revision.body) : brainText(revision.body),
+        brainSources(revision.sources),
+        state.canManage ? h("div", { class: "row brain-change-actions" }, h("span", { class: "spacer" }),
+          btn("Annulla", { icon: "close", cls: "ghost", onclick: () => decide({ ids: [revision.id], decision: "revert" }, "Modifica annullata") }),
+          btn("Approva", { icon: "check", cls: "primary", onclick: () => decide({ ids: [revision.id], decision: "approve" }, "Approvata") })) : null)));
+    } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+  }
+  load();
+}
+
 function renderContext() {
   const body = h("div", { class: "context-browser" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
   let selectedId = route()[1] || "owner";
@@ -3425,6 +3646,7 @@ async function render() {
   else if (page === "new") renderNew();
   else if (page === "archivio") renderRoutineArchive();
   else if (page === "contesto") renderContext();
+  else if (page === "brain") renderBrain();
   else if (page === "settings") renderSettings();
   else if (page === "salotto") renderSalotto();
   else renderAgents();

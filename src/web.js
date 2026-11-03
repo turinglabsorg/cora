@@ -16,6 +16,7 @@ import { telegramBotEnvName } from "./telegram-bots.js";
 import { isWebRoom, roomAgentId } from "./rooms.js";
 import { nextRuns } from "./scheduler.js";
 import { SHARED } from "./store.js";
+import { BRAIN_KINDS } from "./company-brain.js";
 import { VOICE_LANGUAGES } from "./voice.js";
 import { contextSources } from "./context.js";
 import { brainsInUse, testRule } from "./rule-test.js";
@@ -135,7 +136,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null}) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -266,7 +267,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const user = sessionUser(req);
     if (!user) throw new HttpError(401, "login richiesto");
     if (!["GET", "HEAD"].includes(method) && path !== "/api/logout") {
-      const action = path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
+      const action = path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/brain") ? "brain" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
     if (path === "/api/logout" && method === "POST") {
@@ -286,6 +287,56 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!store.contextDocument(id)) throw new HttpError(404, "file di contesto non trovato");
       if (method === "PUT") return send(res, 200, store.saveContextDocument(await readJson(req), { id, userId: user.id }));
       if (method === "DELETE") { store.deleteContextDocument(id); return send(res, 200, { ok: true }); }
+    }
+    if (path === "/api/brain" || path.startsWith("/api/brain/")) {
+      const canManage = user.role === "owner";
+      if (!companyBrain?.enabled) {
+        if (path === "/api/brain" && method === "GET") return send(res, 200, { enabled: false, canManage, kinds: BRAIN_KINDS });
+        throw new HttpError(409, "il brain non è collegato: serve CORA_BRAIN_DATABASE_URL in hush");
+      }
+      const manage = () => { if (!canManage) throw new HttpError(403, "solo l'owner cambia il brain"); };
+      const author = `owner:${user.name || user.email || "Owner"}`;
+      if (path === "/api/brain" && method === "GET") {
+        return send(res, 200, { enabled: true, canManage, kinds: BRAIN_KINDS, stats: await companyBrain.stats(), lastRun: await companyBrain.state("lastRun"), running: Boolean(librarian?.running) });
+      }
+      if (path === "/api/brain/pages" && method === "GET") {
+        const q = String(url.searchParams.get("q") || "").trim();
+        const pages = q ? await companyBrain.search(q, { limit: 30 }) : await companyBrain.pages({ kind: String(url.searchParams.get("kind") || ""), status: url.searchParams.get("status") === "archived" ? "archived" : "live" });
+        return send(res, 200, { pages });
+      }
+      if (path === "/api/brain/pages" && method === "POST") {
+        manage();
+        const body = await readJson(req, 65536);
+        if (await companyBrain.page(body.slug || body.title || "")) throw new HttpError(409, "una pagina con questo nome c'è già");
+        const written = await companyBrain.write({ ...body, author, review: "approved", note: String(body.note || "scritta dal proprietario") });
+        return send(res, 201, written.page);
+      }
+      const brainPage = /^\/api\/brain\/pages\/([a-z0-9-]{2,60})$/.exec(path);
+      if (brainPage) {
+        const page = await companyBrain.page(brainPage[1]);
+        if (!page) throw new HttpError(404, "pagina non trovata");
+        if (method === "GET") return send(res, 200, page);
+        manage();
+        if (method === "PUT") {
+          const body = await readJson(req, 65536);
+          const written = await companyBrain.write({ slug: page.slug, kind: body.kind ?? page.kind, title: body.title ?? page.title, summary: body.summary ?? page.summary, body: body.body ?? page.body, author, review: "approved", note: String(body.note || "corretta dal proprietario") });
+          return send(res, 200, written.page);
+        }
+        if (method === "DELETE") return send(res, 200, await companyBrain.archive(page.slug, { author, note: "archiviata dal proprietario", review: "approved" }));
+      }
+      if (path === "/api/brain/review" && method === "GET") return send(res, 200, { queue: await companyBrain.reviewQueue() });
+      if (path === "/api/brain/review" && method === "POST") {
+        manage();
+        const body = await readJson(req, 65536);
+        return send(res, 200, await companyBrain.review({ ids: Array.isArray(body.ids) ? body.ids.map(String) : [], all: body.all === true, decision: body.decision, by: author }));
+      }
+      if (path === "/api/brain/run" && method === "POST") {
+        manage();
+        if (librarian?.running) return send(res, 202, { started: false, running: true });
+        librarian?.run({ reason: "pannello" }).catch((error) => activity({ type: "error", text: `bibliotecario: ${error.message}` }));
+        return send(res, 202, { started: true, running: true });
+      }
+      throw new HttpError(404, "not found");
     }
     if (path === "/api/permissions") {
       if (method === "PUT") {

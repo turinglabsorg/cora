@@ -47,6 +47,11 @@ const DEFAULT_SETTINGS = {
   noticeChannel: "waitlist",
   // People in the chats the owner lets put agents to work on their computers: { id: "<transport>:<user id>", name, agents: ["*"] | [agent ids] }.
   permissions: [],
+  // The company brain: the librarian's model ("" = the default model), the embedding model of its search, and its hours.
+  brainModel: "",
+  brainEmbedModel: "bge-m3",
+  librarianHour: 3,
+  reviewHour: 8,
 };
 const SSH_PORT_BASE = 2201;
 export const TRANSPORTS = ["discord", "telegram", "slack"];
@@ -310,6 +315,10 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     noticeChannel: cleanText(merged.noticeChannel, 100).trim().replace(/^#/, ""),
     sshKeys: plainKeys(Array.isArray(merged.sshKeys) ? merged.sshKeys.join("\n") : merged.sshKeys).slice(0, 30),
     permissions: cleanPermissions(merged.permissions),
+    brainModel: merged.brainModel ? checkModel(merged.brainModel) : "",
+    brainEmbedModel: cleanText(merged.brainEmbedModel, 80).replace(/[^\w.:/-]/g, "").trim(),
+    librarianHour: Math.round(clampNumber(merged.librarianHour, 0, 23, 3)),
+    reviewHour: Math.round(clampNumber(merged.reviewHour, 0, 23, 8)),
   };
 }
 
@@ -455,6 +464,11 @@ export class Store {
 
   close() {
     try { this.db.close(); } catch {}
+  }
+
+  /** A consistent copy of the whole database, taken while Cora runs (VACUUM INTO). */
+  backup(path) {
+    this.db.prepare("VACUUM INTO ?").run(path);
   }
 
   flush() {}

@@ -13,10 +13,10 @@ SSH="ssh -o BatchMode=yes -o ConnectTimeout=20 ${CORA_DEPLOY_SSH_OPTS:-}"
 
 $SSH "$HOST" 'mkdir -p "$HOME/Services/cora" "$HOME/.cora" && chmod 700 "$HOME/.cora"'
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --delete --exclude .git --exclude '*.log' -e "$SSH" "$SRC/" "$HOST:Services/cora/"
+  rsync -a --delete --exclude .git --exclude '*.log' --exclude node_modules -e "$SSH" "$SRC/" "$HOST:Services/cora/"
 else
   # No local rsync (e.g. a container): ship a tarball and let the host's rsync apply it.
-  tar -C "$SRC" --exclude .git --exclude '*.log' -cf - . | $SSH "$HOST" 'set -e; rm -rf "$HOME/Services/cora.incoming"; mkdir -p "$HOME/Services/cora.incoming"; tar -xf - -C "$HOME/Services/cora.incoming"; rsync -a --delete "$HOME/Services/cora.incoming/" "$HOME/Services/cora/"; rm -rf "$HOME/Services/cora.incoming"'
+  tar -C "$SRC" --exclude .git --exclude '*.log' --exclude node_modules -cf - . | $SSH "$HOST" 'set -e; rm -rf "$HOME/Services/cora.incoming"; mkdir -p "$HOME/Services/cora.incoming"; tar -xf - -C "$HOME/Services/cora.incoming"; rsync -a --delete --exclude node_modules "$HOME/Services/cora.incoming/" "$HOME/Services/cora/"; rm -rf "$HOME/Services/cora.incoming"'
 fi
 
 # The desktop image is rebuilt only when box/ changed; cora then recreates every desktop
@@ -48,7 +48,7 @@ if [ "$BOX_MODE" = ship ]; then
   BOX_MODE=skip
 fi
 
-$SSH "$HOST" BOX_MODE="$BOX_MODE" BOX_HASH="$BOX_HASH" sh -s <<'REMOTE'
+$SSH "$HOST" BOX_MODE="$BOX_MODE" BOX_HASH="$BOX_HASH" BRAIN_PORT="${CORA_BRAIN_PORT:-5442}" sh -s <<'REMOTE'
 set -e
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 DIR="$HOME/Services/cora"
@@ -77,6 +77,25 @@ for pair in ADMIN_PASSWORD:16 SESSION_KEY:32 VAPID_KEY:32; do
   name=${pair%%:*}
   hush info "CORA_$name" >/dev/null 2>&1 || hush info "CORO_$name" >/dev/null 2>&1 || hush generate "CORA_$name" --bytes "${pair##*:}" >/dev/null
 done
+
+# Cora's npm dependencies (pg for the company brain), from the lockfile, without the test-only ones.
+export PATH="$(dirname "$NODE"):$PATH"
+(cd "$DIR" && npm ci --omit=dev --no-audit --no-fund --loglevel=error >/dev/null) || { echo "npm ci failed"; exit 1; }
+
+# The company brain: Postgres with pgvector in a container of its own, reachable only from this
+# machine. Its password and its URL are generated straight into hush; nothing prints them.
+if command -v docker >/dev/null 2>&1; then
+  hush info CORA_BRAIN_DB_PASSWORD >/dev/null 2>&1 || hush generate CORA_BRAIN_DB_PASSWORD --bytes 24 >/dev/null
+  if ! docker inspect cora-brain-db >/dev/null 2>&1; then
+    hush run --name CORA_BRAIN_DB_PASSWORD --env POSTGRES_PASSWORD --redact -- docker run -d --name cora-brain-db --restart unless-stopped \
+      -e POSTGRES_USER=cora -e POSTGRES_DB=cora_brain -e POSTGRES_PASSWORD -p "127.0.0.1:$BRAIN_PORT:5432" \
+      -v cora-brain-db:/var/lib/postgresql/data pgvector/pgvector:0.8.6-pg17 >/dev/null
+  fi
+  docker start cora-brain-db >/dev/null 2>&1 || true
+  for i in $(seq 1 60); do docker exec cora-brain-db pg_isready -U cora -d cora_brain >/dev/null 2>&1 && break; sleep 1; done
+  hush info CORA_BRAIN_DATABASE_URL >/dev/null 2>&1 || hush run --name CORA_BRAIN_DB_PASSWORD --env PW --redact -- \
+    sh -c 'printf "postgres://cora:%s@127.0.0.1:%s/cora_brain" "$PW" "$0" | hush box seal --to self --uses 1 --pubkey-file "$HOME/.hush/box.pub" | hush box open CORA_BRAIN_DATABASE_URL >/dev/null' "$BRAIN_PORT"
+fi
 
 CURRENT_BOX=$(docker image inspect cora-box:latest --format '{{index .Config.Labels "cora.box"}}' 2>/dev/null || true)
 if [ "$BOX_MODE" != skip ] && { [ "$BOX_MODE" = force ] || [ "$CURRENT_BOX" != "$BOX_HASH" ]; }; then

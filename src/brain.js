@@ -24,7 +24,8 @@ const NUDGES = 4;
 /** Tools that talk about work without doing any. */
 const TALK_TOOLS = new Set(["say", "notify", "list_channels", "ask_owner"]);
 /** Tools that look things up: they can back "ho controllato", never "ho creato". */
-const LOOKUP_TOOLS = new Set(["list_routines", "routine_history", "recall", "screenshot"]);
+const LOOKUP_TOOLS = new Set(["list_routines", "routine_history", "recall", "screenshot", "brain_search", "brain_page"]);
+const BRAIN_KIND_LABELS = { client: "cliente", project: "progetto", person: "persona", decision: "decisione", procedure: "procedura", topic: "tema" };
 /** A task's goal: one line, and how many times the agent may be sent back to meet it. */
 const GOAL_CHARS = 300;
 const GOAL_ROUNDS = 12;
@@ -160,7 +161,8 @@ export function effortOf(agent) {
 }
 
 export class Brain {
-  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null }) {
+  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null, companyBrain = null }) {
+    this.companyBrain = companyBrain;
     // The orchestrator admits one task per thread. Its current goal belongs to that task only.
     this.channelGoals = new Map();
     this.activeTurns = new Map();
@@ -250,6 +252,9 @@ export class Brain {
     sections.push("## Scrivere nei canali: strumenti Cora\nPuoi già scrivere direttamente nei canali autorizzati. Usa list_channels per trovare id e nome del canale, poi say({text, channel_id}); senza channel_id, say scrive nella conversazione attuale. Quando chiedi qualcosa a un collega o a una persona del team, o gli consegni un risultato, rivolgiti a lui con @ e il nome come appare in chat (es. @Nome): Cora lo converte nella vera menzione, per un agente se il suo bot è presente e può leggere il canale, per una persona se ha scritto o è stata taggata in questo server. Non inventare id Discord. Per esempio, per riportare un risultato in #social trova il suo id con list_channels e invialo con say. Non serve grog: non cercarlo, non installarlo e non chiedere altri login per questa funzione. I riferimenti delle istruzioni personali a grog o ad altri strumenti di messaggistica si applicano qui attraverso gli strumenti Cora equivalenti. Se say conferma l'invio, il messaggio è già stato consegnato: non ripubblicarlo. Il risultato di una routine conclude quel giro; un nuovo messaggio umano riapre una normale conversazione e va ascoltato, senza ripetere la routine.");
     const documents = this.store.contextDocuments().filter((document) => document.enabled);
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
+    if (this.companyBrain?.enabled) {
+      sections.push("## Il brain aziendale\nÈ la memoria comune di quest'azienda: pagine su clienti, progetti, persone, decisioni e procedure, tenute da un bibliotecario con le fonti. In ogni turno ti arrivano le pagine pertinenti; con brain_search cerchi nelle pagine e in ciò che è stato detto nelle chat, con brain_page leggi una pagina intera. Prima di chiedere al proprietario una cosa che l'azienda potrebbe già sapere, guarda lì. Quando impari qualcosa che vale per tutta l'azienda (una decisione, la preferenza di un cliente, chi fa cosa), segnalalo con brain_note: il bibliotecario lo mette nel brain. La tua memoria personale resta remember. Una pagina «da rivedere» non è ancora stata vista dal proprietario, ma vale.");
+    }
     sections.push("## Routine, reminder e storico\nGestisci i tuoi compiti ricorrenti con set_routine, quelli da fare una sola volta con set_reminder (run_at ISO 8601 con fuso). list_routines mostra ciò che è ancora in programma; con l'id ti dà una routine intera, prompt compreso: leggila così prima di cambiarla e rimanda tutto il testo che non ti è stato chiesto di cambiare. routine_history consulta esecuzioni e attività archiviate, con risultati e verifiche; ogni esecuzione conserva il prompt con cui è girata (routine_id e full per leggerlo intero). Prima di ripetere un'azione già richiesta, consulta lo storico. Un reminder viene archiviato da Cora solo dopo una verifica positiva: non ricrearlo se è già riuscito. Se è bloccato o interrotto, controlla prima gli effetti già prodotti e poi chiedi o prepara una nuova prova senza duplicarli.");
     if (withoutComputer) {
       sections.push("## Il tuo computer\nIn questa conversazione non hai il tuo computer: lo usi solo per chi ha il permesso del proprietario. Se ti chiedono un lavoro che lo richiede, non restare in silenzio: chiedi il via libera al proprietario con ask_owner, oppure spiega che serve il suo permesso.");
@@ -285,6 +290,22 @@ export class Brain {
     return sections.join("\n\n");
   }
 
+  /**
+   * The company brain's pages that bear on this turn, as titles and summaries: the
+   * agent opens one whole with brain_page. A brain that does not answer in time
+   * leaves the turn as it was.
+   */
+  async brainContext(query) {
+    if (!this.companyBrain?.enabled || !String(query || "").trim()) return "";
+    try {
+      const pages = await Promise.race([this.companyBrain.search(query, { limit: 5 }), new Promise((resolve) => setTimeout(() => resolve([]), 4000))]);
+      if (!pages.length) return "";
+      return `Dal brain aziendale (con brain_page leggi una pagina intera):\n${pages.map((page) => `- [${page.slug}] ${page.title} (${BRAIN_KIND_LABELS[page.kind] || page.kind})${page.summary ? `: ${page.summary}` : ""}${page.pending ? " — da rivedere" : ""}`).join("\n")}`;
+    } catch {
+      return "";
+    }
+  }
+
   memoryContext(agent, query) {
     const facts = this.memory.relevant(agent.id, query);
     const diary = this.store.diary(agent.id).slice(-2);
@@ -315,6 +336,7 @@ export class Brain {
       : "Decidi se intervenire. Se non hai niente da aggiungere rispondi solo PASS.";
     const user = [
       this.memoryContext(agent, query),
+      await this.brainContext(query),
       this.elsewhere(agent, channel.id),
       `Ultimi messaggi ${channel.where || `in #${channel.name}`}${channel.note ? ` (${channel.note})` : ""}:\n<chat>\n${transcript}\n</chat>`,
       instruction,
@@ -342,6 +364,7 @@ export class Brain {
     const transcript = formatTranscript(history.slice(-12), agent, this.timezone);
     const user = [
       this.memoryContext(agent, `${routine.name} ${routine.prompt}`),
+      await this.brainContext(`${routine.name} ${routine.prompt}`),
       this.elsewhere(agent, channel.id),
       routine.kind === "reminder" ? `È il momento del tuo reminder "${routine.name}" (una volta: ${routine.runAt}).` : `È il momento della tua routine "${routine.name}" (pianificazione: ${routine.schedule}).`,
       `[Attività programmata: ${routine.id}]`,
@@ -482,7 +505,8 @@ export class Brain {
   async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null }) {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
-    const tools = caps.tools ? TOOL_DEFS.filter((tool) => OWN_TOOLS.has(tool.name) || computer) : [];
+    // The company brain's tools exist only where there is a brain to read.
+    const tools = caps.tools ? TOOL_DEFS.filter((tool) => (OWN_TOOLS.has(tool.name) || computer) && (this.companyBrain?.enabled || !tool.name.startsWith("brain_"))) : [];
     const place = channel.place || "";
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
     let { goal, usage: goalCost } = task && goalRequest ? await this.goalFor(goalRequest, "", goalContext) : { goal: "", usage: null };
@@ -550,7 +574,7 @@ export class Brain {
       return result;
     } : null;
     const ctx = {
-      agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push,
+      agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push, companyBrain: this.companyBrain,
       // The question goes where this conversation is, not to a separate place.
       ask: this.ask ? async (request) => {
         const posted = await this.ask(agent, request, { channelId: channel.id });

@@ -157,6 +157,34 @@ export class Orchestrator {
   }
 
   /**
+   * A private message from Cora to the owner, on the platform in use: a DM from
+   * the main Discord bot or Slack app, or a Telegram message. False when there is
+   * no owner to reach there.
+   */
+  async messageOwner(text) {
+    const { settings } = this.store;
+    const active = this.channels.active;
+    if (active === "slack") {
+      const owner = settings.slackOwnerIds[0];
+      if (!owner || !this.slack?.user) return false;
+      const opened = await this.slack.request("conversations.open", { users: owner });
+      await this.slack.say(opened.channel.id, { content: text });
+      return true;
+    }
+    if (active === "telegram") {
+      const owner = settings.telegramOwnerIds[0];
+      if (!owner || !this.telegram?.user) return false;
+      await this.telegram.say(owner, { content: text });
+      return true;
+    }
+    const owner = settings.ownerIds[0];
+    if (!owner || !this.discord.user) return false;
+    const dm = await this.discord.request("POST", "/users/@me/channels", { body: { recipient_id: owner } });
+    await this.discord.say(dm.id, { content: text });
+    return true;
+  }
+
+  /**
    * Whether the owner lets the person who wrote this put the agent to work on
    * its computer, as if they had asked themselves (Settings → Permissions).
    */

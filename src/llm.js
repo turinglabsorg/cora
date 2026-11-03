@@ -276,6 +276,19 @@ export class LLM {
     return this.ollamaKey ? { Authorization: `Bearer ${this.ollamaKey}` } : {};
   }
 
+  /** Embedding vectors from an Ollama (`/api/embed`): the company brain's search by meaning. */
+  async embed(model, texts, url) {
+    const response = await fetch(`${String(url).replace(/\/$/, "")}/api/embed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(isLocalUrl(url) ? {} : this.ollamaHeaders()) },
+      body: JSON.stringify({ model, input: texts }),
+      signal: AbortSignal.timeout(120000),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`${model}: ${data.error || response.status}`);
+    return data.embeddings;
+  }
+
   providers() {
     return {
       claude: onPath(this.claudeBin),

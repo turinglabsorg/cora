@@ -178,6 +178,13 @@ export async function fakeDiscord() {
       if (!state.botUsers.has(token) && token !== MAIN_TOKEN) return json(res, 401, { message: "401: Unauthorized", code: 0 });
       return json(res, 200, { bot: true, ...caller });
     }
+    // A DM channel with a person: always the same one for the same person, numeric like Discord's.
+    if (url.pathname === "/users/@me/channels" && req.method === "POST") {
+      const recipient = JSON.parse(body.toString("utf8")).recipient_id;
+      state.dms ??= new Map();
+      if (!state.dms.has(recipient)) state.dms.set(recipient, id());
+      return json(res, 200, { id: state.dms.get(recipient), type: 1, recipients: [{ id: recipient }] });
+    }
     if (url.pathname === "/users/@me" && req.method === "PATCH") {
       const patch = JSON.parse(body.toString("utf8"));
       state.profilePatches.push({ token, username: patch.username, avatar: Boolean(patch.avatar) });
@@ -355,6 +362,20 @@ export async function fakeOllama(reply) {
     if (url.pathname === "/api/ps") {
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ models: [{ name: "test-model", size: 18_600_000_000, size_vram: 17_100_000_000, expires_at: "2026-10-28T13:00:00Z" }] }));
+    }
+    // Embeddings that follow the letters a text is made of: close texts come out close, the same every time.
+    if (url.pathname === "/api/embed") {
+      const body = JSON.parse((await readBody(req)).toString("utf8"));
+      calls.push({ embed: body.model, count: body.input.length });
+      res.writeHead(body.model === "missing-embed" ? 404 : 200, { "Content-Type": "application/json" });
+      if (body.model === "missing-embed") return res.end(JSON.stringify({ error: `model "${body.model}" not found` }));
+      const vector = (text) => {
+        const counts = new Array(26).fill(0);
+        for (const char of String(text).normalize("NFD").toLowerCase()) { const index = char.charCodeAt(0) - 97; if (index >= 0 && index < 26) counts[index] += 1; }
+        const norm = Math.sqrt(counts.reduce((sum, value) => sum + value * value, 0)) || 1;
+        return counts.map((value) => value / norm);
+      };
+      return res.end(JSON.stringify({ model: body.model, embeddings: body.input.map(vector) }));
     }
     if (url.pathname === "/api/chat") {
       const body = JSON.parse((await readBody(req)).toString("utf8"));

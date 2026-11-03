@@ -5,7 +5,7 @@ import { SHARED } from "./store.js";
 const XDOTOOL_BUTTON = { click: "1", double_click: "1", right_click: "3", middle_click: "2" };
 
 /** Tools every agent has, also without its computer. */
-export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget", "recall", "update_core", "notify", "ask_owner"]);
+export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget", "recall", "update_core", "notify", "ask_owner", "brain_search", "brain_page", "brain_note"]);
 
 /**
  * What an agent may do about its own life without the owner's computer: speak,
@@ -85,6 +85,21 @@ export const TOOL_DEFS = [
       },
       required: ["text"],
     },
+  },
+  {
+    name: "brain_search",
+    description: "Search the company brain: the pages on clients, projects, people, decisions and procedures that the librarian keeps with their sources, and what was said in the chats, by words and by meaning. Look here before asking the owner something the company may already know.",
+    parameters: { type: "object", properties: { query: { type: "string", description: "what you want to know, in plain words" } }, required: ["query"] },
+  },
+  {
+    name: "brain_page",
+    description: "Read one company brain page whole: its text, when it last changed, whether the owner has reviewed it, and the sources of its latest change.",
+    parameters: { type: "object", properties: { slug: { type: "string", description: "the page's slug, as brain_search or the turn's context give it" } }, required: ["slug"] },
+  },
+  {
+    name: "brain_note",
+    description: "Tell the librarian something the whole company should know: a decision, a client's preference, who does what, a deadline. It goes into the company brain tonight, with you as its source. Your own memory stays remember.",
+    parameters: { type: "object", properties: { text: { type: "string", description: "the fact, short and specific, with who decided and when if you know" } }, required: ["text"] },
   },
   {
     name: "list_channels",
@@ -244,6 +259,9 @@ export function summarizeArgs(name, args) {
   if (name === "share_file") return `${String(args.path || "")} → ${String(args.agent || "")}`;
   if (name === "notify") return String(args.message || "").slice(0, 200);
   if (name === "say") return String(args.text || "").slice(0, 200);
+  if (name === "brain_search") return String(args.query || "").slice(0, 200);
+  if (name === "brain_page") return String(args.slug || "");
+  if (name === "brain_note") return String(args.text || "").slice(0, 200);
   if (name === "set_routine" || name === "set_reminder") return `${args.id ? `${args.id} ` : ""}${args.name || ""} ${args.schedule || args.run_at || ""}`.trim();
   if (name === "routine_history") return String(args.query || "").slice(0, 200);
   if (name === "delete_routine") return String(args.id || "");
@@ -408,6 +426,33 @@ export async function executeTool(call, ctx) {
         return { text: "archived; its execution history remains available with routine_history" };
       }
       case "list_channels": return { text: JSON.stringify(ctx.postingChannels || []) };
+      case "brain_search": {
+        if (!ctx.companyBrain?.enabled) return { text: "error: this instance has no company brain" };
+        const query = String(args.query || "").trim();
+        if (!query) return { text: "error: say what to look for" };
+        const [pages, chats] = await Promise.all([ctx.companyBrain.search(query, { limit: 6 }), ctx.companyBrain.searchArchive(query, { limit: 5 })]);
+        return { text: JSON.stringify({
+          pages: pages.map((page) => ({ slug: page.slug, title: page.title, kind: page.kind, summary: page.summary, updatedAt: page.updatedAt, reviewed: !page.pending })),
+          chats: chats.map((chat) => ({ at: chat.at, author: chat.author, channel: ctx.channelLabel ? ctx.channelLabel(chat.channelId) : chat.channelId, text: chat.text.slice(0, 500) })),
+        }) };
+      }
+      case "brain_page": {
+        if (!ctx.companyBrain?.enabled) return { text: "error: this instance has no company brain" };
+        const page = await ctx.companyBrain.page(String(args.slug || ""));
+        if (!page || page.status !== "live") return { text: "error: no such page; find it with brain_search" };
+        const latest = page.revisions[0];
+        return { text: JSON.stringify({
+          slug: page.slug, title: page.title, kind: page.kind, summary: page.summary, body: page.body, updatedAt: page.updatedAt, reviewed: !page.pending,
+          sources: (latest?.sources || []).slice(0, 6).map((source) => ({ type: source.type, author: source.author, channel: source.channel, at: source.at, quote: source.quote })),
+        }) };
+      }
+      case "brain_note": {
+        if (!ctx.companyBrain?.enabled) return { text: "error: this instance has no company brain" };
+        const text = String(args.text || "").trim();
+        if (!text) return { text: "error: empty note" };
+        await ctx.companyBrain.note({ text, agentId: agent.id, author: agent.name, channelId });
+        return { text: "noted for the librarian: it goes into the company brain at its next run, and the owner sees it in the morning review" };
+      }
       case "say": {
         const text = String(args.text || "").trim();
         if (!text) return { text: "error: empty message" };

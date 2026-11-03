@@ -17,7 +17,9 @@ import { Boxes, plainKeys } from "./box.js";
 import { config, resolveDiscordToken } from "./config.js";
 import { Discord } from "./discord.js";
 import { LLM } from "./llm.js";
+import { CompanyBrain } from "./company-brain.js";
 import { Doc, findDoc } from "./doc.js";
+import { Librarian } from "./librarian.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
 import { Store } from "./store.js";
@@ -92,7 +94,9 @@ export function startCora(overrides = {}) {
   bots.onChange = pickListener;
   const doc = new Doc({ root: findDoc(cfg.docDir), key: cfg.typesafeKey, usageLog: join(cfg.home, "doc-usage.jsonl"), rulesFile: join(cfg.home, "doc-rules.json") });
   const voice = new Voice({ key: cfg.sonioxKey, api: cfg.sonioxApi, ttsUrl: cfg.sonioxTtsUrl, ffmpeg: cfg.ffmpeg });
-  const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc });
+  // The company brain lives in Postgres (pgvector); without its URL the agents simply have no brain to read.
+  const companyBrain = new CompanyBrain({ url: cfg.brainDatabaseUrl, embed: (model, texts) => llm.embed(model, texts, cfg.brainEmbedUrl), embedModel: () => store.settings.brainEmbedModel, log: activity });
+  const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc, companyBrain });
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching(), voice });
   // DMs to an agent's own bot reach the orchestrator, where that one agent answers.
@@ -103,9 +107,18 @@ export function startCora(overrides = {}) {
   skBots.onGuild = (event, agentId) => orchestrator.onSlackMessage(event, agentId).catch((error) => activity({ type: "error", agentId, text: `slack: ${error.message}` }));
   skBots.onDirect = (agentId, event) => orchestrator.onSlackDirect(agentId, event).catch((error) => activity({ type: "error", agentId, text: `slack dm: ${error.message}` }));
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
-  const scheduler = new Scheduler({ store, orchestrator, brain, timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
+  // Where the owner reviews the brain: the address people reach this Cora on.
+  const instanceUrl = cfg.publicHost ? `https://${cfg.publicHost}` : cfg.cloudUrl && cfg.cloudSpace ? `https://${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
+  const librarian = new Librarian({
+    brain: companyBrain, store, llm, log: activity, traces, timezone: cfg.timezone,
+    channelLabel: (id) => brain.channelLabel(id),
+    notify: (notice) => (push.enabled ? push.notify(notice) : Promise.resolve()),
+    messageOwner: (text) => orchestrator.messageOwner(text),
+    reviewUrl: () => (instanceUrl ? `${instanceUrl}/#/brain/revisione` : ""),
+  });
+  const scheduler = new Scheduler({ store, orchestrator, brain, librarian, companyBrain, backups: join(cfg.home, "backups"), timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -203,9 +216,10 @@ export function startCora(overrides = {}) {
     web.server.closeAllConnections?.();
     await closed;
     await bridge.stop();
+    await companyBrain.close();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, server: web.server };
 }
 
 const isMain = (() => {

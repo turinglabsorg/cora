@@ -7,10 +7,10 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10"
 
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --delete --exclude .git --exclude '*.log' -e "$SSH" "$SRC/" "$HOST:Services/cora/"
+  rsync -a --delete --exclude .git --exclude '*.log' --exclude node_modules -e "$SSH" "$SRC/" "$HOST:Services/cora/"
 else
   # No local rsync (e.g. a Linux sandbox): ship a tarball and let the host's rsync apply it.
-  tar -C "$SRC" --exclude .git --exclude '*.log' -cf - . | $SSH "$HOST" 'set -e; rm -rf "$HOME/Services/cora.incoming"; mkdir -p "$HOME/Services/cora.incoming" "$HOME/Services/cora"; tar -xf - -C "$HOME/Services/cora.incoming"; rsync -a --delete "$HOME/Services/cora.incoming/" "$HOME/Services/cora/"; rm -rf "$HOME/Services/cora.incoming"'
+  tar -C "$SRC" --exclude .git --exclude '*.log' --exclude node_modules -cf - . | $SSH "$HOST" 'set -e; rm -rf "$HOME/Services/cora.incoming"; mkdir -p "$HOME/Services/cora.incoming" "$HOME/Services/cora"; tar -xf - -C "$HOME/Services/cora.incoming"; rsync -a --delete --exclude node_modules "$HOME/Services/cora.incoming/" "$HOME/Services/cora/"; rm -rf "$HOME/Services/cora.incoming"'
 fi
 
 # The desktop image is rebuilt only when box/ changed; cora then recreates every desktop

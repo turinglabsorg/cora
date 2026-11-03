@@ -17,5 +17,12 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/turinglabsorg/cora.git"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.10",
+    "@electric-sql/pglite-pgvector": "0.0.11"
   }
 }

@@ -71,7 +71,17 @@ web panel (password, PWA) ──► REST API + live events (SSE) + noVNC proxy +
 | Diary | A page written each night | The last two pages come back every turn |
 | Sleep | Nightly consolidation at `sleepHour` (default 04:00) or on demand | Rereads the day, adds/merges/removes facts, rewrites the core card, writes the diary |
 
-Everything lives in one SQLite file, `~/.cora/cora.db` (Node's built-in `node:sqlite`, FTS5).
+Everything lives in one SQLite file, `~/.cora/cora.db` (Node's built-in `node:sqlite`, FTS5), except the company brain below.
+
+### The company brain
+
+What the company knows, shared by every agent of the instance: one page per client, project, person, decision, procedure or topic, each change a revision with its sources (the message, the agent's note or the shared memory it came from).
+
+- **The librarian** runs every night at `librarianHour` (default 03:00), after a backup: it reads what was said since its last run in every channel (the first night, the last 30 days), the agents' `brain_note`s and, once, the shared memories, and asks the brain's model (`brainModel`, chosen in the panel; the default model otherwise) what the company now knows. A fact with no source it can be traced to is not written; a contradiction is kept with both versions and flagged. **Changes are live at once**: nothing waits for an approval.
+- **The morning review**: at `reviewHour` (default 08:00) the owner gets a push notification and a private message from Cora's bot (Discord, Slack or Telegram) with what changed and the link to **Brain → Revisione**, where each change can be approved or undone (undoing puts the page back as it was, or archives a page the change created). Not answering changes nothing.
+- **The agents** get the pages that bear on each turn (title and summary), and three tools: `brain_search` (pages and the chats, by words and by meaning), `brain_page` (a page whole, with its latest sources) and `brain_note` (something the whole company should know, for the librarian).
+- **Storage**: Postgres with pgvector, in a `cora-brain-db` container (`pgvector/pgvector:0.8.6-pg17`, on `127.0.0.1:5442`) that `deploy/linux.sh` creates with its password and `CORA_BRAIN_DATABASE_URL` generated straight into hush; without that URL there is no brain and nothing else changes. Search is Postgres full-text plus, when `brainEmbedModel` (default `bge-m3`) answers on this machine's Ollama (`CORA_BRAIN_EMBED_URL`, default `http://127.0.0.1:11434`), vector similarity, fused by rank.
+- **Backups**: every night `~/.cora/backups/cora-<day>.db` (`VACUUM INTO`) and `brain-<day>.json` (pages, revisions, notes), the last seven kept.
 
 ## Models
 
@@ -92,14 +102,14 @@ The MCP server (`src/mcp-server.js`) forwards tool calls to a loopback bridge (`
 
 ## Run
 
-Requirements: Node ≥ 22.13, Docker, `hush` (agent-blind secrets CLI), and the official `claude` / `codex` / `grok` / `muse` CLIs installed on the server for the subscription providers you use (Grok: `curl -fsSL https://x.ai/cli/install.sh | bash`; Muse: `curl -fsSL https://dev.meta.ai/install.sh | bash`, then `CORA_MUSE_BIN` or `PATH` must reach `~/.local/bin/muse`). Connect their accounts from the panel. No npm dependencies.
+Requirements: Node ≥ 22.13, Docker, `hush` (agent-blind secrets CLI), and the official `claude` / `codex` / `grok` / `muse` CLIs installed on the server for the subscription providers you use (Grok: `curl -fsSL https://x.ai/cli/install.sh | bash`; Muse: `curl -fsSL https://dev.meta.ai/install.sh | bash`, then `CORA_MUSE_BIN` or `PATH` must reach `~/.local/bin/muse`). Connect their accounts from the panel. One npm dependency, `pg`, loaded only when the company brain is on (`npm ci --omit=dev`, which `deploy/linux.sh` runs); the tests also use PGlite with pgvector, so they need no Postgres server.
 
 ```bash
 docker build -t cora-box:latest box     # the agents' desktop image
 bin/run.sh                              # injects the hush secrets that exist, then starts src/main.js
 ```
 
-Secrets come only from hush: `CORA_ADMIN_PASSWORD` (panel password), `CORA_SESSION_KEY` (cookie signing), `CORA_VAPID_KEY` (Web Push), `CORA_OLLAMA_API_KEY`, `CORA_TELEGRAM_BOT_TOKEN`, `CORA_SLACK_BOT_TOKEN` / `CORA_SLACK_APP_TOKEN` (the main Slack app), `CORA_TYPESAFE_API_KEY` (doc's Jev; where it is missing, the `TYPESAFE_API_KEY` doc itself uses on this machine), `CORA_SONIOX_API_KEY` (voice messages), `CORA_DEEPSEEK_API_KEY` (DeepSeek Harness), an optional `CORA_DISCORD_LISTENER_TOKEN`, and one `CORA_BOT_<NAME>` / `CORA_TG_BOT_<NAME>` / `CORA_SK_BOT_<NAME>` + `CORA_SK_APP_<NAME>` per agent (tokens are pasted in the panel, checked with Discord, Telegram or Slack, and stored in hush without touching a command line or a clear file).
+Secrets come only from hush: `CORA_ADMIN_PASSWORD` (panel password), `CORA_SESSION_KEY` (cookie signing), `CORA_VAPID_KEY` (Web Push), `CORA_OLLAMA_API_KEY`, `CORA_TELEGRAM_BOT_TOKEN`, `CORA_SLACK_BOT_TOKEN` / `CORA_SLACK_APP_TOKEN` (the main Slack app), `CORA_TYPESAFE_API_KEY` (doc's Jev; where it is missing, the `TYPESAFE_API_KEY` doc itself uses on this machine), `CORA_SONIOX_API_KEY` (voice messages), `CORA_DEEPSEEK_API_KEY` (DeepSeek Harness), `CORA_BRAIN_DATABASE_URL` (the company brain's Postgres), an optional `CORA_DISCORD_LISTENER_TOKEN`, and one `CORA_BOT_<NAME>` / `CORA_TG_BOT_<NAME>` / `CORA_SK_BOT_<NAME>` + `CORA_SK_APP_<NAME>` per agent (tokens are pasted in the panel, checked with Discord, Telegram or Slack, and stored in hush without touching a command line or a clear file).
 
 Environment: `PORT` (default 4370), `CORA_LISTEN_HOST` (default 127.0.0.1), `CORA_HOME` (default `~/.cora`), `CORA_PUBLIC_URL` (the VAPID subject), `CORA_PUBLIC_HOST` (the domain an on-premise install answers on, which the cloud's passes are signed for), `OLLAMA_URL` (an address on this machine or this network needs no `OLLAMA_API_KEY`: the GPU in the room answers without one), `CORA_CLAUDE_BIN`, `CORA_CODEX_BIN`, `CORA_DOC_DIR` (the folder holding doc's `doc` package; found from the `doc` CLI on `PATH`, `~/.fluxkit/src/doc` or `~/doc`, and `off` turns the checks off), `CORA_TZ` (default Europe/Rome).
 

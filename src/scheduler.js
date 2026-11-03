@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 const FIELDS = [
   { name: "minute", min: 0, max: 59 },
   { name: "hour", min: 0, max: 23 },
@@ -89,7 +91,10 @@ export function nextRuns(expression, timezone, count = 3, from = new Date()) {
 }
 
 export class Scheduler {
-  constructor({ store, orchestrator, brain, timezone, tickMs, log }) {
+  constructor({ store, orchestrator, brain, librarian = null, companyBrain = null, backups = "", timezone, tickMs, log }) {
+    this.librarian = librarian;
+    this.companyBrain = companyBrain;
+    this.backups = backups;
     this.store = store;
     this.brain = brain;
     this.orchestrator = orchestrator;
@@ -109,9 +114,39 @@ export class Scheduler {
     clearInterval(this.timer);
   }
 
+  async nightly(day) {
+    if (this.backups) await this.backup(day);
+    if (this.librarian) await this.librarian.run({ reason: "notte" });
+  }
+
+  /** The night's copies, seven of each kept: Cora's SQLite whole, and what the brain cannot rebuild from the chats. */
+  async backup(day) {
+    mkdirSync(this.backups, { recursive: true, mode: 0o700 });
+    const database = join(this.backups, `cora-${day}.db`);
+    if (!existsSync(database)) this.store.backup(database);
+    if (this.companyBrain?.enabled) writeFileSync(join(this.backups, `brain-${day}.json`), JSON.stringify(await this.companyBrain.exportAll()), { mode: 0o600 });
+    for (const prefix of ["cora-", "brain-"]) {
+      const kept = readdirSync(this.backups).filter((name) => name.startsWith(prefix) && /^\w+-\d{4}-\d{2}-\d{2}\.(db|json)$/.test(name)).sort();
+      for (const old of kept.slice(0, -7)) rmSync(join(this.backups, old), { force: true });
+    }
+  }
+
   tick(now = new Date()) {
     const parts = zonedParts(now, this.timezone);
     const key = `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+    if (parts.minute === 0) {
+      const day = `${parts.year}-${parts.month}-${parts.day}`;
+      // Before the librarian touches anything, last night's state is kept: Cora's database and the brain.
+      if (parts.hour === this.store.settings.librarianHour && this.fired.get("librarian") !== day) {
+        this.fired.set("librarian", day);
+        const stamp = `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+        this.nightly(stamp).catch((error) => this.log({ type: "error", text: `notte: ${error.message}` }));
+      }
+      if (this.librarian && parts.hour === this.store.settings.reviewHour && this.fired.get("digest") !== day) {
+        this.fired.set("digest", day);
+        this.librarian.digest().catch((error) => this.log({ type: "error", text: `brain: riepilogo: ${error.message}` }));
+      }
+    }
     if (this.brain && parts.hour === this.store.settings.sleepHour && parts.minute === 0) {
       const day = `${parts.year}-${parts.month}-${parts.day}`;
       for (const agent of this.store.agents()) {
