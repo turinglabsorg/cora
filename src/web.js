@@ -5,7 +5,6 @@ import net from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { botEnvName } from "./agent-bots.js";
 import { passLedger, verifyPass } from "./pass.js";
 import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
 import { Slack } from "./slack.js";
@@ -679,6 +678,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (method === "GET") return send(res, 200, await publicAgent(agent));
       if (method === "PUT") {
         const updated = store.updateAgent(agent.id, await readJson(req));
+        bots?.envName(agent);
         bots?.sync();
         tgBots?.sync();
         ensureBoxSoon(updated);
@@ -868,7 +868,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const token = String(body.token || "").trim().replace(/^Bot\s+/i, "");
       if (!/^[\w-]{20,}\.[\w-]{4,}\.[\w-]{20,}$/.test(token)) throw new HttpError(400, "non sembra un token di bot: copialo da Bot \u2192 Reset Token");
       const user = await bots.verify(agent, token, { mainUserId: bots.listener() ? null : discord.user?.id });
-      await storeSecret(botEnvName(agent), token);
+      await storeSecret(bots.envName(agent), token);
       activity({ type: "discord", agentId: agent.id, text: `token del bot salvato in hush (${user.username})` });
       await bots.attach(agent, token);
       return send(res, 200, await publicAgent(store.agent(agent.id)));

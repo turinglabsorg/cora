@@ -95,9 +95,20 @@ export class AgentBots {
     this.sync();
   }
 
+  envName(agent) {
+    const key = `discordBotEnv:${agent.id}`;
+    const stored = this.store.value(key);
+    if (stored) return stored;
+    const preferred = botEnvName(agent);
+    const reserved = this.store.agents().some((other) => other.id !== agent.id && this.store.value(`discordBotEnv:${other.id}`) === preferred);
+    const env = reserved ? `CORA_BOT_${agent.id.toUpperCase()}` : preferred;
+    this.store.setValue(key, env);
+    return env;
+  }
+
   token(agent) {
     if (this.store.value(`discordBotDisconnected:${agent.id}`, false)) return "";
-    const env = botEnvName(agent);
+    const env = this.envName(agent);
     return this.added.get(env) || this.tokenFor(env);
   }
 
@@ -120,7 +131,7 @@ export class AgentBots {
   /** Use a token stored while running (the next start reads it from hush) and wait for the bot to come online. */
   async attach(agent, token, timeoutMs = 10000) {
     this.store.setValue(`discordBotDisconnected:${agent.id}`, false);
-    this.added.set(botEnvName(agent), token);
+    this.added.set(this.envName(agent), token);
     this.sync();
     const deadline = Date.now() + timeoutMs;
     let readyAt = 0;
@@ -137,7 +148,7 @@ export class AgentBots {
 
   detach(agent) {
     this.store.setValue(`discordBotDisconnected:${agent.id}`, true);
-    this.added.delete(botEnvName(agent));
+    this.added.delete(this.envName(agent));
     this.clients.get(agent.id)?.client.stop();
     this.clients.delete(agent.id);
     this.synced.delete(agent.id);
@@ -250,7 +261,7 @@ export class AgentBots {
   }
 
   status(agent, guildId) {
-    const env = botEnvName(agent);
+    const env = this.envName(agent);
     const entry = this.clients.get(agent.id);
     if (!entry) return { env, configured: false, state: "missing-token" };
     const user = entry.client.user;

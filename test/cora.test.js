@@ -1608,11 +1608,11 @@ describe("agents in Discord", () => {
     assert.match(app.store.trace(trace.id).steps.find((item) => item.name === "share_file").result, /error: recipient/);
   });
 
-  test("Discord app disconnect confirms in the panel, survives restart and allows a new app", async (t) => {
+  test("Discord app binding survives renaming, name reuse, disconnect, restart and replacement", async (t) => {
     const directory = tempHome();
     const token = (tail) => `MTQ2NzEyMzQ1Njc4OTAxMjM0NQ.Gabcde.${tail.padEnd(27, "x")}`;
     const tokens = { CORA_BOT_UNLINK: token("unlink"), CORA_BOT_KEEP: token("keep") };
-    for (const [tail, id] of [["unlink", "600000000000000061"], ["keep", "600000000000000062"], ["replacement", "600000000000000063"]]) {
+    for (const [tail, id] of [["unlink", "600000000000000061"], ["keep", "600000000000000062"], ["replacement", "600000000000000063"], ["reused", "600000000000000064"]]) {
       discord.state.botUsers.set(token(tail), { id, username: tail });
     }
     const seed = new Store(directory);
@@ -1643,6 +1643,23 @@ describe("agents in Discord", () => {
     await waitFor(() => instance.bots.client(agent.id) && instance.bots.client(other.id) && instance.discord.token === token("unlink"), { what: "agent listener" });
     const otherClient = instance.bots.client(other.id);
     const path = `/api/agents/${agent.id}/bot`;
+    const originalClient = instance.bots.client(agent.id);
+    const rename = await request(`/api/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ name: "Renamed" }) });
+    assert.equal(rename.status, 200);
+    assert.equal((await rename.json()).bot.env, "CORA_BOT_UNLINK");
+    assert.equal(instance.bots.client(agent.id), originalClient, "renaming keeps the live bot connection");
+    await waitFor(() => discord.state.profilePatches.some((patch) => patch.token === token("unlink") && patch.username === "Renamed"));
+    replies.set("Renamed", () => ({ content: "Eccomi dopo la rinomina." }));
+    discord.say({ content: "<@600000000000000061> ci sei dopo la rinomina?", mentions: [{ id: "600000000000000061", username: "Renamed" }] });
+    await waitFor(() => discord.state.botPosts.some((post) => post.token === token("unlink") && post.content === "Eccomi dopo la rinomina."), { what: "channel reply after rename" });
+
+    const reused = await (await request("/api/agents", { method: "POST", body: JSON.stringify({ name: "Unlink", model: "ollama/test-model", tools: false, chattiness: 0 }) })).json();
+    assert.equal(reused.bot.configured, false, "reusing the old name cannot borrow the renamed agent's bot");
+    assert.notEqual(reused.bot.env, "CORA_BOT_UNLINK");
+    assert.equal((await request(`/api/agents/${reused.id}/bot`, { method: "PUT", body: JSON.stringify({ token: token("reused") }) })).status, 200);
+    assert.equal(tokens.CORA_BOT_UNLINK, token("unlink"), "a new agent cannot overwrite the renamed agent's credential");
+    assert.equal(tokens[reused.bot.env], token("reused"));
+    await request(`/api/agents/${reused.id}`, { method: "DELETE" });
     assert.equal((await fetch(`${root}${path}`, { method: "DELETE", headers: { "X-Cora": "1" } })).status, 401);
     assert.equal((await fetch(`${root}${path}`, { method: "DELETE", headers: { Cookie: session } })).status, 403);
     assert.equal((await request("/api/agents/ag_missing/bot", { method: "DELETE" })).status, 404);
@@ -1672,7 +1689,9 @@ describe("agents in Discord", () => {
     instance = null;
     await start();
     await waitFor(() => instance.bots.client(other.id));
-    assert.equal((await (await request(`/api/agents/${agent.id}`)).json()).bot.configured, false, "disconnect survives restart");
+    const disconnected = await (await request(`/api/agents/${agent.id}`)).json();
+    assert.equal(disconnected.bot.configured, false, "disconnect survives restart");
+    assert.equal(disconnected.bot.env, "CORA_BOT_UNLINK", "the binding keeps its original secret name after restart");
     const failed = await request(path, { method: "PUT", body: JSON.stringify({ token: "invalid" }) });
     assert.equal(failed.status, 400);
     assert.equal(instance.bots.token(instance.store.agent(agent.id)), "", "a failed reconnect keeps the old app disconnected");
@@ -1681,7 +1700,7 @@ describe("agents in Discord", () => {
     const result = await connected.json();
     assert.equal(result.bot.user.id, "600000000000000063");
     assert.equal(JSON.stringify(result).includes(token("replacement")), false);
-    await waitFor(() => discord.state.profilePatches.some((patch) => patch.token === token("replacement") && patch.username === agent.name));
+    await waitFor(() => discord.state.profilePatches.some((patch) => patch.token === token("replacement") && patch.username === "Renamed"));
     await instance.stop();
     instance = null;
     await start();
