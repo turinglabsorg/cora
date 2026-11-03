@@ -1320,6 +1320,131 @@ function accountOwner(record) {
   return tr("Account collegato");
 }
 
+function subscriptionDeviceHelp() {
+  return h("details", { class: "subscription-help" },
+    h("summary", {}, icon("info"), "Problemi con il codice dispositivo?"),
+    h("p", {}, "Abilita l'accesso con codice dispositivo nelle impostazioni Sicurezza di ChatGPT. Per un account aziendale deve abilitarlo un amministratore nei permessi del workspace."),
+    h("a", { href: "https://learn.chatgpt.com/docs/auth#preferred-device-code-authentication-beta", target: "_blank", rel: "noopener" }, "Guida ufficiale OpenAI", icon("external")));
+}
+
+/** A sign-in under way: the official page to open, the device code to copy or confirm, Claude's code to paste back. */
+function subscriptionLoginSteps(record, name, { authCode, act }) {
+  const out = [];
+  const step = (number, title, ...children) => h("li", {}, h("span", { class: "subscription-step", "aria-hidden": "true" }, number), h("div", { class: "subscription-step-body" }, h("b", {}, title), ...children));
+  if (record.login?.url) {
+    const open = btn(tr("Apri {provider}", { provider: name }), { icon: "external", cls: "primary", href: record.login.url, target: "_blank" });
+    const steps = h("ol", { class: "subscription-steps" });
+    if (record.login.userCode) {
+      // Grok and Meta open the page with the code already in it: there it only has to match.
+      const confirmOnly = record.login.url.includes(record.login.userCode);
+      steps.append(step("1", confirmOnly ? "Il codice da confermare" : "Copia il codice", h("div", { class: "subscription-code" },
+        h("strong", { tabindex: "0", "aria-label": "Codice dispositivo" }, raw(record.login.userCode)),
+        btn("", { icon: "copy", cls: "ghost", title: "Copia codice", onclick: async () => {
+          try { await navigator.clipboard.writeText(record.login.userCode); toast("Copiato"); }
+          catch { toast("Non riesco a copiare: selezionalo a mano", true); }
+        } }))),
+      step("2", tr("Accedi a {provider}", { provider: name }), h("p", {}, confirmOnly
+        ? "Controlla che la pagina ufficiale mostri lo stesso codice e autorizza il collegamento."
+        : "Incolla il codice nella pagina ufficiale e autorizza il collegamento."), open));
+    } else {
+      steps.append(step("1", tr("Accedi a {provider}", { provider: name }), h("p", {}, "Apri la pagina ufficiale e autorizza il collegamento."), open));
+      if (record.login.manualCode) steps.append(step("2", "Torna qui con il codice", field("Codice di autorizzazione", authCode),
+        btn("Completa collegamento", { icon: "check", cls: "subscription-complete", onclick: () => {
+          if (!authCode.value.trim()) { authCode.focus(); return; }
+          const code = authCode.value;
+          authCode.value = "";
+          act(() => api(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code } }));
+        } })));
+    }
+    out.push(steps);
+  } else out.push(h("p", { class: "subscription-description" }, "Preparazione dell'accesso…"));
+  out.push(h("div", { class: "subscription-footer" },
+    h("span", { class: "subscription-wait" }, icon("clock"), "In attesa di autorizzazione"),
+    btn("Annulla", { cls: "ghost", onclick: () => act(() => api(`/api/subscriptions/${record.id}/cancel`, { method: "POST" })) })));
+  if (record.provider === "codex") out.push(subscriptionDeviceHelp());
+  return out;
+}
+
+/**
+ * Every account of one subscription harness, as Settings manages them: whose
+ * it is, its state, which agents use it, a check and a removal, and
+ * "Aggiungi account" for one more. An account being signed in shows its steps
+ * in place; a code typed for it survives the redraws.
+ */
+function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
+  const name = PROVIDER_SHORT[provider];
+  const root = h("div", { class: "accounts" });
+  const codes = new Map();
+  let busy = false;
+  let error = "";
+  let snapshot = "";
+  async function act(fn) {
+    if (busy) return;
+    busy = true;
+    error = "";
+    draw(true);
+    try { await fn(); }
+    catch (failure) { error = failure.message; }
+    try { S.data.subscriptions = await api("/api/subscriptions"); }
+    catch { error ||= "Impossibile aggiornare il collegamento. Riprova."; }
+    busy = false;
+    draw(true);
+  }
+  const add = () => act(async () => {
+    const record = await api("/api/subscriptions", { method: "POST", body: { provider, label: name } });
+    await api(`/api/subscriptions/${record.id}/login`, { method: "POST" });
+  });
+  function draw(force = false) {
+    const records = (S.data.subscriptions || []).filter((item) => item.provider === provider && !item.resident);
+    const next = JSON.stringify({ records, busy, error });
+    if (!force && next === snapshot) return;
+    snapshot = next;
+    const installed = Boolean(S.data.providers?.[provider]);
+    const rows = records.map((record) => {
+      const used = (S.data.agents || []).filter((agent) => agent.subscriptionId === record.id).length;
+      if (!codes.has(record.id)) codes.set(record.id, h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Codice di autorizzazione", placeholder: "Incolla il codice di Claude" }));
+      const remove = btn("", { icon: "trash", cls: "sm ghost danger", title: used ? "In uso: prima scegli un altro account nel profilo dell'agente" : "Rimuovi account", disabled: Boolean(used) || busy,
+        onclick: () => act(() => api(`/api/subscriptions/${record.id}`, { method: "DELETE" })) });
+      return h("div", { class: `account ${record.status}` },
+        h("div", { class: "account-row" },
+          h("span", { class: `subscription-option-dot ${record.status}`, "aria-hidden": "true" }),
+          h("div", { class: "grow" }, h("b", {}, raw(record.email || record.label || name)),
+            h("small", {}, raw(`${accountOwner(record)} · `), SUBSCRIPTION_STATES[record.status] || raw(record.status),
+              used ? raw(` · ${used === 1 ? tr("Usato da un agente") : tr("Usato da {count} agenti", { count: used })}`) : null)),
+          h("div", { class: "account-actions" },
+            record.status === "ready" ? btn("", { icon: "refresh", cls: "sm ghost", title: "Verifica collegamento", disabled: busy, onclick: () => act(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) }) : null,
+            record.status === "disconnected" || record.status === "error"
+              ? btn("Ricollega", { icon: "external", cls: "sm", title: "Ricollega", disabled: busy, onclick: () => act(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) }) : null,
+            remove)),
+        record.status === "error" ? h("p", { class: "subscription-error", role: "alert" }, icon("alert"), record.issue === "isolation"
+          ? "Questa istanza non supporta ancora il collegamento. Aggiorna Claude Code sul server e riprova."
+          : "L'accesso non è stato completato. Riprova quando vuoi.") : null,
+        record.status === "connecting" ? h("div", { class: "account-login" }, subscriptionLoginSteps(record, name, { authCode: codes.get(record.id), act })) : null);
+    });
+    root.replaceChildren(...[
+      error ? h("p", { class: "subscription-error", role: "alert" }, icon("alert"), tr(error)) : null,
+      rows.length ? h("div", { class: "account-list" }, rows)
+        : h("p", { class: "accounts-empty" }, installed ? tr("Nessun altro account {provider} collegato.", { provider: name })
+          : tr("{cli} non è installato su questa macchina, quindi non c'è ancora niente da collegare. Installalo sul server con l'utente di Cora e questa scheda si accende da sola.", { cli: CLI_NAMES[provider] || name })),
+      installed ? h("div", { class: "accounts-add" }, btn(busy ? "Preparazione dell'accesso…" : "Aggiungi account", { icon: busy ? "refresh" : "plus", cls: rows.length ? "" : "primary", disabled: busy, onclick: add })) : null,
+    ].filter(Boolean));
+    onChange();
+  }
+  const poll = async () => {
+    if (!root.isConnected) return;
+    if (!busy && S.data.subscriptions?.some((item) => item.provider === provider && item.status === "connecting")) {
+      try {
+        S.data.subscriptions = await api("/api/subscriptions");
+        draw();
+      } catch {}
+    }
+    setTimeout(poll, 1500);
+  };
+  draw(true);
+  setTimeout(poll, 1500);
+  return root;
+}
+
 function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   let provider = "";
   let selectedId = currentId || "";
@@ -1371,13 +1496,6 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
     choosing = !choosing;
     actionError = "";
     draw();
-  }
-
-  function deviceHelp() {
-    return h("details", { class: "subscription-help" },
-      h("summary", {}, icon("info"), "Problemi con il codice dispositivo?"),
-      h("p", {}, "Abilita l'accesso con codice dispositivo nelle impostazioni Sicurezza di ChatGPT. Per un account aziendale deve abilitarlo un amministratore nei permessi del workspace."),
-      h("a", { href: "https://learn.chatgpt.com/docs/auth#preferred-device-code-authentication-beta", target: "_blank", rel: "noopener" }, "Guida ufficiale OpenAI", icon("external")));
   }
 
   function draw(force = false) {
@@ -1453,38 +1571,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
         btn("Cambia account", { cls: "ghost", onclick: changeAccount }),
         btn("", { icon: "refresh", cls: "ghost", title: "Verifica collegamento", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) })));
     } else if (record?.status === "connecting") {
-      const step = (number, title, ...children) => h("li", {}, h("span", { class: "subscription-step", "aria-hidden": "true" }, number), h("div", { class: "subscription-step-body" }, h("b", {}, title), ...children));
-      if (record.login?.url) {
-        const open = btn(tr("Apri {provider}", { provider: name }), { icon: "external", cls: "primary", href: record.login.url, target: "_blank" });
-        const steps = h("ol", { class: "subscription-steps" });
-        if (record.login.userCode) {
-          // Grok and Meta open the page with the code already in it: there it only has to match.
-          const confirmOnly = record.login.url.includes(record.login.userCode);
-          steps.append(step("1", confirmOnly ? "Il codice da confermare" : "Copia il codice", h("div", { class: "subscription-code" },
-            h("strong", { tabindex: "0", "aria-label": "Codice dispositivo" }, raw(record.login.userCode)),
-            btn("", { icon: "copy", cls: "ghost", title: "Copia codice", onclick: async () => {
-              try { await navigator.clipboard.writeText(record.login.userCode); toast("Copiato"); }
-              catch { toast("Non riesco a copiare: selezionalo a mano", true); }
-            } }))),
-          step("2", tr("Accedi a {provider}", { provider: name }), h("p", {}, confirmOnly
-            ? "Controlla che la pagina ufficiale mostri lo stesso codice e autorizza il collegamento."
-            : "Incolla il codice nella pagina ufficiale e autorizza il collegamento."), open));
-        } else {
-          steps.append(step("1", tr("Accedi a {provider}", { provider: name }), h("p", {}, "Apri la pagina ufficiale e autorizza il collegamento."), open));
-          if (record.login.manualCode) steps.append(step("2", "Torna qui con il codice", field("Codice di autorizzazione", authCode),
-            btn("Completa collegamento", { icon: "check", cls: "subscription-complete", onclick: () => {
-              if (!authCode.value.trim()) { authCode.focus(); return; }
-              const code = authCode.value;
-              authCode.value = "";
-              action(() => api(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code } }));
-            } })));
-        }
-        content.append(steps);
-      } else content.append(h("p", { class: "subscription-description" }, "Preparazione dell'accesso…"));
-      content.append(h("div", { class: "subscription-footer" },
-        h("span", { class: "subscription-wait" }, icon("clock"), "In attesa di autorizzazione"),
-        btn("Annulla", { cls: "ghost", onclick: () => action(() => api(`/api/subscriptions/${record.id}/cancel`, { method: "POST" })) })));
-      if (provider === "codex") content.append(deviceHelp());
+      content.append(...subscriptionLoginSteps(record, name, { authCode, act: action }));
     } else {
       authCode.value = "";
       content.append(h("div", { class: "subscription-intro" }, h("h4", {}, tr("Collega il tuo account {provider}", { provider: name })),
@@ -1500,7 +1587,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
         btn(requestBusy ? "Preparazione dell'accesso…" : tr("Collega {provider}", { provider: name }), { icon: requestBusy ? "refresh" : "external", cls: "primary", onclick: record
           ? () => action(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) : connectNew }),
         records.length ? btn("Cambia account", { cls: "ghost", onclick: changeAccount }) : null));
-      if (provider === "codex") content.append(deviceHelp());
+      if (provider === "codex") content.append(subscriptionDeviceHelp());
     }
     if (choosing && record && !record.resident && !(S.data.agents || []).some((agent) => agent.subscriptionId === record.id)) {
       content.append(btn("Rimuovi account", { icon: "trash", cls: "ghost danger subscription-remove", onclick: () => action(async () => {
@@ -3738,6 +3825,21 @@ function instanceAccessPanel() {
   return panel({ icon: "shield", title: "Accesso all'istanza", hint: "Scegli chi può entrare nella tua Cora.", actions: refresh }, body);
 }
 
+/** The connections, by name: what each account or key is for, and whether it works here. */
+const CONNECTION_KEYS = [
+  ["ollama", "Ollama", "globe"],
+  ["orcarouter", "OrcaRouter", "share"],
+  ["deepseek", "DeepSeek", "search"],
+  ["typesafe", "TypeSafe", "shield"],
+  ["soniox", "Soniox", "mic"],
+];
+
+/**
+ * Settings → Collegamenti: one entry per account and per key on the left, like
+ * the channel list of a desk, each with its LED; on the right only the chosen
+ * one. On phones the list comes first and an entry opens its own page.
+ * Every page stays mounted, so a sign-in half done survives a switch.
+ */
 function connectionsPanel() {
   const residentToggle = switchInput("useResidentSubscriptions", "Usa subscription residenti", S.data.settings.useResidentSubscriptions,
     "Come impostazione predefinita, usa gli account già presenti sul dispositivo che ospita Cora.");
@@ -3751,24 +3853,27 @@ function connectionsPanel() {
       renderSettings();
     } else { toggle.checked = !enabled; toggle.disabled = false; }
   });
-  const residentList = h("div", { class: "resident-accounts" });
-  const drawResidents = () => {
-    // Claude and Codex are always listed; a newer CLI once it is installed or has an account here.
-    const listed = SUBSCRIPTION_HARNESSES.filter((provider) => provider === "claude" || provider === "codex" || S.data.providers?.[provider] || S.data.subscriptions?.some((item) => item.resident && item.provider === provider));
-    residentList.replaceChildren(...listed.map((provider) => {
-      const record = S.data.subscriptions?.find((item) => item.resident && item.provider === provider);
-      const connected = record?.status === "ready";
-      return h("div", { class: "resident-account" },
-        h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(SUBSCRIPTION_ICONS[provider])),
-        h("div", { class: "grow" }, h("b", {}, raw(SUBSCRIPTION_NAMES[provider])),
-          h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato"))
-            : !S.data.providers?.[provider] ? tr("{cli} non installato su questa macchina", { cli: CLI_NAMES[provider] })
-              : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
-          connected && record.plan ? h("small", {}, raw(subscriptionPlanLabel(record.plan))) : null),
-        h("span", { class: `subscription-status ${connected ? "ready" : "disconnected"}` }, h("i", { "aria-hidden": "true" }), connected ? "Disponibile" : "Da collegare"));
-    }));
+  // Claude and Codex are always listed; a newer CLI once it is installed or has an account here.
+  const providers = SUBSCRIPTION_HARNESSES.filter((provider) => provider === "claude" || provider === "codex" || S.data.providers?.[provider] || S.data.subscriptions?.some((item) => item.provider === provider));
+  const residentRow = (provider, onclick = null) => {
+    const record = S.data.subscriptions?.find((item) => item.resident && item.provider === provider);
+    const connected = record?.status === "ready";
+    return h(onclick ? "button" : "div", { class: `resident-account${onclick ? " link" : ""}`, type: onclick ? "button" : null, onclick },
+      h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(SUBSCRIPTION_ICONS[provider])),
+      h("div", { class: "grow" }, h("b", {}, raw(SUBSCRIPTION_NAMES[provider])),
+        h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato"))
+          : !S.data.providers?.[provider] ? tr("{cli} non installato su questa macchina", { cli: CLI_NAMES[provider] })
+            : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
+        connected && record.plan ? h("small", {}, raw(subscriptionPlanLabel(record.plan))) : null),
+      h("span", { class: `subscription-status ${connected ? "ready" : "disconnected"}` }, h("i", { "aria-hidden": "true" }), connected ? "Disponibile" : "Da collegare"));
   };
-  drawResidents();
+  const residentList = h("div", { class: "resident-accounts" });
+  const residentSlots = new Map(providers.map((provider) => [provider, h("div", {})]));
+  const drawResidents = () => {
+    residentList.replaceChildren(...providers.map((provider) => residentRow(provider, () => show(provider))));
+    for (const [provider, slot] of residentSlots) slot.replaceChildren(residentRow(provider));
+    drawNav();
+  };
   const scan = btn("Rileva account", { icon: "refresh", cls: "ghost", onclick: async () => {
     scan.disabled = true;
     const result = await guard(api("/api/subscriptions/resident/check", { method: "POST" }));
@@ -3778,12 +3883,6 @@ function connectionsPanel() {
     }
     scan.disabled = false;
   } });
-  const managed = SUBSCRIPTION_HARNESSES.filter((provider) => provider === "claude" || provider === "codex" || S.data.providers?.[provider]).map((provider) => {
-    const existing = S.data.subscriptions?.find((item) => !item.resident && item.provider === provider);
-    const picker = subscriptionPicker(existing?.id, { manage: true });
-    picker.setProvider(provider);
-    return picker.node;
-  });
   // doc runs on this machine or it does not: the card says which, and proves it on demand.
   const docStatus = () => {
     const doc = S.data.doc || {};
@@ -3818,6 +3917,7 @@ function connectionsPanel() {
         if (provider === "deepseek") S.data.providers.deepseek = Boolean(S.data.providers.deepseekInstalled);
         else if (provider !== "typesafe" && provider !== "soniox") S.data.providers[provider] = true;
         S.data.keys = { ...S.data.keys, [provider]: true };
+        drawNav();
         status.replaceChildren(icon("check"), tr("Configurata"));
         status.className = "badge on";
         key.placeholder = tr("Incolla una nuova chiave per sostituirla");
@@ -3838,13 +3938,88 @@ function connectionsPanel() {
           : cloud.signedIn ? h("p", { class: "muted" }, "Non serve: questa macchina è già collegata a Ollama Cloud.")
             : h("p", { class: "muted" }, "In alternativa alla chiave, collega questa macchina al tuo account Ollama.",
               cloud.signinUrl ? [" ", h("a", { href: cloud.signinUrl, target: "_blank", rel: "noopener" }, tr("Collega questa macchina"))] : null));
-    return h("div", { class: "provider-key" }, h("div", { class: "provider-key-head" }, h("h3", {}, raw(name)), status),
-      about, field("Chiave API", key), save);
+    return { status, body: h("div", { class: "provider-key" }, about, field("Chiave API", key), h("div", { class: "row" }, save)) };
   };
-  return h("div", { class: "stack" },
-    panel({ icon: "monitor", title: "Subscription del dispositivo", hint: "Gli account trovati sul server Cora.", actions: scan }, residentToggle, residentList),
-    panel({ icon: "link", title: "Altri account", hint: "Collegali dal browser e scegli quale usare nel profilo di ogni agente." }, h("div", { class: "connection-grid" }, managed)),
-    panel({ icon: "key", title: "Chiavi API", hint: "Ollama, OrcaRouter, DeepSeek, TypeSafe e Soniox. Le chiavi vengono salvate in modo sicuro e non sono mostrate dopo il salvataggio." }, h("div", { class: "connection-grid" }, keyPanel("ollama", "Ollama"), keyPanel("orcarouter", "OrcaRouter"), keyPanel("deepseek", "DeepSeek"), keyPanel("typesafe", "TypeSafe"), keyPanel("soniox", "Soniox"))));
+
+  /* ---------- the entries and their LEDs ---------- */
+  const providerState = (provider) => {
+    const records = (S.data.subscriptions || []).filter((item) => item.provider === provider);
+    const ready = records.filter((item) => item.status === "ready").length;
+    if (ready) return ["on", ready === 1 ? tr("1 account") : tr("{count} account", { count: ready })];
+    if (records.some((item) => item.status === "connecting")) return ["busy", tr("Accesso in corso")];
+    if (!S.data.providers?.[provider]) return ["off", tr("{cli} non installato", { cli: CLI_NAMES[provider] })];
+    return ["off", tr("Da collegare")];
+  };
+  const keyState = (provider) => {
+    if (S.data.keys?.[provider]) return provider === "deepseek" && !S.data.providers?.deepseekInstalled ? ["warn", tr("dsh non installato")] : ["on", tr("Chiave salvata")];
+    if (provider === "ollama" && S.data.ollamaCloud?.signedIn) return ["on", tr("Collegato a Ollama Cloud")];
+    if (provider === "ollama" && S.data.providers?.ollamaLocal) return ["on", tr("Ollama locale")];
+    return ["off", tr("Da configurare")];
+  };
+  const overviewState = () => {
+    const ready = providers.filter((provider) => providerState(provider)[0] === "on").length + CONNECTION_KEYS.filter(([provider]) => keyState(provider)[0] === "on").length;
+    return ["on", tr("{ready} di {total} attivi", { ready, total: providers.length + CONNECTION_KEYS.length })];
+  };
+  const pages = new Map();
+  const entries = [
+    { id: "panoramica", group: "", label: "Panoramica", mark: "monitor", state: overviewState },
+    ...providers.map((provider) => ({ id: provider, group: "Abbonamenti", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
+    ...CONNECTION_KEYS.map(([provider, name, mark]) => ({ id: provider, group: "Chiavi API", label: name, mark, state: () => keyState(provider) })),
+  ];
+
+  const nav = h("nav", { class: "conn-nav", "aria-label": tr("Collegamenti") });
+  let current = "";
+
+  /* ---------- the pages ---------- */
+  const back = () => btn("Collegamenti", { icon: "back", cls: "sm ghost conn-back", onclick: () => show("") });
+  pages.set("panoramica", h("div", { class: "stack" }, back(),
+    panel({ icon: "monitor", title: "Subscription del dispositivo", hint: "Gli account trovati sul server Cora. Tocca un account per collegarne altri.", actions: scan }, residentToggle, residentList),
+    h("p", { class: "conn-note" }, icon("info"), h("span", {}, "Le chiavi vengono salvate in hush e non sono più mostrate dopo il salvataggio. Valgono per tutti gli agenti di questa istanza."))));
+  for (const provider of providers) {
+    pages.set(provider, h("div", { class: "stack" }, back(),
+      panel({ icon: SUBSCRIPTION_ICONS[provider], title: SUBSCRIPTION_NAMES[provider], hint: tr("Lo usa {cli}, per gli agenti che lo scelgono nel loro Cervello.", { cli: CLI_NAMES[provider] }) },
+        h("div", { class: "conn-section" }, h("span", { class: "label" }, "Su questo server"), residentSlots.get(provider)),
+        h("div", { class: "conn-section" }, h("span", { class: "label" }, "Altri account"),
+          h("p", { class: "muted" }, "Collegane quanti vuoi, dal browser: nel profilo di ogni agente scegli quale usa."),
+          subscriptionAccounts(provider, { onChange: () => drawNav() })))));
+  }
+  for (const [provider, name, mark] of CONNECTION_KEYS) {
+    const { status, body } = keyPanel(provider, name);
+    pages.set(provider, h("div", { class: "stack" }, back(), panel({ icon: mark, title: name, actions: status }, body)));
+  }
+  const slots = new Map([...pages].map(([id, page]) => [id, h("div", { class: "conn-page", "data-conn": id, hidden: true }, page)]));
+  const detail = h("div", { class: "conn-detail" }, [...slots.values()]);
+
+  /* ---------- the list ---------- */
+  function drawNav() {
+    const items = [];
+    let group = null;
+    for (const entry of entries) {
+      if (entry.group !== group) {
+        group = entry.group;
+        if (group) items.push(h("span", { class: "conn-group" }, group));
+      }
+      const [led, line] = entry.state();
+      const active = entry.id === (current || "panoramica");
+      items.push(h("button", { type: "button", class: `conn-item${active ? " active" : ""}`, "aria-current": active ? "page" : null, "data-conn": entry.id, onclick: () => show(entry.id) },
+        h("span", { class: "conn-mark", "aria-hidden": "true" }, icon(entry.mark)),
+        h("span", { class: "conn-name" }, h("b", {}, raw(tr(entry.label))), h("small", {}, raw(line))),
+        h("i", { class: `led ${led}`, "aria-hidden": "true" }), icon("next", "conn-go")));
+    }
+    nav.replaceChildren(...items);
+  }
+  const root = h("div", { class: "conn" }, nav, detail);
+  // An empty id is the list alone (phones); on a desktop the list always has a page next to it.
+  function show(id, { updateRoute = true } = {}) {
+    current = pages.has(id) ? id : "";
+    for (const [page, slot] of slots) slot.hidden = page !== (current || "panoramica");
+    root.classList.toggle("open", Boolean(current));
+    drawNav();
+    if (updateRoute) history.replaceState(null, "", current ? `#/settings/collegamenti/${current}` : "#/settings/collegamenti");
+  }
+  drawResidents();
+  show(route()[1] === "collegamenti" ? route()[2] || "" : "", { updateRoute: false });
+  return root;
 }
 
 // doc's built-in Jev checks, in the panel's words; a check doc adds later shows its own reason.

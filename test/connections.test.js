@@ -244,4 +244,45 @@ test("an account says whose it is, and a member's new agent starts on the accoun
   })();
   assert.match(chosen, /Sara's account/);
   assert.match(chosen, /This agent will use Sara's account\./);
+
+  // Settings → Connections: every account and key in a list on the left, the one in the address open on the right.
+  const connections = await (async () => {
+    const panel = panelHarness({ language: "en", fetch: (path, init) => fetch(`${base}${path}`, { ...init, headers: { ...init?.headers, Cookie: owner } }) });
+    await panel.run("boot()");
+    await waitFor(() => panel.run("Boolean(S.data && S.data.subscriptions && S.data.currentUser)"));
+    return panel.run(`(() => {
+      globalThis.history = { replaceState() {} };
+      location.hash = "#/settings/collegamenti/codex";
+      const root = connectionsPanel();
+      const items = () => root.querySelectorAll(".conn-item");
+      const open = () => root.querySelectorAll(".conn-page").filter((page) => !page.hidden).map((page) => page.attributes["data-conn"]);
+      const before = { ids: items().map((item) => item.attributes["data-conn"]), codex: items().find((item) => item.attributes["data-conn"] === "codex").textContent, open: open(), className: root.className };
+      items().find((item) => item.attributes["data-conn"] === "soniox").click();
+      return { ...before, after: open(), active: items().filter((item) => item.className.includes("active")).map((item) => item.attributes["data-conn"]) };
+    })()`);
+  })();
+  assert.deepEqual(connections.ids.slice(0, 3), ["panoramica", "claude", "codex"]);
+  assert.deepEqual(connections.ids.slice(-5), ["ollama", "orcarouter", "deepseek", "typesafe", "soniox"]);
+  assert.match(connections.codex, /ChatGPT \/ Codex2 accounts/, "the server's account and Sara's, both ready");
+  assert.deepEqual([connections.open, connections.className], [["codex"], "conn open"]);
+  assert.deepEqual([connections.after, connections.active], [["soniox"], ["soniox"]]);
+
+  // A harness's page lists every account it has, and "Add account" connects one more.
+  const accounts = await (async () => {
+    const panel = panelHarness({ language: "en", fetch: (path, init) => fetch(`${base}${path}`, { ...init, headers: { ...init?.headers, Cookie: owner } }) });
+    await panel.run("boot()");
+    await waitFor(() => panel.run("Boolean(S.data && S.data.subscriptions && S.data.currentUser)"));
+    return panel.run(`(async () => {
+      const root = subscriptionAccounts("codex");
+      const rows = () => root.querySelectorAll(".account-row").map((row) => row.textContent);
+      const before = rows();
+      const add = root.querySelectorAll("button").find((button) => button.textContent === "Add account");
+      await add.listeners.click[0]();
+      return { before, after: rows() };
+    })()`);
+  })();
+  assert.equal(accounts.before.length, 1);
+  assert.match(accounts.before[0], /Sara's account · Connected/);
+  assert.equal(accounts.after.length, 2, "a second ChatGPT account, being signed in");
+  assert.equal((await request(owner, "/api/subscriptions")).data.filter((record) => record.provider === "codex" && !record.resident).length, 2);
 });
