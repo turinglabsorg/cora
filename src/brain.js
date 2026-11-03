@@ -178,7 +178,7 @@ export class Brain {
     this.channels = channels;
     this.timezone = timezone;
     this.log = log;
-    this.memory = new Memory({ store });
+    this.memory = new Memory({ store, sharedInBrain: () => Boolean(this.companyBrain?.holdsShared) });
     this.sleeping = new Set();
   }
 
@@ -228,7 +228,6 @@ export class Brain {
       `## Chi sei\n${agent.personality.trim() || "Non hai ancora una personalità definita: sii te stesso, curioso e diretto."}`,
       `## La tua scheda (sempre a mente)\n${agent.core.trim() || "(vuota: riempila con update_core quando sai abbastanza)"}`,
     ];
-    if (this.store.settings.sharedMemory.trim()) sections.push(`## Cose che tutti gli agenti sanno\n${this.store.settings.sharedMemory.trim()}`);
     if (others) sections.push(`## Gli altri agenti dell'istanza\nQuesto elenco non indica chi è presente nella conversazione attuale: non coinvolgere un collega soltanto perché è elencato qui. Rispondi come ${agent.name}, senza parlare a nome degli altri.\n${others}`);
     sections.push([
       "## La tua memoria",
@@ -516,7 +515,10 @@ export class Brain {
     const trace = this.startTrace({ agentId: agent.id, kind: mode, channelId: channel.id, model, system, prompt });
     onTrace?.(trace.id);
     trace.spent(goalCost);
-    if (goal) trace.add({ type: "note", text: `Obiettivo: ${goal}` });
+    if (goal) {
+      trace.goal = goal;
+      trace.add({ type: "note", text: `Obiettivo: ${goal}` });
+    }
     let asked = false;
     // What the Cora harness watches while an agent works: real work done, and calls repeated without progress.
     let worked = 0;
@@ -809,6 +811,7 @@ export class Brain {
         trace.spent(cost);
         if (steering.length) return goalVerdict(raw);
         if (next && next !== goal) {
+          trace.goal = next;
           trace.add({ type: "note", text: `Obiettivo aggiornato su quello che hanno detto: ${next}` });
           if (sayTracked) await sayTracked(`Cambio obiettivo: ${next}`).catch(() => {});
           goal = next;
@@ -1016,7 +1019,7 @@ export class Brain {
           '  "remove": ["mem_..."],',
           '  "diary": "una pagina di diario in prima persona (max 8 frasi): cosa è successo, cosa hai imparato, cosa ne pensi"',
           "}",
-          "Regole: aggiungi solo fatti duraturi (preferenze, decisioni, persone, progetti, scadenze), non chiacchiere. Fondi i doppioni (aggiorna uno, rimuovi gli altri). Rimuovi ciò che è superato o sbagliato, ma mai i ricordi fissati. \"shared\": true solo per fatti utili a tutti gli agenti. Non inventare nulla che non risulti dalle conversazioni o dai ricordi.",
+          `Regole: aggiungi solo fatti duraturi (preferenze, decisioni, persone, progetti, scadenze), non chiacchiere. Fondi i doppioni (aggiorna uno, rimuovi gli altri). Rimuovi ciò che è superato o sbagliato, ma mai i ricordi fissati. ${this.companyBrain?.enabled ? "\"shared\": true solo per fatti utili a tutta l'azienda: non diventano tuoi ricordi, vanno al bibliotecario del brain aziendale." : "\"shared\": true solo per fatti utili a tutti gli agenti."} Non inventare nulla che non risulti dalle conversazioni o dai ricordi.`,
         ].join("\n"),
       ].join("\n\n");
       const model = agent.model || this.store.settings.defaultModel;
@@ -1035,7 +1038,7 @@ export class Brain {
         throw error;
       }
       this.store.markSlept(agent.id, new Date(events.length ? events[events.length - 1].at : Date.now()).toISOString());
-      this.log?.({ type: "sleep", agentId: agent.id, text: `ha dormito: +${summary.added} ricordi, ${summary.updated} corretti, ${summary.removed} dimenticati${summary.core ? ", scheda aggiornata" : ""}` });
+      this.log?.({ type: "sleep", agentId: agent.id, text: `ha dormito: +${summary.added} ricordi, ${summary.updated} corretti, ${summary.removed} dimenticati${summary.noted ? `, ${summary.noted} note per il brain` : ""}${summary.core ? ", scheda aggiornata" : ""}` });
       return { status: "done", ...summary };
     } finally {
       this.sleeping.delete(agent.id);
@@ -1043,7 +1046,7 @@ export class Brain {
   }
 
   applySleep(agent, plan) {
-    const summary = { added: 0, updated: 0, removed: 0, core: false, diary: false };
+    const summary = { added: 0, updated: 0, removed: 0, noted: 0, core: false, diary: false };
     const owned = (id) => {
       const found = this.store.findMemory(String(id || ""));
       return found && (found.key === agent.id || found.key === SHARED) ? found : null;
@@ -1065,6 +1068,12 @@ export class Brain {
     for (const item of (Array.isArray(plan.add) ? plan.add : []).slice(0, 25)) {
       const text = typeof item === "string" ? item : item?.text;
       if (!String(text || "").trim()) continue;
+      if (item?.shared && this.companyBrain?.enabled) {
+        this.companyBrain.note({ text: String(text), agentId: agent.id, author: agent.name })
+          .catch((error) => this.log?.({ type: "error", agentId: agent.id, text: `nota per il brain: ${error.message}` }));
+        summary.noted += 1;
+        continue;
+      }
       this.store.addMemory(item?.shared ? SHARED : agent.id, text, "sleep", { by: agent.name });
       summary.added += 1;
     }

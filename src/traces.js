@@ -57,6 +57,8 @@ class Trace {
     // What the turn cost, added up over every model call it made.
     this.tokensIn = 0;
     this.tokensOut = 0;
+    // The goal this turn worked toward, when it had one.
+    this.goal = "";
     this.savedAt = Date.now();
     Object.assign(this, fields);
   }
@@ -101,7 +103,7 @@ class Trace {
     return {
       id: this.id, agentId: this.agentId, kind: this.kind, channelId: this.channelId, model: this.model,
       startedAt: this.startedAt, endedAt: this.endedAt, status: this.status, stepCount: this.steps.length + this.dropped,
-      tokensIn: this.tokensIn, tokensOut: this.tokensOut,
+      tokensIn: this.tokensIn, tokensOut: this.tokensOut, goal: this.goal,
       tools: [...new Set(this.steps.filter((step) => step.type === "tool").map((step) => step.name))],
       output: this.output.slice(0, 240), error: this.error,
     };

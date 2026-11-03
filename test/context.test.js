@@ -36,7 +36,6 @@ async function fixture(t) {
 
 test("Context shows the actual common instructions, source metadata and provider rule handling", async (t) => {
   const { app, ownerInstructions, request } = await fixture(t);
-  app.store.updateSettings({ sharedMemory: "Team fixture memory." });
   const response = await request();
   assert.equal(response.status, 200);
   const owner = response.data.sources.find((source) => source.id === "owner");
@@ -50,10 +49,29 @@ test("Context shows the actual common instructions, source metadata and provider
   const codex = response.data.sources.find((source) => source.id === "resident-codex-AGENTS.md");
   assert.equal(codex.status, "excluded");
   assert.match(codex.content, /ignore-rules/);
-  assert.equal(response.data.sources.find((source) => source.id === "shared-memory").content, "Team fixture memory.");
   writeFileSync(ownerInstructions, "# Updated rules\nFresh fixture instructions.");
   utimesSync(ownerInstructions, new Date(), new Date(Date.now() + 1000));
   assert.match((await request()).data.sources.find((source) => source.id === "owner").content, /Fresh fixture instructions/);
+});
+
+test("the old shared memory text becomes a context file, moved once and gone from the settings", () => {
+  const home = tempHome();
+  const old = new Store(home);
+  old.saveContextDocument({ name: "Memoria condivisa.md", content: "A file the owner already had." });
+  old.db.prepare("INSERT INTO settings(key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(JSON.stringify({ ...old.settings, sharedMemory: "  Sara runs the studio; invoices go out on the 5th.  " }));
+  old.close();
+  const store = new Store(home);
+  const moved = store.contextDocuments().find((document) => document.name === "Memoria condivisa 2.md");
+  assert.equal(moved.content, "Sara runs the studio; invoices go out on the 5th.");
+  assert.equal(moved.enabled, true);
+  assert.equal(store.contextDocuments().find((document) => document.name === "Memoria condivisa.md").content, "A file the owner already had.");
+  assert.equal(Object.hasOwn(store.settings, "sharedMemory"), false);
+  assert.equal(Object.hasOwn(JSON.parse(store.db.prepare("SELECT value FROM settings WHERE key = 'settings'").get().value), "sharedMemory"), false);
+  store.close();
+  const again = new Store(home);
+  assert.equal(again.contextDocuments().length, 2);
+  again.close();
 });
 
 test("Context requires authentication, ignores arbitrary paths, and refuses links to credential-shaped files", async (t) => {

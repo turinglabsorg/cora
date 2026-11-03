@@ -131,6 +131,9 @@ const ICONS = {
   logout: '<path d="M15 3.5h3.5a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H15M10 16.5l4.5-4.5L10 7.5M14.5 12H3.5"/>',
   send: '<path d="M21.5 2.5 10.5 13.5M21.5 2.5l-7 19-4-8-8-4z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  minus: '<path d="M5 12h14"/>',
+  list: '<path d="M9 6h11.5M9 12h11.5M9 18h11.5"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
+  graph: '<circle cx="6" cy="7" r="2.5"/><circle cx="17.5" cy="5.5" r="2"/><circle cx="16" cy="17" r="3"/><circle cx="5.5" cy="18" r="1.8"/><path d="M8.3 7.9 13.4 15M8.4 6.6l7.2-.9M17.2 7.5l-.8 6.5M7.3 17.6l5.7-.4"/>',
   trash: '<path d="M3.5 6h17M9 6V4h6v2M18.5 6l-.9 13.1a2 2 0 0 1-2 1.9H8.4a2 2 0 0 1-2-1.9L5.5 6"/>',
   edit: '<path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-4-4L4 16z"/>',
   pin: '<path d="M12 16.5V22M8 3.5h8l-1 6 3.5 4.5v2h-13v-2L9 9.5z"/>',
@@ -683,7 +686,8 @@ function traceRow(trace, { withAgent = false } = {}) {
   return h("a", { class: "row-link", href: `#/agent/${trace.agentId}/ragionamento/${trace.id}` },
     lead,
     h("span", { class: "grow" },
-      h("span", { class: "row-meta" }, withAgent && agent ? h("b", {}, raw(agent.name)) : null, tag(label, cls), tag(TRACE_KIND[trace.kind] || trace.kind), raw(`${fmtTime(trace.startedAt, true)} · ${traceWhere(trace)} · ${duration(trace)}`)),
+      h("span", { class: "row-meta" }, withAgent && agent ? h("b", {}, raw(agent.name)) : null, tag(label, cls), tag(TRACE_KIND[trace.kind] || trace.kind), raw(`${fmtTime(trace.startedAt, true)} · ${traceWhere(trace)} · ${duration(trace)}`),
+        trace.tokensIn + trace.tokensOut ? tag(tokenTotal(trace.tokensIn + trace.tokensOut), "tokens") : null),
       h("span", { class: "row-text" }, trace.error || trace.output ? raw(trace.error || trace.output) : trace.status === "running" ? "…" : "(niente)"),
       trace.tools?.length ? h("span", { class: "row-tools" }, trace.tools.map((tool) => h("span", {}, icon("tool"), tool))) : null),
     icon("next", "chev"));
@@ -1966,13 +1970,17 @@ async function memoryTab(agent) {
   });
 
   const input = h("textarea", { name: "text", placeholder: "Un fatto da ricordare. Es: «Sara odia le riunioni prima delle 10»." });
-  const add = panel({ tag: "form", icon: "plus", title: "Nuovo ricordo", hint: "A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre." },
+  // With a company brain, what everyone should know goes there: an agent's memory is its own.
+  const addHint = data.brain
+    ? "A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre. Ciò che vale per tutta l'azienda sta nel Brain."
+    : "A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.";
+  const add = panel({ tag: "form", icon: "plus", title: "Nuovo ricordo", hint: addHint },
     input,
-    h("div", { class: "row" }, switchInput("shared", "Condiviso", false), switchInput("pinned", "Fissato", false), h("span", { class: "spacer" }), btn("Aggiungi", { icon: "plus", type: "submit", cls: "primary" })));
+    h("div", { class: "row" }, data.brain ? null : switchInput("shared", "Condiviso", false), switchInput("pinned", "Fissato", false), h("span", { class: "spacer" }), btn("Aggiungi", { icon: "plus", type: "submit", cls: "primary" })));
   add.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!input.value.trim()) return;
-    const body = { text: input.value, shared: add.elements.shared.checked, pinned: add.elements.pinned.checked };
+    const body = { text: input.value, shared: Boolean(add.elements.shared?.checked), pinned: add.elements.pinned.checked };
     if (await guard(api(`/api/agents/${agent.id}/memories`, { method: "POST", body }), "Ricordo aggiunto")) {
       await loadState();
       renderAgent();
@@ -1988,7 +1996,7 @@ async function memoryTab(agent) {
   const draw = () => {
     const query = search.value.trim().toLowerCase();
     const shown = all.filter((memory) => !query || memory.text.toLowerCase().includes(query));
-    list.replaceChildren(...(shown.length ? shown.map((memory) => memoryItem(agent, memory)) : [empty("book", query ? "Nessun ricordo trovato." : "Ancora nessun ricordo.")]));
+    list.replaceChildren(...(shown.length ? shown.map((memory) => memoryItem(agent, memory, data.brain)) : [empty("book", query ? "Nessun ricordo trovato." : "Ancora nessun ricordo.")]));
   };
   search.addEventListener("input", draw);
   draw();
@@ -2002,12 +2010,12 @@ async function memoryTab(agent) {
   return [
     corePanel,
     add,
-    panel({ icon: "book", title: "Ricordi", hint: tr("{count} tra privati e condivisi.", { count: all.length }) }, h("label", { class: "search" }, icon("search"), search), list),
+    panel({ icon: "book", title: "Ricordi", hint: data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length }) }, h("label", { class: "search" }, icon("search"), search), list),
     panel({ icon: "moon", title: "Diario", hint: "Le ultime due pagine gli tornano in mente ogni giorno." }, diary),
   ];
 }
 
-function memoryItem(agent, memory) {
+function memoryItem(agent, memory, brain = false) {
   const SOURCE = { agent: "scritto da lui", sleep: "dal sonno", manual: "manuale" };
   const text = h("span", { class: "row-text full" }, raw(memory.text));
   const update = async (body, ok) => {
@@ -2026,7 +2034,9 @@ function memoryItem(agent, memory) {
       text),
     h("span", { class: "row-actions" },
       btn("", { icon: "pin", cls: `sm ghost${memory.pinned ? " lit" : ""}`, title: memory.pinned ? "Sblocca" : "Fissa", onclick: () => update({ pinned: !memory.pinned }, memory.pinned ? "Sbloccato" : "Fissato") }),
-      btn("", { icon: "share", cls: `sm ghost${memory.scope === "shared" ? " lit" : ""}`, title: memory.scope === "shared" ? "Rendi privato" : "Condividi con tutti", onclick: () => update({ shared: memory.scope !== "shared" }, memory.scope === "shared" ? "Ora è privato" : "Ora lo sanno tutti") }),
+      brain && memory.scope !== "shared"
+        ? btn("", { icon: "bulb", cls: "sm ghost", title: "Manda al brain", onclick: () => update({ shared: true }, "Mandato al bibliotecario del brain") })
+        : btn("", { icon: "share", cls: `sm ghost${memory.scope === "shared" ? " lit" : ""}`, title: memory.scope === "shared" ? "Rendi privato" : "Condividi con tutti", onclick: () => update({ shared: memory.scope !== "shared" }, memory.scope === "shared" ? "Ora è privato" : "Ora lo sanno tutti") }),
       btn("", { icon: "edit", cls: "sm ghost", title: "Modifica", onclick: () => {
         const area = h("textarea", {}, memory.text);
         text.replaceWith(h("span", { class: "edit-box" }, area, h("span", { class: "row end" }, btn("Salva", { icon: "check", cls: "sm primary", onclick: () => update({ text: area.value }, "Aggiornato") }))));
@@ -2478,8 +2488,39 @@ function duration(trace) {
   return seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
 }
 
+/**
+ * What each goal cost: every turn that worked toward it, with the tokens they used
+ * in and out. A goal opens onto its own turns.
+ */
+function goalsPanel(agent, goals) {
+  if (!goals.length) return null;
+  const rows = goals.map((item) => {
+    const turns = h("div", { class: "goal-turns" });
+    const total = item.tokensIn + item.tokensOut;
+    const [label, cls] = TRACE_STATUS[item.status] || [item.status, ""];
+    const row = h("details", { class: "goal-row" },
+      h("summary", {},
+        h("span", { class: "goal-total" }, h("b", {}, total ? shortTokens(total) : "—"), h("small", {}, "token")),
+        h("span", { class: "grow" },
+          h("span", { class: "goal-text" }, raw(item.goal)),
+          h("span", { class: "row-meta" }, tag(label, cls),
+            raw(`${tr(item.turns === 1 ? "1 turno" : "{count} turni", { count: item.turns })} · ${tr("{in} in · {out} out", { in: shortTokens(item.tokensIn), out: shortTokens(item.tokensOut) })} · ${traceWhere(item)} · ${fmtTime(item.last, true)}`))),
+        icon("next", "chev")),
+      turns);
+    row.addEventListener("toggle", async () => {
+      if (!row.open || turns.childElementCount) return;
+      turns.append(skeleton("rows", 2));
+      const list = (await guard(api(`/api/agents/${agent.id}/traces?${new URLSearchParams({ goal: item.goal, limit: "100" })}`))) || [];
+      turns.replaceChildren(h("div", { class: "rows" }, list.map((trace) => traceRow(trace))));
+    });
+    return row;
+  });
+  const all = goals.reduce((sum, item) => sum + item.tokensIn + item.tokensOut, 0);
+  return panel({ icon: "chart", title: "Obiettivi", hint: tr("Quanto è costato ogni obiettivo: tutti i turni che ci hanno lavorato. In tutto {total}.", { total: tokenTotal(all) }) }, h("div", { class: "goal-list" }, rows));
+}
+
 async function tracesTab(agent, isCurrent = () => true) {
-  const list = (await guard(api(`/api/agents/${agent.id}/traces`))) || [];
+  const [list, goals] = await Promise.all([guard(api(`/api/agents/${agent.id}/traces`)), guard(api(`/api/agents/${agent.id}/goals`))]);
   if (!isCurrent()) return null;
   let pending = null;
   S.live = (entry) => {
@@ -2488,8 +2529,8 @@ async function tracesTab(agent, isCurrent = () => true) {
     pending = setTimeout(() => { if (route()[2] === "ragionamento" && !route()[3]) renderAgent(); }, 1500);
   };
   const provider = (agent.model || S.data.settings.defaultModel).split("/")[0];
-  return panel({ icon: "bulb", title: "Ragionamento", hint: provider === "claude" ? "Ogni turno, anche quando passa. Claude Code mostra i passi e gli strumenti, non il testo del ragionamento." : "Ogni turno, anche quando passa: cosa ha letto, cosa ha pensato, gli strumenti e la risposta." },
-    list.length ? h("div", { class: "rows" }, list.map((trace) => traceRow(trace))) : empty("bulb", "Ancora nessun turno registrato."));
+  return [goalsPanel(agent, goals?.goals || []), panel({ icon: "bulb", title: "Ragionamento", hint: provider === "claude" ? "Ogni turno, anche quando passa. Claude Code mostra i passi e gli strumenti, non il testo del ragionamento." : "Ogni turno, anche quando passa: cosa ha letto, cosa ha pensato, gli strumenti e la risposta." },
+    list?.length ? h("div", { class: "rows" }, list.map((trace) => traceRow(trace))) : empty("bulb", "Ancora nessun turno registrato."))];
 }
 
 function stepEl(step, startedAt) {
@@ -2689,13 +2730,378 @@ function brainSources(sources) {
     source.quote ? h("q", {}, raw(source.quote)) : null)));
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs = {}, ...kids) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs)) if (value !== null && value !== undefined && value !== false) el.setAttribute(key, String(value));
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+
+const plainText = (text) => String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+/**
+ * The brain as a map: pages as nodes in their kind's colour, sized by how many
+ * pages they touch; a [[link]] is a line, a title named without one a dashed
+ * line. The layout is a small force simulation with no library: every page
+ * pushes the others away, linked pages pull together, and a light pull to the
+ * centre keeps loose pages in view. Returns the element and `filter()`.
+ */
+function brainMap(graph) {
+  const nodes = graph.nodes.map((node) => ({ ...node, degree: 0, links: new Set(), x: 0, y: 0, vx: 0, vy: 0, fixed: false, hit: true }));
+  const bySlug = new Map(nodes.map((node) => [node.slug, node]));
+  const edges = graph.edges.map((edge) => ({ ...edge, a: bySlug.get(edge.source), b: bySlug.get(edge.target) })).filter((edge) => edge.a && edge.b);
+  for (const edge of edges) {
+    edge.a.degree += 1;
+    edge.b.degree += 1;
+    edge.a.links.add(edge.b.slug);
+    edge.b.links.add(edge.a.slug);
+  }
+  // The hubs start in the middle, the rest on a sunflower spiral around them: the same map every time.
+  nodes.sort((a, b) => b.degree - a.degree || a.title.localeCompare(b.title));
+  nodes.forEach((node, index) => {
+    const radius = 18 * Math.sqrt(0.5 + index);
+    const angle = index * Math.PI * (3 - Math.sqrt(5));
+    node.x = radius * Math.cos(angle);
+    node.y = radius * Math.sin(angle);
+    node.r = 9 + 3.2 * Math.sqrt(node.degree);
+  });
+
+  const edgeLayer = svgEl("g", { class: "edges" });
+  const nodeLayer = svgEl("g", { class: "nodes" });
+  const world = svgEl("g", {}, edgeLayer, nodeLayer);
+  const svg = svgEl("svg", { class: "brain-map-svg", role: "group", "aria-label": tr("Mappa del brain") }, world);
+  for (const edge of edges) edge.el = edgeLayer.appendChild(svgEl("line", { class: `edge ${edge.kind}` }));
+  const owner = new Map();
+  for (const node of nodes) {
+    const label = node.title.length > 30 ? `${node.title.slice(0, 29)}…` : node.title;
+    node.el = svgEl("g", { class: `node kind-${node.kind}`, tabindex: 0, role: "button", "aria-label": `${node.title}, ${tr(BRAIN_KINDS_LABEL[node.kind] || node.kind)}` },
+      node.pending ? svgEl("circle", { class: "ring", r: (node.r + 4).toFixed(1) }) : null,
+      svgEl("circle", { class: "disc", r: node.r.toFixed(1) }),
+      svgEl("circle", { class: "core", r: Math.max(2, node.r * 0.28).toFixed(1) }),
+      svgEl("text", { class: "name", y: node.r.toFixed(1), dy: "1.25em" }, label));
+    node.name = node.el.querySelector(".name");
+    owner.set(node.el, node);
+    nodeLayer.append(node.el);
+  }
+
+  /* ---------- the simulation ---------- */
+  let alpha = 1;
+  // The map takes the well's shape: on a wide screen the pull to the centre is weaker across than down, on a phone the other way round.
+  const gravity = { x: 0.04, y: 0.07 };
+  const shape = () => {
+    const ratio = Math.min(2.5, Math.max(0.5, (svg.clientWidth || 16) / (svg.clientHeight || 10)));
+    gravity.x = 0.07 / ratio ** 1.3;
+  };
+  const tick = () => {
+    for (let i = 0; i < nodes.length; i += 1) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const b = nodes[j];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let l2 = dx * dx + dy * dy;
+        if (l2 > 400000) continue;
+        if (l2 < 0.01) { dx = (i - j) * 0.1; dy = 0.1; l2 = dx * dx + dy * dy; }
+        const push = (240 * alpha) / l2;
+        a.vx -= dx * push; a.vy -= dy * push;
+        b.vx += dx * push; b.vy += dy * push;
+        const room = a.r + b.r + 24;
+        if (l2 < room * room) {
+          const l = Math.sqrt(l2);
+          const overlap = ((room - l) / l) * 0.35;
+          a.vx -= dx * overlap; a.vy -= dy * overlap;
+          b.vx += dx * overlap; b.vy += dy * overlap;
+        }
+      }
+    }
+    for (const { a, b, kind } of edges) {
+      const dx = b.x + b.vx - a.x - a.vx;
+      const dy = b.y + b.vy - a.y - a.vy;
+      const l = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pull = ((l - (kind === "link" ? 95 : 140)) / l) * alpha * ((kind === "link" ? 0.8 : 0.3) / Math.min(a.degree, b.degree)) * 0.5;
+      a.vx += dx * pull; a.vy += dy * pull;
+      b.vx -= dx * pull; b.vy -= dy * pull;
+    }
+    for (const node of nodes) {
+      if (node.fixed) { node.vx = 0; node.vy = 0; continue; }
+      node.vx = (node.vx - node.x * gravity.x * alpha) * 0.6;
+      node.vy = (node.vy - node.y * gravity.y * alpha) * 0.6;
+      node.x += node.vx;
+      node.y += node.vy;
+    }
+    alpha *= 0.977;
+  };
+  const draw = () => {
+    for (const { el, a, b } of edges) {
+      el.setAttribute("x1", a.x.toFixed(1)); el.setAttribute("y1", a.y.toFixed(1));
+      el.setAttribute("x2", b.x.toFixed(1)); el.setAttribute("y2", b.y.toFixed(1));
+    }
+    for (const node of nodes) node.el.setAttribute("transform", `translate(${node.x.toFixed(1)} ${node.y.toFixed(1)})`);
+    declutter();
+  };
+  // Names that would overlap on screen: the better-linked page keeps its name, and the chosen page and its neighbours always do.
+  const byWeight = [...nodes].sort((a, b) => b.degree - a.degree);
+  const declutter = () => {
+    if (!svg.isConnected) return;
+    const placed = [];
+    const overlaps = (box, other) => box[0] < other[2] && box[2] > other[0] && box[1] < other[3] && box[3] > other[1];
+    // Every disc is in the way of the other pages' names.
+    const discs = nodes.map((node) => {
+      const x = node.x * view.k + view.x;
+      const y = node.y * view.k + view.y;
+      const r = node.r * view.k;
+      return { node, box: [x - r, y - r, x + r, y + r] };
+    });
+    const first = selected ? [selected, ...byWeight.filter((node) => selected.links.has(node.slug))] : [];
+    for (const node of [...first, ...byWeight.filter((node) => !first.includes(node))]) {
+      node.width ||= node.name.getComputedTextLength() * view.k;
+      const x = node.x * view.k + view.x;
+      const y = (node.y + node.r) * view.k + view.y;
+      const box = [x - node.width / 2 - 3, y + 2, x + node.width / 2 + 3, y + 18];
+      const free = node === selected || (!placed.some((other) => overlaps(box, other)) && !discs.some((disc) => disc.node !== node && overlaps(box, disc.box)));
+      node.name.style.display = free ? "" : "none";
+      if (free) placed.push(box);
+    }
+  };
+
+  /* ---------- the view: pan, zoom, fit ---------- */
+  const view = { k: 1, x: 0, y: 0 };
+  let touched = false;
+  const apply = () => {
+    world.setAttribute("transform", `translate(${view.x.toFixed(1)} ${view.y.toFixed(1)}) scale(${view.k.toFixed(3)})`);
+    // Names keep their size on screen: zooming in spreads the pages, not the letters.
+    svg.style.setProperty("--k", view.k.toFixed(3));
+    declutter();
+  };
+  const fit = () => {
+    const width = svg.clientWidth;
+    const height = svg.clientHeight;
+    if (!width || !height || !nodes.length) return;
+    let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const node of nodes) {
+      minX = Math.min(minX, node.x - node.r); maxX = Math.max(maxX, node.x + node.r);
+      minY = Math.min(minY, node.y - node.r); maxY = Math.max(maxY, node.y + node.r);
+    }
+    // Screen room for the names on the sides and below, and for the legend on top.
+    const k = Math.min(1.6, Math.max(0.2, Math.min((width - 170) / Math.max(maxX - minX, 1), (height - 120) / Math.max(maxY - minY, 1))));
+    view.k = k;
+    view.x = width / 2 - (k * (minX + maxX)) / 2;
+    view.y = (height + 36) / 2 - (k * (minY + maxY)) / 2;
+    apply();
+  };
+  const zoomAt = (px, py, factor) => {
+    const k = Math.min(3, Math.max(0.2, view.k * factor));
+    view.x = px - ((px - view.x) * k) / view.k;
+    view.y = py - ((py - view.y) * k) / view.k;
+    view.k = k;
+    apply();
+  };
+  let frame = 0;
+  let frames = 0;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const run = () => {
+    if (frame) return;
+    const step = () => {
+      if (!frames) shape();
+      frames += 1;
+      tick();
+      if (alpha > 0.3) tick();
+      draw();
+      if (!touched) fit();
+      frame = alpha > 0.005 && (svg.isConnected || frames < 10) ? requestAnimationFrame(step) : 0;
+    };
+    frame = requestAnimationFrame(step);
+  };
+
+  /* ---------- selection and the card ---------- */
+  const card = h("div", { class: "brain-map-card", hidden: true, "aria-live": "polite" });
+  let selected = null;
+  const select = (node) => {
+    selected = node;
+    svg.classList.toggle("focus", Boolean(node));
+    for (const other of nodes) {
+      other.el.classList.toggle("on", Boolean(node) && (other === node || node.links.has(other.slug)));
+      other.el.classList.toggle("picked", other === node);
+    }
+    for (const edge of edges) edge.el.classList.toggle("on", Boolean(node) && (edge.a === node || edge.b === node));
+    declutter();
+    if (!node) { card.hidden = true; return; }
+    const linked = [...node.links].map((slug) => bySlug.get(slug)).sort((a, b) => b.degree - a.degree);
+    card.replaceChildren(
+      h("div", { class: "row" }, badge(BRAIN_KINDS_LABEL[node.kind] || raw(node.kind)), node.pending ? badge("Da rivedere", "warn") : null, h("span", { class: "spacer" }),
+        btn("", { icon: "close", cls: "sm ghost", title: "Chiudi", onclick: () => select(null) })),
+      h("b", {}, raw(node.title)),
+      node.summary ? h("p", {}, raw(node.summary)) : null,
+      h("small", {}, linked.length === 1 ? tr("1 pagina collegata") : tr("{count} pagine collegate", { count: linked.length })),
+      linked.length ? h("div", { class: "chips" }, linked.slice(0, 12).map((other) => h("button", { type: "button", class: "chip", onclick: () => select(other) }, raw(other.title)))) : null,
+      h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Apri la pagina", { icon: "next", cls: "sm primary", href: `#/brain/p/${node.slug}` })));
+    card.hidden = false;
+    reveal(node);
+  };
+  // A page the card would cover glides into the free part of the well, above the card.
+  let glide = 0;
+  const reveal = (node) => {
+    const width = svg.clientWidth;
+    const room = svg.getBoundingClientRect();
+    const cardTop = card.getBoundingClientRect().top - room.top;
+    const cardRight = card.getBoundingClientRect().right - room.left;
+    const x = node.x * view.k + view.x;
+    const y = node.y * view.k + view.y;
+    const covered = y + node.r * view.k > cardTop - 12 && (cardRight > width - 40 || x - node.r * view.k < cardRight + 12);
+    if (!covered && y > 60) return;
+    const target = { x: view.x + width / 2 - x, y: view.y + Math.max(70, cardTop / 2) - y };
+    const from = { x: view.x, y: view.y };
+    const started = performance.now();
+    touched = true;
+    cancelAnimationFrame(glide);
+    const step = (now) => {
+      const t = reduced ? 1 : Math.min(1, (now - started) / 320);
+      const ease = 1 - (1 - t) ** 3;
+      view.x = from.x + (target.x - from.x) * ease;
+      view.y = from.y + (target.y - from.y) * ease;
+      apply();
+      if (t < 1) glide = requestAnimationFrame(step);
+    };
+    glide = requestAnimationFrame(step);
+  };
+  const open = (node) => { location.hash = `#/brain/p/${node.slug}`; };
+
+  /* ---------- pointer, wheel and keys ---------- */
+  const pointers = new Map();
+  let drag = null;
+  let pinch = null;
+  let lastTap = { node: null, at: 0 };
+  const local = (event) => {
+    const box = svg.getBoundingClientRect();
+    return [event.clientX - box.left, event.clientY - box.top];
+  };
+  svg.addEventListener("pointerdown", (event) => {
+    if (event.button > 0) return;
+    try { svg.setPointerCapture(event.pointerId); } catch {}
+    pointers.set(event.pointerId, local(event));
+    if (pointers.size === 2) {
+      const [p, q] = [...pointers.values()];
+      pinch = { distance: Math.hypot(p[0] - q[0], p[1] - q[1]) || 1, k: view.k, x: view.x, y: view.y, mid: [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2] };
+      drag = null;
+      return;
+    }
+    const node = owner.get(event.target.closest?.(".node")) || null;
+    drag = { node, start: local(event), moved: false, viewX: view.x, viewY: view.y };
+  });
+  svg.addEventListener("pointermove", (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.set(event.pointerId, local(event));
+    if (pinch && pointers.size === 2) {
+      touched = true;
+      const [p, q] = [...pointers.values()];
+      const k = Math.min(3, Math.max(0.2, (pinch.k * (Math.hypot(p[0] - q[0], p[1] - q[1]) || 1)) / pinch.distance));
+      const mid = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+      view.x = mid[0] - ((pinch.mid[0] - pinch.x) * k) / pinch.k;
+      view.y = mid[1] - ((pinch.mid[1] - pinch.y) * k) / pinch.k;
+      view.k = k;
+      apply();
+      return;
+    }
+    if (!drag) return;
+    const [x, y] = local(event);
+    if (!drag.moved && Math.hypot(x - drag.start[0], y - drag.start[1]) < 5) return;
+    drag.moved = true;
+    touched = true;
+    if (drag.node) {
+      drag.node.fixed = true;
+      drag.node.x = (x - view.x) / view.k;
+      drag.node.y = (y - view.y) / view.k;
+      alpha = Math.max(alpha, 0.25);
+      draw();
+      run();
+    } else {
+      svg.classList.add("grabbing");
+      view.x = drag.viewX + x - drag.start[0];
+      view.y = drag.viewY + y - drag.start[1];
+      apply();
+    }
+  });
+  const release = (event) => {
+    if (!pointers.delete(event.pointerId)) return;
+    if (pointers.size < 2) pinch = null;
+    svg.classList.remove("grabbing");
+    if (drag && !drag.moved) {
+      const now = Date.now();
+      if (drag.node && lastTap.node === drag.node && now - lastTap.at < 400) open(drag.node);
+      else select(drag.node);
+      lastTap = { node: drag.node, at: now };
+    }
+    if (drag?.node) drag.node.fixed = false;
+    drag = null;
+  };
+  svg.addEventListener("pointerup", release);
+  svg.addEventListener("pointercancel", release);
+  svg.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    touched = true;
+    const [x, y] = local(event);
+    zoomAt(x, y, Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0015)));
+  }, { passive: false });
+  svg.addEventListener("keydown", (event) => {
+    const node = owner.get(event.target.closest?.(".node"));
+    if (event.key === "Escape") { select(null); return; }
+    if (!node || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    if (selected === node) open(node);
+    else select(node);
+  });
+
+  const tools = h("div", { class: "brain-map-tools" },
+    btn("", { icon: "plus", cls: "sm", title: "Avvicina", onclick: () => { touched = true; zoomAt(svg.clientWidth / 2, svg.clientHeight / 2, 1.3); } }),
+    btn("", { icon: "minus", cls: "sm", title: "Allontana", onclick: () => { touched = true; zoomAt(svg.clientWidth / 2, svg.clientHeight / 2, 1 / 1.3); } }),
+    btn("", { icon: "maximize", cls: "sm", title: "Mostra tutto", onclick: () => { touched = false; fit(); } }));
+  const counts = new Map();
+  for (const node of nodes) counts.set(node.kind, (counts.get(node.kind) || 0) + 1);
+  const legend = h("div", { class: "brain-map-legend", "aria-hidden": "true" },
+    Object.keys(BRAIN_KINDS_PLURAL).filter((kind) => counts.has(kind)).map((kind) => h("span", { class: `kind-${kind}` }, h("i"), BRAIN_KINDS_PLURAL[kind], h("em", {}, String(counts.get(kind))))),
+    edges.length ? h("span", { class: "lines" }, h("i", { class: "line" }), "collegamento") : null,
+    edges.some((edge) => edge.kind === "mention") ? h("span", { class: "lines" }, h("i", { class: "line mention" }), "citazione") : null);
+  const element = h("div", { class: "brain-map" }, svg, legend, tools, card,
+    h("div", { class: "brain-map-hint" }, "Trascina per spostarti · rotella per lo zoom · doppio clic apre"));
+  new ResizeObserver(() => { if (!touched) fit(); }).observe(svg);
+  if (reduced) {
+    requestAnimationFrame(() => {
+      shape();
+      while (alpha > 0.005) tick();
+      draw();
+      fit();
+    });
+  } else {
+    draw();
+    run();
+  }
+  return {
+    element,
+    /** Dim what does not match a kind or a search, without moving anything. */
+    filter({ kind = "", query = "" } = {}) {
+      const words = plainText(query).trim();
+      for (const node of nodes) {
+        node.hit = (!kind || node.kind === kind) && (!words || plainText(`${node.title} ${node.summary}`).includes(words));
+        node.el.classList.toggle("dim", !node.hit);
+      }
+      for (const edge of edges) edge.el.classList.toggle("dim", !(edge.a.hit && edge.b.hit));
+      if (selected && !selected.hit) select(null);
+    },
+  };
+}
+
 function renderBrain() {
   const [, view, slug] = route();
   if (view === "p" && slug) return renderBrainPage(slug);
   if (view === "revisione") return renderBrainReview();
+  const mapView = view === "mappa";
   const body = h("div", { class: "stack" }, skeleton("rows", 4));
   let state = null;
   let kind = "";
+  let map = null;
+  const mapBox = h("div", {}, skeleton("rows", 3));
   const search = h("input", { type: "search", placeholder: tr("Cerca nel brain…"), "aria-label": tr("Cerca nel brain"), autocomplete: "off" });
   const list = h("div", { class: "brain-list" });
   const reviewButton = btn("Rivedi", { icon: "check", cls: "primary", href: "#/brain/revisione" });
@@ -2706,6 +3112,17 @@ function renderBrain() {
   } });
   async function pages() {
     const query = search.value.trim();
+    if (mapView) {
+      if (map) { map.filter({ kind, query }); return; }
+      try {
+        const graph = await api("/api/brain/graph");
+        if (!graph.nodes.length) { mapBox.replaceChildren(empty("bulb", "Ancora nessuna pagina: il bibliotecario le scrive di notte dalle chat.")); return; }
+        map = brainMap(graph);
+        mapBox.replaceChildren(map.element);
+        map.filter({ kind, query: search.value.trim() });
+      } catch (error) { mapBox.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+      return;
+    }
     list.replaceChildren(skeleton("rows", 3));
     try {
       const data = await api(`/api/brain/pages?${new URLSearchParams(query ? { q: query } : { kind })}`);
@@ -2716,7 +3133,9 @@ function renderBrain() {
     } catch (error) { list.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
   }
   let timer = null;
-  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(pages, 300); });
+  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(pages, mapView ? 120 : 300); });
+  const views = h("div", { class: "segmented", role: "tablist", "aria-label": tr("Come vedere il brain") },
+    [["", "Elenco", "list"], ["mappa", "Mappa", "graph"]].map(([key, label, name]) => h("button", { type: "button", role: "tab", class: (key === "mappa") === mapView ? "on" : "", "aria-selected": String((key === "mappa") === mapView), onclick: () => { location.hash = key ? `#/brain/${key}` : "#/brain"; } }, icon(name), label)));
   const settingsPanel = () => {
     const settings = S.data.settings;
     const form = h("form", { class: "stack" },
@@ -2753,9 +3172,8 @@ function renderBrain() {
         h("div", {}, h("b", {}, String(stats.chunks)), h("small", {}, "messaggi cercabili")),
         h("div", { class: "grow" }, h("b", {}, lastRun ? raw(fmtTime(lastRun.at, true)) : "—"),
           h("small", {}, lastRun ? raw(tr("ultimo giro: {created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato"))),
-      h("div", { class: "brain-search" }, search, chips),
-      list,
-      state.canManage ? settingsPanel() : null);
+      h("div", { class: "brain-search" }, search, h("div", { class: "brain-views" }, chips, views)),
+      ...(mapView ? [mapBox] : state.canManage ? [list, settingsPanel()] : [list]));
   }
   async function load() {
     try {
@@ -2917,7 +3335,7 @@ function renderContext() {
       if (stored.length && index === stored.length) list.append(h("span", { class: "context-group label" }, "Istruzioni e memoria"));
       list.append(h("button", { type: "button", class: `context-file${source.id === selectedId && (!editor || editor.id) ? " active" : ""}`, "aria-pressed": String(source.id === selectedId && (!editor || editor.id)), disabled: busy, onclick: () => choose(source.id) },
         icon(source.storage === "database" ? "file" : source.provider === "cora" ? "book" : "file"),
-        h("span", { class: "grow" }, h("b", {}, source.id === "shared-memory" ? "Memoria condivisa" : raw(source.title)),
+        h("span", { class: "grow" }, h("b", {}, raw(source.title)),
           h("small", {}, source.storage === "database" ? labels[source.status] : raw(source.provider === "codex" ? "ChatGPT / Codex" : source.provider === "claude" ? "Claude" : "Cora"), raw(" · "), scopes[source.scope])),
         h("i", { class: `context-file-dot ${source.status}`, "aria-label": labels[source.status] })));
     }
@@ -2949,12 +3367,12 @@ function renderContext() {
       const explanation = custom ? selected.enabled ? "Questo file è incluso nel contesto di tutti gli agenti dal prossimo turno." : "Il file è conservato nello spazio e non viene inviato agli agenti."
         : selected.id === "owner" ? "Queste istruzioni vengono incluse da Cora nel contesto di tutti gli agenti."
         : selected.provider === "codex" ? "Codex viene avviato con le istruzioni locali disabilitate. Riceve le istruzioni comuni già incluse da Cora."
-        : selected.provider === "claude" ? "File disponibile a Claude. Il caricamento dipende dal profilo e dal runtime del turno." : "Questa memoria viene condivisa con tutti gli agenti dell'istanza.";
+        : "File disponibile a Claude. Il caricamento dipende dal profilo e dal runtime del turno.";
       const copy = selected.content ? btn("Copia testo", { icon: "copy", cls: "ghost", onclick: async () => {
         try { await navigator.clipboard.writeText(selected.content); toast("Copiato"); } catch { toast("Non riesco a copiare: selezionalo a mano", true); }
       } }) : null;
       document = h("section", { class: "context-document" },
-        h("header", {}, h("div", { class: "grow" }, h("h2", {}, selected.id === "shared-memory" ? "Memoria condivisa" : raw(selected.title)),
+        h("header", {}, h("div", { class: "grow" }, h("h2", {}, raw(selected.title)),
           selected.path || custom ? h("p", { class: "context-path" }, custom ? "Salvato nel database di questa istanza" : raw(selected.path)) : null), copy), error,
         h("div", { class: "context-provenance" }, badge(labels[selected.status], selected.status === "applied" ? "on" : ""), selected.updatedAt ? h("time", { datetime: selected.updatedAt }, raw(new Date(selected.updatedAt).toLocaleString(LOCALE, { dateStyle: "medium", timeStyle: "short" }))) : null),
         h("p", { class: "context-explanation" }, explanation), selected.accountLabel ? h("p", { class: "context-explanation" }, raw(selected.accountLabel)) : null,
@@ -2988,8 +3406,8 @@ function renderContext() {
   const newButton = btn("Nuovo file", { icon: "plus", cls: "primary", onclick: () => begin() });
   const upload = btn("Carica file", { icon: "upgrade", onclick: () => fileInput.click() });
   const refresh = btn("Aggiorna", { icon: "refresh", cls: "ghost", onclick: load });
-  shell([pageHead("Contesto", "Le istruzioni del server e la memoria comune agli agenti.", [upload, newButton, refresh]),
-    h("p", { class: "context-intro" }, "Aggiungi istruzioni e file di riferimento per tutti gli agenti. Puoi anche ispezionare le sorgenti del server e la memoria condivisa."),
+  shell([pageHead("Contesto", "Le istruzioni del server e i file che tutti gli agenti leggono.", [upload, newButton, refresh]),
+    h("p", { class: "context-intro" }, "Aggiungi istruzioni e file di riferimento per tutti gli agenti. Puoi anche ispezionare le sorgenti del server."),
     h("small", { class: "context-upload-hint" }, "File .md e .txt · 30.000 caratteri per file · 60.000 caratteri attivi in totale"), fileInput, body], { title: "Contesto" });
   newButton.disabled = upload.disabled = true;
   load();
@@ -3499,9 +3917,7 @@ function renderSettings() {
               : h("small", {}, "Lo usano gli agenti senza un modello loro, e il lavoro di fondo: obiettivi, verifiche, sonno.");
           })()),
         field("Ora del sonno", h("input", { type: "number", name: "sleepHour", min: 0, max: 23, value: settings.sleepHour, inputmode: "numeric" }), "consolidamento notturno della memoria"),
-        h("div", { class: "field full" }, h("span", { class: "label" }, "Provider"), providers))),
-    panel({ icon: "book", title: "Memoria condivisa", hint: "Cose che tutti gli agenti sanno: chi sei, i progetti, le regole della casa." },
-      h("textarea", { name: "sharedMemory", class: "tall" }, settings.sharedMemory))),
+        h("div", { class: "field full" }, h("span", { class: "label" }, "Provider"), providers)))),
     h("div", { class: "settings-pane stack", "data-settings-tab": "permessi", role: "tabpanel" }, permissionsPane()),
     h("div", { class: "settings-pane stack", "data-settings-tab": "controlli", role: "tabpanel" }, docChecksPane()),
     h("div", { class: "settings-pane stack", "data-settings-tab": "accesso", role: "tabpanel" },
@@ -3524,7 +3940,6 @@ function renderSettings() {
       historySize: Number(data.get("historySize")),
       defaultModel: pickedModel(data, "defaultModel"),
       sleepHour: Number(data.get("sleepHour")),
-      sharedMemory: data.get("sharedMemory"),
       sshKeys: String(data.get("sshKeys") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
     };
     if (guilds.length) body.guildIds = [...form.querySelectorAll("input[name=guild]:checked")].map((input) => input.value);

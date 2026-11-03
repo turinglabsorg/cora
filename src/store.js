@@ -27,7 +27,6 @@ const DEFAULT_SETTINGS = {
   maxAgentTurns: 8,
   maxRepliesPerRound: 2,
   historySize: 30,
-  sharedMemory: "",
   defaultModel: "ollama/deepseek-v4.1-flash",
   // Goal mode is off until it yields to the owner: a goal it cannot drop fights whoever asked for it.
   goalMode: false,
@@ -295,7 +294,6 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     maxAgentTurns: Math.round(clampNumber(merged.maxAgentTurns, 0, 40, 8)),
     maxRepliesPerRound: Math.round(clampNumber(merged.maxRepliesPerRound, 1, 6, 2)),
     historySize: Math.round(clampNumber(merged.historySize, 5, 100, 30)),
-    sharedMemory: cleanText(merged.sharedMemory, 12000),
     defaultModel: checkModel(merged.defaultModel) || DEFAULT_SETTINGS.defaultModel,
     goalMode: Boolean(merged.goalMode),
     useResidentSubscriptions: Boolean(merged.useResidentSubscriptions),
@@ -399,6 +397,7 @@ function traceRow(row, full) {
     tools: row.tools ? row.tools.split(",") : [],
     tokensIn: row.tokens_in || 0,
     tokensOut: row.tokens_out || 0,
+    goal: row.goal || "",
     output: full ? row.output : row.output.slice(0, 240),
     error: row.error,
   };
@@ -420,12 +419,18 @@ export class Store {
     for (const column of ["tokens_in", "tokens_out"]) {
       try { this.db.exec(`ALTER TABLE traces ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`); } catch {}
     }
+    // The goal a task worked toward: the column is new, so older traces get it back from their "Obiettivo" notes.
+    try {
+      this.db.exec("ALTER TABLE traces ADD COLUMN goal TEXT NOT NULL DEFAULT ''");
+      this.backfillGoals();
+    } catch {}
     // Turns cut short by the restart: the long tasks among them are picked up again (Orchestrator.resumeInterrupted).
     this.interruptedAtStart = this.db.prepare("SELECT id FROM traces WHERE status = 'running'").all().map((row) => row.id);
     this.db.exec("UPDATE traces SET status = 'interrupted' WHERE status = 'running'");
     this.q = {};
     const settingsRow = this.db.prepare("SELECT value FROM settings WHERE key = 'settings'").get();
-    this.cachedSettings = sanitizeSettings(settingsRow ? JSON.parse(settingsRow.value) : {}, DEFAULT_SETTINGS);
+    const savedSettings = settingsRow ? JSON.parse(settingsRow.value) : {};
+    this.cachedSettings = sanitizeSettings(savedSettings, DEFAULT_SETTINGS);
     this.cachedAgents = this.db.prepare("SELECT data FROM agents ORDER BY position").all().map((row) => JSON.parse(row.data));
     this.cachedRoutines = this.db.prepare("SELECT data FROM routines ORDER BY rowid").all().map((row) => JSON.parse(row.data));
     this.recoverRoutineRuns();
@@ -443,6 +448,29 @@ export class Store {
         this.writeAgent(agent);
       }
     });
+    if (Object.hasOwn(savedSettings, "sharedMemory")) this.moveSharedMemory(savedSettings.sharedMemory);
+  }
+
+  /**
+   * Older versions kept a free "shared memory" text in the settings. It is a
+   * context file now, which every agent already reads: moved once, under the
+   * same name, then gone from the settings. It is inserted as it is, so an
+   * instance already at the file limit keeps the text; one over the size limit
+   * gets it switched off rather than lost.
+   */
+  moveSharedMemory(text) {
+    const content = String(text || "").trim().slice(0, CONTEXT_LIMITS.fileChars);
+    if (content) {
+      const documents = this.contextDocuments();
+      const taken = new Set(documents.map((document) => document.name.toLowerCase()));
+      let name = "Memoria condivisa.md";
+      for (let n = 2; taken.has(name.toLowerCase()); n += 1) name = `Memoria condivisa ${n}.md`;
+      const active = documents.filter((document) => document.enabled).reduce((total, document) => total + document.content.length, 0);
+      const at = new Date().toISOString();
+      this.stmt("INSERT INTO context_documents(id,name,content,enabled,created_at,updated_at,created_by,updated_by) VALUES (?,?,?,?,?,?,?,?)")
+        .run(newId("ctx"), name, content, active + content.length <= CONTEXT_LIMITS.totalChars ? 1 : 0, at, at, "", "");
+    }
+    this.updateSettings({});
   }
 
   stmt(sql) {
@@ -1118,6 +1146,33 @@ export class Store {
 
   /* ---------- reasoning traces ---------- */
   /** The system prompt (it carries the owner's instructions) is stored once and shared by the traces that used it. */
+  /** The goal of each trace written before goals had a column, read from its own notes. */
+  backfillGoals() {
+    const update = this.db.prepare("UPDATE traces SET goal = ? WHERE id = ?");
+    for (const row of this.db.prepare("SELECT id, steps FROM traces WHERE goal = '' AND steps LIKE '%Obiettivo%'").all()) {
+      let goal = "";
+      try {
+        for (const step of JSON.parse(row.steps)) {
+          const match = step.type === "note" && /^Obiettivo(?: aggiornato su quello che hanno detto)?: (.+)$/s.exec(String(step.text || ""));
+          if (match) goal = match[1].trim();
+        }
+      } catch {}
+      if (goal) update.run(goal.slice(0, 600), row.id);
+    }
+  }
+
+  /**
+   * What each goal of an agent cost: every turn that worked toward it (a task resumed
+   * after a restart is the same goal), the tokens they used, and how the last one ended.
+   */
+  goalUsage(agentId, limit = 30) {
+    return this.stmt(`SELECT goal, channel_id, COUNT(*) AS turns, SUM(tokens_in) AS tokens_in, SUM(tokens_out) AS tokens_out,
+        MIN(started_at) AS first, MAX(started_at) AS last,
+        (SELECT status FROM traces l WHERE l.agent_id = t.agent_id AND l.goal = t.goal AND IFNULL(l.channel_id, '') = IFNULL(t.channel_id, '') ORDER BY l.started_at DESC LIMIT 1) AS status
+      FROM traces t WHERE agent_id = ? AND goal <> '' GROUP BY goal, channel_id ORDER BY last DESC LIMIT ?`).all(agentId, limit)
+      .map((row) => ({ goal: row.goal, channelId: row.channel_id, turns: row.turns, tokensIn: row.tokens_in || 0, tokensOut: row.tokens_out || 0, first: row.first, last: row.last, status: row.status }));
+  }
+
   saveTrace(trace) {
     const tools = [...new Set(trace.steps.filter((step) => step.type === "tool").map((step) => step.name))].join(",");
     let systemHash = null;
@@ -1125,11 +1180,11 @@ export class Store {
       systemHash = createHash("sha256").update(trace.system).digest("hex");
       this.stmt("INSERT OR IGNORE INTO trace_systems(hash, text) VALUES (?, ?)").run(systemHash, trace.system);
     }
-    this.stmt(`INSERT OR REPLACE INTO traces(id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, system_hash, prompt, steps, output, error, tokens_in, tokens_out)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    this.stmt(`INSERT OR REPLACE INTO traces(id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, system_hash, prompt, steps, output, error, tokens_in, tokens_out, goal)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       trace.id, trace.agentId, trace.kind, trace.channelId || null, trace.model || "", trace.startedAt, trace.endedAt || null, trace.status,
       trace.steps.length + (trace.dropped || 0), tools, systemHash, trace.prompt || "", JSON.stringify(trace.steps), trace.output || "", trace.error || "",
-      Number(trace.tokensIn) || 0, Number(trace.tokensOut) || 0,
+      Number(trace.tokensIn) || 0, Number(trace.tokensOut) || 0, String(trace.goal || "").slice(0, 600),
     );
     if (trace.status !== "running" && Math.random() < 0.05) this.pruneTraces(trace.agentId);
   }
@@ -1139,13 +1194,17 @@ export class Store {
     this.stmt("DELETE FROM trace_systems WHERE hash NOT IN (SELECT system_hash FROM traces WHERE system_hash IS NOT NULL)").run();
   }
 
-  traces(agentId, limit = 50) {
-    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out FROM traces WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?")
+  traces(agentId, limit = 50, { goal = null } = {}) {
+    if (goal !== null) {
+      return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal FROM traces WHERE agent_id = ? AND goal = ? ORDER BY started_at DESC LIMIT ?")
+        .all(agentId, goal, limit).map((row) => traceRow(row, false));
+    }
+    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal FROM traces WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?")
       .all(agentId, limit).map((row) => traceRow(row, false));
   }
 
   recentTraces(limit = 12) {
-    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out FROM traces ORDER BY started_at DESC LIMIT ?")
+    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal FROM traces ORDER BY started_at DESC LIMIT ?")
       .all(limit).map((row) => traceRow(row, false));
   }
 

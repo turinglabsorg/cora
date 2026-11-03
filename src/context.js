@@ -39,7 +39,6 @@ export function contextSources({ config, store, subscriptions, brain }) {
       if (!source.available) sources.pop();
     }
   }
-  sources.push({ id: "shared-memory", title: "Memoria condivisa", path: "", provider: "cora", scope: "shared", status: "applied", available: true, content: store.settings.sharedMemory, truncated: false });
   for (const document of store.contextDocuments()) sources.push({
     ...document, title: document.name, path: "", provider: "cora", scope: "database", storage: "database",
     status: document.enabled ? "applied" : "disabled", available: true, truncated: false,

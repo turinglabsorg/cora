@@ -44,6 +44,7 @@ export class Librarian {
       const result = this.llm.isAgentic(model)
         ? await this.llm.runAgent({ model, system: SYSTEM, prompt, tools: [], execute: null, timeoutMs: 10 * 60 * 1000, onStep: (step) => trace?.add(step) })
         : await this.llm.chat({ model, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }], tools: [] });
+      trace?.spent(result.usage);
       trace?.finish({ status: "done", output: result.text });
       return { text: result.text, traceId: trace?.id || null };
     } catch (error) {
@@ -158,11 +159,19 @@ export class Librarian {
         "- Per cambiare una pagina esistente usa il suo slug e riscrivi il testo completo, tenendo tutto ciò che è ancora vero.",
         "- Se una cosa nuova contraddice la pagina non scegliere: scrivi entrambe le versioni con le date e spiega la contraddizione in \"conflict\".",
         "- Una pagina nuova solo se l'argomento non ne ha già una. Al massimo 15 pagine per risposta; se non c'è niente di nuovo da sapere, {\"pages\": []}.",
+        "- Mai password, token, chiavi o altri segreti nelle pagine, nemmeno se compaiono nelle conversazioni: al più dove sono conservati (es. «in hush come NOME»).",
         "- Scrivi nella lingua delle conversazioni.",
       ].join("\n"),
     ].filter(Boolean).join("\n\n");
-    const { text, traceId } = await this.think(prompt);
-    const answer = parseJsonObject(text);
+    let { text, traceId } = await this.think(prompt);
+    let answer;
+    try {
+      answer = parseJsonObject(text);
+    } catch (error) {
+      // A long answer can break its own JSON (a quote left bare): the batch is asked once more, with the error, before the run stops on it.
+      ({ text, traceId } = await this.think(`${prompt}\n\nLa tua risposta precedente non era JSON valido (${error.message.slice(0, 200)}). Rispondi di nuovo con lo stesso contenuto, solo JSON valido: dentro le stringhe le virgolette vanno scritte \\" e gli a capo \\n.`));
+      answer = parseJsonObject(text);
+    }
     const known = new Map(all.map((page) => [page.slug, page]));
     const done = { created: 0, updated: 0, flagged: 0, skipped: 0, traceId };
     for (const change of (Array.isArray(answer.pages) ? answer.pages : []).slice(0, PAGES_PER_BATCH)) {

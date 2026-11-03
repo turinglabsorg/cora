@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startCora } from "../src/main.js";
-import { Store } from "../src/store.js";
+import { SHARED, Store } from "../src/store.js";
+import { executeTool } from "../src/tools.js";
 import { CHANNEL, GUILD, MAIN_TOKEN, OWNER, fakeDiscord, fakeDocker, fakeOllama, tempHome, waitFor } from "./helpers.js";
 
 const LIBRARIAN = /^Sei il bibliotecario del brain aziendale/;
@@ -111,6 +112,25 @@ test("the librarian turns the chats into the company brain, the agents read it, 
   assert.deepEqual(await app.companyBrain.notes(), [], "a note is read once");
   assert.equal((await call("/api/brain/pages/giulia-ferri")).data.revisions[0].sources[0].type, "note");
 
+  // The map: the pages, linked by their [[slug]]s, and by a title named without the link.
+  assert.equal((await call("/api/brain/pages", { method: "POST", body: { title: "Fatturazione", kind: "procedure", summary: "Come partono le fatture.", body: "- Le fatture di Acme partono il 5 del mese.\n- Il portale si apre con la password: q8x2kd93hf0a (in hush come ACME_PORTAL)." } })).status, 201);
+  const billing = (await call("/api/brain/pages/fatturazione")).data;
+  assert.match(billing.body, /la password: \[segreto omesso\] \(in hush come ACME_PORTAL\)/, "a secret never stays in the brain, its name in hush does");
+  assert.doesNotMatch(JSON.stringify(billing), /q8x2kd93hf0a/);
+  assert.equal((await app.companyBrain.state("secretsScrubbed")).pages, 0, "a new brain is scrubbed once, with nothing to scrub");
+
+  // A brain written before the rule: what it already holds is scrubbed.
+  await app.companyBrain.q("UPDATE brain_pages SET body = body || $2 WHERE slug = $1", ["acme", "\n- Il token: tk93hd82ks01."]);
+  await app.companyBrain.q("UPDATE brain_chunks SET text = text || $2 WHERE id = $1", [`msg:${decision.id}`, " password: zz81kd02ma"]);
+  assert.deepEqual(await app.companyBrain.scrubSecrets(), { pages: 1, revisions: 0, notes: 0, chunks: 1 });
+  assert.match((await call("/api/brain/pages/acme")).data.body, /- Il token: \[segreto omesso\]\./);
+  assert.doesNotMatch(JSON.stringify(await app.companyBrain.exportAll()), /tk93hd82ks01/);
+  assert.match((await app.companyBrain.q("SELECT text FROM brain_chunks WHERE id = $1", [`msg:${decision.id}`]))[0].text, /password: \[segreto omesso\]$/);
+  const graph = (await call("/api/brain/graph")).data;
+  assert.deepEqual(graph.nodes.map((node) => [node.slug, node.kind, node.pending > 0]).sort(), [["acme", "client", true], ["fatturazione", "procedure", false], ["giulia-ferri", "person", true]]);
+  assert.deepEqual(graph.edges.map((edge) => [[edge.source, edge.target].sort().join(" "), edge.kind]).sort(), [["acme fatturazione", "mention"], ["acme giulia-ferri", "link"]]);
+  assert.equal((await call("/api/brain/pages/fatturazione", { method: "DELETE" })).status, 200);
+
   // The morning: a note on the phone and a DM from Cora's bot, with the link to the review.
   const digest = await app.librarian.digest();
   assert.equal(digest.status, "sent");
@@ -140,7 +160,85 @@ test("the librarian turns the chats into the company brain, the agents read it, 
   await app.scheduler.backup("2026-11-03");
   assert.ok(existsSync(join(home, "backups", "cora-2026-11-03.db")));
   const saved = JSON.parse(readFileSync(join(home, "backups", "brain-2026-11-03.json"), "utf8"));
-  assert.deepEqual(saved.pages.map((page) => page.slug).sort(), ["acme", "giulia-ferri"]);
+  assert.deepEqual(saved.pages.map((page) => page.slug).sort(), ["acme", "fatturazione", "giulia-ferri"], "archived pages are kept too");
+});
+
+test("with a company brain the shared memories belong to it: agents keep their own, and sharing hands a fact to the librarian", async (t) => {
+  let librarianAnswer = () => ({ pages: [] });
+  const librarianPrompts = [];
+  const ollama = await fakeOllama(async (body) => {
+    const system = String(body.messages[0]?.content || "");
+    const user = String(body.messages.filter((message) => message.role === "user").at(-1)?.content || "");
+    if (!LIBRARIAN.test(system)) return { content: "PASS" };
+    librarianPrompts.push(user);
+    // The first answer breaks its JSON with a bare quote, as a long answer sometimes does.
+    if (librarianPrompts.length === 1) return { content: '{"pages": [{"slug": "studio", "title": "Lo "studio"", "body": "x"}]}' };
+    return { content: JSON.stringify(librarianAnswer(user)) };
+  });
+  const home = tempHome();
+  const seed = new Store(home);
+  seed.updateSettings({ brainModel: "ollama/test-model" });
+  const old = seed.addMemory(SHARED, "Lo studio chiude il venerdì alle 16.", "manual");
+  seed.close();
+  const app = startCora({ home, host: "127.0.0.1", port: 0, insecureCookies: true, adminPassword: "fixture-password", sessionKey: "fixture-brain-shared",
+    discordToken: "", telegramToken: "", ollamaUrl: ollama.url, ollamaKey: "test-ollama-key", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
+    claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes", grokBin: "/missing/grok", museBin: "/missing/muse", botTokenFor: () => "",
+    brainDatabaseUrl: "pglite:memory", brainEmbedUrl: ollama.url,
+    docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
+  });
+  await app.ready;
+  await app.companyBrain.ready;
+  t.after(async () => {
+    await app.stop();
+    await ollama.close();
+  });
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const login = await fetch(`${base}/api/login`, { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" }, body: JSON.stringify({ password: "fixture-password" }) });
+  const cookie = login.headers.get("set-cookie").split(";")[0];
+  const call = async (path, { method = "GET", body } = {}) => {
+    const response = await fetch(`${base}${path}`, { method, headers: { Cookie: cookie, "X-Cora": "1", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, data: await response.json() };
+  };
+  const ada = (await call("/api/agents", { method: "POST", body: { name: "Ada", model: "ollama/test-model", chattiness: 0, tools: false } })).data;
+  const sharedNow = () => app.store.memories(SHARED).map((memory) => memory.text);
+
+  // Until the librarian has read them, the agents still have the old shared memories.
+  assert.ok(app.brain.memory.facts(ada.id).some((fact) => fact.id === old.id && fact.scope === "shared"));
+  let memories = (await call(`/api/agents/${ada.id}/memories`)).data;
+  assert.deepEqual([memories.brain, memories.shared.length], [true, 1]);
+
+  // A shared fact, from the agent, the panel or the night, is a note for the librarian, not a memory.
+  const remembered = await executeTool({ name: "remember", args: { fact: "Il cliente Acme vuole le fatture in PDF.", shared: true } }, { agent: ada, store: app.store, memory: app.brain.memory, companyBrain: app.companyBrain, channelId: "room:test" });
+  assert.match(remembered.text, /noted for the company brain/);
+  assert.ok((await call(`/api/agents/${ada.id}/memories`, { method: "POST", body: { text: "Le riunioni sono il martedì.", shared: true } })).data.noted);
+  const own = (await call(`/api/agents/${ada.id}/memories`, { method: "POST", body: { text: "Sam preferisce i messaggi brevi." } })).data;
+  const shared = (await call(`/api/agents/${ada.id}/memories/${own.id}`, { method: "PUT", body: { shared: true } })).data;
+  assert.ok(shared.noted, "sharing a memory hands it to the librarian");
+  assert.deepEqual(app.store.memories(ada.id).map((memory) => memory.text), ["Sam preferisce i messaggi brevi."], "and the agent keeps its own");
+  const slept = app.brain.applySleep(ada, { add: [{ text: "Giulia è la referente di Acme.", shared: true }, { text: "Ho promesso a Sam un riassunto." }] });
+  assert.deepEqual([slept.added, slept.noted], [1, 1]);
+  await waitFor(async () => (await app.companyBrain.notes()).length === 4, { what: "the night's note" });
+  assert.deepEqual((await app.companyBrain.notes()).map((note) => [note.author, note.text]), [
+    ["Ada", "Il cliente Acme vuole le fatture in PDF."],
+    ["Owner", "Le riunioni sono il martedì."],
+    ["Owner", "Sam preferisce i messaggi brevi."],
+    ["Ada", "Giulia è la referente di Acme."],
+  ]);
+  assert.deepEqual(sharedNow(), ["Lo studio chiude il venerdì alle 16."], "nothing new is written as a shared memory");
+
+  // Once the librarian has read them, they live in the brain: agents and the panel no longer show them as memories.
+  librarianAnswer = (prompt) => ({ pages: [{ slug: "studio", kind: "procedure", title: "Lo studio", summary: "Orari dello studio.", body: "- Chiude il venerdì alle 16.", sources: [/\[(s\d+)\] Lo studio chiude/.exec(prompt)[1]] }] });
+  const run = await app.librarian.run();
+  assert.deepEqual([run.created, run.errors], [1, []], "a batch whose JSON broke is asked once more");
+  assert.match(librarianPrompts[1], /La tua risposta precedente non era JSON valido/);
+  assert.equal(app.companyBrain.holdsShared, true);
+  assert.ok(!app.brain.memory.facts(ada.id).some((fact) => fact.scope === "shared"));
+  assert.deepEqual(app.brain.memory.searchFacts(ada.id, "studio venerdì").map((fact) => fact.id), []);
+  assert.doesNotMatch(app.brain.memoryContext(ada, "quando chiude lo studio?"), /venerdì/);
+  memories = (await call(`/api/agents/${ada.id}/memories`)).data;
+  assert.deepEqual(memories.shared, []);
+  assert.deepEqual(sharedNow(), ["Lo studio chiude il venerdì alle 16."], "the old rows stay where they were, in case the brain goes away");
+  assert.deepEqual((await app.companyBrain.search("studio venerdì")).map((page) => page.slug), ["studio"]);
 });
 
 test("without a brain database the panel says so and the agents' brain tools answer plainly", async (t) => {

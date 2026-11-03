@@ -165,6 +165,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     for (const grant of settings.permissions) if (!people.some((person) => person.id === grant.id)) people.push({ id: grant.id, transport: grant.id.split(":")[0], name: grant.name || grant.id, last: 0, messages: 0 });
     return { canManage: user.role === "owner", people: people.map((person) => ({ ...person, agents: grants.get(person.id)?.agents || [] })) };
   };
+  /** A shared fact written in the panel, with a company brain: a note for the librarian, signed by whoever wrote it. */
+  const noteForBrain = async (text, agent, user) => {
+    const fact = String(text || "").trim();
+    if (!fact) throw new HttpError(400, "scrivi il ricordo");
+    return companyBrain.note({ text: fact, agentId: agent.id, author: user?.name || user?.email || "Owner" });
+  };
   const localOwner = () => store.panelUser("local-owner") || store.registerPanelUser({ id: "local-owner", name: "Owner", email: "", role: "owner", source: "local" });
   const sessionHash = (token) => createHash("sha256").update(token).digest("hex");
   const sessionCookie = (identity = localOwner()) => {
@@ -299,6 +305,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (path === "/api/brain" && method === "GET") {
         return send(res, 200, { enabled: true, canManage, kinds: BRAIN_KINDS, stats: await companyBrain.stats(), lastRun: await companyBrain.state("lastRun"), running: Boolean(librarian?.running) });
       }
+      if (path === "/api/brain/graph" && method === "GET") return send(res, 200, await companyBrain.graph());
       if (path === "/api/brain/pages" && method === "GET") {
         const q = String(url.searchParams.get("q") || "").trim();
         const pages = q ? await companyBrain.search(q, { limit: 30 }) : await companyBrain.pages({ kind: String(url.searchParams.get("kind") || ""), status: url.searchParams.get("status") === "archived" ? "archived" : "live" });
@@ -697,7 +704,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           core: agent.core,
           coreHistory: store.coreHistory(agent.id),
           facts: store.memories(agent.id),
-          shared: store.memories(SHARED),
+          // With a company brain, what everyone knows lives there: once the librarian has read the shared memories, agents no longer get them.
+          shared: companyBrain?.holdsShared ? [] : store.memories(SHARED),
+          brain: Boolean(companyBrain?.enabled),
           diary: store.diary(agent.id),
           lastSleepAt: agent.lastSleepAt,
           sleeping: brain.sleeping.has(agent.id),
@@ -705,6 +714,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       if (section === "memories" && !itemId && method === "POST") {
         const body = await readJson(req);
+        if (body.shared && companyBrain?.enabled) return send(res, 201, { noted: await noteForBrain(body.text, agent, user) });
         const memory = store.addMemory(body.shared ? SHARED : agent.id, body.text, "manual", { pinned: body.pinned });
         return send(res, 201, memory);
       }
@@ -714,6 +724,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (method === "PUT") {
           const body = await readJson(req);
           let key = found.key;
+          // Sharing a memory, with a company brain, hands it to the librarian: the agent keeps its own copy.
+          if (body.shared === true && key !== SHARED && companyBrain?.enabled) return send(res, 200, { ...found.memory, noted: await noteForBrain(found.memory.text, agent, user) });
           if (body.shared !== undefined && Boolean(body.shared) !== (key === SHARED)) {
             const target = body.shared ? SHARED : agent.id;
             store.moveMemory(key, itemId, target);
@@ -765,9 +777,17 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     match = /^\/api\/agents\/([\w-]+)\/traces$/.exec(path);
     if (match && method === "GET") {
       if (!store.agent(match[1])) throw new HttpError(404, "agente non trovato");
-      const live = [...(traces?.live.values() || [])].filter((trace) => trace.agentId === match[1]).map((trace) => trace.summary());
+      // ?goal= gives only the turns that worked toward that goal.
+      const goal = url.searchParams.has("goal") ? String(url.searchParams.get("goal")) : null;
+      const live = [...(traces?.live.values() || [])].filter((trace) => trace.agentId === match[1] && (goal === null || trace.goal === goal)).map((trace) => trace.summary());
       const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 60));
-      return send(res, 200, [...live, ...store.traces(match[1], limit).filter((trace) => !live.some((item) => item.id === trace.id))]);
+      return send(res, 200, [...live, ...store.traces(match[1], limit, { goal }).filter((trace) => !live.some((item) => item.id === trace.id))]);
+    }
+
+    match = /^\/api\/agents\/([\w-]+)\/goals$/.exec(path);
+    if (match && method === "GET") {
+      if (!store.agent(match[1])) throw new HttpError(404, "agente non trovato");
+      return send(res, 200, { goals: store.goalUsage(match[1]) });
     }
 
     if (path === "/api/usage" && method === "GET") {

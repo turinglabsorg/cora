@@ -486,6 +486,10 @@ describe("panel auth", () => {
     assert.ok(!run.argv.includes("--dangerously-bypass-approvals-and-sandbox"));
     assert.match(run.stdin, /Il sandbox dell'host non rende in sola lettura/);
     assert.equal(app.store.trace(result.traceId).steps.find((step) => step.type === "tool" && step.name === "shell").ok, true);
+    assert.equal(app.store.trace(result.traceId).goal, "Il record di prova è aggiornato", "the turn keeps the goal it worked toward");
+    const goalsSeen = (await call(`/api/agents/${agent.id}/goals`)).data.goals;
+    assert.deepEqual(goalsSeen.map((item) => [item.goal, item.turns]), [["Il record di prova è aggiornato", 1]]);
+    assert.equal((await call(`/api/agents/${agent.id}/traces?${new URLSearchParams({ goal: "Il record di prova è aggiornato" })}`)).data[0].id, result.traceId);
   });
 
   test("Codex without a desktop retains the write boundary and cannot gain shell from application instructions", async (t) => {
@@ -1713,6 +1717,13 @@ describe("agents in Discord", () => {
     const agent = await waitFor(() => app.store.agent(created.data.id)?.sshPort && app.store.agent(created.data.id), { what: "an SSH port" });
     const runs = () => readFileSync(docker.log, "utf8").split("\n").filter((line) => line.startsWith(`run -d --name cora-box-${agent.id} `));
     await waitFor(() => runs().length === 1, { what: "the box to be created" });
+    const seccompFile = runs()[0].match(/--security-opt seccomp=(.+) --shm-size /)[1];
+    const seccomp = JSON.parse(readFileSync(seccompFile, "utf8"));
+    assert.equal(seccomp.defaultAction, "SCMP_ACT_ERRNO");
+    for (const name of ["clone", "setns", "unshare"]) {
+      assert.ok(seccomp.syscalls.some((rule) => rule.action === "SCMP_ACT_ALLOW" && rule.names.includes(name)), `${name} supports the Chromium namespace sandbox`);
+    }
+    assert.doesNotMatch(runs()[0], /--privileged|--cap-add/);
     assert.match(runs()[0], new RegExp(`-p 127\\.0\\.0\\.1:${agent.sshPort}:22 `));
     assert.match(runs()[0], new RegExp(`-v cora-home-${agent.id}:/home/agent -v cora-sys-${agent.id}:/var/lib/cora `));
     const keys = await waitFor(() => { try { return readFileSync(join(docker.dir, "authorized_keys"), "utf8"); } catch { return ""; } }, { what: "authorized keys" });

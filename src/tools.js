@@ -113,7 +113,7 @@ export const TOOL_DEFS = [
       type: "object",
       properties: {
         fact: { type: "string" },
-        shared: { type: "boolean", description: "true = every agent will know it" },
+        shared: { type: "boolean", description: "true = every agent will know it (with a company brain it becomes a note for the librarian, like brain_note)" },
       },
       required: ["fact"],
     },
@@ -336,6 +336,14 @@ export async function executeTool(call, ctx) {
         return { text: `opened ${url} in Chromium. Take a screenshot in a few seconds to see it.` };
       }
       case "remember": {
+        // What everyone should know belongs to the company brain, when the instance has one.
+        if (args.shared && ctx.companyBrain?.enabled) {
+          const text = String(args.fact || "").trim();
+          if (!text) return { text: "error: empty fact" };
+          await ctx.companyBrain.note({ text, agentId: agent.id, author: agent.name, channelId });
+          ctx.log?.({ type: "memory", agentId: agent.id, text: `(per il brain) ${text.slice(0, 300)}` });
+          return { text: "noted for the company brain (shared facts go there): the librarian adds it at its next run" };
+        }
         const key = args.shared ? SHARED : agent.id;
         const memory = store.addMemory(key, String(args.fact || ""), "agent", { by: agent.name });
         ctx.log?.({ type: "memory", agentId: agent.id, text: `${args.shared ? "(condiviso) " : ""}${memory.text}` });

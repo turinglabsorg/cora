@@ -9,6 +9,7 @@ import { mentions } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { SHARED, Store, ftsQuery } from "../src/store.js";
 import { Traces } from "../src/traces.js";
+import { redactSecrets } from "../src/company-brain.js";
 import { tempHome } from "./helpers.js";
 
 describe("cron", () => {
@@ -224,3 +225,34 @@ test("a Slack app's short description stays under what Slack's editor accepts, c
   assert.equal(appManifest({ name: "Neo", personality: "" }).display_information.description, "Neo, agente di Cora");
 });
 
+test("a goal's cost is the sum of every turn that worked toward it, older turns included", () => {
+  const store = new Store(tempHome());
+  const save = (id, goal, tokensIn, tokensOut, steps, at) => store.saveTrace({ id, agentId: "ag_goals", kind: "chat", channelId: "web-ag_goals", model: "m", startedAt: at, endedAt: at, status: "done", steps, dropped: 0, prompt: "", output: "", error: "", tokensIn, tokensOut, goal });
+  save("t1", "Report pronto", 100, 10, [], "2026-11-01T10:00:00.000Z");
+  save("t2", "Report pronto", 50, 5, [], "2026-11-01T11:00:00.000Z");
+  // A turn from before goals had a column: its goal is read back from its own notes, the last one winning.
+  save("t3", "", 30, 3, [{ type: "note", text: "Obiettivo: Bozza inviata" }, { type: "note", text: "Obiettivo aggiornato su quello che hanno detto: Bozza inviata a Sam" }], "2026-11-02T09:00:00.000Z");
+  save("t4", "", 7, 1, [{ type: "note", text: "Controllo obiettivo: raggiunto" }], "2026-11-02T10:00:00.000Z");
+  store.backfillGoals();
+  assert.deepEqual(store.goalUsage("ag_goals").map((item) => [item.goal, item.turns, item.tokensIn, item.tokensOut, item.status]),
+    [["Bozza inviata a Sam", 1, 30, 3, "done"], ["Report pronto", 2, 150, 15, "done"]]);
+  assert.deepEqual(store.traces("ag_goals", 10, { goal: "Report pronto" }).map((trace) => trace.id), ["t2", "t1"]);
+  store.close();
+});
+
+test("the brain keeps no secret: credential shapes and values after a secret's word go, names and ordinary words stay", () => {
+  const cases = [
+    ["la secret cfjitqet62m7 è stata consegnata", "la secret [segreto omesso] è stata consegnata"],
+    ["il bot usa xoxb-1234567890-abcdefgh", "il bot usa [segreto omesso]"],
+    ["password: Hunter22!", "password: [segreto omesso]!"],
+    ["api key=AbC123xyz789", "api key=[segreto omesso]"],
+    ["sk-ant-api03-abcdefgh123 nel file", "[segreto omesso] nel file"],
+    ["in hush come CORA_SESSION_KEY", "in hush come CORA_SESSION_KEY"],
+    ["la chiave DeepSeek è la stessa", "la chiave DeepSeek è la stessa"],
+    ["Token usati: 12345678", "Token usati: 12345678"],
+    ["token per goal", "token per goal"],
+    ["la segretaria2026 arriva", "la segretaria2026 arriva"],
+    ["Il token: tk93hd82ks01.", "Il token: [segreto omesso]."],
+  ];
+  for (const [text, expected] of cases) assert.equal(redactSecrets(text), expected, text);
+});

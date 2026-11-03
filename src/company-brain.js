@@ -24,6 +24,20 @@ export function searchText(...parts) {
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim().slice(0, 20000);
 }
 
+/**
+ * What looks like a credential, taken out of anything the brain keeps: every
+ * agent reads the brain, so a secret has no place in it (its name in hush is
+ * fine). Tokens by their known shapes, and any value of letters and digits
+ * that follows "secret", "password", "token", "chiave" and the like.
+ */
+const SECRET_SHAPES = /\b(?:xox[abprs]-|xapp-|sk-(?:ant-|proj-)?|sk_live_|rk_live_|pk_live_|ghp_|gho_|ghs_|github_pat_|glpat-|AKIA|AIza|hf_)[A-Za-z0-9_-]{8,}/g;
+const SECRET_AFTER_WORD = /\b(secret|password|passwd|pwd|token|api[ _-]?key|chiave|segreto|passphrase)\b(\s*(?:[:=]|è|is)?\s*[`'"«]?)(?=[A-Za-z0-9_\-./+=]*\d)(?=[A-Za-z0-9_\-./+=]*[A-Za-z])[A-Za-z0-9_\-./+=]{7,}[A-Za-z0-9_+=-]/gi;
+export const SECRET_MARK = "[segreto omesso]";
+
+export function redactSecrets(text) {
+  return String(text || "").replace(SECRET_SHAPES, SECRET_MARK).replace(SECRET_AFTER_WORD, (match, word, gap) => `${word}${gap}${SECRET_MARK}`);
+}
+
 export function slugify(text) {
   return String(text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
     .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/, "");
@@ -162,16 +176,64 @@ export class CompanyBrain {
 
   get enabled() { return Boolean(this.url); }
 
+  /**
+   * The agents' shared memories belong to the brain once the librarian has read
+   * them: from then on agents no longer get them as memories. Until then (or
+   * while the database is down at start) they keep them.
+   */
+  get holdsShared() { return this.enabled && this.sharedImported === true; }
+
   async open() {
     const db = await openBrainDb(this.url);
     try {
       await db.exec(SCHEMA);
+      const [row] = await db.query("SELECT value FROM brain_state WHERE key = 'sharedImported'");
+      this.sharedImported = row?.value === true;
+      const [scrubbed] = await db.query("SELECT value FROM brain_state WHERE key = 'secretsScrubbed'");
+      if (!scrubbed) await this.scrubSecrets(db);
     } catch (error) {
       await db.close().catch(() => {});
       throw error;
     }
     this.db = db;
     return db;
+  }
+
+  /**
+   * Once, for a brain written before secrets were kept out of it: what looks
+   * like a credential goes from pages, revisions, notes and the searchable
+   * chats. The chats themselves keep the original in Cora's own archive.
+   */
+  async scrubSecrets(db = this.db) {
+    const changed = { pages: 0, revisions: 0, notes: 0, chunks: 0 };
+    for (const row of await db.query("SELECT id, title, summary, body FROM brain_pages")) {
+      const [title, summary, body] = [row.title, row.summary, row.body].map(redactSecrets);
+      if (title === row.title && summary === row.summary && body === row.body) continue;
+      await db.query("UPDATE brain_pages SET title = $2, summary = $3, body = $4, search = $5 WHERE id = $1", [row.id, title, summary, body, searchText(title, summary, body)]);
+      changed.pages += 1;
+    }
+    for (const row of await db.query("SELECT id, title, summary, body, note, conflict, sources FROM brain_revisions")) {
+      const [title, summary, body, note, conflict] = [row.title, row.summary, row.body, row.note, row.conflict].map(redactSecrets);
+      const before = Array.isArray(row.sources) ? row.sources : JSON.parse(row.sources || "[]");
+      const sources = before.map((source) => (source?.quote ? { ...source, quote: redactSecrets(source.quote) } : source));
+      if (title === row.title && summary === row.summary && body === row.body && note === row.note && conflict === row.conflict && JSON.stringify(sources) === JSON.stringify(before)) continue;
+      await db.query("UPDATE brain_revisions SET title = $2, summary = $3, body = $4, note = $5, conflict = $6, sources = $7 WHERE id = $1", [row.id, title, summary, body, note, conflict, JSON.stringify(sources)]);
+      changed.revisions += 1;
+    }
+    for (const row of await db.query("SELECT id, text FROM brain_notes")) {
+      const text = redactSecrets(row.text);
+      if (text === row.text) continue;
+      await db.query("UPDATE brain_notes SET text = $2 WHERE id = $1", [row.id, text]);
+      changed.notes += 1;
+    }
+    for (const row of await db.query("SELECT id, author, text FROM brain_chunks")) {
+      const text = redactSecrets(row.text);
+      if (text === row.text) continue;
+      await db.query("UPDATE brain_chunks SET text = $2, search = $3 WHERE id = $1", [row.id, text, searchText(row.author || "", text)]);
+      changed.chunks += 1;
+    }
+    await db.query("INSERT INTO brain_state (key, value) VALUES ('secretsScrubbed', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [JSON.stringify({ at: new Date().toISOString(), ...changed })]);
+    return changed;
   }
 
   async q(sql, params = []) {
@@ -194,6 +256,7 @@ export class CompanyBrain {
 
   async setState(key, value) {
     await this.q("INSERT INTO brain_state (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [key, JSON.stringify(value)]);
+    if (key === "sharedImported") this.sharedImported = value === true;
   }
 
   /* ---------- embeddings ---------- */
@@ -234,6 +297,35 @@ export class CompanyBrain {
     return { ...pageRow(row), revisions: revisions.map(revisionRow) };
   }
 
+  /**
+   * The brain as a map: the live pages, and what ties them. A `link` is a
+   * [[slug]] in a page's text; a `mention` is a page's title named in another
+   * page's text without the link (titles of four letters or more, whole words).
+   * One edge per pair, the link winning over the mention.
+   */
+  async graph({ limit = 400 } = {}) {
+    const rows = await this.q(`SELECT p.slug, p.kind, p.title, p.summary, p.body, p.updated_at,
+        (SELECT count(*) FROM brain_revisions r WHERE r.page_id = p.id AND r.review = ANY($1::text[])) AS pending
+      FROM brain_pages p WHERE p.status = 'live' ORDER BY p.updated_at DESC LIMIT $2`, [OPEN_REVIEWS, limit]);
+    const slugs = new Set(rows.map((row) => row.slug));
+    const edges = new Map();
+    const add = (source, target, kind) => {
+      if (source === target) return;
+      const key = [source, target].sort().join(" ");
+      if (!edges.has(key) || (kind === "link" && edges.get(key).kind === "mention")) edges.set(key, { source, target, kind });
+    };
+    const names = rows.map((row) => ({ slug: row.slug, name: searchText(row.title) })).filter((item) => item.name.length >= 4);
+    for (const row of rows) {
+      for (const [, slug] of String(row.body).matchAll(/\[\[([a-z0-9-]{2,60})\]\]/g)) if (slugs.has(slug)) add(row.slug, slug, "link");
+      const text = ` ${searchText(row.summary, row.body)} `;
+      for (const item of names) if (item.slug !== row.slug && text.includes(` ${item.name} `)) add(row.slug, item.slug, "mention");
+    }
+    return {
+      nodes: rows.map((row) => ({ slug: row.slug, kind: row.kind, title: row.title, summary: row.summary, pending: Number(row.pending || 0), updatedAt: iso(row.updated_at) })),
+      edges: [...edges.values()],
+    };
+  }
+
   async stats() {
     const [row] = await this.q(`SELECT
       (SELECT count(*) FROM brain_pages WHERE status = 'live') AS pages,
@@ -253,10 +345,13 @@ export class CompanyBrain {
     const clean = {
       slug: slugify(slug || title),
       kind: BRAIN_KINDS.includes(kind) ? kind : "topic",
-      title: String(title || "").replace(/\s+/g, " ").trim().slice(0, 120),
-      summary: String(summary || "").replace(/\s+/g, " ").trim().slice(0, 400),
-      body: String(body || "").trim().slice(0, BODY_LIMIT),
+      title: redactSecrets(title).replace(/\s+/g, " ").trim().slice(0, 120),
+      summary: redactSecrets(summary).replace(/\s+/g, " ").trim().slice(0, 400),
+      body: redactSecrets(body).trim().slice(0, BODY_LIMIT),
     };
+    note = redactSecrets(note);
+    conflict = redactSecrets(conflict);
+    sources = sources.map((source) => (source?.quote ? { ...source, quote: redactSecrets(source.quote) } : source));
     if (clean.slug.length < 2 || !clean.title) throw new Error("una pagina ha bisogno di un titolo");
     const reviewState = conflict ? "flagged" : review;
     const result = await this.transaction(async (tx) => {
@@ -377,7 +472,7 @@ export class CompanyBrain {
     let added = 0;
     for (const item of items) {
       const rows = await this.q(`INSERT INTO brain_chunks (id, source, channel_id, at, author, text, search) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING RETURNING id`,
-        [item.id, item.source, item.channelId || "", item.at ? new Date(item.at) : null, item.author || "", String(item.text).slice(0, 4000), searchText(item.author || "", item.text)]);
+        [item.id, item.source, item.channelId || "", item.at ? new Date(item.at) : null, item.author || "", redactSecrets(item.text).slice(0, 4000), searchText(item.author || "", redactSecrets(item.text))]);
       added += rows.length;
     }
     const model = this.embedModel();
