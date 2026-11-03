@@ -561,7 +561,7 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .conn-section { display: grid; gap: 10px; }
 .conn-section + .conn-section { margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--line); }
 .conn-section > .muted { margin: -4px 0 2px; font-size: 13px; }
-.conn .provider-key { padding: 0; border: 0; background: none; max-width: 620px; }
+.conn .provider-key { padding: 0; border: 0; background: none; }
 /* The page already names the provider: its picker keeps only the account's status. */
 .conn .subscription-head .subscription-mark, .conn .subscription-head > .grow { display: none; }
 .conn .subscription-head:not(:has(> :not(.subscription-mark, .grow))) { display: none; }

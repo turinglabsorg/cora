@@ -3980,14 +3980,18 @@ function connectionsPanel() {
         else if (provider !== "typesafe" && provider !== "soniox") S.data.providers[provider] = true;
         S.data.keys = { ...S.data.keys, [provider]: true };
         drawNav();
-        status.replaceChildren(icon("check"), tr("Configurata"));
-        status.className = "badge on";
+        const [text, cls, name] = badgeFor(state());
+        status.replaceChildren(icon(name), text);
+        status.className = `badge${cls ? ` ${cls}` : ""}`;
         key.placeholder = tr("Incolla una nuova chiave per sostituirla");
         save.lastChild.textContent = tr("Aggiorna chiave");
       }
       save.disabled = false;
     } });
-    const status = badge(configured ? "Configurata" : "Da configurare", configured ? "on" : "", configured ? "check" : "key");
+    // The page says what the list says: a key, a local Ollama or a missing program, not only "is there a key".
+    const state = () => keyState(provider);
+    const badgeFor = ([led, line]) => [raw(line), led === "on" ? "on" : led === "warn" ? "warn" : "", led === "on" ? "check" : led === "warn" ? "alert" : "key"];
+    const status = badge(...badgeFor(state()));
     key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
     const cloud = S.data.ollamaCloud || {};
     const about = provider === "typesafe" ? docStatus()
