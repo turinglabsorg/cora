@@ -53,6 +53,7 @@ export class Discord extends EventEmitter {
     this.ownMessageIds = new Set();
     this.ownWebhookIds = new Set();
     this.ws = null;
+    this.attempt = 0;
     this.sessionId = null;
     this.resumeUrl = null;
     this.seq = null;
@@ -154,12 +155,19 @@ export class Discord extends EventEmitter {
     clearTimeout(this.firstBeat);
     clearInterval(this.heartbeat);
     clearTimeout(this.reconnectTimer);
-    try { this.ws?.close(1000); } catch {}
+    // The socket is let go before it closes: its close belongs to a connection that is over, and must not
+    // reconnect a client started again meanwhile. A connect still waiting for its address is dropped too.
+    this.attempt += 1;
+    const ws = this.ws;
+    this.ws = null;
+    try { ws?.close(1000); } catch {}
+    if (["connecting", "ready", "reconnecting"].includes(this.state)) this.setState("stopped");
   }
 
   async connect() {
     if (this.stopped) return;
     const token = this.token;
+    const attempt = this.attempt;
     this.setState("connecting");
     let base = this.sessionId && this.resumeUrl ? this.resumeUrl : this.gatewayUrl;
     if (!base) {
@@ -169,7 +177,7 @@ export class Discord extends EventEmitter {
       }
       base = gateway.url;
     }
-    if (this.stopped || token !== this.token) return;
+    if (this.stopped || token !== this.token || attempt !== this.attempt) return;
     const url = new URL(base);
     url.searchParams.set("v", "10");
     url.searchParams.set("encoding", "json");

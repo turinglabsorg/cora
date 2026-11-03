@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { asksToStop, claimsWork, cleanReply, deliveryNote } from "../src/brain.js";
-import { Discord, splitMessage } from "../src/discord.js";
+import { DIRECT_MESSAGE_INTENTS, Discord, LISTENING_INTENTS, splitMessage } from "../src/discord.js";
 import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
 import { appManifest } from "../src/slack-bots.js";
@@ -11,7 +11,7 @@ import { SHARED, Store, ftsQuery } from "../src/store.js";
 import { Traces } from "../src/traces.js";
 import { redactSecrets } from "../src/company-brain.js";
 import { panelHarness } from "./panel.js";
-import { tempHome } from "./helpers.js";
+import { fakeDiscord, sleep, tempHome, waitFor } from "./helpers.js";
 
 describe("cron", () => {
   test("parses ranges, lists and steps", () => {
@@ -75,6 +75,25 @@ describe("a final reply that only says a message went out", () => {
       assert.ok(!deliveryNote(text), `«${text}» is not`);
     }
   });
+});
+
+test("a bot that asks to hear more reconnects once: the old connection's close does not start another", async () => {
+  const fake = await fakeDiscord();
+  fake.state.botUsers.set("vale-token", { id: "600000000000000031", username: "Vale" });
+  const client = new Discord({ token: "vale-token", apiBase: fake.url, intents: DIRECT_MESSAGE_INTENTS });
+  try {
+    client.start();
+    await waitFor(() => client.state === "ready", { what: "the first connection" });
+    client.useIntents(LISTENING_INTENTS);
+    await waitFor(() => client.state === "ready" && fake.state.identifies === 2, { what: "the second connection" });
+    // A stray reconnect would come a second later, resuming on a socket of its own.
+    await sleep(1500);
+    assert.equal(fake.state.sockets.size, 1, "one connection, the one identified with the new intents");
+    assert.equal(fake.state.identifies, 2);
+  } finally {
+    client.stop();
+    await fake.close();
+  }
 });
 
 describe("posting as an agent through the plain bot", () => {
