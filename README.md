@@ -178,9 +178,11 @@ Agents on `ollama/` run on Cora's own agent loop, the Cora harness; agents on Cl
 
 ## Hosted: usecora.space
 
-`cloud/` is the hosted side: a small service (Node, no dependencies, SQLite in `~/.cora-cloud`) for a domain where each space is one Cora.
+The usecora.space marketing landing is maintained separately in a private repository. It is not included here.
 
-- The apex (`usecora.space`) is the landing and the only place people sign in, with Google (OpenID Connect) or GitHub (OAuth), both with PKCE and a state bound to the browser. One account can have both identities.
+`cloud/` is the open-source identity and routing service: a small service (Node, no dependencies, SQLite in `~/.cora-cloud`) for a domain where each space is one Cora.
+
+- The apex serves a minimal entry page and is the only place people sign in, with Google (OpenID Connect) or GitHub (OAuth), both with PKCE and a state bound to the browser. One account can have both identities.
 - `<space>.usecora.space` is routed by its Host to that space's Cora (requests, event streams and the desktop's WebSockets pass through).
 - Entering a space goes through `/go/<space>`: the cloud signs a one-minute, single-use pass with its Ed25519 key, and the space's Cora (`/auth/cloud`) checks it with the public key alone, then opens its usual session. With `CORA_CLOUD_URL`, `CORA_CLOUD_KEY` (the public key, `cloud/cli.js public-key`) and `CORA_CLOUD_SPACE` set, a Cora has no password login; `bin/login-link.mjs` makes a one-time link on the host for when the cloud cannot be reached.
 - Before sign-in opens, the landing takes waitlist emails (`cloud/cli.js waitlist` lists them). People without a space can ask for one from their account page; spaces are added by hand: `cloud/cli.js space add <name> --upstream <url> --google <email> --github <login>`.

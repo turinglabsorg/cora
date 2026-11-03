@@ -170,12 +170,10 @@ describe("usecora.space", () => {
   test("the apex is the landing; www goes to the apex; an unknown space and an unknown host are not found", async () => {
     const landing = await request("/");
     assert.equal(landing.status, 200);
-    assert.match(landing.body, /AI agents that live/);
-    assert.match(landing.body, /Bring your own<\/em> intelligence/);
-    assert.match(landing.body, /<section class="band company-brain" id="brain">[\s\S]*One brain for the whole company\.[\s\S]*Morning review/);
+    assert.match(landing.body, /Cora cloud/);
+    assert.doesNotMatch(landing.body, /data-orb|company-brain|hero-title/, "marketing landing is maintained privately");
     assert.match(landing.body, /<a href="https:\/\/digitaloracles\.com">Made by DigitalOracles LTD<\/a>/);
     assert.doesNotMatch(landing.body, /Made by Turing Labs/);
-    assert.doesNotMatch(landing.body, /href="[^"]*\/(login|account)/, "the landing has no sign-in until it opens");
     assert.match(landing.headers["content-security-policy"], /frame-ancestors 'none'/);
     assert.match(landing.headers["content-security-policy"], /script-src 'self'/);
     assert.equal((await request("/assets/cloud.css")).status, 200);

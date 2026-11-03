@@ -111,7 +111,7 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
   // Where a space answers: its own domain when it is installed somewhere else, otherwise its name here.
   const spaceOrigin = (space) => (typeof space === "string" ? store.space(space)?.publicUrl : space?.publicUrl) || `${origin.protocol}//${typeof space === "string" ? space : space?.slug}.${origin.host}`;
   const spaceAudience = (space) => new URL(spaceOrigin(space)).hostname;
-  const version = createHash("sha256").update(readFileSync(join(ASSETS, "cloud.css"))).update(readFileSync(join(ASSETS, "cloud.js"))).digest("hex").slice(0, 10);
+  const version = createHash("sha256").update(readFileSync(join(ASSETS, "cloud.css"))).digest("hex").slice(0, 10);
   views.configure({ origin: origin.origin, version });
   const policy = CSP.replace("script-src 'self'", `script-src 'self' ${origin.origin}`).replace("style-src 'self'", `style-src 'self' ${origin.origin}`);
 
