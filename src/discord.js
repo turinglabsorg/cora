@@ -475,17 +475,11 @@ export class Discord extends EventEmitter {
     return sent;
   }
 
-  /** Align this bot's Discord profile with the agent's name and avatar. */
-  async syncProfile({ username, avatarUrl }) {
+  /** Align this bot's Discord profile with the agent's name and picture (a PNG). */
+  async syncProfile({ username, image = null }) {
     const patch = {};
     if (username && this.user && this.user.username !== username) patch.username = username;
-    if (avatarUrl) {
-      const response = await fetch(avatarUrl, { signal: AbortSignal.timeout(15000) });
-      if (response.ok) {
-        const type = response.headers.get("content-type") || "image/png";
-        patch.avatar = `data:${type.split(";")[0]};base64,${Buffer.from(await response.arrayBuffer()).toString("base64")}`;
-      }
-    }
+    if (image) patch.avatar = `data:image/png;base64,${image.toString("base64")}`;
     if (!Object.keys(patch).length) return null;
     const user = await this.request("PATCH", "/users/@me", { body: patch });
     this.user = { ...this.user, ...user };

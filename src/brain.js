@@ -25,6 +25,21 @@ const NUDGES = 4;
 const TALK_TOOLS = new Set(["say", "notify", "list_channels", "ask_owner"]);
 /** Tools that look things up: they can back "ho controllato", never "ho creato". */
 const LOOKUP_TOOLS = new Set(["list_routines", "routine_history", "recall", "screenshot", "brain_search", "brain_page"]);
+/**
+ * What an agent says of itself, agreed with its gender: Italian says "acceso" or
+ * "accesa", and a neutral agent picks sentences that ask for neither.
+ */
+const SELF = {
+  "": { tied: "non sei legato a nessuna piattaforma", on: "Sei sempre acceso", plain: "sii te stesso, curioso e diretto", line: "" },
+  male: { tied: "non sei legato a nessuna piattaforma", on: "Sei sempre acceso", plain: "sii te stesso, curioso e diretto",
+    line: "Sei di genere maschile: quando parli di te usa il maschile (\"sono pronto\", \"sono stato\")." },
+  female: { tied: "non sei legata a nessuna piattaforma", on: "Sei sempre accesa", plain: "sii te stessa, curiosa e diretta",
+    line: "Sei di genere femminile: quando parli di te usa il femminile (\"sono pronta\", \"sono stata\")." },
+  neutral: { tied: "nessuna piattaforma ti lega", on: "Sei sempre in ascolto", plain: "sii semplicemente te, con curiosità e franchezza",
+    line: "Non hai un genere: quando parli di te scegli frasi che non ne chiedono uno (\"ci sono\", \"ho finito\", invece di \"sono pronto\" o \"sono pronta\")." },
+};
+// How a colleague is spoken of, next to its name in the list of the others.
+const PRONOUNS = { male: "lui", female: "lei", neutral: "neutro" };
 const BRAIN_KIND_LABELS = { client: "cliente", project: "progetto", person: "persona", decision: "decisione", procedure: "procedura", topic: "tema" };
 /** A task's goal: one line, and how many times the agent may be sent back to meet it. */
 const GOAL_CHARS = 300;
@@ -221,11 +236,12 @@ export class Brain {
   systemPrompt(agent, { place, computer, withoutComputer = false }) {
     const others = this.store.agents()
       .filter((other) => other.id !== agent.id && other.enabled)
-      .map((other) => `- ${other.name}: ${other.personality.split("\n")[0].slice(0, 140) || "(nessuna descrizione)"}`)
+      .map((other) => `- ${other.name}${PRONOUNS[other.gender] ? ` (${PRONOUNS[other.gender]})` : ""}: ${other.personality.split("\n")[0].slice(0, 140) || "(nessuna descrizione)"}`)
       .join("\n");
+    const self = SELF[agent.gender] || SELF[""];
     const sections = [
-      `Sei ${agent.name}. Fai parte di Cora, una squadra di agenti AI che vive dove decide il tuo proprietario: non sei legato a nessuna piattaforma. ${place ? `In questo momento parlate ${place}.` : ""} Sei sempre acceso: senti tutto quello che si dice e puoi parlare con tutti.`,
-      `## Chi sei\n${agent.personality.trim() || "Non hai ancora una personalità definita: sii te stesso, curioso e diretto."}`,
+      `Sei ${agent.name}. Fai parte di Cora, una squadra di agenti AI che vive dove decide il tuo proprietario: ${self.tied}. ${place ? `In questo momento parlate ${place}.` : ""} ${self.on}: senti tutto quello che si dice e puoi parlare con tutti.${self.line ? ` ${self.line}` : ""}`,
+      `## Chi sei\n${agent.personality.trim() || `Non hai ancora una personalità definita: ${self.plain}.`}`,
       `## La tua scheda (sempre a mente)\n${agent.core.trim() || "(vuota: riempila con update_core quando sai abbastanza)"}`,
     ];
     if (others) sections.push(`## Gli altri agenti dell'istanza\nQuesto elenco non indica chi è presente nella conversazione attuale: non coinvolgere un collega soltanto perché è elencato qui. Rispondi come ${agent.name}, senza parlare a nome degli altri.\n${others}`);

@@ -197,16 +197,20 @@ export class AgentBots {
     }
   }
 
-  /** Name and avatar follow the panel; retried only when they change. */
+  /** Name and avatar follow the panel; sent again only when they change, or a while after a failure. */
   syncProfile(agent) {
     const entry = agent && this.clients.get(agent.id);
     if (!entry?.client.user) return;
-    const key = `${agent.name}|${agent.avatarUrl}`;
+    const key = `${agent.name}|${agent.avatarVersion}`;
     if (this.synced.get(agent.id) === key) return;
     this.synced.set(agent.id, key);
-    entry.client.syncProfile({ username: agent.name, avatarUrl: agent.avatarUrl })
+    entry.client.syncProfile({ username: agent.name, image: this.store.avatar(agent.id) })
       .then((user) => { if (user) this.log?.({ type: "discord", agentId: agent.id, text: "profilo del bot aggiornato" }); })
-      .catch((error) => this.log?.({ type: "warning", agentId: agent.id, text: `profilo del bot: ${error.message}` }));
+      .catch((error) => {
+        // Tried again in a while: Discord allows only a few new pictures an hour.
+        setTimeout(() => { if (this.synced.get(agent.id) === key) this.synced.delete(agent.id); }, 10 * 60 * 1000).unref?.();
+        this.log?.({ type: "warning", agentId: agent.id, text: `profilo del bot: ${error.message}` });
+      });
   }
 
   stop() {

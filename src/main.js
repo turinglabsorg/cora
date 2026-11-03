@@ -112,6 +112,8 @@ export function startCora(overrides = {}) {
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
   // Where the owner reviews the brain: the address people reach this Cora on.
   const instanceUrl = cfg.publicHost ? `https://${cfg.publicHost}` : cfg.cloudUrl && cfg.cloudSpace ? `https://${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
+  // The agents' pictures are served from here, so Slack and Discord fetch them from this address.
+  store.setAvatarBase(instanceUrl);
   const librarian = new Librarian({
     brain: companyBrain, store, llm, log: activity, traces, timezone: cfg.timezone,
     channelLabel: (id) => brain.channelLabel(id),

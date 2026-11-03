@@ -26,7 +26,7 @@ The admin panel is a **radio studio mixing desk**. Each agent is a channel strip
 | `--ink` | `#1d1b18` | teletype text, text on amber buttons |
 | `--kind-client` … `--kind-topic` | amber `#f2a93b`, blue `#6fa8dc`, green `#8cc56a`, rose `#e0789a`, lavender `#b39ddb`, teal `#5cbfb0` | the six kinds of brain page (client, project, person, decision, procedure, topic): the nodes of the brain map and their legend |
 
-Each agent also has its own `color` (stored on the agent, default `#e8a33d`), used for its avatar ring and its name in the feed.
+Each agent also has its own `color` (stored on the agent, default `#e8a33d`), used for its picture and its name in the feed. Cora draws each agent's picture like the mark: a circle and a ring as lines in the agent's color on `#070707`, the ring's far half faint, two big eyes; the seed varies where the ring sits (visor, cap, collar), its tilt and the eyes. A drawn picture carries its own circle, so it shows with no ring around it (`.avatar.drawn`); an uploaded one gets the color ring.
 
 ## Typography
 
@@ -71,7 +71,7 @@ The panel behaves like an installed app (web manifest, apple-touch-icon, no pinc
 - **Manifest block**: for a provider that creates its apps from a document (Slack), a row with «Copia il manifest» and the link that opens the provider, and a `<details>` holding the JSON in the mono font. Never make someone retype what a paste can do.
 
 - **ON AIR lamp** (`.onair`): pill in the top bar. Lit red with glow when Discord is `ready`, amber blinking while connecting, dark when off/error (error text in the tooltip and the dashboard).
-- **Channel strip** (`.strip`): agent card on the dashboard. Top: monitor (desktop thumbnail, 16:10, scanline overlay, "SPENTO" when off). Middle: avatar with color ring, name (display font), model (mono). Bottom: horizontal fader showing chattiness, LEDs (`.led` on/off/warn) for *attivo*, *desktop*, *strumenti*. Whole strip is a link to the agent.
+- **Channel strip** (`.strip`): agent card on the dashboard. Top: monitor (desktop thumbnail, 16:10, scanline overlay, "SPENTO" when off). Middle: avatar (its color ring, or the drawn picture's own circle), name (display font), model (mono). Bottom: horizontal fader showing chattiness, LEDs (`.led` on/off/warn) for *attivo*, *desktop*, *strumenti*. Whole strip is a link to the agent.
 - **Fader** (`input[type=range].fader`): track with tick marks, amber cap. Used for chattiness.
 - **Teletype** (`.teletype`): paper strip with perforation edges, mono text, newest on top, each line `time · who · what`; tool calls in blue, errors in red, agent messages in the agent's color.
 - **Tabs** (`.tabs`): hardware buttons; active one is lit amber with a small LED dot. Scroll horizontally on phones.

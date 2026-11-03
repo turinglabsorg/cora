@@ -7,6 +7,8 @@ import { toMrkdwn } from "../src/slack.js";
 import { appManifest } from "../src/slack-bots.js";
 import { mentions } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
+import { drawAvatar } from "../src/avatar.js";
+import { encodePng, pngSize } from "../src/png.js";
 import { SHARED, Store, ftsQuery } from "../src/store.js";
 import { Traces } from "../src/traces.js";
 import { redactSecrets } from "../src/company-brain.js";
@@ -230,9 +232,47 @@ describe("SQLite store", () => {
   test("rejects invalid input with a 400", () => {
     const store = new Store(tempHome());
     assert.throws(() => store.createAgent({ name: "Discord Bot" }), (error) => error.status === 400);
-    assert.throws(() => store.createAgent({ name: "x", avatarUrl: "http://insecure" }), (error) => error.status === 400);
     store.close();
   });
+
+  test("an agent's picture is Cora's drawing, at an address that changes with it, until one of its own is kept", () => {
+    const home = tempHome();
+    const store = new Store(home);
+    const agent = store.createAgent({ name: "Pia", color: "#6fa8dc", avatarUrl: "https://api.dicebear.com/9.x/notionists/png?seed=Pia" });
+    assert.equal(agent.avatarUrl, "", "no public address, no address for Slack or Discord; an outside link is not taken");
+    assert.deepEqual(pngSize(store.avatar(agent.id)), { width: 512, height: 512 });
+
+    store.setAvatarBase("https://pia.usecora.test/");
+    const drawn = store.agent(agent.id);
+    assert.equal(drawn.avatarUrl, `https://pia.usecora.test/avatars/${agent.id}.png?v=${drawn.avatarVersion}`);
+    assert.equal(store.updateAgent(agent.id, { personality: "calma" }).avatarUrl, drawn.avatarUrl, "what the picture is not made of leaves it alone");
+    const recoloured = store.updateAgent(agent.id, { color: "#e5533d" });
+    assert.notEqual(recoloured.avatarVersion, drawn.avatarVersion, "a new colour is a new picture");
+    assert.notEqual(store.updateAgent(agent.id, { avatarSeed: "altra-faccia" }).avatarVersion, recoloured.avatarVersion, "and so is a new face");
+
+    const own = encodePng(512, 512, Buffer.alloc(512 * 512 * 4, 200));
+    const uploaded = store.setAvatarImage(agent.id, own);
+    assert.ok(store.avatar(agent.id).equals(own));
+    assert.match(uploaded.avatarUpload, /^[0-9a-f]{16}$/);
+    store.close();
+
+    const again = new Store(home);
+    assert.ok(again.avatar(agent.id).equals(own), "an uploaded picture survives a restart");
+    assert.equal(again.setAvatarImage(agent.id, null).avatarUpload, "");
+    assert.ok(!again.avatar(agent.id).equals(own), "and gives way to the drawing when dropped");
+    assert.ok(again.deleteAgent(agent.id));
+    assert.equal(again.avatar(agent.id), null);
+    again.close();
+  });
+});
+
+test("Cora draws each agent its own face: the same every time, different for another seed or colour", () => {
+  const one = drawAvatar({ seed: "ag_000000000001", color: "#6fa8dc", size: 96 });
+  assert.deepEqual(pngSize(one), { width: 96, height: 96 });
+  assert.ok(one.equals(drawAvatar({ seed: "ag_000000000001", color: "#6fa8dc", size: 96 })));
+  assert.ok(!one.equals(drawAvatar({ seed: "ag_000000000002", color: "#6fa8dc", size: 96 })));
+  assert.ok(!one.equals(drawAvatar({ seed: "ag_000000000001", color: "#e5533d", size: 96 })));
+  assert.equal(pngSize(Buffer.from("not a png")), null);
 });
 
 test("a Slack app's short description stays under what Slack's editor accepts, cut at a word", () => {

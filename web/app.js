@@ -263,9 +263,14 @@ function switchInput(name, label, checked, hint) {
     h("span", { class: "switch-text" }, label, hint ? h("small", {}, hint) : null));
 }
 
+/** An agent's picture, as Cora serves it: drawn for the agent, or the one uploaded. */
+const avatarSrc = (agent) => `/avatars/${encodeURIComponent(agent.id)}.png?v=${encodeURIComponent(agent.avatarVersion || "")}`;
+
 function avatar(agent, size = "") {
-  const el = h("span", { class: `avatar${size ? ` ${size}` : ""}`, vars: { "--ring": agent.color || "#f2a93b" } });
-  if (agent.avatarUrl) el.append(h("img", { src: agent.avatarUrl, alt: "", loading: "lazy", referrerpolicy: "no-referrer" }));
+  // A picture Cora drew has its own circle in the agent's colour: the ring is for an uploaded one.
+  const drawn = agent.id && !agent.avatarUpload ? " drawn" : "";
+  const el = h("span", { class: `avatar${size ? ` ${size}` : ""}${drawn}`, vars: { "--ring": agent.color || "#f2a93b" } });
+  if (agent.id) el.append(h("img", { src: avatarSrc(agent), alt: "", loading: "lazy" }));
   else el.append((agent.name || "?").slice(0, 2));
   return el;
 }
@@ -1672,6 +1677,71 @@ function armedButton(label, armedLabel, { icon: name = "trash", onconfirm }) {
   return button;
 }
 
+/** An image file cut to its centre square and drawn at 512 pixels, as a PNG: what Slack and Discord take for an icon. */
+async function squarePng(file, size = 512) {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = h("canvas", { width: size, height: size });
+  const context = canvas.getContext("2d");
+  context.imageSmoothingQuality = "high";
+  context.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size);
+  bitmap.close();
+  return canvas.toDataURL("image/png");
+}
+
+/**
+ * The agent's picture. Cora draws it from the agent's colour and a seed, and
+ * "Ridisegna" draws another face; or an image of one's own, made square here.
+ * Nothing is sent before the form is saved: `upload()` then does its part.
+ */
+function avatarPicker(agent, colorInput) {
+  const seedInput = h("input", { type: "hidden", name: "avatarSeed", value: agent.avatarSeed || (agent.id ? "" : crypto.randomUUID().slice(0, 8)) });
+  // undefined: the picture stays as it is; a data URL: a new image; null: back to the drawing.
+  let picked;
+  const img = h("img", { alt: "" });
+  const preview = h("span", { class: "avatar lg" }, img);
+  const own = () => picked || (picked === undefined && agent.avatarUpload);
+  const drawn = btn("Usa il disegno", { icon: "spark", cls: "sm ghost", onclick: () => { picked = null; show(); } });
+  const show = () => {
+    preview.style.setProperty("--ring", colorInput.value);
+    preview.classList.toggle("drawn", !own());
+    img.src = picked || (own() ? avatarSrc(agent)
+      : `/api/avatars/preview?seed=${encodeURIComponent(seedInput.value || agent.id)}&color=${encodeURIComponent(colorInput.value)}`);
+    drawn.hidden = !own();
+  };
+  const file = h("input", { type: "file", accept: "image/*", hidden: true });
+  file.addEventListener("change", async () => {
+    const chosen = file.files[0];
+    file.value = "";
+    if (!chosen) return;
+    try {
+      picked = await squarePng(chosen);
+      show();
+    } catch {
+      toast(tr("Questa immagine non si apre"), true);
+    }
+  });
+  colorInput.addEventListener("input", show);
+  show();
+  return {
+    node: h("div", { class: "field full" }, h("span", { class: "label" }, "Immagine"),
+      h("div", { class: "avatar-pick" }, preview,
+        h("div", { class: "stack-sm" },
+          h("div", { class: "avatar-actions" },
+            btn("Ridisegna", { icon: "refresh", cls: "sm", onclick: () => { seedInput.value = crypto.randomUUID().slice(0, 8); picked = null; show(); } }),
+            btn("Carica la tua", { icon: "upgrade", cls: "sm", onclick: () => file.click() }),
+            drawn),
+          h("small", {}, "La disegna Cora con il colore dell'agente. Una tua viene tagliata quadrata."))),
+      seedInput, file),
+    /** After the agent is saved: the new image, or the drawing back in place of an old one. */
+    async upload(id) {
+      if (picked) return guard(api(`/api/agents/${id}/avatar`, { method: "PUT", body: { image: picked } }), "Immagine salvata");
+      if (picked === null && agent.avatarUpload) return guard(api(`/api/agents/${id}/avatar`, { method: "DELETE" }), "Di nuovo il disegno di Cora");
+      return true;
+    },
+  };
+}
+
 /**
  * Who the agent is. The brain lives in its own tab once the agent exists; while it
  * is being created there is no tab yet, so the simple pair harness + model rides here.
@@ -1680,7 +1750,10 @@ function agentForm(agent, { only = "" } = {}) {
   const isNew = !agent.id;
   const wantsBrain = only !== "profile";
   const nameInput = h("input", { type: "text", name: "name", value: agent.name || "", required: true, maxlength: 32, placeholder: "es. Marta", autocomplete: "off" });
-  const avatarInput = h("input", { type: "url", name: "avatarUrl", value: agent.avatarUrl || "", placeholder: "https://… (png o jpg)" });
+  const colorInput = h("input", { type: "color", name: "color", value: agent.color || "#e8a33d" });
+  const picture = avatarPicker(agent, colorInput);
+  const genderInput = h("select", { name: "gender" },
+    [["", "Non indicato"], ["female", "Femminile"], ["male", "Maschile"], ["neutral", "Neutro"]].map(([value, label]) => h("option", { value, selected: (agent.gender || "") === value }, label)));
   const fader = h("input", { type: "range", class: "fader", name: "chattiness", min: 0, max: 100, value: Math.round((agent.chattiness ?? 0.5) * 100) });
   const faderValue = h("b", { class: "fader-value" }, fader.value);
   fader.addEventListener("input", () => { faderValue.textContent = fader.value; });
@@ -1712,13 +1785,9 @@ function agentForm(agent, { only = "" } = {}) {
     panel({ icon: "user", title: "Identità", hint: "Come si chiama e come appare." },
       h("div", { class: "grid2" },
         field("Nome", nameInput),
-        field("Colore", h("input", { type: "color", name: "color", value: agent.color || "#e8a33d" })),
-        h("div", { class: "field full" }, h("span", { class: "label" }, "Avatar"),
-          h("div", { class: "input-row" }, avatarInput,
-            btn("Genera", { icon: "spark", onclick: () => {
-              const seed = encodeURIComponent(nameInput.value || "cora");
-              avatarInput.value = `https://api.dicebear.com/9.x/notionists/png?seed=${seed}&size=256&backgroundColor=f2a93b,e9dfcc,8cc56a,6fa8dc`;
-            } }))))),
+        field("Colore", colorInput),
+        field("Genere", genderInput, "Come parla di sé, e la voce che gli viene data."),
+        picture.node)),
     wantsBrain ? panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
       h("div", { class: "stack-sm" },
         field("Harness", harnessPick, "Chi guida il ciclo: Cora, oppure il modello stesso."),
@@ -1738,7 +1807,7 @@ function agentForm(agent, { only = "" } = {}) {
         h("div", { class: "field" }, h("span", { class: "label" }, tr("Canali {transport}", { transport: TRANSPORTS[S.data.transport].label })), channelChips(agent.channelIds || []),
           h("small", {}, "Nessuno selezionato = li ascolta tutti.")),
         switchInput("enabled", "In onda", agent.enabled ?? true, "Spento non ascolta e non parla, da nessuna parte."))),
-    voicePanel(agent),
+    voicePanel(agent, genderInput),
     h("div", { class: "savebar" },
       isNew ? null : armedButton("Elimina", "Conferma", { onconfirm: async () => {
         if (await guard(api(`/api/agents/${agent.id}`, { method: "DELETE" }), `${agent.name} eliminato`)) {
@@ -1754,8 +1823,9 @@ function agentForm(agent, { only = "" } = {}) {
     const data = new FormData(form);
     const body = {
       name: data.get("name"),
-      avatarUrl: data.get("avatarUrl"),
+      avatarSeed: data.get("avatarSeed"),
       color: data.get("color"),
+      gender: data.get("gender"),
       chattiness: Number(data.get("chattiness")) / 100,
       channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
       enabled: form.elements.enabled.checked,
@@ -1773,6 +1843,7 @@ function agentForm(agent, { only = "" } = {}) {
     };
     const saved = await guard(isNew ? api("/api/agents", { method: "POST", body }) : api(`/api/agents/${agent.id}`, { method: "PUT", body }), isNew ? "Agente creato" : "Salvato");
     if (!saved) return;
+    await picture.upload(saved.id);
     await loadState();
     if (isNew) location.hash = `#/agent/${saved.id}/profilo`;
     else renderAgent();
@@ -1782,8 +1853,11 @@ function agentForm(agent, { only = "" } = {}) {
 
 const VOICE_LANGUAGE_NAMES = { it: "Italiano", en: "English", es: "Español", fr: "Français", de: "Deutsch", pt: "Português" };
 
-/** The agent's voice: the language it speaks, a Soniox voice heard before it is chosen, and when it answers out loud. */
-function voicePanel(agent) {
+/**
+ * The agent's voice: the language it speaks, a Soniox voice heard before it is chosen, and when it answers out loud.
+ * The voices offered follow the agent's gender, in the order the server picks the automatic one.
+ */
+function voicePanel(agent, genderInput) {
   const language = h("select", { name: "voiceLanguage" },
     h("option", { value: "", selected: !agent.voiceLanguage }, "La lingua dell'istanza"),
     Object.entries(VOICE_LANGUAGE_NAMES).map(([code, name]) => h("option", { value: code, selected: agent.voiceLanguage === code }, raw(name))));
@@ -1792,16 +1866,21 @@ function voicePanel(agent) {
   const player = h("audio", { class: "voice-preview", controls: true, hidden: true });
   let catalog = [];
   const spoken = () => language.value || S.data.settings.language || "it";
-  // The voices native in the language first, then the ones with no accent of their own.
-  const fits = () => catalog.filter((item) => !item.languages.length || item.languages.includes(spoken()))
-    .sort((a, b) => Number(b.languages.includes(spoken())) - Number(a.languages.includes(spoken())));
+  // Of the agent's gender (a neutral one takes any); native in the language first, then the ones with no accent of their own.
+  const fits = () => {
+    const gender = ["male", "female"].includes(genderInput.value) ? genderInput.value : "";
+    const own = catalog.filter((item) => !gender || item.gender === gender);
+    const native = own.filter((item) => !item.languages.length || item.languages.includes(spoken()));
+    return (native.length ? native : own.length ? own : catalog)
+      .sort((a, b) => Number(b.languages.includes(spoken())) - Number(a.languages.includes(spoken())));
+  };
   const fill = () => {
     const chosen = voice.value;
     voice.replaceChildren(h("option", { value: "" }, "Automatica"),
       fits().map((item) => h("option", { value: item.id, selected: item.id === chosen }, raw(`${item.id}${item.gender ? ` · ${item.gender}` : ""}`))));
     if (chosen && !fits().some((item) => item.id === chosen)) voice.value = "";
     const picked = catalog.find((item) => item.id === voice.value);
-    about.textContent = picked ? picked.description : tr("Automatica: la prima voce di Soniox per la sua lingua.");
+    about.textContent = picked ? picked.description : tr("Automatica: la prima voce di Soniox per la sua lingua e il suo genere.");
   };
   const listen = btn("Ascolta", { icon: "play", cls: "ghost", onclick: async () => {
     const heard = voice.value || fits()[0]?.id || catalog[0]?.id;
@@ -1818,6 +1897,8 @@ function voicePanel(agent) {
   } });
   language.addEventListener("change", fill);
   voice.addEventListener("change", fill);
+  // A voice of the other gender gives way to the automatic one.
+  genderInput.addEventListener("change", fill);
   const body = h("div", { class: "stack-sm" },
     h("div", { class: "voice-row" }, field("Lingua", language), field("Voce", voice)),
     about, h("div", { class: "voice-listen" }, listen, player));

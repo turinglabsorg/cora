@@ -916,6 +916,8 @@ export async function fakeSlack() {
     configTokens: new Set(),
     manifests: new Map(),
     icons: new Map(),
+    // The refusal the next icons get, as Slack names it ("" = accepted).
+    iconError: "",
     configCalls: [],
     rotations: 0,
   };
@@ -975,11 +977,12 @@ export async function fakeSlack() {
         state.manifests.set(params.app_id, JSON.parse(params.manifest));
         return ok(res, { app_id: params.app_id, permissions_updated: false });
       }
-      if (/^https:\/\//.test(params.url || "") && !/small/.test(params.url)) {
+      if (state.iconError) return fail(res, state.iconError);
+      if (/^https:\/\//.test(params.url || "")) {
         state.icons.set(params.app_id, params.url);
         return ok(res, {});
       }
-      return fail(res, /small/.test(params.url || "") ? "invalid_icon_size" : "icon_not_accessible");
+      return fail(res, "icon_not_accessible");
     }
     const app = appFor(req, method === "apps.connections.open" ? "app" : "bot");
     if (!app) return fail(res, "invalid_auth");

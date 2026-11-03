@@ -119,17 +119,24 @@ export class Voice {
     const model = models.find((item) => item.id === TTS_MODEL) || models[0] || { voices: [] };
     const voices = (model.voices || []).map((voice) => {
       const accent = accentOf(voice.description);
-      return { id: String(voice.id), gender: voice.gender || "", languages: voice.languages?.length ? voice.languages : accent ? [accent] : [], description: String(voice.description || "").slice(0, 200) };
+      return { id: String(voice.id), gender: String(voice.gender || "").toLowerCase(), languages: voice.languages?.length ? voice.languages : accent ? [accent] : [], description: String(voice.description || "").slice(0, 200) };
     });
     this.catalog = { at: Date.now(), voices };
     return voices;
   }
 
-  /** The agent's chosen voice, or the first one Soniox has that sounds native in that language. */
+  /**
+   * The agent's chosen voice, or one that fits it: of its gender when it has one
+   * (a neutral agent takes any), native in that language or with no accent of its
+   * own, the native ones first. The panel offers the voices in the same order.
+   */
   async voiceFor(agent, language) {
     if (agent.voice) return agent.voice;
     const voices = await this.voices();
-    return (voices.find((voice) => voice.languages.includes(language)) || voices.find((voice) => !voice.languages.length) || voices[0])?.id || "";
+    const own = ["male", "female"].includes(agent.gender) ? voices.filter((voice) => voice.gender === agent.gender) : voices;
+    const native = own.filter((voice) => !voice.languages.length || voice.languages.includes(language));
+    const pool = native.length ? native : own.length ? own : voices;
+    return (pool.find((voice) => voice.languages.includes(language)) || pool[0])?.id || "";
   }
 
   /**

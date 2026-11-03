@@ -8,6 +8,7 @@ import { passKeys, signPass } from "../src/pass.js";
 import { Discord, LISTENING_INTENTS } from "../src/discord.js";
 import { loginLinkToken } from "../src/web.js";
 import { SHARED, Store } from "../src/store.js";
+import { encodePng, pngSize } from "../src/png.js";
 import { panelHarness } from "./panel.js";
 import { identityCli } from "./subscription-fixtures.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
@@ -1480,6 +1481,34 @@ describe("agents in Discord", () => {
     await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
   });
 
+  test("Cora draws each agent's picture, open to anyone who fetches it, and keeps one of the owner's own in its place", async () => {
+    const created = (await call("/api/agents", { method: "POST", body: { name: "Lumi", color: "#8cc56a", model: "ollama/test-model", chattiness: 0, tools: false } })).data;
+    try {
+      const picture = await fetch(`${base}/avatars/${created.id}.png?v=${created.avatarVersion}`);
+      assert.equal(picture.status, 200, "no session needed: Slack and Discord fetch it");
+      assert.equal(picture.headers.get("content-type"), "image/png");
+      assert.match(picture.headers.get("cache-control"), /immutable/);
+      assert.deepEqual(pngSize(Buffer.from(await picture.arrayBuffer())), { width: 512, height: 512 });
+      assert.match((await fetch(`${base}/avatars/${created.id}.png?v=old`)).headers.get("cache-control"), /no-cache/, "an old address is not kept for good");
+      assert.equal((await fetch(`${base}/avatars/ag_000000000000.png`)).status, 404);
+      assert.equal((await call("/api/avatars/preview?seed=x&color=%23ffffff", { auth: false })).status, 401, "drawing on request is for the panel only");
+      assert.equal((await call("/api/avatars/preview?seed=x&color=%23ffffff")).headers.get("content-type"), "image/png");
+
+      const png = (size) => `data:image/png;base64,${encodePng(size, size, Buffer.alloc(size * size * 4, 90)).toString("base64")}`;
+      assert.match((await call(`/api/agents/${created.id}/avatar`, { method: "PUT", body: { image: "data:image/jpeg;base64,AAAA" } })).data.error, /PNG/);
+      assert.match((await call(`/api/agents/${created.id}/avatar`, { method: "PUT", body: { image: png(256) } })).data.error, /tra 512 e 2000/);
+      const own = await call(`/api/agents/${created.id}/avatar`, { method: "PUT", body: { image: png(512) } });
+      assert.equal(own.status, 200);
+      assert.notEqual(own.data.avatarVersion, created.avatarVersion, "a new picture, a new address");
+      const served = Buffer.from(await (await fetch(`${base}/avatars/${created.id}.png?v=${own.data.avatarVersion}`)).arrayBuffer());
+      assert.equal(served.toString("base64"), png(512).split(",")[1]);
+      const back = await call(`/api/agents/${created.id}/avatar`, { method: "DELETE" });
+      assert.equal(back.data.avatarVersion, created.avatarVersion, "back to the very same drawing");
+    } finally {
+      await call(`/api/agents/${created.id}`, { method: "DELETE" });
+    }
+  });
+
   test("a tool call with an unknown run token is refused by the bridge", async () => {
     const response = await fetch(`${app.bridge.url}/tools/call`, { method: "POST", headers: { Authorization: "Bearer nope" }, body: "{}" });
     assert.equal(response.status, 401);
@@ -1492,6 +1521,7 @@ describe("agents in Discord", () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Pia", model: "ollama/test-model", chattiness: 0, tools: false } });
     await waitFor(() => app.bots.client(created.data.id), { what: "Pia's bot online" });
     await waitFor(() => discord.state.profilePatches.some((patch) => patch.token === "pia-token" && patch.username === "Pia"), { what: "profile sync" });
+    assert.ok(discord.state.profilePatches.some((patch) => patch.token === "pia-token" && patch.avatar), "with the picture Cora drew for her");
     let prompt = "";
     replies.set("Pia", (body) => {
       prompt = lastUserText(body);
@@ -2596,6 +2626,26 @@ describe("talking with the agents", () => {
     await quiet();
   });
 
+  test("an agent speaks of itself in its own gender, and an unknown gender is none", async () => {
+    let system = "";
+    replies.set("Olga", (body) => {
+      system = String(body.messages[0].content);
+      return { content: `Eccomi (${/genere femminile/.test(system) ? "lei" : /Non hai un genere/.test(system) ? "neutro" : "?"}).` };
+    });
+    await call(`/api/agents/${olga.id}`, { method: "PUT", body: { gender: "female" } });
+    discord.say({ content: "Olga, sei pronta?" });
+    await waitFor(() => posts("Olga").includes("Eccomi (lei)."), { what: "Olga answering as herself" });
+    assert.match(system, /non sei legata a nessuna piattaforma[\s\S]*Sei sempre accesa/);
+    await quiet();
+    await call(`/api/agents/${olga.id}`, { method: "PUT", body: { gender: "neutral" } });
+    discord.say({ content: "Olga, ci sei?" });
+    await waitFor(() => posts("Olga").includes("Eccomi (neutro)."), { what: "Olga answering with no gender" });
+    assert.match(system, /Sei sempre in ascolto/);
+    assert.doesNotMatch(system, /Sei sempre acces[oa]/);
+    await quiet();
+    assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { gender: "robot" } })).data.gender, "", "an unknown gender is no gender");
+  });
+
   test("after a restart the first message is answered, messages written while down are picked up, and a bot can call an agent by name", async () => {
     replies.set("Olga", (body) => ({ content: `Ok: ${lastChatLine(body).split(": ").pop()}` }));
     replies.set("Pino", () => ({ content: "Pino qui." }));
@@ -3416,9 +3466,11 @@ describe("agents in Slack", () => {
     assert.equal(slack.state.manifests.get(mainApp).display_information.name, "Cora");
     assert.equal(slack.state.manifests.get(mainApp).display_information.description, "creata a mano", "Cora's own description is left alone");
 
-    // A new image and a new personality in the panel reach Slack on their own.
-    await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarUrl: "https://cdn.test/silvia.png", personality: "Segue i clienti di Dopamina.\nAltro." } });
-    await waitFor(() => slack.state.icons.get(silviaApp) === "https://cdn.test/silvia.png", { what: "Silvia's icon" });
+    // A new face and a new personality in the panel reach Slack on their own, the picture from this space's public address.
+    app.store.setAvatarBase("https://cora.test");
+    const face = (await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarSeed: "nuova", personality: "Segue i clienti di Dopamina.\nAltro." } })).data;
+    assert.equal(face.avatarUrl, `https://cora.test/avatars/${silvia.id}.png?v=${face.avatarVersion}`);
+    await waitFor(() => slack.state.icons.get(silviaApp) === face.avatarUrl, { what: "Silvia's icon" });
     await waitFor(() => slack.state.manifests.get(silviaApp).display_information.description === "Segue i clienti di Dopamina.", { what: "Silvia's description" });
     const synced = (await call(`/api/agents/${silvia.id}`)).data.slackBot.appSync;
     assert.deepEqual([synced.appId, synced.error], [silviaApp, ""]);
@@ -3431,12 +3483,16 @@ describe("agents in Slack", () => {
     assert.equal(slack.state.configCalls.length, calls, "an app already in line costs no call");
 
     // An image Slack refuses is said in the agent's panel.
-    await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarUrl: "https://cdn.test/small.png" } });
+    slack.state.iconError = "invalid_icon_size";
+    await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarSeed: "rifiutata" } });
     const refused = await waitFor(async () => (await call(`/api/agents/${silvia.id}`)).data.slackBot.appSync?.error, { what: "the refusal" });
     assert.match(refused, /tra 512 e 2000 pixel/);
+    slack.state.iconError = "";
     const forced = await call(`/api/agents/${silvia.id}/slack-app`, { method: "POST" });
     assert.equal(forced.status, 200);
-    await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarUrl: "", personality: "" } });
+    assert.equal(slack.state.icons.get(silviaApp), app.store.agent(silvia.id).avatarUrl, "forced, the refused picture goes through once Slack takes it");
+    app.store.setAvatarBase("");
+    await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarSeed: "", personality: "" } });
     await waitFor(() => slack.state.manifests.get(silviaApp).display_information.description === "Silvia, agente di Cora", { what: "Silvia back as she was" });
   });
 

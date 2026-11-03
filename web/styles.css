@@ -219,6 +219,12 @@ a.stat:hover { border-color: var(--line-strong); }
 .avatar.xs { width: 26px; height: 26px; font-size: 11px; box-shadow: 0 0 0 1.5px var(--ring); }
 .avatar.add { --ring: var(--line); color: var(--muted); background: transparent; }
 .avatar.add .ico { width: 14px; height: 14px; }
+.avatar.drawn, .avatar.sm.drawn, .avatar.xs.drawn { background: #070707; box-shadow: none; }
+.avatar-pick { display: flex; align-items: center; gap: 18px; }
+.avatar-pick .avatar { width: 96px; height: 96px; }
+.avatar-pick .stack-sm { gap: 8px; min-width: 0; }
+.avatar-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.avatar-actions .btn[hidden] { display: none; }
 
 .empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 28px 12px; color: var(--faint); text-align: center; }
 .empty .ico { width: 28px; height: 28px; stroke-width: 1.5; }

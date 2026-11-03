@@ -107,6 +107,18 @@ test("a voice note is Ogg/Opus and MP3 when ffmpeg is there, and an MP3 from Son
   assert.ok(soniox.state.deleted.includes(asked.id) && soniox.state.deleted.includes(asked.file_id), "the transcription and the file are deleted on Soniox");
 });
 
+test("an agent with no voice of its own gets one of its gender, native in its language when there is one", async (t) => {
+  const soniox = await fakeSoniox();
+  t.after(soniox.close);
+  const voice = new Voice({ key: soniox.key, api: soniox.url, ttsUrl: soniox.ttsUrl });
+  assert.equal(await voice.voiceFor({ gender: "male" }, "it"), "Marco");
+  assert.equal(await voice.voiceFor({ gender: "female" }, "it"), "Giulia");
+  assert.equal(await voice.voiceFor({ gender: "female" }, "en"), "Grace");
+  assert.equal(await voice.voiceFor({ gender: "male" }, "en"), "Marco", "no man's voice is native in English: still a man's");
+  assert.equal(await voice.voiceFor({ gender: "neutral" }, "it"), "Giulia", "a neutral agent takes the first native voice");
+  assert.equal(await voice.voiceFor({ gender: "male", voice: "Grace" }, "it"), "Grace", "a voice the owner chose stays");
+});
+
 /**
  * A whole Cora on stand-ins (Discord, Telegram, Slack, Ollama, Soniox) for the voice journeys.
  * `replies` answers per agent name; every prompt an agent got is in `prompts`.

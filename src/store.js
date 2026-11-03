@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { avatarVersion, drawnAvatar } from "./avatar.js";
 import { plainKeys } from "./box.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS, isSubscriptionProvider } from "./harnesses.js";
 import { VOICE_LANGUAGES } from "./voice.js";
@@ -56,7 +57,8 @@ const SSH_PORT_BASE = 2201;
 export const TRANSPORTS = ["discord", "telegram", "slack"];
 
 const AGENT_DEFAULTS = {
-  avatarUrl: "",
+  // What Cora draws the picture from: empty means the agent's id.
+  avatarSeed: "",
   color: "#e8a33d",
   personality: "",
   core: "",
@@ -71,6 +73,8 @@ const AGENT_DEFAULTS = {
   effort: "",
 };
 const EFFORTS = ["", "low", "medium", "high"];
+/** How an agent speaks of itself, and the voice it gets; empty means not said. */
+export const GENDERS = ["male", "female", "neutral"];
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -78,6 +82,7 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS avatars (agent_id TEXT PRIMARY KEY, data BLOB NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, provider TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS context_documents (
   id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, content TEXT NOT NULL,
@@ -234,17 +239,26 @@ export function ftsQuery(text) {
   return [...new Set(words)].map((word) => `"${word.replace(/"/g, "\"\"")}"`).join(" OR ");
 }
 
-export function sanitizeAgent(input, previous = {}) {
+/**
+ * The picture's version, and the address Slack and Discord fetch it from: under
+ * this space's public address, so none without one (the panel still shows it).
+ */
+function avatarFields(agent, base) {
+  const version = avatarVersion(agent);
+  return { avatarVersion: version, avatarUrl: base ? `${base}/avatars/${agent.id}.png?v=${version}` : "" };
+}
+
+export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
   const merged = { ...AGENT_DEFAULTS, ...previous, ...input };
   const name = cleanText(merged.name, 32).replace(/[\r\n]/g, " ").trim();
   if (!name) throw new ValidationError("name is required");
   if (/discord|clyde/i.test(name)) throw new ValidationError("Discord does not allow 'discord' or 'clyde' in a webhook name");
-  const avatarUrl = cleanText(merged.avatarUrl, 500).trim();
-  if (avatarUrl && !/^https:\/\//.test(avatarUrl)) throw new ValidationError("avatarUrl must be https");
-  return {
+  const agent = {
     id: previous.id || input.id || newId("ag"),
     name,
-    avatarUrl,
+    avatarSeed: cleanText(merged.avatarSeed, 40).replace(/[^\w-]/g, ""),
+    // An uploaded picture is set apart (Store.setAvatarImage): here only its fingerprint rides along.
+    avatarUpload: /^[0-9a-f]{16}$/.test(previous.avatarUpload || "") ? previous.avatarUpload : "",
     color: /^#[0-9a-fA-F]{6}$/.test(merged.color) ? merged.color : AGENT_DEFAULTS.color,
     personality: cleanText(merged.personality, 8000),
     core: cleanText(merged.core, 4000),
@@ -259,6 +273,7 @@ export function sanitizeAgent(input, previous = {}) {
     think: Boolean(merged.think),
     effort: EFFORTS.includes(merged.effort) ? merged.effort : merged.think && merged.effort === undefined ? "high" : "",
     // Its voice (a Soniox voice id) and the language it speaks; empty means the instance's language and Soniox's first voice for it.
+    gender: GENDERS.includes(merged.gender) ? merged.gender : "",
     voice: cleanText(merged.voice, 40).replace(/[^\w .-]/g, "").trim(),
     voiceLanguage: VOICE_LANGUAGES.includes(merged.voiceLanguage) ? merged.voiceLanguage : "",
     lastSleepAt: previous.lastSleepAt || null,
@@ -266,6 +281,7 @@ export function sanitizeAgent(input, previous = {}) {
     createdAt: previous.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  return { ...agent, ...avatarFields(agent, avatarBase) };
 }
 
 const PERSON_ID = /^(discord:\d{5,25}|telegram:\d{1,20}|slack:[UW][A-Z0-9]{4,})$/;
@@ -409,6 +425,7 @@ function traceRow(row, full) {
 export class Store {
   constructor(home) {
     this.home = home;
+    this.avatarBase = "";
     mkdirSync(home, { recursive: true, mode: 0o700 });
     this.path = join(home, "cora.db");
     this.db = new DatabaseSync(this.path);
@@ -736,6 +753,49 @@ export class Store {
   /* ---------- agents ---------- */
   agents() { return this.cachedAgents; }
 
+  /**
+   * Where the agents' pictures are reached from outside, for Slack and Discord to
+   * fetch: this space's public address, or none. Every agent's address is written
+   * again from it, so a picture from before (a link elsewhere) gives way to Cora's.
+   */
+  setAvatarBase(base) {
+    this.avatarBase = String(base || "").replace(/\/+$/, "");
+    this.tx(() => {
+      for (const [index, agent] of this.cachedAgents.entries()) {
+        const dressed = { ...agent, ...avatarFields(agent, this.avatarBase) };
+        if (dressed.avatarUrl === agent.avatarUrl && dressed.avatarVersion === agent.avatarVersion) continue;
+        this.cachedAgents[index] = dressed;
+        this.writeAgent(dressed);
+      }
+    });
+  }
+
+  /** The picture an agent shows, as a PNG: the one uploaded for it, or Cora's drawing. */
+  avatar(agentId) {
+    const agent = this.agent(agentId);
+    if (!agent) return null;
+    const row = agent.avatarUpload ? this.stmt("SELECT data FROM avatars WHERE agent_id = ?").get(agentId) : null;
+    return row ? Buffer.from(row.data) : drawnAvatar(agent.avatarSeed || agent.id, agent.color);
+  }
+
+  /** Keep an uploaded picture (a PNG) for an agent, or drop it (null) to go back to the drawn one. */
+  setAvatarImage(agentId, image) {
+    const index = this.cachedAgents.findIndex((agent) => agent.id === agentId);
+    if (index < 0) return null;
+    const avatarUpload = image ? createHash("sha256").update(image).digest("hex").slice(0, 16) : "";
+    const agent = { ...this.cachedAgents[index], avatarUpload, updatedAt: new Date().toISOString() };
+    Object.assign(agent, avatarFields(agent, this.avatarBase));
+    this.tx(() => {
+      if (image) {
+        this.stmt("INSERT INTO avatars (agent_id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at")
+          .run(agentId, image, agent.updatedAt);
+      } else this.stmt("DELETE FROM avatars WHERE agent_id = ?").run(agentId);
+      this.writeAgent(agent);
+    });
+    this.cachedAgents[index] = agent;
+    return agent;
+  }
+
   agent(id) { return this.cachedAgents.find((agent) => agent.id === id) || null; }
 
   writeAgent(agent) {
@@ -745,7 +805,7 @@ export class Store {
   }
 
   createAgent(input) {
-    const agent = sanitizeAgent(input);
+    const agent = sanitizeAgent(input, {}, { avatarBase: this.avatarBase });
     this.checkAgentSubscription(agent);
     if (this.cachedAgents.some((other) => other.name.toLowerCase() === agent.name.toLowerCase())) {
       throw new ValidationError("an agent with this name already exists");
@@ -758,7 +818,7 @@ export class Store {
   updateAgent(id, input) {
     const index = this.cachedAgents.findIndex((agent) => agent.id === id);
     if (index < 0) return null;
-    const agent = sanitizeAgent(input, this.cachedAgents[index]);
+    const agent = sanitizeAgent(input, this.cachedAgents[index], { avatarBase: this.avatarBase });
     const previous = this.cachedAgents[index];
     this.checkAgentSubscription(agent, { unchanged: (agent.subscriptionId || "") === (previous.subscriptionId || "") && (agent.model || this.settings.defaultModel).split("/")[0] === (previous.model || this.settings.defaultModel).split("/")[0] });
     if (this.cachedAgents.some((other) => other.id !== id && other.name.toLowerCase() === agent.name.toLowerCase())) {
@@ -775,6 +835,7 @@ export class Store {
     this.cachedAgents = this.cachedAgents.filter((agent) => agent.id !== id);
     this.tx(() => {
       this.stmt("DELETE FROM agents WHERE id = ?").run(id);
+      this.stmt("DELETE FROM avatars WHERE agent_id = ?").run(id);
       this.stmt("DELETE FROM memories WHERE owner = ?").run(id);
       this.stmt("DELETE FROM diary WHERE agent_id = ?").run(id);
       this.stmt("DELETE FROM core_history WHERE agent_id = ?").run(id);

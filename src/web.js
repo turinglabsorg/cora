@@ -5,7 +5,9 @@ import net from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { drawnAvatar } from "./avatar.js";
 import { passLedger, verifyPass } from "./pass.js";
+import { pngSize } from "./png.js";
 import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
 import { Slack } from "./slack.js";
 import { SLACK_CONFIG_SECRET } from "./slack-apps.js";
@@ -223,6 +225,17 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       ...headers,
     });
     res.end(payload);
+  };
+
+  /**
+   * An agent's picture, open to anyone: Slack and Discord fetch it to show the agent.
+   * Its address carries the picture's version, so the current one is kept for good.
+   */
+  const avatarFile = (res, url, agentId) => {
+    const agent = store.agent(agentId);
+    if (!agent) throw new HttpError(404, "not found");
+    const current = url.searchParams.get("v") === agent.avatarVersion;
+    return send(res, 200, store.avatar(agent.id), { "Content-Type": "image/png", "Cache-Control": current ? "public, max-age=31536000, immutable" : "no-cache" });
   };
 
   const boxStatus = async (agent) => {
@@ -687,6 +700,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         throw new HttpError(400, error.message);
       }
     }
+    // The picture Cora would draw, for the panel to show while an agent is being made.
+    if (path === "/api/avatars/preview" && method === "GET") {
+      const seed = String(url.searchParams.get("seed") || "").replace(/[^\w-]/g, "").slice(0, 40) || "cora";
+      const color = String(url.searchParams.get("color") || "").toLowerCase();
+      return send(res, 200, drawnAvatar(seed, /^#[0-9a-f]{6}$/.test(color) ? color : "#e8a33d"), { "Content-Type": "image/png", "Cache-Control": "private, max-age=86400" });
+    }
+
     if (path === "/api/agents" && method === "POST") {
       const agent = store.createAgent(await readJson(req));
       bots?.sync();
@@ -868,6 +888,26 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       activity({ type: "slack", agentId: agent.id, text: `token dell'app Slack salvati in hush (@${user.name})` });
       await skBots.attach(agent, { botToken, appToken });
       return send(res, 200, await publicAgent(store.agent(agent.id)));
+    }
+
+    // A picture of one's own for an agent (the panel sends it already square, as a PNG), or back to Cora's drawing.
+    match = /^\/api\/agents\/([\w-]+)\/avatar$/.exec(path);
+    if (match && (method === "PUT" || method === "DELETE")) {
+      const agent = store.agent(match[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      let image = null;
+      if (method === "PUT") {
+        const encoded = /^data:image\/png;base64,([A-Za-z0-9+/]+=*)$/.exec(String((await readJson(req, 4 * 1024 * 1024)).image || ""))?.[1];
+        image = encoded ? Buffer.from(encoded, "base64") : null;
+        const size = pngSize(image);
+        if (!size) throw new HttpError(400, "l'immagine deve essere un PNG");
+        if (size.width !== size.height || size.width < 512 || size.width > 2000) throw new HttpError(400, "l'immagine deve essere quadrata, tra 512 e 2000 pixel");
+      }
+      const updated = store.setAvatarImage(agent.id, image);
+      bots?.sync();
+      skBots?.sync();
+      activity({ type: "agent", agentId: agent.id, text: image ? `nuova immagine per ${agent.name}` : `${agent.name} torna all'immagine disegnata da Cora` });
+      return send(res, 200, await publicAgent(updated));
     }
 
     match = /^\/api\/agents\/([\w-]+)\/slack-app$/.exec(path);
@@ -1102,6 +1142,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (url.pathname === "/api/cloud/access" && req.method === "POST") return await cloudAccess(req, res);
       if (url.pathname === "/api/cloud/notice" && req.method === "POST") return await cloudNotice(req, res);
       if (url.pathname === "/api/events") return events(req, res);
+      const picture = /^\/avatars\/([\w-]+)\.png$/.exec(url.pathname);
+      if (picture && (req.method === "GET" || req.method === "HEAD")) return avatarFile(res, url, picture[1]);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (url.pathname.startsWith("/box/")) return await proxyBox(req, res);
       const file = STATIC[url.pathname];
