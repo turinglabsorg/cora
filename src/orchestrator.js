@@ -832,6 +832,8 @@ export class Orchestrator {
     if (!last || last.passive) return;
     const { forced, optional } = this.pickCandidates(state, last, agents, { summonedOnly });
     if (!forced.length && !optional.length) return;
+    if (queued && this.threadWork.has(state.id) && forced.some((agent) =>
+      agent.tools && (queued.kind === "owner" || this.authorized(queued, agent, state)))) return;
     if (["owner", "human"].includes(last.kind) && !state.focus && forced.length) state.focus = { ids: forced.map((agent) => agent.id), at: Date.now() };
 
     const generation = state.generation;
