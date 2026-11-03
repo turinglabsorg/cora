@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb x11vnc novnc python3-websockify supervisor dbus-x11 \
       xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfce4-settings thunar mousepad \
-      chromium fonts-noto fonts-noto-cjk fonts-noto-color-emoji fonts-dejavu \
+      chromium chromium-sandbox fonts-noto fonts-noto-cjk fonts-noto-color-emoji fonts-dejavu \
       xdotool imagemagick xclip autocutsel \
       curl wget git jq python3 python3-pip python3-venv ca-certificates sudo locales tzdata procps less nano unzip \
     && sed -i 's/# it_IT.UTF-8/it_IT.UTF-8/; s/# en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen \
@@ -17,12 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN usermod -l agent -d /home/agent -m node && groupmod -n agent node \
     && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent && chmod 440 /etc/sudoers.d/agent \
-    && echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --disable-dev-shm-usage --no-first-run --password-store=basic --test-type"' > /etc/chromium.d/cora \
+    && echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --disable-dev-shm-usage --no-first-run --password-store=basic --test-type"' > /etc/chromium.d/cora \
     && ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
     && mv /usr/share/novnc/vendor /usr/share/novnc/thirdparty \
     && sed -i 's#\.\./vendor/pako/#../thirdparty/pako/#g' /usr/share/novnc/core/inflator.js /usr/share/novnc/core/deflator.js \
     && ! grep -rq "vendor/pako" /usr/share/novnc/core \
     && printf '{"name":"novnc","version":"%s"}\n' "$(dpkg-query -W -f='${Version}' novnc | cut -d: -f2 | cut -d- -f1)" > /usr/share/novnc/package.json
+
+ARG CHROMIUM_MIN_VERSION=156.0.8078.73
+RUN dpkg --compare-versions "$(chromium --version | cut -d' ' -f2)" ge "$CHROMIUM_MIN_VERSION"
 
 # Remote access: Tailscale (its own node per agent, Tailscale SSH) and an OpenSSH
 # server reached through the host. Their state lives in the /var/lib/cora volume.

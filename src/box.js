@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const OUTPUT_LIMIT = 24000;
+const BROWSER_SECCOMP = fileURLToPath(new URL("../box/seccomp.json", import.meta.url));
 
 export function runProcess(command, args, { input, timeoutMs = 60000, maxBytes = 20 * 1024 * 1024 } = {}) {
   return new Promise((resolve) => {
@@ -143,6 +145,7 @@ export class Boxes {
       "--name", this.name(agent.id),
       "--hostname", slug(agent.name),
       "--restart", "unless-stopped",
+      "--security-opt", `seccomp=${BROWSER_SECCOMP}`,
       "--shm-size", "1g",
       "--memory", "2g",
       "--cpus", "2",
