@@ -245,7 +245,8 @@ test("an account says whose it is, and a member's new agent starts on the accoun
   assert.match(chosen, /Sara's account/);
   assert.match(chosen, /This agent will use Sara's account\./);
 
-  // Settings → Connections: every account and key in a list on the left, the one in the address open on the right.
+  // Settings: every entry in one list on the left, grouped, the one in the address open on the right.
+  // The address of the old Connections tab still opens the same account's page.
   const connections = await (async () => {
     const panel = panelHarness({ language: "en", fetch: (path, init) => fetch(`${base}${path}`, { ...init, headers: { ...init?.headers, Cookie: owner } }) });
     await panel.run("boot()");
@@ -253,18 +254,23 @@ test("an account says whose it is, and a member's new agent starts on the accoun
     return panel.run(`(() => {
       globalThis.history = { replaceState() {} };
       location.hash = "#/settings/collegamenti/codex";
-      const root = connectionsPanel();
-      const items = () => root.querySelectorAll(".conn-item");
-      const open = () => root.querySelectorAll(".conn-page").filter((page) => !page.hidden).map((page) => page.attributes["data-conn"]);
-      const before = { ids: items().map((item) => item.attributes["data-conn"]), codex: items().find((item) => item.attributes["data-conn"] === "codex").textContent, open: open(), className: root.className };
-      items().find((item) => item.attributes["data-conn"] === "soniox").click();
-      return { ...before, after: open(), active: items().filter((item) => item.className.includes("active")).map((item) => item.attributes["data-conn"]) };
+      renderSettings();
+      const root = document.getElementById("app").querySelector(".rail");
+      const items = () => root.querySelectorAll(".rail-item");
+      const open = () => root.querySelectorAll(".rail-page").filter((page) => !page.hidden).map((page) => page.attributes["data-page"]);
+      const groups = root.querySelectorAll(".rail-group").map((group) => group.textContent);
+      const before = { ids: items().map((item) => item.attributes["data-page"]), groups, codex: items().find((item) => item.attributes["data-page"] === "codex").textContent, open: open(), className: root.className };
+      items().find((item) => item.attributes["data-page"] === "soniox").click();
+      return { ...before, after: open(), active: items().filter((item) => item.className.includes("active")).map((item) => item.attributes["data-page"]) };
     })()`);
   })();
-  assert.deepEqual(connections.ids.slice(0, 3), ["panoramica", "claude", "codex"]);
-  assert.deepEqual(connections.ids.slice(-5), ["ollama", "orcarouter", "deepseek", "typesafe", "soniox"]);
+  assert.deepEqual(connections.groups, ["Channels", "Subscriptions", "API keys", "Agents", "People", "General"]);
+  assert.deepEqual(connections.ids.slice(0, 6), ["discord", "telegram", "slack", "server", "claude", "codex"]);
+  const firstKey = connections.ids.indexOf("ollama");
+  assert.deepEqual(connections.ids.slice(firstKey, firstKey + 5), ["ollama", "orcarouter", "deepseek", "typesafe", "soniox"]);
+  assert.deepEqual(connections.ids.slice(firstKey + 5), ["regia", "modelli", "permessi", "accesso", "ssh", "controlli", "preferenze"]);
   assert.match(connections.codex, /ChatGPT \/ Codex2 accounts/, "the server's account and Sara's, both ready");
-  assert.deepEqual([connections.open, connections.className], [["codex"], "conn open"]);
+  assert.deepEqual([connections.open, connections.className], [["codex"], "rail open"]);
   assert.deepEqual([connections.after, connections.active], [["soniox"], ["soniox"]]);
 
   // A harness's page lists every account it has, and "Add account" connects one more.

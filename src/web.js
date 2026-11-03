@@ -491,7 +491,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       catch (error) { throw new HttpError(502, error.message); }
     }
     if (path === "/api/voices/preview" && method === "POST") {
-      if (!voice?.enabled) throw new HttpError(409, "collega Soniox in Impostazioni → Collegamenti");
+      if (!voice?.enabled) throw new HttpError(409, "collega Soniox in Impostazioni → Soniox");
       const body = await readJson(req, 4096);
       const language = VOICE_LANGUAGES.includes(body.language) ? body.language : "it";
       const sample = String(body.text || "").trim().slice(0, 300) || (language === "en" ? "Hi, this is my voice. I answer like this when you talk to me." : "Ciao, questa è la mia voce. Ti rispondo così quando mi parli.");

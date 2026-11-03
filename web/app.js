@@ -933,7 +933,7 @@ const HARNESS_NEEDS = {
   grok: "Grok Build non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   muse: "Muse Code non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   hermes: "Hermes non è installato su questa macchina: installalo sul server con l'utente di Cora.",
-  deepseek: "DeepSeek Harness ha bisogno di dsh sul server (npm i -g @deepseek-ai/dsh) e della chiave DeepSeek in Impostazioni → Collegamenti.",
+  deepseek: "DeepSeek Harness ha bisogno di dsh sul server (npm i -g @deepseek-ai/dsh) e della chiave DeepSeek in Impostazioni → DeepSeek.",
   ollama: "Nessun Ollama su questa macchina e nessuna chiave Ollama Cloud.",
   orcarouter: "Nessuna chiave OrcaRouter.",
 };
@@ -1182,7 +1182,7 @@ function brainPanel(agent) {
       out.push(h("div", { class: "notice warn" }, icon("alert"), h("div", { class: "stack-sm" },
         ...harnessMissing(harness).map((line) => h("span", {}, raw(line))),
         SUBSCRIPTION_HARNESSES.includes(harness)
-          ? h("span", { class: "muted" }, tr("Dopo l'installazione l'account si collega qui, o in Impostazioni → Collegamenti."))
+          ? h("span", { class: "muted" }, tr("Dopo l'installazione l'account si collega qui, o in Impostazioni → Abbonamenti."))
           : null)));
       right.replaceChildren(...out);
       return;
@@ -1241,18 +1241,22 @@ function brainPanel(agent) {
   };
 }
 
+/** How long an agent thinks before it answers: the same four levels wherever it is chosen. */
+function effortSelect(agent) {
+  return h("select", { name: "effort", "aria-label": tr("Ragionamento") },
+    [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) =>
+      h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label)));
+}
+
 /** The Cervello tab: the two columns, plus what the brain does once it has a model. */
 function brainTab(agent) {
   const brain = brainPanel(agent);
   const form = h("form", { class: "stack" },
     panel({ icon: "chip", title: "Cervello", hint: "Chi guida il ciclo, dove gira il modello e quale." }, brain.node),
     panel({ icon: "spark", title: "Come pensa", hint: "Quanto si ferma a ragionare e cosa ha per le mani." },
-      h("div", { class: "stack-sm" },
-        field("Ragionamento: livello", h("select", { name: "effort" },
-          [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) =>
-            h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label))),
-          "Quanto pensa prima di rispondere: più alto è più accurato ma più lento."),
-        switchInput("tools", "Usa il suo computer", agent.tools ?? true, "Un desktop Linux tutto suo, che vedi anche tu."))),
+      setRows(
+        setRow("Ragionamento", "Quanto pensa prima di rispondere: più alto è più accurato ma più lento.", effortSelect(agent)),
+        setRow("Usa il suo computer", "Un desktop Linux tutto suo, che vedi anche tu.", switchInput("tools", "", agent.tools ?? true)))),
     h("div", { class: "savebar" }, h("span", { class: "spacer" }), btn("Salva", { icon: "check", type: "submit", cls: "primary" })));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1531,7 +1535,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       // The account is ChatGPT's or Claude's; what is missing is the program that uses it.
       content.append(h("p", { class: "subscription-description" },
         tr("{cli} non è installato su questa macchina, quindi non c'è ancora niente da collegare. Installalo sul server con l'utente di Cora e questa scheda si accende da sola.", { cli: CLI_NAMES[provider] || name })));
-      if (!manage) content.append(h("div", { class: "subscription-footer" }, btn("Impostazioni", { cls: "ghost", href: "#/settings/collegamenti" })));
+      if (!manage) content.append(h("div", { class: "subscription-footer" }, btn("Impostazioni", { cls: "ghost", href: `#/settings/${provider}` })));
       for (const button of content.querySelectorAll("button")) button.disabled = requestBusy;
       return;
     }
@@ -1587,7 +1591,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       if (record?.resident) {
         content.append(h("p", { class: "subscription-description" }, "Nessun account residente disponibile. Collega un altro account oppure controlla i collegamenti nelle impostazioni."),
           h("div", { class: "subscription-footer" }, btn(tr("Collega {provider}", { provider: name }), { icon: "external", cls: "primary", onclick: connectNew }),
-            btn("Impostazioni", { cls: "ghost", href: "#/settings/collegamenti" })));
+            btn("Impostazioni", { cls: "ghost", href: `#/settings/${provider}` })));
       } else content.append(h("div", { class: "subscription-footer" },
         btn(requestBusy ? "Preparazione dell'accesso…" : tr("Collega {provider}", { provider: name }), { icon: requestBusy ? "refresh" : "external", cls: "primary", onclick: record
           ? () => action(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) : connectNew }),
@@ -1724,14 +1728,11 @@ function avatarPicker(agent, colorInput) {
   colorInput.addEventListener("input", show);
   show();
   return {
-    node: h("div", { class: "field full" }, h("span", { class: "label" }, "Immagine"),
-      h("div", { class: "avatar-pick" }, preview,
-        h("div", { class: "stack-sm" },
-          h("div", { class: "avatar-actions" },
-            btn("Ridisegna", { icon: "refresh", cls: "sm", onclick: () => { seedInput.value = crypto.randomUUID().slice(0, 8); picked = null; show(); } }),
-            btn("Carica la tua", { icon: "upgrade", cls: "sm", onclick: () => file.click() }),
-            drawn),
-          h("small", {}, "La disegna Cora con il colore dell'agente. Una tua viene tagliata quadrata."))),
+    node: h("div", { class: "avatar-pick" }, preview,
+      h("div", { class: "avatar-actions" },
+        btn("Ridisegna", { icon: "refresh", cls: "sm", onclick: () => { seedInput.value = crypto.randomUUID().slice(0, 8); picked = null; show(); } }),
+        btn("Carica la tua", { icon: "upgrade", cls: "sm", onclick: () => file.click() }),
+        drawn),
       seedInput, file),
     /** After the agent is saved: the new image, or the drawing back in place of an old one. */
     async upload(id) {
@@ -1763,7 +1764,7 @@ function agentForm(agent, { only = "" } = {}) {
   const model = wantsBrain ? modelPicker("model", agent.model || "", { harness }) : null;
   const harnessPick = wantsBrain ? h("select", {}, Object.entries(HARNESSES).map(([key, item]) =>
     h("option", { value: key, selected: key === harness }, tr(item.label)))) : null;
-  const harnessHint = wantsBrain ? h("small", { class: "muted" }, tr(HARNESSES[harness].hint)) : null;
+  const harnessHint = wantsBrain ? h("span", {}, tr(HARNESSES[harness].hint)) : null;
   const subscription = wantsBrain ? subscriptionPicker(agent.subscriptionId, { isNew }) : null;
   if (wantsBrain) {
     const syncSubscription = () => {
@@ -1783,30 +1784,25 @@ function agentForm(agent, { only = "" } = {}) {
   }
   const form = h("form", { class: "stack" },
     panel({ icon: "user", title: "Identità", hint: "Come si chiama e come appare." },
-      h("div", { class: "grid2" },
-        field("Nome", nameInput),
-        field("Colore", colorInput),
-        field("Genere", genderInput, "Come parla di sé, e la voce che gli viene data."),
-        picture.node)),
+      setRows(
+        setRow("Nome", "Chi lo nomina riceve la sua risposta.", nameInput),
+        setRow("Colore", "Quello della sua immagine e del suo nome nel pannello.", colorInput),
+        setRow("Genere", "Come parla di sé, e la voce che gli viene data.", genderInput),
+        setRow("Immagine", "La disegna Cora con il colore dell'agente; «Ridisegna» propone un'altra faccia. Una tua viene tagliata quadrata.", picture.node, { stack: true }))),
     wantsBrain ? panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
-      h("div", { class: "stack-sm" },
-        field("Harness", harnessPick, "Chi guida il ciclo: Cora, oppure il modello stesso."),
-        harnessHint,
-        field("Modello", model),
-        subscription.node,
-        field("Ragionamento: livello", h("select", { name: "effort" },
-          [["", "Automatico"], ["low", "Basso"], ["medium", "Medio"], ["high", "Alto"]].map(([value, label]) => h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label))),
-        "Quanto pensa prima di rispondere: più alto è più accurato ma più lento."),
-        switchInput("tools", "Usa il suo computer", agent.tools ?? true, "Un desktop Linux tutto suo, che vedi anche tu."))) : null,
+      setRows(
+        setRow("Harness", harnessHint, harnessPick),
+        setRow("Modello", "Il modello che pensa, per l'harness scelto.", model, { stack: true }),
+        h("div", { class: "set-row stack" }, subscription.node),
+        setRow("Ragionamento", "Quanto pensa prima di rispondere: più alto è più accurato ma più lento.", effortSelect(agent)),
+        setRow("Usa il suo computer", "Un desktop Linux tutto suo, che vedi anche tu.", switchInput("tools", "", agent.tools ?? true)))) : null,
     panel({ icon: "spark", title: "Carattere", hint: "Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri." },
       h("textarea", { name: "personality", class: "tall", placeholder: "Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…" }, agent.personality || "")),
     panel({ icon: "radio", title: "Ascolto", hint: "Quanto interviene e dove." },
-      h("div", { class: "stack-sm" },
-        h("div", { class: "field" }, h("span", { class: "field-row" }, h("span", { class: "label" }, "Loquacità"), faderValue), fader,
-          h("small", {}, "Quanto spesso interviene quando nessuno lo chiama per nome. Se lo nomini risponde sempre.")),
-        h("div", { class: "field" }, h("span", { class: "label" }, tr("Canali {transport}", { transport: TRANSPORTS[S.data.transport].label })), channelChips(agent.channelIds || []),
-          h("small", {}, "Nessuno selezionato = li ascolta tutti.")),
-        switchInput("enabled", "In onda", agent.enabled ?? true, "Spento non ascolta e non parla, da nessuna parte."))),
+      setRows(
+        setRow("Loquacità", "Quanto spesso interviene quando nessuno lo chiama per nome. Se lo nomini risponde sempre.", h("div", { class: "fader-row" }, fader, faderValue), { stack: true }),
+        setRow(tr("Canali {transport}", { transport: TRANSPORTS[S.data.transport].label }), "Nessuno selezionato = li ascolta tutti.", channelChips(agent.channelIds || []), { stack: true }),
+        setRow("In onda", "Spento non ascolta e non parla, da nessuna parte.", switchInput("enabled", "", agent.enabled ?? true)))),
     voicePanel(agent, genderInput),
     h("div", { class: "savebar" },
       isNew ? null : armedButton("Elimina", "Conferma", { onconfirm: async () => {
@@ -1862,7 +1858,7 @@ function voicePanel(agent, genderInput) {
     h("option", { value: "", selected: !agent.voiceLanguage }, "La lingua dell'istanza"),
     Object.entries(VOICE_LANGUAGE_NAMES).map(([code, name]) => h("option", { value: code, selected: agent.voiceLanguage === code }, raw(name))));
   const voice = h("select", { name: "voice" }, h("option", { value: agent.voice || "", selected: true }, agent.voice ? raw(agent.voice) : "Automatica"));
-  const about = h("small", { class: "voice-about" });
+  const about = h("span", { class: "voice-about" });
   const player = h("audio", { class: "voice-preview", controls: true, hidden: true });
   let catalog = [];
   const spoken = () => language.value || S.data.settings.language || "it";
@@ -1900,13 +1896,15 @@ function voicePanel(agent, genderInput) {
   // A voice of the other gender gives way to the automatic one.
   genderInput.addEventListener("change", fill);
   const body = h("div", { class: "stack-sm" },
-    h("div", { class: "voice-row" }, field("Lingua", language), field("Voce", voice)),
-    about, h("div", { class: "voice-listen" }, listen, player));
+    setRows(
+      setRow("Lingua", "La lingua in cui parla, e in cui risponde a voce.", language),
+      setRow("Voce", about, h("div", { class: "voice-pick" }, voice, listen)),
+      h("div", { class: "voice-listen" }, player)));
   api("/api/voices").then((data) => {
     if (!data.configured) {
       for (const control of [voice, language]) control.disabled = true;
       listen.disabled = true;
-      about.replaceChildren(tr("Per dare una voce agli agenti collega Soniox in "), h("a", { href: "#/settings/collegamenti" }, tr("Impostazioni → Collegamenti")), ".");
+      about.replaceChildren(tr("Per dare una voce agli agenti collega Soniox in "), h("a", { href: "#/settings/soniox" }, tr("Impostazioni → Soniox")), ".");
       return;
     }
     catalog = data.voices;
@@ -1989,29 +1987,26 @@ function slackAccount(agent) {
     : badge("App principale", bot.state === "error" ? "err" : "", "slack");
   let body;
   if (bot.user) {
-    body = [
-      h("p", { class: "lead" }, "Collegata come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", bot.inChannel ? "Scrive nel canale col suo account." : "Non è ancora nei canali accesi: invitala con /invite e scriverà da sola."),
-      slackAppSync(agent, bot),
-    ];
+    body = setRows(
+      setRow("App sua", h("span", {}, "Collegata come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", bot.inChannel ? "Scrive nel canale col suo account." : "Non è ancora nei canali accesi: invitala con /invite e scriverà da sola.")),
+      h("div", { class: "set-row stack" }, slackAppSync(agent, bot)));
   } else {
-    body = [
-      h("p", { class: "lead" }, bot.state === "error" ? tr("I token salvati non funzionano ({error}): incollane di nuovi.", { error: bot.error }) : "Ora scrive tramite l'app principale, col suo nome sul messaggio. Con un'app sua è un utente Slack vero: la menzioni e le scrivi in privato."),
-      steps(
+    body = setRows(setRow("App sua", bot.state === "error" ? tr("I token salvati non funzionano ({error}): incollane di nuovi.", { error: bot.error }) : "Ora scrive tramite l'app principale, col suo nome sul messaggio. Con un'app sua è un utente Slack vero: la menzioni e le scrivi in privato.",
+      h("div", { class: "stack-sm" }, steps(
         h("span", {}, "tocca «Crea l'app su Slack», scegli ", h("b", {}, "From a manifest"), " e incolla il manifest qui sotto;"),
         h("span", {}, "Install to Workspace, poi copia il ", h("b", {}, "Bot User OAuth Token"), " (xoxb-) da OAuth & Permissions;"),
         h("span", {}, "in Basic Information → App-Level Tokens crea un token con ", h("code", {}, "connections:write"), " e copia l'xapp-;"),
         h("span", {}, "incolla i due token qui: li controllo e li salvo in hush come ", h("code", {}, bot.env), " e ", h("code", {}, bot.appEnv), ";"),
         h("span", {}, "nel canale scrivi ", h("code", {}, `/invite @${agent.name}`), ".")),
       bot.manifest ? slackManifest(bot.manifest) : null,
-      slackTokenForm({ path: `/api/agents/${agent.id}/slack-bot`, ok: "Token salvati" }),
-    ];
+      slackTokenForm({ path: `/api/agents/${agent.id}/slack-bot`, ok: "Token salvati" })), { stack: true }));
   }
   return panel({ icon: "slack", title: "Account Slack", hint: "La sua app su Slack.", actions }, body);
 }
 
 /** How the agent's Slack app follows the panel: its name, description and image. */
 function slackAppSync(agent, bot) {
-  if (!S.data.slack?.apps?.configured) return h("small", { class: "muted" }, "Perché l'app Slack prenda da sola il nome e l'immagine dell'agente, collega il token di configurazione in Impostazioni → Canali → Slack.");
+  if (!S.data.slack?.apps?.configured) return h("small", { class: "muted" }, "Perché l'app Slack prenda da sola il nome e l'immagine dell'agente, collega il token di configurazione in Impostazioni → Slack.");
   const record = bot.appSync;
   const button = btn("Aggiorna su Slack", { icon: "refresh", cls: "sm ghost", onclick: async () => {
     button.disabled = true;
@@ -2048,15 +2043,15 @@ function slackAppsField() {
     await guard(api("/api/slack/apps/sync", { method: "POST" }), "App Slack aggiornate");
     now.disabled = false;
   } }) : null;
-  return h("div", { class: "field slack-apps" }, h("span", { class: "label" }, "Aspetto delle app"),
-    h("small", {}, apps.configured
-      ? "Nome, descrizione e immagine di ogni app seguono il pannello: cambi un agente qui e la sua app su Slack si aggiorna da sola."
-      : "Con il token di configurazione di Slack nome, descrizione e immagine di ogni app seguono il pannello, senza passare da Slack."),
+  return setRows(setRow("Token di configurazione", apps.configured
+    ? "Nome, descrizione e immagine di ogni app seguono il pannello: cambi un agente qui e la sua app su Slack si aggiorna da sola."
+    : "Con il token di configurazione di Slack nome, descrizione e immagine di ogni app seguono il pannello, senza passare da Slack.",
+  h("div", { class: "stack-sm" },
     apps.error ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(apps.error))) : null,
     apps.configured ? null : steps(
       h("span", {}, "apri ", h("a", { href: "https://api.slack.com/apps", target: "_blank", rel: "noopener" }, "api.slack.com/apps"), " e, in fondo alla pagina, in ", h("b", {}, "Your App Configuration Tokens"), " tocca Generate Token per il workspace;"),
       h("span", {}, "copia il ", h("b", {}, "Refresh Token"), " (xoxe-…) e incollalo qui: Cora lo rinnova da sola e lo tiene in hush.")),
-    h("div", { class: "row" }, input, save, now));
+    h("div", { class: "input-row" }, input, save, now)), { stack: true }));
 }
 
 function steps(...items) {
@@ -2066,22 +2061,18 @@ function steps(...items) {
 function discordAccount(agent) {
   const bot = agent.bot || { configured: false, env: "" };
   const actions = bot.user ? badge("Account suo", "on", "check") : badge("Via webhook", bot.configured ? "err" : "", "hash");
-  let body;
+  const rows = [];
   if (bot.user) {
-    body = [
-      h("p", { class: "lead" }, "Collegato come ", h("b", {}, raw(bot.user.username)), ". ", bot.inGuild ? "È nel server." : "Non è ancora nel server."),
-      bot.inGuild ? null : h("div", { class: "row" }, btn("Invita nel server", { icon: "external", href: bot.inviteUrl, target: "_blank", cls: "primary" })),
-    ];
+    rows.push(setRow("Bot suo", h("span", {}, "Collegato come ", h("b", {}, raw(bot.user.username)), ". ", bot.inGuild ? "È nel server." : "Non è ancora nel server."),
+      bot.inGuild ? null : btn("Invita nel server", { icon: "external", href: bot.inviteUrl, target: "_blank", cls: "primary" })));
   } else {
-    body = [
-      h("p", { class: "lead" }, bot.configured ? tr("Il token salvato non funziona ({error}): incollane uno nuovo.", { error: bot.error || bot.state }) : "Ora parla tramite il bot principale, con nome e avatar suoi. Con un bot tutto suo è online, menzionabile e «sta scrivendo…» a nome suo."),
-      steps(
+    rows.push(setRow("Bot suo", bot.configured ? tr("Il token salvato non funziona ({error}): incollane uno nuovo.", { error: bot.error || bot.state }) : "Ora parla tramite il bot principale, con nome e avatar suoi. Con un bot tutto suo è online, menzionabile e «sta scrivendo…» a nome suo.",
+      h("div", { class: "stack-sm" }, steps(
         h("span", {}, "apri ", h("a", { href: "https://discord.com/developers/applications", target: "_blank", rel: "noopener" }, "discord.com/developers"), " → New Application, chiamala ", h("b", {}, raw(agent.name)), ";"),
         "sezione Bot → Reset Token → copia;",
         h("span", {}, "incollalo qui: lo controllo con Discord e lo salvo in hush come ", h("code", {}, bot.env), ";"),
         "poi tocca «Invita nel server»."),
-      tokenForm({ placeholder: "Token del bot Discord", path: `/api/agents/${agent.id}/bot`, ok: "Token salvato" }),
-    ];
+      tokenForm({ placeholder: "Token del bot Discord", path: `/api/agents/${agent.id}/bot`, ok: "Token salvato" })), { stack: true }));
   }
   if (bot.configured) {
     const disconnect = armedButton("Scollega app", "Conferma scollegamento", { icon: "power", onconfirm: async () => {
@@ -2094,9 +2085,9 @@ function discordAccount(agent) {
       })(), "App Discord scollegata");
       disconnect.disabled = false;
     } });
-    body.push(h("div", { class: "row" }, disconnect));
+    rows.push(setRow("Scollega l'app", "Torna a parlare tramite il bot principale.", disconnect));
   }
-  return panel({ icon: "hash", title: "Account Discord", hint: "Il suo utente su Discord.", actions }, body);
+  return panel({ icon: "hash", title: "Account Discord", hint: "Il suo utente su Discord.", actions }, setRows(...rows));
 }
 
 function telegramAccount(agent) {
@@ -2106,23 +2097,20 @@ function telegramAccount(agent) {
     : badge("Bot principale", bot.state === "error" ? "err" : "", "send");
   let body;
   if (bot.user) {
-    body = [
-      h("p", { class: "lead" }, "Collegato come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", bot.inChat ? "Scrive nel gruppo con il suo account." : "Non è ancora nel gruppo: finché non lo aggiungi scrive tramite il bot principale."),
-      h("div", { class: "row" },
-        bot.inChat ? null : btn("Aggiungi al gruppo", { icon: "plus", href: `https://t.me/${bot.user.username}?startgroup=cora`, target: "_blank", cls: "primary" }),
-        btn("Apri su Telegram", { icon: "external", href: bot.link, target: "_blank" })),
-      h("small", { class: "muted" }, "Il nome segue il pannello; la foto si cambia da BotFather con /setuserpic."),
-    ];
+    body = setRows(
+      setRow("Bot suo", h("span", {}, "Collegato come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", bot.inChat ? "Scrive nel gruppo con il suo account." : "Non è ancora nel gruppo: finché non lo aggiungi scrive tramite il bot principale."),
+        h("div", { class: "row" },
+          bot.inChat ? null : btn("Aggiungi al gruppo", { icon: "plus", href: `https://t.me/${bot.user.username}?startgroup=cora`, target: "_blank", cls: "primary" }),
+          btn("Apri su Telegram", { icon: "external", href: bot.link, target: "_blank" }))),
+      setRow("Nome e foto", "Il nome segue il pannello; la foto si cambia da BotFather con /setuserpic."));
   } else {
-    body = [
-      h("p", { class: "lead" }, bot.state === "error" ? tr("Il token salvato non funziona ({error}): incollane uno nuovo.", { error: bot.error }) : "Ora scrive tramite il bot principale, col suo nome in grassetto. Con un bot tutto suo scrive col suo account ed è menzionabile."),
-      steps(
+    body = setRows(setRow("Bot suo", bot.state === "error" ? tr("Il token salvato non funziona ({error}): incollane uno nuovo.", { error: bot.error }) : "Ora scrive tramite il bot principale, col suo nome in grassetto. Con un bot tutto suo scrive col suo account ed è menzionabile.",
+      h("div", { class: "stack-sm" }, steps(
         h("span", {}, "apri ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener" }, "@BotFather"), ", scrivi /newbot e chiamalo ", h("b", {}, raw(agent.name)), ";"),
         "copia il token che ti dà;",
         h("span", {}, "incollalo qui: lo controllo con Telegram e lo salvo in hush come ", h("code", {}, bot.env), ";"),
         "poi tocca «Aggiungi al gruppo»."),
-      tokenForm({ placeholder: "Token di BotFather (123456:ABC…)", path: `/api/agents/${agent.id}/telegram-bot`, ok: "Token salvato" }),
-    ];
+      tokenForm({ placeholder: "Token di BotFather (123456:ABC…)", path: `/api/agents/${agent.id}/telegram-bot`, ok: "Token salvato" })), { stack: true }));
   }
   return panel({ icon: "send", title: "Account Telegram", hint: "Il suo bot su Telegram.", actions }, body);
 }
@@ -3001,13 +2989,14 @@ async function traceDetail(agent, traceId, isCurrent = () => true) {
 }
 
 /* ---------- language ---------- */
+/** The language: of the panel on this device, and of the agents' automatic messages. Saved at once. */
 function languagePanel() {
-  return panel({ icon: "globe", title: "Lingua", hint: "Del pannello su questo dispositivo, e dei messaggi automatici degli agenti. Gli agenti rispondono nella lingua in cui scrivi." },
-    h("div", { class: "choices" }, Object.entries(LANGS).map(([code, label]) => h("button", { type: "button", class: `choice${code === LANG ? " on" : ""}`, onclick: async () => {
-      if (code === LANG) return;
-      await guard(api("/api/settings", { method: "PUT", body: { language: code } }));
-      setLanguage(code);
-    } }, h("span", { class: "panel-ico" }, raw(code.toUpperCase())), h("span", { class: "grow" }, h("b", {}, raw(label))), icon(code === LANG ? "check" : "next", "chev")))));
+  const choose = h("div", { class: "segmented", role: "group", "aria-label": tr("Lingua") }, Object.entries(LANGS).map(([code, label]) => h("button", { type: "button", class: code === LANG ? "on" : "", "aria-pressed": String(code === LANG), onclick: async () => {
+    if (code === LANG) return;
+    if (await saveSettings({ language: code })) setLanguage(code);
+  } }, raw(label))));
+  return panel({ icon: "globe", title: "Lingua", hint: "Gli agenti rispondono comunque nella lingua in cui scrivi." },
+    setRows(setRow("Lingua del pannello", "Del pannello su questo dispositivo, e dei messaggi automatici degli agenti.", choose)));
 }
 
 /* ---------- notifications ---------- */
@@ -3025,39 +3014,37 @@ async function currentSubscription() {
 }
 
 function notificationsPanel() {
-  const body = h("div", { class: "stack-sm" }, h("p", { class: "lead" }, "Controllo…"));
+  const body = h("div", {}, setRows(setRow("Su questo dispositivo", "Controllo…")));
   const draw = async () => {
     const push = S.data.push || {};
-    let content;
-    if (!push.enabled) content = h("p", { class: "lead" }, "Le notifiche non sono ancora configurate sul server.");
+    let text;
+    let actions = null;
+    if (!push.enabled) text = "Le notifiche non sono ancora configurate sul server.";
     else if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-      content = h("p", { class: "lead" }, isIos() ? "Su iPhone: tocca Condividi → «Aggiungi alla schermata Home», poi apri Cora da lì e torna qui." : "Questo browser non supporta le notifiche push.");
+      text = isIos() ? "Su iPhone: tocca Condividi → «Aggiungi alla schermata Home», poi apri Cora da lì e torna qui." : "Questo browser non supporta le notifiche push.";
     } else if (isIos() && !isInstalled()) {
-      content = h("p", { class: "lead" }, "Su iPhone le notifiche funzionano solo dall'app: Condividi → «Aggiungi alla schermata Home», poi apri Cora da lì.");
+      text = "Su iPhone le notifiche funzionano solo dall'app: Condividi → «Aggiungi alla schermata Home», poi apri Cora da lì.";
     } else if (Notification.permission === "denied") {
-      content = h("p", { class: "lead" }, "Le notifiche sono bloccate per Cora: riattivale dalle impostazioni del telefono o del browser.");
+      text = "Le notifiche sono bloccate per Cora: riattivale dalle impostazioni del telefono o del browser.";
     } else {
       const subscription = await currentSubscription().catch(() => null);
       if (subscription) {
-        content = [
-          h("p", { class: "lead" }, "Attive su questo dispositivo", push.devices > 1 ? tr(" (e su altri {count})", { count: push.devices - 1 }) : "", "."),
-          h("div", { class: "row" },
-            btn("Prova", { icon: "bell", onclick: () => guard(api("/api/push/test", { method: "POST" }), "Notifica inviata") }),
-            btn("Disattiva qui", { icon: "close", cls: "ghost", onclick: async () => {
-              await guard(api("/api/push/unsubscribe", { method: "POST", body: { endpoint: subscription.endpoint } }));
-              await subscription.unsubscribe().catch(() => {});
-              await loadState();
-              draw();
-            } })),
+        text = h("span", {}, "Attive su questo dispositivo", push.devices > 1 ? tr(" (e su altri {count})", { count: push.devices - 1 }) : "", ".");
+        actions = [
+          btn("Prova", { icon: "bell", onclick: () => guard(api("/api/push/test", { method: "POST" }), "Notifica inviata") }),
+          btn("Disattiva qui", { icon: "close", cls: "ghost", onclick: async () => {
+            await guard(api("/api/push/unsubscribe", { method: "POST", body: { endpoint: subscription.endpoint } }));
+            await subscription.unsubscribe().catch(() => {});
+            await loadState();
+            draw();
+          } }),
         ];
       } else {
-        content = [
-          h("p", { class: "lead" }, "Attivale su questo dispositivo: ti arrivano le richieste degli agenti, i loro avvisi e le risposte quando il pannello è chiuso."),
-          h("div", { class: "row" }, btn("Attiva le notifiche", { icon: "bell", cls: "primary", onclick: () => enableNotifications().then(draw) })),
-        ];
+        text = "Ti arrivano le richieste degli agenti, i loro avvisi e le risposte quando il pannello è chiuso.";
+        actions = btn("Attiva le notifiche", { icon: "bell", cls: "primary", onclick: () => enableNotifications().then(draw) });
       }
     }
-    body.replaceChildren(...[content].flat());
+    body.replaceChildren(setRows(setRow("Su questo dispositivo", text, actions)));
   };
   draw();
   return panel({ icon: "bell", title: "Notifiche", hint: "Gli agenti ti scrivono sul telefono quando serve te." }, body);
@@ -3806,37 +3793,6 @@ function renderContext() {
 }
 
 /* ---------- settings ---------- */
-function transportChoice(kind) {
-  const info = transportInfo(kind);
-  const inUse = S.data.transport === kind;
-  const ready = info.state === "missing-token" ? "senza token" : "pronto";
-  const small = h("small", {}, inUse ? tr("in uso · {state}", { state: tr(STATE_LABEL[info.state] || info.state) }) : ready);
-  const card = h("button", { type: "button", class: `choice${inUse ? " on" : ""}`, "aria-pressed": inUse ? "true" : "false" },
-    h("span", { class: "panel-ico" }, icon(info.icon)),
-    h("span", { class: "grow" }, h("b", {}, info.label), small),
-    icon(inUse ? "check" : "next", "chev"));
-  let armed = false;
-  card.addEventListener("click", async () => {
-    if (inUse) return;
-    if (!armed) {
-      armed = true;
-      card.classList.add("armed");
-      small.textContent = tr("tocca di nuovo: {transport} si spegne", { transport: TRANSPORTS[S.data.transport].label });
-      setTimeout(() => {
-        armed = false;
-        card.classList.remove("armed");
-        small.textContent = tr(ready);
-      }, 4000);
-      return;
-    }
-    if (await guard(api("/api/settings", { method: "PUT", body: { transport: kind } }), tr("Cora ora vive su {transport}", { transport: info.label }))) {
-      await loadState();
-      renderSettings();
-    }
-  });
-  return card;
-}
-
 function subscriptionPlanLabel(plan) {
   // Meta names its tiers itself ("Muse Code High Usage"): those are shown as they come.
   return ({ free: "Free", pro: "Pro", plus: "Plus", max: "Max", team: "Team", enterprise: "Enterprise", business: "Business", self_serve_business_prolite: "Business" })[plan] || (/\s/.test(plan) ? plan : tr("Abbonamento attivo"));
@@ -3910,7 +3866,7 @@ function instanceAccessPanel() {
     badge(current?.role === "member" ? "Utente" : "Owner", "on"));
   if (!S.data.access?.canManage) return panel({ icon: "shield", title: "Accesso all'istanza", hint: "Il tuo account e i permessi di questa Cora." }, identity,
     h("p", { class: "lead" }, "Puoi lavorare con gli agenti e usare tutte le funzioni operative. L'owner gestisce chi può entrare."));
-  const body = h("div", { class: "stack" }, identity, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  const body = h("div", { class: "stack" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
   let data;
   let busy = false;
   const update = async (fn) => {
@@ -3929,7 +3885,7 @@ function instanceAccessPanel() {
       update(() => api("/api/access", { method: "PUT", body: { [kind]: [...data[kind], value] } }));
     } });
     input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); add.click(); } });
-    return h("section", { class: "access-rules" }, h("h3", {}, title), h("p", {}, hint),
+    return h("section", { class: "set-section access-rules" }, h("span", { class: "label" }, title), h("p", { class: "muted" }, hint),
       h("div", { class: "access-add" }, input, add),
       h("ul", {}, data[kind].length ? data[kind].map((value) => h("li", { class: "access-rule" }, icon(kind === "domains" ? "globe" : "user"), h("span", { class: "grow" }, raw((kind === "domains" ? "@" : "") + value)),
         btn("", { icon: "close", cls: "ghost", title: tr("Rimuovi {value}", { value }), onclick: () => update(() => api("/api/access", { method: "PUT", body: { [kind]: data[kind].filter((entry) => entry !== value) } })) })))
@@ -3944,14 +3900,13 @@ function instanceAccessPanel() {
           tr("Ultima attività: {date}", { date: new Date(user.lastSeenAt).toLocaleString(LOCALE, { dateStyle: "short", timeStyle: "short" }) }))),
       badge(user.role === "owner" ? "Owner" : user.blocked ? "Revocato" : user.allowed ? "Utente" : "Non autorizzato", user.allowed ? "on" : ""),
       user.role === "owner" ? null : btn(user.blocked ? "Riabilita" : "Revoca accesso", { cls: user.blocked ? "ghost" : "ghost danger", onclick: () => update(() => api(`/api/access/users/${user.id}`, { method: "PUT", body: { blocked: !user.blocked } })) }))));
-    body.replaceChildren(identity,
+    body.replaceChildren(
       h("p", { class: "lead" }, "Gli utenti ammessi hanno gli stessi permessi operativi. Solo l'owner può autorizzare o revocare gli accessi."),
-      h("div", { class: "connection-grid" },
-        rules("domains", "Domini autorizzati", "Ammetti tutti gli account con un indirizzo verificato di questi domini.", "es. azienda.it"),
-        rules("emails", "Singole persone", "Autorizza una persona senza aprire l'accesso a tutto il suo dominio.", "nome@azienda.it")),
+      rules("domains", "Domini autorizzati", "Ammetti tutti gli account con un indirizzo verificato di questi domini.", "es. azienda.it"),
+      rules("emails", "Singole persone", "Autorizza una persona senza aprire l'accesso a tutto il suo dominio.", "nome@azienda.it"),
       h("p", { class: "access-note" }, icon("info"), "Quando un utente perde l'autorizzazione, si chiudono anche le sue sessioni aperte. L'owner conserva sempre l'accesso."),
-      h("section", { class: "access-people" }, h("h3", {}, "Utenti di questa istanza"),
-        h("p", {}, "Ogni persona mantiene la propria identità, anche nei messaggi agli agenti."), users),
+      h("section", { class: "set-section access-people" }, h("span", { class: "label" }, "Utenti di questa istanza"),
+        h("p", { class: "muted" }, "Ogni persona mantiene la propria identità, anche nei messaggi agli agenti."), users),
       h("details", { class: "access-history" }, h("summary", {}, icon("clock"), "Attività degli utenti"),
         h("div", { class: "access-audit" }, data.audit.map((entry) => h("div", {}, h("span", { class: "grow" }, h("b", {}, raw(entry.name || entry.email || "Owner")), h("span", {}, actions[entry.action] || "Attività")),
           h("time", { datetime: new Date(entry.at).toISOString() }, raw(new Date(entry.at).toLocaleString(LOCALE, { dateStyle: "short", timeStyle: "short" }))))))));
@@ -3983,192 +3938,6 @@ const CONNECTION_KEYS = [
  * one. On phones the list comes first and an entry opens its own page.
  * Every page stays mounted, so a sign-in half done survives a switch.
  */
-function connectionsPanel() {
-  const residentToggle = switchInput("useResidentSubscriptions", "Usa subscription residenti", S.data.settings.useResidentSubscriptions,
-    "Come impostazione predefinita, usa gli account già presenti sul dispositivo che ospita Cora.");
-  const toggle = residentToggle.querySelector("input");
-  toggle.addEventListener("change", async () => {
-    toggle.disabled = true;
-    const enabled = toggle.checked;
-    const saved = await guard(api("/api/settings", { method: "PUT", body: { useResidentSubscriptions: enabled } }), "Impostazioni salvate");
-    if (saved) {
-      await loadState();
-      renderSettings();
-    } else { toggle.checked = !enabled; toggle.disabled = false; }
-  });
-  // Claude and Codex are always listed; a newer CLI once it is installed or has an account here.
-  const providers = SUBSCRIPTION_HARNESSES.filter((provider) => provider === "claude" || provider === "codex" || S.data.providers?.[provider] || S.data.subscriptions?.some((item) => item.provider === provider));
-  const residentRow = (provider, onclick = null) => {
-    const record = S.data.subscriptions?.find((item) => item.resident && item.provider === provider);
-    const connected = record?.status === "ready";
-    return h(onclick ? "button" : "div", { class: `resident-account${onclick ? " link" : ""}`, type: onclick ? "button" : null, onclick },
-      h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(SUBSCRIPTION_ICONS[provider])),
-      h("div", { class: "grow" }, h("b", {}, raw(SUBSCRIPTION_NAMES[provider])),
-        h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato"))
-          : !S.data.providers?.[provider] ? tr("{cli} non installato su questa macchina", { cli: CLI_NAMES[provider] })
-            : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
-        connected && record.plan ? h("small", {}, raw(subscriptionPlanLabel(record.plan))) : null),
-      h("span", { class: `subscription-status ${connected ? "ready" : "disconnected"}` }, h("i", { "aria-hidden": "true" }), connected ? "Disponibile" : "Da collegare"));
-  };
-  const residentList = h("div", { class: "resident-accounts" });
-  const residentSlots = new Map(providers.map((provider) => [provider, h("div", {})]));
-  const drawResidents = () => {
-    residentList.replaceChildren(...providers.map((provider) => residentRow(provider, () => show(provider))));
-    for (const [provider, slot] of residentSlots) slot.replaceChildren(residentRow(provider));
-    drawNav();
-  };
-  const scan = btn("Rileva account", { icon: "refresh", cls: "ghost", onclick: async () => {
-    scan.disabled = true;
-    const result = await guard(api("/api/subscriptions/resident/check", { method: "POST" }));
-    if (result) {
-      S.data.subscriptions = await api("/api/subscriptions");
-      drawResidents();
-    }
-    scan.disabled = false;
-  } });
-  // doc runs on this machine or it does not: the card says which, and proves it on demand.
-  const docStatus = () => {
-    const doc = S.data.doc || {};
-    const intro = h("p", {}, "La usa doc per controllare quello che gli agenti scrivono in chat e pubblicano, con Jev di TypeSafe. Senza chiave restano solo le regole esatte.");
-    if (!doc.installed) return h("div", { class: "stack-sm" }, intro, h("p", { class: "muted" }, "doc non è installato su questa macchina: per ora non controlla niente."));
-    const result = h("p", { class: "muted", role: "status" });
-    const probe = btn("Verifica adesso", { icon: "shield", onclick: async () => {
-      probe.disabled = true;
-      result.textContent = tr("Verifico…");
-      const outcome = await guard(api("/api/doc/probe", { method: "POST" }));
-      probe.disabled = false;
-      if (!outcome) { result.textContent = ""; return; }
-      result.textContent = tr(outcome.runs && outcome.jev ? "doc risponde e Jev di TypeSafe giudica: è operativo."
-        : outcome.runs ? S.data.keys?.typesafe ? "doc risponde, ma Jev non ha giudicato: controlla la chiave." : "doc risponde con le regole esatte. Per i giudizi di Jev serve la chiave."
-          : "doc non ha risposto su questa macchina.");
-    } });
-    return h("div", { class: "stack-sm" }, intro,
-      h("p", { class: "muted" }, tr("doc è attivo: {checks} controlli nelle ultime 24 ore, {stopped} fermati.", { checks: doc.checks || 0, stopped: doc.stopped || 0 })),
-      probe, result);
-  };
-  const keyPanel = (provider, name) => {
-    // A local Ollama is not a key: the card is about the key, and says what else counts.
-    const configured = Boolean(S.data.keys?.[provider]);
-    const key = h("input", { type: "password", autocomplete: "new-password", autocapitalize: "off", spellcheck: "false", "aria-label": tr("Chiave API {provider}", { provider: name }), placeholder: configured ? "Incolla una nuova chiave per sostituirla" : "Incolla la chiave API" });
-    const save = btn(configured ? "Aggiorna chiave" : "Salva chiave", { icon: "check", cls: "primary", onclick: async () => {
-      if (!key.value.trim()) { key.focus(); return; }
-      save.disabled = true;
-      const value = key.value;
-      key.value = "";
-      const result = await guard(api(`/api/providers/${provider}/key`, { method: "PUT", body: { key: value } }), "Chiave salvata");
-      if (result) {
-        if (provider === "deepseek") S.data.providers.deepseek = Boolean(S.data.providers.deepseekInstalled);
-        else if (provider !== "typesafe" && provider !== "soniox") S.data.providers[provider] = true;
-        S.data.keys = { ...S.data.keys, [provider]: true };
-        drawNav();
-        const [text, cls, name] = badgeFor(state());
-        status.replaceChildren(icon(name), text);
-        status.className = `badge${cls ? ` ${cls}` : ""}`;
-        key.placeholder = tr("Incolla una nuova chiave per sostituirla");
-        save.lastChild.textContent = tr("Aggiorna chiave");
-      }
-      save.disabled = false;
-    } });
-    // The page says what the list says: a key, a local Ollama or a missing program, not only "is there a key".
-    const state = () => keyState(provider);
-    const badgeFor = ([led, line]) => [raw(line), led === "on" ? "on" : led === "warn" ? "warn" : "", led === "on" ? "check" : led === "warn" ? "alert" : "key"];
-    const status = badge(...badgeFor(state()));
-    key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
-    const cloud = S.data.ollamaCloud || {};
-    const about = provider === "typesafe" ? docStatus()
-      : provider === "soniox" ? h("p", {}, "Gli agenti ascoltano i messaggi vocali e rispondono con una voce loro. La voce di ogni agente si sceglie nel suo profilo.")
-      : provider === "deepseek" ? h("p", {}, S.data.providers?.deepseekInstalled ? "La usa DeepSeek Harness, per gli agenti che scelgono quell'harness nel loro Cervello." : "La usa DeepSeek Harness, che su questa macchina non è ancora installato.")
-      : provider !== "ollama" ? h("p", {}, "La chiave vale per tutti gli agenti di questa istanza.")
-      : h("div", { class: "stack-sm" },
-        h("p", {}, "Serve solo per i modelli di Ollama Cloud. L'Ollama di questa macchina non ne ha bisogno."),
-        configured ? null
-          : cloud.signedIn ? h("p", { class: "muted" }, "Non serve: questa macchina è già collegata a Ollama Cloud.")
-            : h("p", { class: "muted" }, "In alternativa alla chiave, collega questa macchina al tuo account Ollama.",
-              cloud.signinUrl ? [" ", h("a", { href: cloud.signinUrl, target: "_blank", rel: "noopener" }, tr("Collega questa macchina"))] : null));
-    return { status, body: h("div", { class: "provider-key" }, about, field("Chiave API", key), h("div", { class: "row" }, save)) };
-  };
-
-  /* ---------- the entries and their LEDs ---------- */
-  const providerState = (provider) => {
-    const records = (S.data.subscriptions || []).filter((item) => item.provider === provider);
-    const ready = records.filter((item) => item.status === "ready").length;
-    if (ready) return ["on", ready === 1 ? tr("1 account") : tr("{count} account", { count: ready })];
-    if (records.some((item) => item.status === "connecting")) return ["busy", tr("Accesso in corso")];
-    if (!S.data.providers?.[provider]) return ["off", tr("{cli} non installato", { cli: CLI_NAMES[provider] })];
-    return ["off", tr("Da collegare")];
-  };
-  const keyState = (provider) => {
-    if (S.data.keys?.[provider]) return provider === "deepseek" && !S.data.providers?.deepseekInstalled ? ["warn", tr("dsh non installato")] : ["on", tr("Chiave salvata")];
-    if (provider === "ollama" && S.data.ollamaCloud?.signedIn) return ["on", tr("Collegato a Ollama Cloud")];
-    if (provider === "ollama" && S.data.providers?.ollamaLocal) return ["on", tr("Ollama locale")];
-    return ["off", tr("Da configurare")];
-  };
-  const overviewState = () => {
-    const ready = providers.filter((provider) => providerState(provider)[0] === "on").length + CONNECTION_KEYS.filter(([provider]) => keyState(provider)[0] === "on").length;
-    return ["on", tr("{ready} di {total} attivi", { ready, total: providers.length + CONNECTION_KEYS.length })];
-  };
-  const pages = new Map();
-  const entries = [
-    { id: "panoramica", group: "", label: "Panoramica", mark: "monitor", state: overviewState },
-    ...providers.map((provider) => ({ id: provider, group: "Abbonamenti", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
-    ...CONNECTION_KEYS.map(([provider, name, mark]) => ({ id: provider, group: "Chiavi API", label: name, mark, state: () => keyState(provider) })),
-  ];
-
-  const nav = h("nav", { class: "conn-nav", "aria-label": tr("Collegamenti") });
-  let current = "";
-
-  /* ---------- the pages ---------- */
-  const back = () => btn("Collegamenti", { icon: "back", cls: "sm ghost conn-back", onclick: () => show("") });
-  pages.set("panoramica", h("div", { class: "stack" }, back(),
-    panel({ icon: "monitor", title: "Subscription del dispositivo", hint: "Gli account trovati sul server Cora. Tocca un account per collegarne altri.", actions: scan }, residentToggle, residentList),
-    h("p", { class: "conn-note" }, icon("info"), h("span", {}, "Le chiavi vengono salvate in hush e non sono più mostrate dopo il salvataggio. Valgono per tutti gli agenti di questa istanza."))));
-  for (const provider of providers) {
-    pages.set(provider, h("div", { class: "stack" }, back(),
-      panel({ icon: SUBSCRIPTION_ICONS[provider], title: SUBSCRIPTION_NAMES[provider], hint: tr("Lo usa {cli}, per gli agenti che lo scelgono nel loro Cervello.", { cli: CLI_NAMES[provider] }) },
-        h("div", { class: "conn-section" }, h("span", { class: "label" }, "Su questo server"), residentSlots.get(provider)),
-        h("div", { class: "conn-section" }, h("span", { class: "label" }, "Altri account"),
-          h("p", { class: "muted" }, "Collegane quanti vuoi, dal browser: nel profilo di ogni agente scegli quale usa."),
-          subscriptionAccounts(provider, { onChange: () => drawNav() })))));
-  }
-  for (const [provider, name, mark] of CONNECTION_KEYS) {
-    const { status, body } = keyPanel(provider, name);
-    pages.set(provider, h("div", { class: "stack" }, back(), panel({ icon: mark, title: name, actions: status }, body)));
-  }
-  const slots = new Map([...pages].map(([id, page]) => [id, h("div", { class: "conn-page", "data-conn": id, hidden: true }, page)]));
-  const detail = h("div", { class: "conn-detail" }, [...slots.values()]);
-
-  /* ---------- the list ---------- */
-  function drawNav() {
-    const items = [];
-    let group = null;
-    for (const entry of entries) {
-      if (entry.group !== group) {
-        group = entry.group;
-        if (group) items.push(h("span", { class: "conn-group" }, group));
-      }
-      const [led, line] = entry.state();
-      const active = entry.id === (current || "panoramica");
-      items.push(h("button", { type: "button", class: `conn-item${active ? " active" : ""}`, "aria-current": active ? "page" : null, "data-conn": entry.id, onclick: () => show(entry.id) },
-        h("span", { class: "conn-mark", "aria-hidden": "true" }, icon(entry.mark)),
-        h("span", { class: "conn-name" }, h("b", {}, raw(tr(entry.label))), h("small", {}, raw(line))),
-        h("i", { class: `led ${led}`, "aria-hidden": "true" }), icon("next", "conn-go")));
-    }
-    nav.replaceChildren(...items);
-  }
-  const root = h("div", { class: "conn" }, nav, detail);
-  // An empty id is the list alone (phones); on a desktop the list always has a page next to it.
-  function show(id, { updateRoute = true } = {}) {
-    current = pages.has(id) ? id : "";
-    for (const [page, slot] of slots) slot.hidden = page !== (current || "panoramica");
-    root.classList.toggle("open", Boolean(current));
-    drawNav();
-    if (updateRoute) history.replaceState(null, "", current ? `#/settings/collegamenti/${current}` : "#/settings/collegamenti");
-  }
-  drawResidents();
-  show(route()[1] === "collegamenti" ? route()[2] || "" : "", { updateRoute: false });
-  return root;
-}
-
 // doc's built-in Jev checks, in the panel's words; a check doc adds later shows its own reason.
 const DOC_CHECKS = {
   "reply:effort": ["Stime di tempo e di lavoro", "Ferma una stima di quanto ci vorrà, o di quanto c'è voluto."],
@@ -4259,7 +4028,7 @@ function docChecksPane() {
       field("Cosa deve riconoscere Jev", question, "una domanda a cui si risponde sì o no"),
       field("Cosa dire all'agente quando scatta", fix),
       h("div", { class: "doc-targets" }, targets.map((item) => item.node)),
-      data.keySet ? null : h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Per provare un controllo serve la chiave TypeSafe, in Collegamenti → Chiavi API.")),
+      data.keySet ? null : h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Per provare un controllo serve la chiave TypeSafe, in Impostazioni → TypeSafe.")),
       h("div", { class: "row" }, tryButton, btn("Annulla", { cls: "ghost", onclick: () => draw() }), saveButton),
       summary, results);
   };
@@ -4290,7 +4059,7 @@ function docChecksPane() {
       data.added.filter((rule) => rule.on.includes(target)).map(ownRow)));
     const adding = editing === null || typeof editing === "string";
     root.replaceChildren(panel({ icon: "shield", title: "Controlli di doc", hint: "Jev di TypeSafe legge quello che gli agenti scrivono alle persone e i commenti che pubblicano, e ferma quello che un controllo vieta. L'agente riceve il motivo e riscrive." },
-      data.keySet ? null : h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Senza la chiave TypeSafe Jev non giudica: restano solo le regole esatte. Aggiungila in Collegamenti → Chiavi API.")),
+      data.keySet ? null : h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Senza la chiave TypeSafe Jev non giudica: restano solo le regole esatte. Aggiungila in Impostazioni → TypeSafe.")),
       adding ? editor(typeof editing === "string" ? data.added.find((rule) => rule.key === editing) : null)
         : h("div", { class: "doc-add" }, btn("Aggiungi un controllo", { icon: "plus", onclick: () => draw(null) })),
       groups,
@@ -4304,173 +4073,456 @@ function docChecksPane() {
   return root;
 }
 
+/* ---------- settings ---------- */
+
+/** One setting: what it is and what it does on the left, its control on the right (under it with `stack`, and on phones). */
+function setRow(label, hint, control, { stack = false, cls = "" } = {}) {
+  return h("div", { class: `set-row${stack ? " stack" : ""}${cls ? ` ${cls}` : ""}` },
+    h("div", { class: "set-text" }, h("b", {}, label, h("span", { class: "set-saved", "aria-live": "polite" })), hint ? h("small", {}, hint) : null),
+    control ? h("div", { class: "set-control" }, control) : null);
+}
+
+/** A run of setting rows, between hairlines. */
+function setRows(...rows) {
+  return h("div", { class: "set-rows" }, rows);
+}
+
+/**
+ * Settings save as they change, one field at a time: the row says "salvato" for a
+ * moment, a refusal comes back as a toast. There is no Save button anywhere in Settings.
+ */
+async function saveSettings(changes, row = null) {
+  try {
+    S.data.settings = await api("/api/settings", { method: "PUT", body: changes });
+  } catch (error) {
+    toast(error.message, true);
+    return false;
+  }
+  const mark = row?.querySelector(".set-saved");
+  if (mark) {
+    mark.textContent = tr("salvato");
+    mark.classList.add("on");
+    clearTimeout(mark.timer);
+    mark.timer = setTimeout(() => { mark.classList.remove("on"); mark.textContent = ""; }, 1800);
+  }
+  return true;
+}
+
+const idList = (text) => String(text || "").split(/[\s,]+/).filter(Boolean);
+
+/** A list of switches that saves the ids of the ones on, as a whole, at every change. */
+function switchList(items, chosen, key, row) {
+  const list = h("div", { class: "set-switches" }, items.map((item) => h("label", { class: "switch" },
+    h("input", { type: "checkbox", value: item.id, checked: chosen.includes(item.id) }),
+    h("span", { class: "rocker" }),
+    h("span", { class: "switch-text" }, raw(item.name), item.sub ? h("small", { class: item.mono ? "mono" : "" }, item.sub) : null))));
+  list.addEventListener("change", async () => {
+    const on = [...list.querySelectorAll("input")].filter((input) => input.checked);
+    if (!(await saveSettings({ [key]: on.map((input) => input.value) }, row()))) {
+      await loadState();
+      renderSettings();
+    }
+  });
+  return list;
+}
+
+/** A text field of ids (the owners); the page saves it when it is left. */
+function idsInput(key, label) {
+  return h("input", { type: "text", class: "mono", value: (S.data.settings[key] || []).join(", "), autocomplete: "off", spellcheck: "false", "aria-label": label });
+}
+
+/** Which transport a channel page is about, said the way the list says it. */
+function channelState(kind) {
+  const info = transportInfo(kind);
+  const inUse = S.data.transport === kind;
+  if (info.state === "missing-token") return ["off", tr("senza token")];
+  if (info.state === "error") return ["err", tr("errore")];
+  if (inUse) return [info.state === "ready" ? "on" : "busy", tr("in uso · {state}", { state: tr(STATE_LABEL[info.state] || info.state) })];
+  return ["off", tr("pronto, non in uso")];
+}
+
+/** Moves Cora to another transport: the first tap says what goes off, the second does it. */
+function transportButton(kind) {
+  const info = transportInfo(kind);
+  const label = tr("Usa {transport}", { transport: info.label });
+  const button = btn(label, { icon: info.icon, cls: "primary", disabled: info.state === "missing-token", title: info.state === "missing-token" ? tr("Prima collega il bot") : null });
+  let armed = false;
+  button.addEventListener("click", async () => {
+    if (!armed) {
+      armed = true;
+      button.classList.add("danger");
+      button.lastChild.textContent = tr("Conferma: {transport} si spegne", { transport: TRANSPORTS[S.data.transport].label });
+      setTimeout(() => {
+        armed = false;
+        button.classList.remove("danger");
+        button.lastChild.textContent = label;
+      }, 4000);
+      return;
+    }
+    button.disabled = true;
+    if (await guard(api("/api/settings", { method: "PUT", body: { transport: kind } }), tr("Cora ora vive su {transport}", { transport: info.label }))) {
+      await loadState();
+      renderSettings();
+    } else button.disabled = false;
+  });
+  return button;
+}
+
+/** A provider's subscription accounts, as the list says them. */
+function providerState(provider) {
+  const records = (S.data.subscriptions || []).filter((item) => item.provider === provider);
+  const ready = records.filter((item) => item.status === "ready").length;
+  if (ready) return ["on", ready === 1 ? tr("1 account") : tr("{count} account", { count: ready })];
+  if (records.some((item) => item.status === "connecting")) return ["busy", tr("Accesso in corso")];
+  if (!S.data.providers?.[provider]) return ["off", tr("{cli} non installato", { cli: CLI_NAMES[provider] })];
+  return ["off", tr("Da collegare")];
+}
+
+/** An API key, and for Ollama what else counts: a local Ollama, or this machine paired with Ollama Cloud. */
+function keyState(provider) {
+  if (S.data.keys?.[provider]) return provider === "deepseek" && !S.data.providers?.deepseekInstalled ? ["warn", tr("dsh non installato")] : ["on", tr("Chiave salvata")];
+  if (provider === "ollama" && S.data.ollamaCloud?.signedIn) return ["on", tr("Collegato a Ollama Cloud")];
+  if (provider === "ollama" && S.data.providers?.ollamaLocal) return ["on", tr("Ollama locale")];
+  return ["off", tr("Da configurare")];
+}
+
+/**
+ * Settings: one list of everything on the left, grouped like a desk's sections, and
+ * the page of the entry in the address on the right (#/settings/<entry>). Every page
+ * is panels of rows, and every change saves itself. On phones the list comes first
+ * and an entry opens its page alone, with a way back.
+ */
 function renderSettings() {
   const settings = S.data.settings;
+  const manage = S.data.access?.canManage !== false;
+  let current = "";
+  // The list is drawn as soon as a page asks (an account list redraws it while it is built), so it starts empty.
+  let entries = [];
+  const fallback = () => S.data.transport || "discord";
+  const nav = h("nav", { class: "rail-nav", "aria-label": tr("Impostazioni") });
+  const pages = new Map();
+  const back = () => btn("Impostazioni", { icon: "back", cls: "sm ghost rail-back", onclick: () => show("") });
+  const page = (id, ...content) => pages.set(id, h("div", { class: "stack" }, back(), content));
+
+  /* ---------- Canali ---------- */
+  const listenRow = (kind) => {
+    const inUse = S.data.transport === kind;
+    return inUse
+      ? setRow(tr("Cora vive su {transport}", { transport: TRANSPORTS[kind].label }), "Gli altri canali sono spenti. Il salotto del pannello c'è sempre.")
+      : setRow("Canale di Cora", tr("Un canale alla volta: passando a {transport}, {current} si spegne.", { transport: TRANSPORTS[kind].label, current: TRANSPORTS[S.data.transport].label }), transportButton(kind));
+  };
+  const ownersRow = (key, hint) => {
+    const input = idsInput(key, tr("Proprietari"));
+    const row = setRow("Proprietari", hint, input, { stack: true });
+    input.addEventListener("change", async () => {
+      if (await saveSettings({ [key]: idList(input.value) }, row)) input.value = S.data.settings[key].join(", ");
+    });
+    return row;
+  };
+  const channelBadge = (kind) => {
+    const [led, line] = channelState(kind);
+    return badge(raw(line), led === "on" ? "on" : led === "err" ? "err" : led === "busy" ? "warn" : "", led === "on" ? "radio" : led === "err" ? "alert" : TRANSPORTS[kind].icon);
+  };
+
   const discord = S.data.discord;
-  const telegram = S.data.telegram;
   const guilds = discord.guilds;
-  const providers = h("div", { class: "badges" }, CONNECTIONS.map(([key, label]) => {
-    const on = S.data.providers?.[key];
-    return h("span", { class: `badge${on ? " on" : ""}`, title: on ? "" : PROVIDER_HINTS[key] }, icon(on ? "check" : "close"), tr(label));
-  }));
   const listening = S.data.agents.find((agent) => agent.bot?.user && agent.bot.user.id === discord.user?.id);
-  const discordPanel = panel({ icon: "hash", title: "Discord", hint: "Un bot ascolta i server accesi (gli altri vengono ignorati); ogni agente scrive col suo.", actions: S.data.transport === "discord" ? badge("In uso", "on", "radio") : null },
-    discord.user
-      ? h("p", { class: "lead" }, "Ascolta con ", h("b", {}, raw(discord.user.username)), listening ? " (il bot dell'agente)" : "", raw(` · ${tr(STATE_LABEL[discord.state] || discord.state)}`))
-      : discord.state === "missing-token"
-        ? [h("p", { class: "lead" }, "Nessun bot ascolta. Cora usa il bot di un agente che può leggere i messaggi:"),
-          steps(h("span", {}, "apri ", h("a", { href: "https://discord.com/developers/applications", target: "_blank", rel: "noopener" }, "discord.com/developers"), " e scegli l'app di un agente (es. Primo);"), "sezione Bot → Privileged Gateway Intents → accendi «Message Content Intent» → Save;", "entro un minuto Cora lo usa per ascoltare.")]
-        : h("p", { class: "lead" }, tr("Stato: {state}", { state: tr(STATE_LABEL[discord.state] || discord.state) }), discord.error ? raw(` (${discord.error})`) : ""),
-    h("div", { class: "field" }, h("span", { class: "label" }, "Server"),
-      guilds.length ? h("div", { class: "stack-sm" }, guilds.map((guild) => h("label", { class: "switch" },
-        h("input", { type: "checkbox", name: "guild", value: guild.id, checked: settings.guildIds.includes(guild.id) }),
-        h("span", { class: "rocker" }), h("span", { class: "switch-text" }, raw(guild.name), h("small", { class: "mono" }, raw(guild.id)))))) : h("small", {}, "Discord non è collegato adesso: i server compaiono quando lo è.")),
-    field("Proprietari (ID utente Discord)", h("input", { type: "text", name: "ownerIds", class: "mono", value: settings.ownerIds.join(", "), autocomplete: "off" }), "Solo i proprietari possono far usare il computer agli agenti. Vuoto = tutti."));
-  const chats = telegram.chats;
-  const telegramPanel = panel({ icon: "send", title: "Telegram", hint: "Un bot principale ascolta le chat accese; ogni agente può avere anche un bot suo.", actions: S.data.transport === "telegram" ? badge("In uso", "on", "radio") : null },
-    telegram.user
-      ? h("p", { class: "lead" }, "Bot: ", h("b", {}, raw(`@${telegram.user.username}`)), raw(` · ${tr(STATE_LABEL[telegram.state] || telegram.state)}${telegram.error ? ` (${telegram.error})` : ""}`))
-      : telegram.state === "idle" || telegram.state === "stopped"
-        ? h("p", { class: "lead" }, "Il token c'è: il bot si collega quando Cora passa su Telegram.")
-        : [
-        h("p", { class: "lead" }, telegram.state === "error" ? tr("Il token non funziona: {error}.", { error: telegram.error }) : "Serve un bot che ascolti."),
-        steps(
-          h("span", {}, "apri ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener" }, "@BotFather"), " e scrivi /newbot (es. «Cora»);"),
-          "sempre in BotFather: /setprivacy → il bot → Disable, così sente tutto il gruppo;",
-          "incolla qui il token: lo controllo e lo salvo in hush;",
-          "aggiungi il bot al gruppo e accendi la chat qui sotto."),
-      ],
-    tokenForm({ placeholder: telegram.user ? "Nuovo token (solo per cambiarlo)" : "Token di BotFather (123456:ABC…)", path: "/api/telegram/token", ok: "Bot Telegram collegato" }),
-    h("div", { class: "field" }, h("span", { class: "label" }, "Chat"),
-      chats.length ? h("div", { class: "stack-sm" }, chats.map((chat) => h("label", { class: "switch" },
-        h("input", { type: "checkbox", name: "tgchat", value: chat.id, checked: settings.telegramChatIds.includes(chat.id) }),
-        h("span", { class: "rocker" }),
-        h("span", { class: "switch-text" }, raw(chat.title), h("small", {}, `${tr(chat.type === "private" ? "chat privata" : chat.type === "channel" ? "canale" : "gruppo")}${chat.member === false ? tr(" · il bot non c'è più") : ""}`))))) : h("small", {}, "Aggiungi il bot a un gruppo (o scrivigli in privato): la chat compare qui e la accendi.")),
-    field("Proprietari (ID utente Telegram)", h("input", { type: "text", name: "telegramOwnerIds", class: "mono", value: settings.telegramOwnerIds.join(", "), autocomplete: "off" }), "Se è vuoto diventa proprietario chi ha creato il gruppo, o chi scrive al bot in privato."));
+  let guildRow;
+  page("discord",
+    panel({ icon: "hash", title: "Discord", hint: "Un bot ascolta i server accesi; ogni agente scrive col suo.", actions: channelBadge("discord") },
+      setRows(listenRow("discord"),
+        discord.user
+          ? setRow("Bot che ascolta", h("span", {}, h("b", {}, raw(discord.user.username)), listening ? tr(" (il bot dell'agente)") : "", raw(` · ${tr(STATE_LABEL[discord.state] || discord.state)}`)))
+          : discord.state === "missing-token"
+            ? setRow("Bot che ascolta", "Nessun bot ascolta. Cora usa il bot di un agente che può leggere i messaggi:",
+              steps(h("span", {}, "apri ", h("a", { href: "https://discord.com/developers/applications", target: "_blank", rel: "noopener" }, "discord.com/developers"), " e scegli l'app di un agente (es. Primo);"), "sezione Bot → Privileged Gateway Intents → accendi «Message Content Intent» → Save;", "entro un minuto Cora lo usa per ascoltare."), { stack: true })
+            : setRow("Bot che ascolta", h("span", {}, tr("Stato: {state}", { state: tr(STATE_LABEL[discord.state] || discord.state) }), discord.error ? raw(` (${discord.error})`) : "")))),
+    panel({ icon: "radio", title: "Ascolto", hint: "I server accesi, e chi può far usare il computer agli agenti." },
+      setRows(
+        guildRow = setRow("Server", guilds.length ? "Gli altri server vengono ignorati." : "Discord non è collegato adesso: i server compaiono quando lo è.",
+          guilds.length ? switchList(guilds.map((guild) => ({ id: guild.id, name: guild.name, sub: guild.id, mono: true })), settings.guildIds, "guildIds", () => guildRow) : null, { stack: true }),
+        ownersRow("ownerIds", "ID utente Discord, separati da virgole. Solo loro possono far usare il computer agli agenti; vuoto = tutti."))));
+
+  const telegram = S.data.telegram;
+  let chatRow;
+  page("telegram",
+    panel({ icon: "send", title: "Telegram", hint: "Un bot principale ascolta le chat accese; ogni agente può avere anche un bot suo.", actions: channelBadge("telegram") },
+      setRows(listenRow("telegram"),
+        setRow("Bot",
+          telegram.user ? h("span", {}, h("b", {}, raw(`@${telegram.user.username}`)), raw(` · ${tr(STATE_LABEL[telegram.state] || telegram.state)}${telegram.error ? ` (${telegram.error})` : ""}`))
+            : telegram.state === "idle" || telegram.state === "stopped" ? "Il token c'è: il bot si collega quando Cora passa su Telegram."
+              : telegram.state === "error" ? tr("Il token non funziona: {error}.", { error: telegram.error }) : "Serve un bot che ascolti.",
+          h("div", { class: "stack-sm" },
+            telegram.user || telegram.state === "idle" || telegram.state === "stopped" ? null : steps(
+              h("span", {}, "apri ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener" }, "@BotFather"), " e scrivi /newbot (es. «Cora»);"),
+              "sempre in BotFather: /setprivacy → il bot → Disable, così sente tutto il gruppo;",
+              "incolla qui il token: lo controllo e lo salvo in hush;",
+              "aggiungi il bot al gruppo e accendi la chat qui sotto."),
+            tokenForm({ placeholder: telegram.user ? "Nuovo token (solo per cambiarlo)" : "Token di BotFather (123456:ABC…)", path: "/api/telegram/token", ok: "Bot Telegram collegato" })), { stack: true }))),
+    panel({ icon: "radio", title: "Ascolto", hint: "Le chat accese, e chi può far usare il computer agli agenti." },
+      setRows(
+        chatRow = setRow("Chat", telegram.chats.length ? "Le chat spente vengono ignorate." : "Aggiungi il bot a un gruppo (o scrivigli in privato): la chat compare qui e la accendi.",
+          telegram.chats.length ? switchList(telegram.chats.map((chat) => ({ id: chat.id, name: chat.title, sub: `${tr(chat.type === "private" ? "chat privata" : chat.type === "channel" ? "canale" : "gruppo")}${chat.member === false ? tr(" · il bot non c'è più") : ""}` })), settings.telegramChatIds, "telegramChatIds", () => chatRow) : null, { stack: true }),
+        ownersRow("telegramOwnerIds", "ID utente Telegram. Se è vuoto diventa proprietario chi ha creato il gruppo, o chi scrive al bot in privato."))));
 
   const slack = S.data.slack || { state: "missing-token", channels: [], error: "" };
-  const slackChannels = slack.channels || [];
   const refreshChannels = btn("Aggiorna canali", { icon: "refresh", cls: "sm ghost", onclick: async () => {
     if (await guard(api("/api/slack/channels"), "Canali aggiornati")) {
       await loadState();
       renderSettings();
     }
   } });
-  const slackPanel = panel({ icon: "slack", title: "Slack", hint: "Un'app per ogni agente, così è un utente vero: la menzioni e le scrivi in privato.", actions: S.data.transport === "slack" ? badge("In uso", "on", "radio") : null },
-    slack.user
-      ? h("p", { class: "lead" }, "App principale: ", h("b", {}, raw(`@${slack.user.username}`)), raw(`${slack.team ? ` · ${slack.team.name}` : ""} · ${tr(STATE_LABEL[slack.state] || slack.state)}${slack.error ? ` (${slack.error})` : ""}`))
-      : slack.state === "idle" || slack.state === "stopped"
-        ? h("p", { class: "lead" }, "I token ci sono: l'app si collega quando Cora passa su Slack.")
-        : [
-          h("p", { class: "lead" }, slack.state === "error" ? tr("I token non funzionano: {error}.", { error: slack.error }) : "Serve l'app principale: tiene l'elenco dei canali e scrive gli avvisi."),
-          steps(
-            h("span", {}, "apri ", h("a", { href: "https://api.slack.com/apps?new_app=1", target: "_blank", rel: "noopener" }, "api.slack.com/apps"), " → From a manifest, e scegli il workspace;"),
-            h("span", {}, "Install to Workspace, poi copia il ", h("b", {}, "Bot User OAuth Token"), " (xoxb-);"),
-            h("span", {}, "in Basic Information → App-Level Tokens crea un token con ", h("code", {}, "connections:write"), " e copia l'xapp-;"),
-            "incolla qui i due token: li controllo e li salvo in hush."),
-        ],
-    slackTokenForm({ path: "/api/slack/token", ok: "App Slack collegata" }),
-    h("div", { class: "field" }, h("span", { class: "label" }, "Canali", slackChannels.length ? refreshChannels : null),
-      slackChannels.length ? h("div", { class: "stack-sm" }, slackChannels.map((channel) => h("label", { class: "switch" },
-        h("input", { type: "checkbox", name: "slchannel", value: channel.id, checked: settings.slackChannelIds.includes(channel.id) }),
-        h("span", { class: "rocker" }),
-        h("span", { class: "switch-text" }, raw(`#${channel.name}`), h("small", {}, tr(channel.private ? "canale privato" : "canale pubblico")))))) : h("div", { class: "row" }, h("small", {}, "Invita un'app in un canale (/invite): il canale compare qui e lo accendi."), refreshChannels)),
-    field("Proprietari (ID utente Slack)", h("input", { type: "text", name: "slackOwnerIds", class: "mono", value: settings.slackOwnerIds.join(", "), autocomplete: "off" }), "Se è vuoto diventa proprietario chi possiede il workspace, appena scrive."),
-    slackAppsField());
+  let slackRow;
+  page("slack",
+    panel({ icon: "slack", title: "Slack", hint: "Un'app per ogni agente, così è un utente vero: la menzioni e le scrivi in privato.", actions: channelBadge("slack") },
+      setRows(listenRow("slack"),
+        setRow("App principale",
+          slack.user ? h("span", {}, h("b", {}, raw(`@${slack.user.username}`)), raw(`${slack.team ? ` · ${slack.team.name}` : ""} · ${tr(STATE_LABEL[slack.state] || slack.state)}${slack.error ? ` (${slack.error})` : ""}`))
+            : slack.state === "idle" || slack.state === "stopped" ? "I token ci sono: l'app si collega quando Cora passa su Slack."
+              : slack.state === "error" ? tr("I token non funzionano: {error}.", { error: slack.error }) : "Serve l'app principale: tiene l'elenco dei canali e scrive gli avvisi.",
+          h("div", { class: "stack-sm" },
+            slack.user || slack.state === "idle" || slack.state === "stopped" ? null : steps(
+              h("span", {}, "apri ", h("a", { href: "https://api.slack.com/apps?new_app=1", target: "_blank", rel: "noopener" }, "api.slack.com/apps"), " → From a manifest, e scegli il workspace;"),
+              h("span", {}, "Install to Workspace, poi copia il ", h("b", {}, "Bot User OAuth Token"), " (xoxb-);"),
+              h("span", {}, "in Basic Information → App-Level Tokens crea un token con ", h("code", {}, "connections:write"), " e copia l'xapp-;"),
+              "incolla qui i due token: li controllo e li salvo in hush."),
+            slackTokenForm({ path: "/api/slack/token", ok: "App Slack collegata" })), { stack: true }))),
+    panel({ icon: "radio", title: "Ascolto", hint: "I canali accesi, e chi può far usare il computer agli agenti.", actions: refreshChannels },
+      setRows(
+        slackRow = setRow("Canali", slack.channels?.length ? "Le app sentono solo i canali accesi." : "Invita un'app in un canale (/invite): il canale compare qui e lo accendi.",
+          slack.channels?.length ? switchList(slack.channels.map((channel) => ({ id: channel.id, name: `#${channel.name}`, sub: tr(channel.private ? "canale privato" : "canale pubblico") })), settings.slackChannelIds, "slackChannelIds", () => slackRow) : null, { stack: true }),
+        ownersRow("slackOwnerIds", "ID utente Slack. Se è vuoto diventa proprietario chi possiede il workspace, appena scrive."))),
+    panel({ icon: "user", title: "Aspetto delle app", hint: "Nome, descrizione e immagine di ogni app seguono il pannello." }, slackAppsField()));
 
-  const form = h("form", { class: "stack" },
-    h("div", { class: "settings-pane stack", "data-settings-tab": "preferenze", role: "tabpanel" }, languagePanel(), notificationsPanel()),
-    h("div", { class: "settings-pane stack", "data-settings-tab": "collegamenti", role: "tabpanel" }, connectionsPanel()),
-    h("div", { class: "settings-pane stack", "data-settings-tab": "canali", role: "tabpanel" },
-    panel({ icon: "radio", title: "Dove vive Cora", hint: "Un canale alla volta: quando ne accendi uno, l'altro si spegne. Il salotto del pannello c'è sempre." },
-      h("div", { class: "choices" }, transportChoice("discord"), transportChoice("telegram"), transportChoice("slack"))),
-    h("div", { class: "split" }, discordPanel, telegramPanel), slackPanel),
-    h("div", { class: "settings-pane stack", "data-settings-tab": "agenti", role: "tabpanel" },
-    panel({ icon: "sliders", title: "Regia", hint: "Quanto possono parlarsi tra loro prima di fermarsi ad aspettare un umano." },
-      h("div", { class: "grid3" },
-        field("Messaggi tra agenti", h("input", { type: "number", name: "maxAgentTurns", min: 0, max: 40, value: settings.maxAgentTurns, inputmode: "numeric" }), "dopo ogni messaggio umano"),
-        field("Risposte per giro", h("input", { type: "number", name: "maxRepliesPerRound", min: 1, max: 6, value: settings.maxRepliesPerRound, inputmode: "numeric" }), "agenti che parlano insieme"),
-        field("Messaggi di contesto", h("input", { type: "number", name: "historySize", min: 5, max: 100, value: settings.historySize, inputmode: "numeric" }), "quanta chat rileggono")),
-      switchInput("goalMode", "Obiettivi", settings.goalMode, "Ogni compito riceve un obiettivo, cioè cosa deve essere vero perché sia finito, e un altro modello controlla che lo sia davvero. Nel Ragionamento i turni si raggruppano per obiettivo, con i token di ciascuno.")),
-    panel({ icon: "chip", title: "Cervelli e sonno", hint: "Il modello di chi non ne sceglie uno e l'ora in cui riordinano la memoria." },
-      h("div", { class: "grid2" },
-        h("div", { class: "field" }, h("span", { class: "label" }, "Modello predefinito"), modelPicker("defaultModel", settings.defaultModel, { allowDefault: false }),
-          (() => {
-            const known = S.data.models.find((model) => model.id === settings.defaultModel);
-            const reason = !settings.defaultModel ? "" : !known ? tr(MISSING_MODEL) : known.usable === false ? tr(known.reason || "non disponibile") : "";
-            return reason
-              ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("{model} non risponde su questa macchina ({reason}). Gli agenti senza un modello loro, gli obiettivi e le verifiche lo usano: scegline uno che gira qui.", { model: known?.label || settings.defaultModel, reason }))))
-              : h("small", {}, "Lo usano gli agenti senza un modello loro, e il lavoro di fondo: obiettivi, verifiche, sonno.");
-          })()),
-        field("Ora del sonno", h("input", { type: "number", name: "sleepHour", min: 0, max: 23, value: settings.sleepHour, inputmode: "numeric" }), "consolidamento notturno della memoria"),
-        h("div", { class: "field full" }, h("span", { class: "label" }, "Provider"), providers)))),
-    h("div", { class: "settings-pane stack", "data-settings-tab": "permessi", role: "tabpanel" }, permissionsPane()),
-    h("div", { class: "settings-pane stack", "data-settings-tab": "controlli", role: "tabpanel" }, docChecksPane()),
-    h("div", { class: "settings-pane stack", "data-settings-tab": "accesso", role: "tabpanel" },
-    instanceAccessPanel(),
-    panel({ icon: "key", title: "Chiavi SSH", hint: "Chi entra nei desktop via SSH passando dalla macchina host. Valgono già le chiavi che entrano nella macchina host; qui aggiungi le altre, una per riga." },
-      h("textarea", { name: "sshKeys", class: "mono", placeholder: "ssh-ed25519 AAAA… telefono" }, settings.sshKeys.join("\n")))),
-    h("div", { class: "savebar" }, h("span", { class: "spacer" }), btn("Salva impostazioni", { icon: "check", type: "submit", cls: "primary" })));
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const data = new FormData(form);
-    const ids = (name) => String(data.get(name) || "").split(/[\s,]+/).filter(Boolean);
-    const body = {
-      ownerIds: ids("ownerIds"),
-      telegramChatIds: [...form.querySelectorAll("input[name=tgchat]:checked")].map((input) => input.value),
-      telegramOwnerIds: ids("telegramOwnerIds"),
-      slackChannelIds: [...form.querySelectorAll("input[name=slchannel]:checked")].map((input) => input.value),
-      slackOwnerIds: ids("slackOwnerIds"),
-      maxAgentTurns: Number(data.get("maxAgentTurns")),
-      maxRepliesPerRound: Number(data.get("maxRepliesPerRound")),
-      historySize: Number(data.get("historySize")),
-      defaultModel: pickedModel(data, "defaultModel"),
-      sleepHour: Number(data.get("sleepHour")),
-      goalMode: data.get("goalMode") === "on",
-      sshKeys: String(data.get("sshKeys") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
-    };
-    if (guilds.length) body.guildIds = [...form.querySelectorAll("input[name=guild]:checked")].map((input) => input.value);
-    if (await guard(api("/api/settings", { method: "PUT", body }), "Impostazioni salvate")) {
+  /* ---------- Abbonamenti e chiavi ---------- */
+  const providers = SUBSCRIPTION_HARNESSES.filter((provider) => provider === "claude" || provider === "codex" || S.data.providers?.[provider] || S.data.subscriptions?.some((item) => item.provider === provider));
+  const residentToggle = switchInput("useResidentSubscriptions", "", S.data.settings.useResidentSubscriptions);
+  const toggle = residentToggle.querySelector("input");
+  const residentToggleRow = setRow("Usa gli account del server", "Gli agenti che non scelgono un account usano quelli già presenti sulla macchina che ospita Cora.", residentToggle);
+  toggle.addEventListener("change", async () => {
+    toggle.disabled = true;
+    if (await saveSettings({ useResidentSubscriptions: toggle.checked }, residentToggleRow)) {
       await loadState();
       renderSettings();
-    }
+    } else { toggle.checked = !toggle.checked; toggle.disabled = false; }
   });
-  const tabs = [["collegamenti", "Collegamenti", "link"], ["canali", "Canali", "radio"], ["agenti", "Agenti", "users"], ["permessi", "Permessi", "user"], ["controlli", "Controlli", "shield"], ["preferenze", "Preferenze", "sliders"], ["accesso", "Accesso", "key"]];
-  const nav = h("div", { class: "tabs settings-tabs", role: "tablist", "aria-label": "Sezioni impostazioni" });
-  const showTab = (id, updateRoute = false) => {
-    for (const pane of form.querySelectorAll(".settings-pane")) pane.hidden = pane.dataset.settingsTab !== id;
-    for (const button of nav.querySelectorAll("button")) {
-      const active = button.dataset.tab === id;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-selected", String(active));
-      button.tabIndex = active ? 0 : -1;
-    }
-    form.querySelector(".savebar").hidden = ["collegamenti", "permessi", "controlli", "preferenze"].includes(id);
-    if (updateRoute) history.replaceState(null, "", `#/settings/${id}`);
-    revealSelection(nav);
+  const residentRow = (provider, onclick = null) => {
+    const record = S.data.subscriptions?.find((item) => item.resident && item.provider === provider);
+    const connected = record?.status === "ready";
+    return h(onclick ? "button" : "div", { class: `resident-account${onclick ? " link" : ""}`, type: onclick ? "button" : null, onclick },
+      h("span", { class: "subscription-mark", "aria-hidden": "true" }, icon(SUBSCRIPTION_ICONS[provider])),
+      h("div", { class: "grow" }, h("b", {}, raw(SUBSCRIPTION_NAMES[provider])),
+        h("span", { class: "resident-email" }, connected ? raw(record.email || tr("Account rilevato"))
+          : !S.data.providers?.[provider] ? tr("{cli} non installato su questa macchina", { cli: CLI_NAMES[provider] })
+            : record?.status === "error" ? "Verifica non riuscita" : "Nessun account rilevato"),
+        connected && record.plan ? h("small", {}, raw(subscriptionPlanLabel(record.plan))) : null),
+      h("span", { class: `subscription-status ${connected ? "ready" : "disconnected"}` }, h("i", { "aria-hidden": "true" }), connected ? "Disponibile" : "Da collegare"));
   };
-  for (const [id, label, name] of tabs) nav.append(h("button", { type: "button", role: "tab", id: `settings-tab-${id}`, "aria-controls": `settings-pane-${id}`, "data-tab": id, onclick: () => showTab(id, true) }, icon(name), label));
-  for (const pane of form.querySelectorAll(".settings-pane")) {
-    pane.id = `settings-pane-${pane.dataset.settingsTab}`;
-    pane.setAttribute("aria-labelledby", `settings-tab-${pane.dataset.settingsTab}`);
+  const residentList = h("div", { class: "resident-accounts" });
+  const residentSlots = new Map(providers.map((provider) => [provider, h("div", {})]));
+  const drawResidents = () => {
+    residentList.replaceChildren(...providers.map((provider) => residentRow(provider, () => show(provider))));
+    for (const [provider, slot] of residentSlots) slot.replaceChildren(residentRow(provider));
+    drawNav();
+  };
+  const scan = btn("Rileva account", { icon: "refresh", cls: "ghost", onclick: async () => {
+    scan.disabled = true;
+    const result = await guard(api("/api/subscriptions/resident/check", { method: "POST" }));
+    if (result) {
+      S.data.subscriptions = await api("/api/subscriptions");
+      drawResidents();
+    }
+    scan.disabled = false;
+  } });
+  page("server",
+    panel({ icon: "monitor", title: "Account del server", hint: "Gli account trovati sulla macchina che ospita Cora. Tocca un account per collegarne altri.", actions: scan },
+      setRows(residentToggleRow), residentList),
+    h("p", { class: "set-note" }, icon("info"), h("span", {}, "Le chiavi vengono salvate in hush e non sono più mostrate dopo il salvataggio. Valgono per tutti gli agenti di questa istanza.")));
+  for (const provider of providers) {
+    page(provider,
+      panel({ icon: SUBSCRIPTION_ICONS[provider], title: SUBSCRIPTION_NAMES[provider], hint: tr("Lo usa {cli}, per gli agenti che lo scelgono nel loro Cervello.", { cli: CLI_NAMES[provider] }), actions: (() => { const [led, line] = providerState(provider); return badge(raw(line), led === "on" ? "on" : led === "busy" ? "warn" : "", led === "on" ? "check" : "user"); })() },
+        h("div", { class: "set-section" }, h("span", { class: "label" }, "Su questo server"), residentSlots.get(provider)),
+        h("div", { class: "set-section" }, h("span", { class: "label" }, "Altri account"),
+          h("p", { class: "muted" }, "Collegane quanti vuoi, dal browser: nel profilo di ogni agente scegli quale usa."),
+          subscriptionAccounts(provider, { onChange: () => drawNav() }))));
   }
-  nav.addEventListener("keydown", (event) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const buttons = [...nav.querySelectorAll("button")];
-    let index = buttons.indexOf(document.activeElement);
-    index = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
-    buttons[index].click();
-    buttons[index].focus();
+  // doc runs on this machine or it does not: the page says which, and proves it on demand.
+  const docStatus = () => {
+    const doc = S.data.doc || {};
+    const intro = h("p", {}, "La usa doc per controllare quello che gli agenti scrivono in chat e pubblicano, con Jev di TypeSafe. Senza chiave restano solo le regole esatte.");
+    if (!doc.installed) return h("div", { class: "stack-sm" }, intro, h("p", { class: "muted" }, "doc non è installato su questa macchina: per ora non controlla niente."));
+    const result = h("p", { class: "muted", role: "status" });
+    const probe = btn("Verifica adesso", { icon: "shield", onclick: async () => {
+      probe.disabled = true;
+      result.textContent = tr("Verifico…");
+      const outcome = await guard(api("/api/doc/probe", { method: "POST" }));
+      probe.disabled = false;
+      if (!outcome) { result.textContent = ""; return; }
+      result.textContent = tr(outcome.runs && outcome.jev ? "doc risponde e Jev di TypeSafe giudica: è operativo."
+        : outcome.runs ? S.data.keys?.typesafe ? "doc risponde, ma Jev non ha giudicato: controlla la chiave." : "doc risponde con le regole esatte. Per i giudizi di Jev serve la chiave."
+          : "doc non ha risposto su questa macchina.");
+    } });
+    return h("div", { class: "stack-sm" }, intro,
+      h("p", { class: "muted" }, tr("doc è attivo: {checks} controlli nelle ultime 24 ore, {stopped} fermati.", { checks: doc.checks || 0, stopped: doc.stopped || 0 })),
+      h("div", { class: "row" }, probe), result);
+  };
+  const keyPage = (provider, name, mark) => {
+    const configured = Boolean(S.data.keys?.[provider]);
+    const key = h("input", { type: "password", autocomplete: "new-password", autocapitalize: "off", spellcheck: "false", "aria-label": tr("Chiave API {provider}", { provider: name }), placeholder: configured ? "Incolla una nuova chiave per sostituirla" : "Incolla la chiave API" });
+    // The page says what the list says: a key, a local Ollama or a missing program, not only "is there a key".
+    const badgeFor = ([led, line]) => [raw(line), led === "on" ? "on" : led === "warn" ? "warn" : "", led === "on" ? "check" : led === "warn" ? "alert" : "key"];
+    const status = badge(...badgeFor(keyState(provider)));
+    const save = btn(configured ? "Aggiorna chiave" : "Salva chiave", { icon: "check", cls: "primary", onclick: async () => {
+      if (!key.value.trim()) { key.focus(); return; }
+      save.disabled = true;
+      const value = key.value;
+      key.value = "";
+      const result = await guard(api(`/api/providers/${provider}/key`, { method: "PUT", body: { key: value } }), "Chiave salvata");
+      if (result) {
+        if (provider === "deepseek") S.data.providers.deepseek = Boolean(S.data.providers.deepseekInstalled);
+        else if (provider !== "typesafe" && provider !== "soniox") S.data.providers[provider] = true;
+        S.data.keys = { ...S.data.keys, [provider]: true };
+        drawNav();
+        const [text, cls, icon_] = badgeFor(keyState(provider));
+        status.replaceChildren(icon(icon_), text);
+        status.className = `badge${cls ? ` ${cls}` : ""}`;
+        key.placeholder = tr("Incolla una nuova chiave per sostituirla");
+        save.lastChild.textContent = tr("Aggiorna chiave");
+      }
+      save.disabled = false;
+    } });
+    key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
+    const cloud = S.data.ollamaCloud || {};
+    const about = provider === "typesafe" ? docStatus()
+      : provider === "soniox" ? h("p", {}, "Gli agenti ascoltano i messaggi vocali e rispondono con una voce loro. La voce di ogni agente si sceglie nel suo profilo.")
+        : provider === "deepseek" ? h("p", {}, S.data.providers?.deepseekInstalled ? "La usa DeepSeek Harness, per gli agenti che scelgono quell'harness nel loro Cervello." : "La usa DeepSeek Harness, che su questa macchina non è ancora installato.")
+          : provider !== "ollama" ? h("p", {}, "La chiave vale per tutti gli agenti di questa istanza.")
+            : h("div", { class: "stack-sm" },
+              h("p", {}, "Serve solo per i modelli di Ollama Cloud. L'Ollama di questa macchina non ne ha bisogno."),
+              configured ? null
+                : cloud.signedIn ? h("p", { class: "muted" }, "Non serve: questa macchina è già collegata a Ollama Cloud.")
+                  : h("p", { class: "muted" }, "In alternativa alla chiave, collega questa macchina al tuo account Ollama.",
+                    cloud.signinUrl ? [" ", h("a", { href: cloud.signinUrl, target: "_blank", rel: "noopener" }, tr("Collega questa macchina"))] : null));
+    page(provider, panel({ icon: mark, title: name, actions: status }, h("div", { class: "provider-key" }, about),
+      setRows(setRow("Chiave API", "Salvata in hush, non si rivede più.", h("div", { class: "input-row" }, key, save), { stack: true }))));
+  };
+  for (const [provider, name, mark] of CONNECTION_KEYS) keyPage(provider, name, mark);
+
+  /* ---------- Agenti ---------- */
+  const numberRow = (key, label, hint, min, max) => {
+    const input = h("input", { type: "number", class: "num", min, max, value: settings[key], inputmode: "numeric", "aria-label": tr(label) });
+    const row = setRow(label, hint, input);
+    input.addEventListener("change", async () => {
+      if (await saveSettings({ [key]: Number(input.value) }, row)) input.value = S.data.settings[key];
+      drawNav();
+    });
+    return row;
+  };
+  const goal = switchInput("goalMode", "", settings.goalMode);
+  const goalRow = setRow("Obiettivi", "Ogni compito riceve un obiettivo, cioè cosa deve essere vero perché sia finito, e un altro modello controlla che lo sia davvero. Nel Ragionamento i turni si raggruppano per obiettivo.", goal);
+  goal.querySelector("input").addEventListener("change", async (event) => {
+    if (!(await saveSettings({ goalMode: event.target.checked }, goalRow))) event.target.checked = !event.target.checked;
+    drawNav();
   });
-  const initialTab = tabs.some(([id]) => id === route()[1]) ? route()[1] : "collegamenti";
-  showTab(initialTab);
-  shell([pageHead("Impostazioni", "Account, canali e preferenze della tua Cora."), nav, form], { title: "Impostazioni" });
-  requestAnimationFrame(() => revealSelection(nav));
-  if (typeof ResizeObserver !== "undefined") {
-    S.settingsObserver = new ResizeObserver(() => revealSelection(nav));
-    S.settingsObserver.observe(nav);
+  page("regia", panel({ icon: "sliders", title: "Regia", hint: "Quanto possono parlarsi tra loro prima di fermarsi ad aspettare un umano." },
+    setRows(
+      numberRow("maxAgentTurns", "Messaggi tra agenti", "Quanti messaggi si scambiano dopo ogni messaggio umano, prima di fermarsi.", 0, 40),
+      numberRow("maxRepliesPerRound", "Risposte per giro", "Quanti agenti parlano insieme.", 1, 6),
+      numberRow("historySize", "Messaggi di contesto", "Quanta chat rileggono prima di rispondere.", 5, 100),
+      goalRow)));
+
+  const model = modelPicker("defaultModel", settings.defaultModel, { allowDefault: false });
+  const modelNote = () => {
+    const known = S.data.models.find((item) => item.id === S.data.settings.defaultModel);
+    const reason = !S.data.settings.defaultModel ? "" : !known ? tr(MISSING_MODEL) : known.usable === false ? tr(known.reason || "non disponibile") : "";
+    return reason ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("{model} non risponde su questa macchina ({reason}). Gli agenti senza un modello loro, gli obiettivi e le verifiche lo usano: scegline uno che gira qui.", { model: known?.label || S.data.settings.defaultModel, reason })))) : null;
+  };
+  const modelWarning = h("div", {}, modelNote());
+  const modelRow = setRow("Modello predefinito", "Lo usano gli agenti senza un modello loro, e il lavoro di fondo: obiettivi, verifiche, sonno.", h("div", { class: "stack-sm" }, model, modelWarning), { stack: true });
+  const saveModel = async () => {
+    const value = model.querySelector("input").value.trim() || model.querySelector("select").value;
+    if (!value || value === S.data.settings.defaultModel) return;
+    await saveSettings({ defaultModel: value }, modelRow);
+    modelWarning.replaceChildren(...[modelNote()].filter(Boolean));
+    drawNav();
+  };
+  model.addEventListener("change", saveModel);
+  const hour = h("select", { "aria-label": tr("Ora del sonno") }, Array.from({ length: 24 }, (_, index) => h("option", { value: index, selected: index === settings.sleepHour }, raw(`${String(index).padStart(2, "0")}:00`))));
+  const hourRow = setRow("Ora del sonno", "Ogni notte a quest'ora riordinano la memoria.", hour);
+  hour.addEventListener("change", () => saveSettings({ sleepHour: Number(hour.value) }, hourRow));
+  const providerBadges = h("div", { class: "badges" }, CONNECTIONS.map(([key, label]) => {
+    const on = S.data.providers?.[key];
+    return h("span", { class: `badge${on ? " on" : ""}`, title: on ? "" : PROVIDER_HINTS[key] }, icon(on ? "check" : "close"), tr(label));
+  }));
+  page("modelli", panel({ icon: "chip", title: "Modelli e sonno", hint: "Il modello di chi non ne sceglie uno, e l'ora in cui riordinano la memoria." },
+    setRows(modelRow, hourRow, setRow("Cosa gira qui", "Gli harness e i provider che questa macchina può usare adesso.", providerBadges, { stack: true }))));
+
+  /* ---------- Persone ---------- */
+  page("permessi", permissionsPane());
+  page("accesso", instanceAccessPanel());
+  const keys = h("textarea", { class: "mono", placeholder: "ssh-ed25519 AAAA… telefono", "aria-label": tr("Chiavi SSH"), disabled: !manage }, settings.sshKeys.join("\n"));
+  const keysRow = setRow("Altre chiavi", "Una per riga. Valgono già le chiavi che entrano nella macchina host: qui aggiungi le altre. Si salvano quando esci dal campo.", keys, { stack: true });
+  keys.addEventListener("change", () => saveSettings({ sshKeys: keys.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) }, keysRow).then(drawNav));
+  page("ssh", panel({ icon: "key", title: "Chiavi SSH", hint: "Chi entra nei desktop degli agenti via SSH, passando dalla macchina host." }, setRows(keysRow)));
+
+  /* ---------- Generale ---------- */
+  page("controlli", docChecksPane());
+  page("preferenze", languagePanel(), notificationsPanel());
+
+  /* ---------- the list ---------- */
+  const doc = S.data.doc || {};
+  const people = (settings.permissions || []).length;
+  const keyCount = settings.sshKeys.length;
+  entries = [
+    ...["discord", "telegram", "slack"].map((kind) => ({ id: kind, group: "Canali", label: TRANSPORTS[kind].label, mark: TRANSPORTS[kind].icon, state: () => channelState(kind) })),
+    { id: "server", group: "Abbonamenti", label: "Account del server", mark: "monitor", state: () => [null, settings.useResidentSubscriptions ? tr("in uso per chi non sceglie") : tr("non usati")] },
+    ...providers.map((provider) => ({ id: provider, group: "Abbonamenti", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
+    ...CONNECTION_KEYS.map(([provider, name, mark]) => ({ id: provider, group: "Chiavi API", label: name, mark, state: () => keyState(provider) })),
+    { id: "regia", group: "Agenti", label: "Regia", mark: "sliders", state: () => [null, tr("{turns} messaggi · obiettivi {goals}", { turns: S.data.settings.maxAgentTurns, goals: tr(S.data.settings.goalMode ? "accesi" : "spenti") })] },
+    { id: "modelli", group: "Agenti", label: "Modelli e sonno", mark: "chip", state: () => {
+      const known = S.data.models.find((item) => item.id === S.data.settings.defaultModel);
+      return [known && known.usable !== false ? null : "warn", S.data.settings.defaultModel || tr("nessun modello")];
+    } },
+    { id: "permessi", group: "Persone", label: "Permessi", mark: "user", state: () => [null, people ? (people === 1 ? tr("1 persona oltre a te") : tr("{count} persone oltre a te", { count: people })) : tr("solo tu")] },
+    { id: "accesso", group: "Persone", label: "Accesso", mark: "shield", state: () => [null, tr("chi entra nella tua Cora")] },
+    { id: "ssh", group: "Persone", label: "Chiavi SSH", mark: "key", state: () => [null, keyCount ? (keyCount === 1 ? tr("1 chiave in più") : tr("{count} chiavi in più", { count: keyCount })) : tr("solo quelle dell'host")] },
+    { id: "controlli", group: "Generale", label: "Controlli di doc", mark: "shield", state: () => [doc.installed ? "on" : "off", doc.installed ? tr("doc attivo") : tr("doc non installato")] },
+    { id: "preferenze", group: "Generale", label: "Lingua e notifiche", mark: "globe", state: () => [null, LANGS[LANG]] },
+  ];
+  function drawNav() {
+    const items = [];
+    let group = null;
+    for (const entry of entries) {
+      if (entry.group !== group) {
+        group = entry.group;
+        items.push(h("span", { class: "rail-group" }, group));
+      }
+      const [led, line] = entry.state();
+      const active = entry.id === (current || fallback());
+      items.push(h("button", { type: "button", class: `rail-item${active ? " active" : ""}`, "aria-current": active ? "page" : null, "data-page": entry.id, onclick: () => show(entry.id) },
+        h("span", { class: "rail-mark", "aria-hidden": "true" }, icon(entry.mark)),
+        h("span", { class: "rail-name" }, h("b", {}, raw(tr(entry.label))), h("small", {}, raw(line))),
+        led ? h("i", { class: `led ${led}`, "aria-hidden": "true" }) : h("i", { class: "led none", "aria-hidden": "true" }), icon("next", "rail-go")));
+    }
+    nav.replaceChildren(...items);
+    requestAnimationFrame(() => nav.querySelector(".rail-item.active")?.scrollIntoView?.({ block: "nearest" }));
   }
+  const slots = new Map([...pages].map(([id, content]) => [id, h("div", { class: "rail-page", "data-page": id, hidden: true }, content)]));
+  const root = h("div", { class: "rail" }, nav, h("div", { class: "rail-detail" }, [...slots.values()]));
+  // An empty id is the list alone (phones); on a desktop the list always has a page next to it.
+  function show(id, { updateRoute = true } = {}) {
+    current = pages.has(id) ? id : "";
+    for (const [entry, slot] of slots) slot.hidden = entry !== (current || fallback());
+    root.classList.toggle("open", Boolean(current));
+    drawNav();
+    if (updateRoute) history.replaceState(null, "", current ? `#/settings/${current}` : "#/settings");
+  }
+  // The addresses before the list: a tab, or Collegamenti and one of its entries.
+  const [, first = "", second = ""] = route();
+  const legacy = { collegamenti: second && second !== "panoramica" ? second : "server", canali: S.data.transport, agenti: "regia" };
+  drawResidents();
+  show(legacy[first] || first, { updateRoute: false });
+  shell([pageHead("Impostazioni", "Canali, account e preferenze della tua Cora."), root], { title: "Impostazioni" });
 }
 
 /* ---------- login ---------- */
