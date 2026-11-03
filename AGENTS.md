@@ -64,6 +64,7 @@ Always-on Discord agents with personalities, layered memory, routines and their 
 
 ## Rules
 
+- Desktop Chromium must be at least `156.0.8078.73`; the image installs `chromium-sandbox` and must not add `--no-sandbox`. `Boxes.create()` passes the **file path** of `box/seccomp.json` to Docker, enabling the browser's namespace sandbox. Keep this profile based on the current Moby default with `clone`, `setns` and `unshare` allowed: the older Playwright profile breaks current Linux container runtimes. Before shipping browser/image changes, run a real non-root browser and verify `chrome://sandbox` reports namespace, PID and Seccomp-BPF sandboxing.
 - Secrets only through hush (`bin/run.sh`). Discord: cora listens through an agent's own bot with the Message Content intent, or an optional dedicated `CORA_DISCORD_LISTENER_TOKEN`; it never borrows another tool's bot. Telegram: `CORA_TELEGRAM_BOT_TOKEN` and `CORA_TG_BOT_<NAME>`, stored from the panel through `src/secrets.js`. Bot API URLs carry the token: never log them.
 - The agents are not tied to a platform (the owner asked): prompts say where they are right now, never that they "live on Discord".
 - Bots can be in servers the agents must not hear: only `settings.guildIds` are heard, keep everything else out of it.
