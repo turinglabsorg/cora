@@ -10,6 +10,7 @@ import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.j
 import { SHARED, Store, ftsQuery } from "../src/store.js";
 import { Traces } from "../src/traces.js";
 import { redactSecrets } from "../src/company-brain.js";
+import { panelHarness } from "./panel.js";
 import { tempHome } from "./helpers.js";
 
 describe("cron", () => {
@@ -259,4 +260,54 @@ test("the brain keeps no secret: credential shapes and values after a secret's w
     ["la chiave del cliente Acme è nel vault", "la chiave del cliente Acme è nel vault"],
   ];
   for (const [text, expected] of cases) assert.equal(redactSecrets(text), expected, text);
+});
+
+test("the panel renders markdown as DOM: blocks, inline marks, only web and mail links, [[pages]] only in the brain", () => {
+  const panel = panelHarness({ fetch: async () => { throw new Error("offline"); } });
+  const render = (text, options = {}) => panel.run(`h("div", {}, markdown(${JSON.stringify(text)}, ${JSON.stringify(options)}))`);
+  const kids = (node) => node.children.filter((child) => child.tagName !== "text" || child.text);
+  const out = render([
+    "# Piano",
+    "Una riga **importante**, una *corsiva*, `a_b`, ~~vecchio~~ e snake_case_name.",
+    "Seconda riga: https://example.com/a. [sito](https://cora.test) [male](javascript:alert(1)) <script>x</script>",
+    "",
+    "- uno",
+    "  - due",
+    "- [x] fatto",
+    "",
+    "3. tre",
+    "4. quattro",
+    "",
+    "> citazione",
+    "",
+    "| Nome | Costo |",
+    "|---|---:|",
+    "| Acme | 10 € |",
+    "",
+    "```js",
+    "const a = \"<b>\";",
+    "```",
+    "---",
+    "Vedi [[acme]].",
+    "Nel 2026 è andata così:",
+    "2026. Poi è cambiato.",
+  ].join("\n"), { wiki: true });
+  assert.deepEqual(kids(out).map((node) => node.tagName), ["h3", "p", "ul", "ol", "blockquote", "div", "div", "hr", "p"]);
+  const [, paragraph, bullets, numbers, quote, table, code, , last] = kids(out);
+  assert.deepEqual(kids(paragraph).filter((node) => node.tagName !== "text").map((node) => [node.tagName, node.textContent]), [
+    ["strong", "importante"], ["em", "corsiva"], ["code", "a_b"], ["del", "vecchio"], ["br", ""], ["a", "https://example.com/a"], ["a", "sito"],
+  ]);
+  assert.match(paragraph.textContent, /e snake_case_name\./, "underscores inside a word are not emphasis");
+  assert.match(paragraph.textContent, /\[male\]\(javascript:alert\(1\)\) <script>x<\/script>/, "a link that is not web or mail, and any HTML, stay text");
+  assert.deepEqual(paragraph.querySelectorAll("a").map((a) => a.attributes.href), ["https://example.com/a", "https://cora.test"]);
+  assert.equal(bullets.querySelector("ul").textContent, "due", "a nested list goes inside its item");
+  assert.equal(bullets.querySelector("input").attributes.type, "checkbox");
+  assert.deepEqual([numbers.attributes.start, numbers.querySelectorAll("li").length], ["3", 2], "a numbered list after a bulleted one is a list of its own");
+  assert.equal(quote.textContent, "citazione");
+  assert.deepEqual(table.querySelectorAll("th").map((th) => [th.textContent, th.className]), [["Nome", ""], ["Costo", "md-right"]]);
+  assert.deepEqual([code.querySelector("span").textContent, code.querySelector("pre").textContent], ["js", 'const a = "<b>";']);
+  assert.deepEqual(last.querySelectorAll("a").map((a) => [a.attributes.href, a.className]), [["#/brain/p/acme", "brain-link"]]);
+  assert.match(last.textContent, /così:2026\. Poi è cambiato\.$/, "a line that opens with a year stays a sentence");
+  assert.equal(render("Vedi [[acme]].").textContent, "Vedi [[acme]].", "outside the brain [[slug]] is text");
+  assert.equal(render("**grassetto *e corsivo***").querySelector("strong").querySelector("em").textContent, "e corsivo");
 });

@@ -2321,27 +2321,192 @@ function chatFile(file) {
   return h("a", { href: url, class: "chat-file doc" }, icon("file"), raw(file.name));
 }
 
-/** Message text with its web links clickable; nothing else in it is interpreted. */
-function linkedText(text) {
-  const pattern = /\[([^\]\n]{1,200})\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s<>"]+/g;
+/* ---------- markdown ---------- */
+// One pass over the inline marks. Group numbers matter: they are read in mdInline().
+const MD_INLINE = [
+  "(`+)([^`][\\s\\S]*?)\\1(?!`)",
+  "\\[\\[([a-z0-9-]{2,60})\\]\\]",
+  "(!?)\\[([^\\]\\n]{1,300})\\]\\(\\s*<?((?:https?:\\/\\/|mailto:)[^\\s)>]+)>?(?:\\s+\"[^\"\\n]*\")?\\s*\\)",
+  "<((?:https?:\\/\\/|mailto:)[^>\\s]+)>",
+  "(https?:\\/\\/[^\\s<>\"]+)",
+  "(\\*\\*|__)(?=\\S)([\\s\\S]*?\\S)\\9(?![*_])",
+  "~~(?=\\S)([\\s\\S]*?\\S)~~",
+  "(\\*|_)(?=[^\\s*_])([\\s\\S]*?[^\\s\\\\])\\12(?![\\p{L}\\p{N}])",
+  "\\\\([\\\\`*_{}\\[\\]()#+\\-.!|~>])",
+].join("|");
+
+function mdLink(href, label) {
+  return h("a", href.startsWith("mailto:") ? { href } : { href, target: "_blank", rel: "noopener noreferrer" }, label);
+}
+
+/** Text with its line breaks kept. */
+function mdText(text) {
+  return String(text).split("\n").flatMap((line, index) => (index ? [h("br"), raw(line)] : [raw(line)]));
+}
+
+function mdInline(text, wiki) {
   const count = (value, char) => value.split(char).length - 1;
-  const parts = [];
+  const re = new RegExp(MD_INLINE, "gu");
+  const out = [];
   let last = 0;
-  for (const match of text.matchAll(pattern)) {
-    let url = match[2] || match[0];
-    let end = match.index + match[0].length;
-    if (!match[2]) {
+  let m;
+  while ((m = re.exec(text))) {
+    const at = m.index;
+    let end = at + m[0].length;
+    // An underscore inside a word (snake_case) is part of the word.
+    if ((m[9] === "__" || m[12] === "_") && /[\p{L}\p{N}]/u.test(text[at - 1] || "")) { re.lastIndex = at + 1; continue; }
+    let node;
+    if (m[1]) node = h("code", {}, raw(m[2].replace(/^ (.*) $/s, "$1")));
+    else if (m[3]) node = wiki ? h("a", { href: `#/brain/p/${m[3]}`, class: "brain-link" }, raw(m[3])) : raw(m[0]);
+    else if (m[6]) node = mdLink(m[6], m[4] ? raw(m[5]) : mdInline(m[5], wiki));
+    else if (m[7]) node = mdLink(m[7], raw(m[7].replace(/^mailto:/, "")));
+    else if (m[8]) {
       // Sentence punctuation after a bare link is not part of it; a closing bracket only when unbalanced.
-      while (/[.,;:!?'»…]$/.test(url) || (url.endsWith(")") && count(url, ")") > count(url, "("))) {
-        url = url.slice(0, -1);
-        end -= 1;
-      }
-    }
-    parts.push(raw(text.slice(last, match.index)), h("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, raw(match[1] || url)));
+      let url = m[8];
+      while (/[.,;:!?'»…*_]$/.test(url) || (url.endsWith(")") && count(url, ")") > count(url, "("))) url = url.slice(0, -1);
+      end = at + url.length;
+      re.lastIndex = end;
+      node = mdLink(url, raw(url));
+    } else if (m[10]) node = h("strong", {}, mdInline(m[10], wiki));
+    else if (m[11]) node = h("del", {}, mdInline(m[11], wiki));
+    else if (m[13]) node = h("em", {}, mdInline(m[13], wiki));
+    else node = raw(m[14]);
+    if (at > last) out.push(...mdText(text.slice(last, at)));
+    out.push(node);
     last = end;
   }
-  parts.push(raw(text.slice(last)));
-  return parts;
+  if (last < text.length) out.push(...mdText(text.slice(last)));
+  return out;
+}
+
+function mdCode(body, lang) {
+  const copy = btn("", { icon: "copy", cls: "sm ghost", title: "Copia", onclick: () => {
+    navigator.clipboard?.writeText(body).then(() => toast("Copiato"), () => toast("Non riesco a copiare: selezionalo a mano", true));
+  } });
+  return h("div", { class: "md-pre" }, h("div", { class: "md-pre-head" }, h("span", {}, raw(lang)), copy), h("pre", {}, h("code", {}, raw(body))));
+}
+
+const MD = {
+  fence: /^\s{0,3}(`{3,}|~{3,})\s*([\w+#.-]*)[^`]*$/,
+  heading: /^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/,
+  rule: /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/,
+  item: /^(\s*)([-*+•]|\d{1,9}[.)])\s+(.*)$/,
+  quote: /^\s{0,3}>\s?(.*)$/,
+  tableSep: /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/,
+};
+
+function mdCells(row) {
+  return row.trim().replace(/\\\|/g, "\u0000").replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.replace(/\u0000/g, "|").trim());
+}
+
+function mdTable(lines, start, wiki) {
+  const head = mdCells(lines[start]);
+  const align = mdCells(lines[start + 1]).map((cell) => (/^:-+:$/.test(cell) ? "center" : /-:$/.test(cell) ? "right" : ""));
+  let i = start + 2;
+  const rows = [];
+  while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(mdCells(lines[i++]));
+  const cell = (tag, text, index) => h(tag, align[index] ? { class: `md-${align[index]}` } : {}, mdInline(text, wiki));
+  return {
+    node: h("div", { class: "md-table" }, h("table", {},
+      h("thead", {}, h("tr", {}, head.map((text, index) => cell("th", text, index)))),
+      h("tbody", {}, rows.map((row) => h("tr", {}, head.map((_, index) => cell("td", row[index] || "", index))))))),
+    next: i,
+  };
+}
+
+function mdList(lines, start, wiki) {
+  const entries = [];
+  let i = start;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j += 1;
+      if (j < lines.length && MD.item.test(lines[j])) { i = j; continue; }
+      break;
+    }
+    const m = MD.item.exec(line);
+    if (m && !MD.rule.test(line)) {
+      const entry = { indent: m[1].replace(/\t/g, "    ").length, ordered: /\d/.test(m[2]), number: parseInt(m[2], 10), text: m[3] };
+      // A numbered list after a bulleted one (or the other way round) is a list of its own.
+      if (entries.length && entry.indent <= entries[0].indent && entry.ordered !== entries[0].ordered) break;
+      entries.push(entry);
+    }
+    else if (entries.length && (/^\s{2,}\S/.test(line) || !(MD.heading.test(line) || MD.fence.test(line) || MD.quote.test(line) || MD.rule.test(line) || (line.includes("|") && MD.tableSep.test(lines[i + 1] || ""))))) entries.at(-1).text += `\n${line.trim()}`;
+    else break;
+    i += 1;
+  }
+  const newList = (entry) => h(entry.ordered ? "ol" : "ul", entry.ordered && entry.number !== 1 ? { start: entry.number } : {});
+  const root = newList(entries[0]);
+  const stack = [{ indent: entries[0].indent, list: root, last: null }];
+  for (const entry of entries) {
+    let top = stack.at(-1);
+    if (entry.indent > top.indent + 1 && top.last) {
+      const list = newList(entry);
+      top.last.append(list);
+      stack.push(top = { indent: entry.indent, list, last: null });
+    } else {
+      while (stack.length > 1 && entry.indent < top.indent) { stack.pop(); top = stack.at(-1); }
+    }
+    const task = /^\[([ xX])\]\s+(.*)$/s.exec(entry.text);
+    const li = task
+      ? h("li", { class: "task" }, h("input", { type: "checkbox", disabled: true, checked: task[1] !== " " }), mdInline(task[2], wiki))
+      : h("li", {}, mdInline(entry.text, wiki));
+    top.list.append(li);
+    top.last = li;
+  }
+  return { node: root, next: i };
+}
+
+/**
+ * Markdown as people and agents write it, built as DOM nodes: nothing in the
+ * text ever becomes HTML. Headings, paragraphs with their line breaks, lists
+ * (nested, numbered, with checkboxes), quotes, fenced code, tables and rules;
+ * inline code, bold, italic, strikethrough, links (web and mail only) and bare
+ * web addresses. With `wiki`, [[slug]] links to that page of the brain.
+ */
+function markdown(text, { wiki = false } = {}) {
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  // A numbered line breaks into a paragraph only as "1.": "2026. Poi…" stays a sentence.
+  const startsBlock = (line, next) => MD.heading.test(line) || MD.fence.test(line) || MD.rule.test(line) || MD.quote.test(line)
+    || (MD.item.test(line) && !/^\s*(?:\d*[02-9]|\d{2,})[.)]\s/.test(line)) || (line.includes("|") && MD.tableSep.test(next || ""));
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    let m;
+    if (!line.trim()) { i += 1; continue; }
+    if ((m = MD.fence.exec(line))) {
+      const body = [];
+      const close = new RegExp(`^\\s{0,3}${m[1][0] === "`" ? "`" : "~"}{${m[1].length},}\\s*$`);
+      for (i += 1; i < lines.length && !close.test(lines[i]); i += 1) body.push(lines[i]);
+      i += 1;
+      blocks.push(mdCode(body.join("\n"), m[2]));
+    } else if ((m = MD.heading.exec(line))) {
+      blocks.push(h(`h${Math.min(6, m[1].length + 2)}`, {}, mdInline(m[2], wiki)));
+      i += 1;
+    } else if (MD.rule.test(line)) {
+      blocks.push(h("hr"));
+      i += 1;
+    } else if (line.includes("|") && MD.tableSep.test(lines[i + 1] || "")) {
+      const table = mdTable(lines, i, wiki);
+      blocks.push(table.node);
+      i = table.next;
+    } else if (MD.quote.test(line)) {
+      const inner = [];
+      while (i < lines.length && (m = MD.quote.exec(lines[i]))) { inner.push(m[1]); i += 1; }
+      blocks.push(h("blockquote", {}, markdown(inner.join("\n"), { wiki })));
+    } else if (MD.item.test(line)) {
+      const list = mdList(lines, i, wiki);
+      blocks.push(list.node);
+      i = list.next;
+    } else {
+      const paragraph = [line.trim()];
+      for (i += 1; i < lines.length && lines[i].trim() && !startsBlock(lines[i], lines[i + 1]); i += 1) paragraph.push(lines[i].trim());
+      blocks.push(h("p", {}, mdInline(paragraph.join("\n"), wiki)));
+    }
+  }
+  return blocks;
 }
 
 function chatMessage(item, answer) {
@@ -2359,7 +2524,7 @@ function chatMessage(item, answer) {
         h("time", {}, fmtTime(item.at)),
         item.traceId && agent ? h("a", { class: "why", href: `#/agent/${agent.id}/ragionamento/${item.traceId}`, title: "Ragionamento" }, icon("bulb"), "perché") : null),
       item.request ? h("div", { class: "request-tag" }, icon("ask"), "Richiesta") : null,
-      text ? h("div", { class: "text" }, linkedText(text)) : null,
+      text ? h("div", { class: "text md" }, markdown(text)) : null,
       item.file ? chatFile(item.file) : null,
       choices));
 }
@@ -2684,25 +2849,9 @@ function brainAuthor(author) {
   return raw(author);
 }
 
-/** A page's text as text: lines, bullets and [[slug]] links; nothing in it becomes HTML. */
+/** A page's text: markdown, with [[slug]] as links to the other pages; nothing in it becomes HTML. */
 function brainText(text) {
-  const inline = (line) => line.split(/(\[\[[a-z0-9-]{2,60}\]\])/g).map((part) => {
-    const link = /^\[\[([a-z0-9-]{2,60})\]\]$/.exec(part);
-    return link ? h("a", { href: `#/brain/p/${link[1]}`, class: "brain-link" }, raw(link[1])) : raw(part);
-  });
-  const blocks = [];
-  let list = null;
-  for (const line of String(text || "").split("\n")) {
-    const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
-    if (bullet) {
-      if (!list) blocks.push(list = h("ul", {}));
-      list.append(h("li", {}, inline(bullet[1])));
-      continue;
-    }
-    list = null;
-    if (line.trim()) blocks.push(h("p", {}, inline(line)));
-  }
-  return h("div", { class: "brain-text" }, blocks);
+  return h("div", { class: "brain-text md" }, markdown(text, { wiki: true }));
 }
 
 /** The lines a change took out and put in, as the review shows them. */
