@@ -3899,6 +3899,54 @@ describe("thread goal lifecycle", () => {
     } finally { release(); app.boxes.shell = shell; await quiet(); }
   });
 
+  for (const [who, author] of [["owner", OWNER], ["authorized member", STRANGER]]) {
+    test(`${who} desktop requests wait for the thread instead of receiving a turn without tools`, async () => {
+      const permissions = app.store.settings.permissions;
+      const releaseAfterMs = app.orchestrator.releaseAfterMs;
+      const shell = app.boxes.shell;
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let oldCalls = 0, nextCalls = 0, evaluations = 0, commands = 0;
+      app.orchestrator.releaseAfterMs = 10;
+      if (author !== OWNER) app.store.updateSettings({ permissions: [...permissions.filter((grant) => grant.id !== `discord:${author}`), { id: `discord:${author}`, agents: [ivo.id] }] });
+      goals = () => "la registrazione è controllata sul computer";
+      checks = () => JSON.stringify({ met: true });
+      intentions = () => { evaluations++; return JSON.stringify({ intent: "status", reply: "" }); };
+      replies.set("Iris", async () => { oldCalls++; await gate; return { content: "Controllo di Iris terminato." }; });
+      replies.set("Ivo", (body) => {
+        nextCalls++;
+        if (!body.tools.some((tool) => tool.function.name === "shell")) return { content: "In questa sessione non ho il terminale." };
+        return nextCalls === 1 ? { tool_calls: [{ function: { name: "shell", arguments: { command: "check-registration" } } }] } : { content: "Registrazione controllata dal computer." };
+      });
+      app.boxes.shell = async () => {
+        commands++;
+        assert.equal(app.orchestrator.threadWork.get(CHANNEL), ivo.id);
+        return { code: 0, output: "Registration checked on the agent's computer." };
+      };
+      try {
+        discord.say({ content: "Iris, controlla il documento" });
+        await waitFor(() => oldCalls === 1);
+        const question = discord.say({ content: "Ivo, hai già registrato il tuo indirizzo?", author, username: author === OWNER ? "Sam" : "Teammate" });
+        await waitFor(() => evaluations > 0, { what: "semantic status evaluation without a handoff" });
+        await app.orchestrator.round(app.orchestrator.state(CHANNEL));
+        assert.equal(nextCalls, 0, "a busy thread must not strip the requested agent's computer");
+        assert.ok(app.orchestrator.state(CHANNEL).humanQueue.has(question.id), "the authorized request stays queued");
+        assert.equal(app.orchestrator.threadWork.get(CHANNEL), iris.id, "a status question preserves the current worker");
+        release();
+        await waitFor(() => commands === 1, { what: "the queued agent using its computer after the thread is released" });
+        await waitFor(() => discord.state.webhookPosts.some((post) => post.username === "Ivo" && post.content === "Registrazione controllata dal computer."));
+        assert.ok(!app.orchestrator.state(CHANNEL).humanQueue.has(question.id));
+        assert.ok(!discord.state.webhookPosts.some((post) => /non ho il terminale/.test(post.content)));
+      } finally {
+        release();
+        await quiet();
+        app.boxes.shell = shell;
+        app.orchestrator.releaseAfterMs = releaseAfterMs;
+        app.store.updateSettings({ permissions });
+      }
+    });
+  }
+
   test("tools wait for semantic evaluation and cannot run after an evaluated stop", async () => {
     const r = routine(iris, "Stop valutato");
     goals = () => "controllo completato";
