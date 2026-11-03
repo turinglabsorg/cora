@@ -287,6 +287,7 @@ export const EN = {
   "Permessi": "Permissions",
   "Obiettivi": "Goals",
   "Obiettivo": "Goal",
+  "Ogni compito riceve un obiettivo, cioè cosa deve essere vero perché sia finito, e un altro modello controlla che lo sia davvero. Nel Ragionamento i turni si raggruppano per obiettivo, con i token di ciascuno.": "Every task gets a goal, what must be true for it to be finished, and another model checks that it really is. In Reasoning the turns are grouped by goal, each with its tokens.",
   "Ogni turno, anche quando passa, e gli obiettivi con tutti i turni che ci hanno lavorato. Claude Code mostra i passi e gli strumenti, non il testo del ragionamento.": "Every turn, even when it passes, and the goals with every turn that worked toward them. Claude Code shows the steps and the tools, not the text of its reasoning.",
   "Ogni turno, anche quando passa: cosa ha letto, cosa ha pensato, gli strumenti e la risposta. Un obiettivo raccoglie tutti i turni che ci hanno lavorato.": "Every turn, even when it passes: what it read, what it thought, the tools and the answer. A goal gathers every turn that worked toward it.",
   "1 turno": "1 turn",

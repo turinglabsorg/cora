@@ -4305,7 +4305,8 @@ function renderSettings() {
       h("div", { class: "grid3" },
         field("Messaggi tra agenti", h("input", { type: "number", name: "maxAgentTurns", min: 0, max: 40, value: settings.maxAgentTurns, inputmode: "numeric" }), "dopo ogni messaggio umano"),
         field("Risposte per giro", h("input", { type: "number", name: "maxRepliesPerRound", min: 1, max: 6, value: settings.maxRepliesPerRound, inputmode: "numeric" }), "agenti che parlano insieme"),
-        field("Messaggi di contesto", h("input", { type: "number", name: "historySize", min: 5, max: 100, value: settings.historySize, inputmode: "numeric" }), "quanta chat rileggono"))),
+        field("Messaggi di contesto", h("input", { type: "number", name: "historySize", min: 5, max: 100, value: settings.historySize, inputmode: "numeric" }), "quanta chat rileggono")),
+      switchInput("goalMode", "Obiettivi", settings.goalMode, "Ogni compito riceve un obiettivo, cioè cosa deve essere vero perché sia finito, e un altro modello controlla che lo sia davvero. Nel Ragionamento i turni si raggruppano per obiettivo, con i token di ciascuno.")),
     panel({ icon: "chip", title: "Cervelli e sonno", hint: "Il modello di chi non ne sceglie uno e l'ora in cui riordinano la memoria." },
       h("div", { class: "grid2" },
         h("div", { class: "field" }, h("span", { class: "label" }, "Modello predefinito"), modelPicker("defaultModel", settings.defaultModel, { allowDefault: false }),
@@ -4340,6 +4341,7 @@ function renderSettings() {
       historySize: Number(data.get("historySize")),
       defaultModel: pickedModel(data, "defaultModel"),
       sleepHour: Number(data.get("sleepHour")),
+      goalMode: data.get("goalMode") === "on",
       sshKeys: String(data.get("sshKeys") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
     };
     if (guilds.length) body.guildIds = [...form.querySelectorAll("input[name=guild]:checked")].map((input) => input.value);
@@ -4470,13 +4472,27 @@ async function render() {
 document.documentElement.lang = LANG;
 document.title = "Cora · Computer-Operating Resident Agents";
 
+/** While the state loads, the page being opened in outline: its own name, not always the agents page. */
+const BOOT_TITLES = { agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", settings: "Impostazioni", archivio: "Archivio" };
+
+function bootSkeleton() {
+  const [section] = route();
+  const title = BOOT_TITLES[section] || "Agenti";
+  if (title === "Agenti") {
+    return [[
+      pageHead("Agenti", skeletonLine("sk-caption")),
+      panel({ icon: "chart", title: "Consumi globali" }, skeleton("heat")),
+      panel({ icon: "users", title: "Gli agenti" }, skeleton()),
+      panel({ icon: "chart", title: "Consumi per agente" }, skeleton("heat")),
+    ], title];
+  }
+  if (section === "salotto" || section === "agent") return [[pageHead(title, skeletonLine("sk-caption")), skeleton("chat", 4)], title];
+  return [[pageHead(title, skeletonLine("sk-caption")), panel({}, skeleton("rows", 4)), panel({}, skeleton("rows", 3))], title];
+}
+
 async function boot() {
-  shell([
-    pageHead("Agenti", skeletonLine("sk-caption")),
-    panel({ icon: "chart", title: "Consumi globali" }, skeleton("heat")),
-    panel({ icon: "users", title: "Gli agenti" }, skeleton()),
-    panel({ icon: "chart", title: "Consumi per agente" }, skeleton("heat")),
-  ], { title: "Agenti" });
+  const [outline, title] = bootSkeleton();
+  shell(outline, { title });
   const me = await fetch("/api/me", { credentials: "same-origin" }).then((response) => response.json()).catch(() => ({}));
   S.cloud = me.cloud || null;
   if (!me.authed) return renderLogin();
