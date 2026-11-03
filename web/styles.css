@@ -1376,3 +1376,11 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .md td + td, .md th + th { border-left: 1px solid var(--line); }
 .md th.md-right, .md td.md-right { text-align: right; font-variant-numeric: tabular-nums; }
 .md th.md-center, .md td.md-center { text-align: center; }
+
+/* An agent's Slack app following the panel: one line with its state and a button to do it now. */
+.slack-app-sync { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); color: var(--muted); font-size: 13px; line-height: 1.5; }
+.slack-app-sync > .ico { flex: none; width: 16px; height: 16px; color: var(--green); }
+.slack-app-sync.err { border-color: rgba(229, 83, 61, 0.35); }
+.slack-app-sync.err > .ico { color: var(--red); }
+.slack-apps .row { flex-wrap: wrap; gap: 8px; }
+.slack-apps .row input { flex: 1 1 260px; min-width: 0; }

@@ -3398,6 +3398,48 @@ describe("agents in Slack", () => {
     await quiet();
   });
 
+  test("with Slack's configuration token every app follows the panel, name, description and image, with no trip to Slack", async () => {
+    const silviaApp = "A0000000101";
+    const mainApp = "A0000000100";
+    slack.configToken("xoxe-1-first-0000");
+    assert.match((await call("/api/slack/config-token", { method: "PUT", body: { token: "nope" } })).data.error, /xoxe-/);
+    assert.match((await call("/api/slack/config-token", { method: "PUT", body: { token: "xoxe-1-unknown-000" } })).data.error, /non accetta/);
+    const saved = await call("/api/slack/config-token", { method: "PUT", body: { token: "xoxe-1-first-0000" } });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.data.apps.configured, true);
+    assert.equal(hushVault.CORA_SLACK_CONFIG_TOKEN, "xoxe-1-refresh-1", "the spent refresh token is replaced in hush by the one Slack gave back");
+
+    await waitFor(() => slack.state.manifests.get(silviaApp) && slack.state.manifests.get(mainApp), { what: "both manifests updated" });
+    assert.deepEqual([slack.state.manifests.get(silviaApp).display_information.name, slack.state.manifests.get(silviaApp).features.bot_user.display_name], ["Silvia", "Silvia"]);
+    assert.equal(slack.state.manifests.get(silviaApp).display_information.description, "Silvia, agente di Cora");
+    assert.equal(slack.state.manifests.get(silviaApp).settings.socket_mode_enabled, true, "the rest of the manifest stays as it was");
+    assert.equal(slack.state.manifests.get(mainApp).display_information.name, "Cora");
+    assert.equal(slack.state.manifests.get(mainApp).display_information.description, "creata a mano", "Cora's own description is left alone");
+
+    // A new image and a new personality in the panel reach Slack on their own.
+    await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarUrl: "https://cdn.test/silvia.png", personality: "Segue i clienti di Dopamina.\nAltro." } });
+    await waitFor(() => slack.state.icons.get(silviaApp) === "https://cdn.test/silvia.png", { what: "Silvia's icon" });
+    await waitFor(() => slack.state.manifests.get(silviaApp).display_information.description === "Segue i clienti di Dopamina.", { what: "Silvia's description" });
+    const synced = (await call(`/api/agents/${silvia.id}`)).data.slackBot.appSync;
+    assert.deepEqual([synced.appId, synced.error], [silviaApp, ""]);
+    assert.equal((await call("/api/state")).data.slack.appSync.appId, mainApp);
+
+    // Nothing new, nothing sent.
+    const calls = slack.state.configCalls.length;
+    app.skBots.sync();
+    await sleep(800);
+    assert.equal(slack.state.configCalls.length, calls, "an app already in line costs no call");
+
+    // An image Slack refuses is said in the agent's panel.
+    await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarUrl: "https://cdn.test/small.png" } });
+    const refused = await waitFor(async () => (await call(`/api/agents/${silvia.id}`)).data.slackBot.appSync?.error, { what: "the refusal" });
+    assert.match(refused, /tra 512 e 2000 pixel/);
+    const forced = await call(`/api/agents/${silvia.id}/slack-app`, { method: "POST" });
+    assert.equal(forced.status, 200);
+    await call(`/api/agents/${silvia.id}`, { method: "PUT", body: { avatarUrl: "", personality: "" } });
+    await waitFor(() => slack.state.manifests.get(silviaApp).display_information.description === "Silvia, agente di Cora", { what: "Silvia back as she was" });
+  });
+
   test("Slack's own markup becomes names and words, and what an agent writes becomes mrkdwn", async () => {
     slack.state.posts.length = 0;
     replies.set("Silvia", (body) => {

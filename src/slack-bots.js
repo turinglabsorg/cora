@@ -73,8 +73,9 @@ export function appManifest(agent) {
  * heard as long as one of them is in it; repeats are dropped by message id.
  */
 export class SlackBots {
-  constructor({ store, apiBase, tokenFor = (name) => process.env[name] || "", log, onDirect = null, onGuild = null }) {
+  constructor({ store, apiBase, tokenFor = (name) => process.env[name] || "", log, onDirect = null, onGuild = null, apps = null }) {
     this.store = store;
+    this.apps = apps;
     this.apiBase = apiBase;
     this.tokenFor = tokenFor;
     this.log = log;
@@ -86,9 +87,24 @@ export class SlackBots {
     this.active = false;
   }
 
+  /**
+   * The hush names an agent's Slack tokens live under, fixed the first time they
+   * are read: renaming the agent keeps its app (and the app then takes the new name).
+   */
+  envNames(agent) {
+    const key = `slackBotEnv:${agent.id}`;
+    const stored = this.store.value(key);
+    if (stored?.bot && stored?.app) return stored;
+    const taken = (name) => this.store.agents().some((other) => other.id !== agent.id && this.store.value(`slackBotEnv:${other.id}`)?.bot === name);
+    const names = taken(slackBotEnvName(agent))
+      ? { bot: `CORA_SK_BOT_${agent.id.toUpperCase()}`, app: `CORA_SK_APP_${agent.id.toUpperCase()}` }
+      : { bot: slackBotEnvName(agent), app: slackAppEnvName(agent) };
+    this.store.setValue(key, names);
+    return names;
+  }
+
   tokens(agent) {
-    const botEnv = slackBotEnvName(agent);
-    const appEnv = slackAppEnvName(agent);
+    const { bot: botEnv, app: appEnv } = this.envNames(agent);
     return {
       botToken: this.added.get(botEnv) || this.tokenFor(botEnv),
       appToken: this.added.get(appEnv) || this.tokenFor(appEnv),
@@ -122,8 +138,11 @@ export class SlackBots {
         this.forgetMembership(agentId);
       }
     }
-    for (const [agentId, { botToken, appToken }] of wanted) {
-      if (this.clients.has(agentId)) continue;
+    for (const [agentId, { agent, botToken, appToken }] of wanted) {
+      if (this.clients.has(agentId)) {
+        this.syncApp(agent).catch(() => {});
+        continue;
+      }
       const client = new Slack({ botToken, appToken, apiBase: this.apiBase });
       const entry = { client, botToken, appToken, error: "" };
       this.clients.set(agentId, entry);
@@ -134,6 +153,7 @@ export class SlackBots {
       client.on("ready", () => {
         this.log?.({ type: "slack", agentId, text: `app Slack collegata come @${client.user?.name}` });
         client.listChannels().catch(() => {});
+        this.syncApp(this.store.agent(agentId)).catch(() => {});
       });
       client.on("joined", () => this.forgetMembership(agentId));
       client.on("status", (status) => {
@@ -144,6 +164,13 @@ export class SlackBots {
       });
       client.start();
     }
+  }
+
+  /** Name, description and image follow the panel, through the app's own configuration. */
+  syncApp(agent, options = {}) {
+    const entry = agent && this.clients.get(agent.id);
+    if (!this.apps?.configured || !entry?.client.user) return Promise.resolve(null);
+    return this.apps.sync({ key: agent.id, botToken: entry.botToken, name: agent.name, description: shortDescription(agent), iconUrl: agent.avatarUrl || "" }, options);
   }
 
   client(agentId) {
@@ -192,8 +219,9 @@ export class SlackBots {
 
   /** Use tokens stored while running and wait for the app to answer. */
   async attach(agent, { botToken, appToken }, timeoutMs = 10000) {
-    this.added.set(slackBotEnvName(agent), botToken);
-    this.added.set(slackAppEnvName(agent), appToken);
+    const { bot, app } = this.envNames(agent);
+    this.added.set(bot, botToken);
+    this.added.set(app, appToken);
     if (!this.active) return null;
     this.sync();
     const deadline = Date.now() + timeoutMs;
@@ -241,8 +269,7 @@ export class SlackBots {
   }
 
   async status(agent, channelId) {
-    const botEnv = slackBotEnvName(agent);
-    const appEnv = slackAppEnvName(agent);
+    const { bot: botEnv, app: appEnv } = this.envNames(agent);
     const entry = this.clients.get(agent.id);
     const { botToken, appToken } = this.tokens(agent);
     const manifest = appManifest(agent);
@@ -264,6 +291,8 @@ export class SlackBots {
       user: user ? { id: user.id, username: user.name } : null,
       team: entry.client.team,
       inChannel: user ? await this.inChannel(agent.id, channelId) : false,
+      // How the app's name and image last followed the panel (none until a configuration token is there).
+      appSync: this.apps?.configured ? this.apps.record(agent.id) : null,
     };
   }
 }

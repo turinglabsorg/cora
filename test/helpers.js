@@ -911,6 +911,13 @@ export async function fakeSlack() {
     // What getUploadURLExternal was asked for, in order.
     slots: [],
     nextTs: 100,
+    // App configuration: the refresh tokens Slack still accepts, the access tokens it issued, each app's manifest, and every call.
+    refreshTokens: new Set(),
+    configTokens: new Set(),
+    manifests: new Map(),
+    icons: new Map(),
+    configCalls: [],
+    rotations: 0,
   };
   const ok = (res, body) => {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -943,11 +950,44 @@ export async function fakeSlack() {
     }
     const method = url.pathname.replace("/api/", "");
     const params = Object.fromEntries(new URLSearchParams(body.toString("utf8")));
+    if (method === "tooling.tokens.rotate") {
+      if (!state.refreshTokens.delete(params.refresh_token)) return fail(res, "invalid_refresh_token");
+      state.rotations += 1;
+      const token = `xoxe.xoxp-1-config-${state.rotations}`;
+      const refresh = `xoxe-1-refresh-${state.rotations}`;
+      state.configTokens.add(token);
+      state.refreshTokens.add(refresh);
+      return ok(res, { token, refresh_token: refresh, team_id: SLACK_TEAM, user_id: SLACK_OWNER, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 43200 });
+    }
+    if (method.startsWith("apps.manifest.") || method === "apps.icon.set") {
+      if (!state.configTokens.has(String(req.headers.authorization || "").replace(/^Bearer\s+/i, ""))) return fail(res, "invalid_auth");
+      const appEntry = [...state.apps.values()].find((entry) => `A${entry.id.slice(1)}` === params.app_id);
+      if (!appEntry) return fail(res, "invalid_app_id");
+      state.configCalls.push({ method, appId: params.app_id, ...(params.manifest ? { manifest: JSON.parse(params.manifest) } : {}), ...(params.url ? { url: params.url } : {}) });
+      if (method === "apps.manifest.export") {
+        return ok(res, { manifest: state.manifests.get(params.app_id) || {
+          display_information: { name: appEntry.name, description: "creata a mano" },
+          features: { bot_user: { display_name: appEntry.name, always_online: true } },
+          settings: { socket_mode_enabled: true },
+        } });
+      }
+      if (method === "apps.manifest.update") {
+        state.manifests.set(params.app_id, JSON.parse(params.manifest));
+        return ok(res, { app_id: params.app_id, permissions_updated: false });
+      }
+      if (/^https:\/\//.test(params.url || "") && !/small/.test(params.url)) {
+        state.icons.set(params.app_id, params.url);
+        return ok(res, {});
+      }
+      return fail(res, /small/.test(params.url || "") ? "invalid_icon_size" : "icon_not_accessible");
+    }
     const app = appFor(req, method === "apps.connections.open" ? "app" : "bot");
     if (!app) return fail(res, "invalid_auth");
     switch (method) {
       case "auth.test":
         return ok(res, { user_id: app.id, user: app.name, bot_id: `B${app.id.slice(1)}`, team_id: SLACK_TEAM, team: "Dopamina", url: "https://dopamina.slack.com/" });
+      case "bots.info":
+        return ok(res, { bot: { id: params.bot, app_id: `A${params.bot.slice(1)}`, name: app.name } });
       case "apps.connections.open":
         state.opens += 1;
         return ok(res, { url: `ws://127.0.0.1:${server.address().port}/link?t=${encodeURIComponent(app.appToken)}` });
@@ -1013,6 +1053,10 @@ export async function fakeSlack() {
   return {
     state,
     url: `http://127.0.0.1:${port}/api`,
+    /** A refresh token Slack will accept once, as "Generate Token" under Your App Configuration Tokens gives. */
+    configToken(refresh) {
+      state.refreshTokens.add(refresh);
+    },
     /** Register an app (the main one, or an agent's) and the channels it is in. */
     addApp({ botToken, appToken, id, name, channels = [SLACK_CHANNEL] }) {
       state.apps.set(botToken, { botToken, appToken, id, name, channels: new Set(channels) });

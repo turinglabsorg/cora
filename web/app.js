@@ -1910,7 +1910,7 @@ function slackAccount(agent) {
   if (bot.user) {
     body = [
       h("p", { class: "lead" }, "Collegata come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", bot.inChannel ? "Scrive nel canale col suo account." : "Non è ancora nei canali accesi: invitala con /invite e scriverà da sola."),
-      h("small", { class: "muted" }, "Nome e immagine stanno nell'app Slack: se rinomini l'agente, rinomina anche l'app."),
+      slackAppSync(agent, bot),
     ];
   } else {
     body = [
@@ -1926,6 +1926,56 @@ function slackAccount(agent) {
     ];
   }
   return panel({ icon: "slack", title: "Account Slack", hint: "La sua app su Slack.", actions }, body);
+}
+
+/** How the agent's Slack app follows the panel: its name, description and image. */
+function slackAppSync(agent, bot) {
+  if (!S.data.slack?.apps?.configured) return h("small", { class: "muted" }, "Perché l'app Slack prenda da sola il nome e l'immagine dell'agente, collega il token di configurazione in Impostazioni → Canali → Slack.");
+  const record = bot.appSync;
+  const button = btn("Aggiorna su Slack", { icon: "refresh", cls: "sm ghost", onclick: async () => {
+    button.disabled = true;
+    if (await guard(api(`/api/agents/${agent.id}/slack-app`, { method: "POST" }), "App Slack aggiornata")) {
+      await loadState();
+      renderAgent();
+    }
+    button.disabled = false;
+  } });
+  const line = !record ? tr("Nome, descrizione e immagine passano all'app Slack appena si collega.")
+    : record.error ? tr("Slack non ha preso l'ultimo aggiornamento: {error}.", { error: record.error })
+      : tr("Nome, descrizione e immagine seguono il pannello: allineati {time}.", { time: fmtTime(record.at, true) });
+  return h("div", { class: `slack-app-sync${record?.error ? " err" : ""}` }, icon(record?.error ? "alert" : "check"), h("span", { class: "grow" }, raw(line)), button);
+}
+
+/** Settings → Canali → Slack: the configuration token that lets every app follow the panel. */
+function slackAppsField() {
+  const apps = S.data.slack?.apps || { configured: false };
+  const input = h("input", { type: "password", class: "mono", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Refresh token di configurazione", placeholder: apps.configured ? "Incolla un nuovo refresh token per sostituirlo" : "xoxe-…" });
+  const save = btn(apps.configured ? "Sostituisci" : "Collega", { icon: "check", cls: apps.configured ? "" : "primary", onclick: async () => {
+    if (!input.value.trim()) { input.focus(); return; }
+    save.disabled = true;
+    const token = input.value;
+    input.value = "";
+    if (await guard(api("/api/slack/config-token", { method: "PUT", body: { token } }), "Le app Slack seguono il pannello")) {
+      await loadState();
+      renderSettings();
+    }
+    save.disabled = false;
+  } });
+  input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
+  const now = apps.configured ? btn("Aggiorna tutte adesso", { icon: "refresh", cls: "ghost", onclick: async () => {
+    now.disabled = true;
+    await guard(api("/api/slack/apps/sync", { method: "POST" }), "App Slack aggiornate");
+    now.disabled = false;
+  } }) : null;
+  return h("div", { class: "field slack-apps" }, h("span", { class: "label" }, "Aspetto delle app"),
+    h("small", {}, apps.configured
+      ? "Nome, descrizione e immagine di ogni app seguono il pannello: cambi un agente qui e la sua app su Slack si aggiorna da sola."
+      : "Con il token di configurazione di Slack nome, descrizione e immagine di ogni app seguono il pannello, senza passare da Slack."),
+    apps.error ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(apps.error))) : null,
+    apps.configured ? null : steps(
+      h("span", {}, "apri ", h("a", { href: "https://api.slack.com/apps", target: "_blank", rel: "noopener" }, "api.slack.com/apps"), " e, in fondo alla pagina, in ", h("b", {}, "Your App Configuration Tokens"), " tocca Generate Token per il workspace;"),
+      h("span", {}, "copia il ", h("b", {}, "Refresh Token"), " (xoxe-…) e incollalo qui: Cora lo rinnova da sola e lo tiene in hush.")),
+    h("div", { class: "row" }, input, save, now));
 }
 
 function steps(...items) {
@@ -4240,7 +4290,8 @@ function renderSettings() {
         h("input", { type: "checkbox", name: "slchannel", value: channel.id, checked: settings.slackChannelIds.includes(channel.id) }),
         h("span", { class: "rocker" }),
         h("span", { class: "switch-text" }, raw(`#${channel.name}`), h("small", {}, tr(channel.private ? "canale privato" : "canale pubblico")))))) : h("div", { class: "row" }, h("small", {}, "Invita un'app in un canale (/invite): il canale compare qui e lo accendi."), refreshChannels)),
-    field("Proprietari (ID utente Slack)", h("input", { type: "text", name: "slackOwnerIds", class: "mono", value: settings.slackOwnerIds.join(", "), autocomplete: "off" }), "Se è vuoto diventa proprietario chi possiede il workspace, appena scrive."));
+    field("Proprietari (ID utente Slack)", h("input", { type: "text", name: "slackOwnerIds", class: "mono", value: settings.slackOwnerIds.join(", "), autocomplete: "off" }), "Se è vuoto diventa proprietario chi possiede il workspace, appena scrive."),
+    slackAppsField());
 
   const form = h("form", { class: "stack" },
     h("div", { class: "settings-pane stack", "data-settings-tab": "preferenze", role: "tabpanel" }, languagePanel(), notificationsPanel()),

@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { passLedger, verifyPass } from "./pass.js";
 import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
 import { Slack } from "./slack.js";
-import { slackAppEnvName, slackBotEnvName } from "./slack-bots.js";
+import { SLACK_CONFIG_SECRET } from "./slack-apps.js";
 import { Telegram } from "./telegram.js";
 import { pullModel } from "./llm.js";
 import { telegramBotEnvName } from "./telegram-bots.js";
@@ -135,7 +135,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null}) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -164,6 +164,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     for (const grant of settings.permissions) if (!people.some((person) => person.id === grant.id)) people.push({ id: grant.id, transport: grant.id.split(":")[0], name: grant.name || grant.id, last: 0, messages: 0 });
     return { canManage: user.role === "owner", people: people.map((person) => ({ ...person, agents: grants.get(person.id)?.agents || [] })) };
   };
+  /** Every Slack app brought in line with the panel now, Cora's own first. */
+  const syncSlackApps = async () => {
+    const records = { main: await syncMainSlackApp?.({ force: true }).catch(() => null) };
+    for (const agent of store.agents()) records[agent.id] = await skBots?.syncApp(agent, { force: true }).catch(() => null);
+    return records;
+  };
+
   /** A shared fact written in the panel, with a company brain: a note for the librarian, signed by whoever wrote it. */
   const noteForBrain = async (text, agent, user) => {
     const fact = String(text || "").trim();
@@ -387,7 +394,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         transport: channels.active,
         discord: discord.status(),
         telegram: telegram.status(),
-        slack: slack ? slack.status() : null,
+        slack: slack ? { ...slack.status(), apps: slackApps?.status() || null, appSync: slackApps?.configured ? slackApps.record("main") : null } : null,
         channels: channels.list(),
         discordChannels: discord.listChannels(store.settings.guildIds),
         guilds: discord.status().guilds,
@@ -616,6 +623,24 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       activity({ type: "slack", text: `token dell'app Slack salvati in hush (@${user.name})` });
       return send(res, 200, { slack: slack.status(), bot: { id: user.id, username: user.name }, team: probe.team });
     }
+    // Slack's app configuration token: from then on the apps' name, description and icon follow the panel.
+    if (path === "/api/slack/config-token" && method === "PUT" && slackApps) {
+      const body = await readJson(req, 4096);
+      const token = String(body.token || "").trim();
+      if (!/^xoxe-[\w-]{10,}$/.test(token)) throw new HttpError(400, "serve il refresh token, quello che comincia con xoxe- (Your App Configuration Tokens)");
+      try {
+        await slackApps.connect(token);
+      } catch (error) {
+        throw new HttpError(400, error.message);
+      }
+      activity({ type: "slack", text: `token di configurazione Slack salvato in hush (${SLACK_CONFIG_SECRET}): le app seguono il pannello` });
+      syncSlackApps();
+      return send(res, 200, { apps: slackApps.status() });
+    }
+    if (path === "/api/slack/apps/sync" && method === "POST" && slackApps) {
+      if (!slackApps.configured) throw new HttpError(409, "manca il token di configurazione di Slack");
+      return send(res, 200, { records: await syncSlackApps() });
+    }
     if (path === "/api/slack/channels" && method === "GET" && slack) {
       const channelsSeen = new Map();
       for (const channel of await slack.listChannels().catch(() => [])) channelsSeen.set(channel.id, channel);
@@ -666,6 +691,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const agent = store.createAgent(await readJson(req));
       bots?.sync();
       tgBots?.sync();
+      skBots?.sync();
       activity({ type: "agent", agentId: agent.id, text: `creato ${agent.name}` });
       ensureBoxSoon(agent);
       return send(res, 201, await publicAgent(agent));
@@ -679,8 +705,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (method === "PUT") {
         const updated = store.updateAgent(agent.id, await readJson(req));
         bots?.envName(agent);
+        skBots?.envNames(agent);
         bots?.sync();
         tgBots?.sync();
+        // A new name, description or image reaches the agent's Slack app on its own.
+        skBots?.sync();
         ensureBoxSoon(updated);
         return send(res, 200, await publicAgent(updated));
       }
@@ -689,6 +718,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         store.deleteAgent(agent.id);
         bots?.sync();
         tgBots?.sync();
+        skBots?.sync();
         activity({ type: "agent", text: `eliminato ${agent.name}` });
         return send(res, 200, { ok: true });
       }
@@ -832,10 +862,21 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!/^xoxb-[\w-]{10,}$/.test(botToken)) throw new HttpError(400, "il token del bot comincia con xoxb- (OAuth & Permissions)");
       if (!/^xapp-[\w-]{10,}$/.test(appToken)) throw new HttpError(400, "il token a livello app comincia con xapp- (Basic Information)");
       const { user } = await skBots.verify(agent, { botToken, appToken, teamId: store.settings.slackTeamId, mainUserId: slack?.user?.id || "" });
-      await storeSecret(slackBotEnvName(agent), botToken);
-      await storeSecret(slackAppEnvName(agent), appToken);
+      const names = skBots.envNames(agent);
+      await storeSecret(names.bot, botToken);
+      await storeSecret(names.app, appToken);
       activity({ type: "slack", agentId: agent.id, text: `token dell'app Slack salvati in hush (@${user.name})` });
       await skBots.attach(agent, { botToken, appToken });
+      return send(res, 200, await publicAgent(store.agent(agent.id)));
+    }
+
+    match = /^\/api\/agents\/([\w-]+)\/slack-app$/.exec(path);
+    if (match && method === "POST" && skBots) {
+      const agent = store.agent(match[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      if (!slackApps?.configured) throw new HttpError(409, "manca il token di configurazione di Slack");
+      const record = await skBots.syncApp(agent, { force: true });
+      if (!record) throw new HttpError(409, "l'app Slack di questo agente non è collegata");
       return send(res, 200, await publicAgent(store.agent(agent.id)));
     }
 

@@ -23,6 +23,8 @@ export const config = {
   telegramApi: setting("TELEGRAM_API") || "https://api.telegram.org",
   slackToken: env.SLACK_BOT_TOKEN || "",
   slackAppToken: env.SLACK_APP_TOKEN || "",
+  // Slack's app configuration refresh token: the apps' name, description and icon follow the panel.
+  slackConfigToken: env.SLACK_CONFIG_TOKEN || "",
   slackApi: setting("SLACK_API") || "https://slack.com/api",
   docker: setting("DOCKER") || firstExisting(["/usr/local/bin/docker", "/usr/bin/docker", "docker"]),
   boxImage: setting("BOX_IMAGE") || "cora-box:latest",

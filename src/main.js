@@ -22,6 +22,7 @@ import { Doc, findDoc } from "./doc.js";
 import { Librarian } from "./librarian.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Scheduler } from "./scheduler.js";
+import { SlackApps } from "./slack-apps.js";
 import { Store } from "./store.js";
 import { Subscriptions } from "./subscriptions.js";
 import { Voice } from "./voice.js";
@@ -81,7 +82,9 @@ export function startCora(overrides = {}) {
   const tokenFor = cfg.botTokenFor || ((name) => process.env[name] || process.env[name.replace(/^CORA_/, "CORO_")] || "");
   const bots = new AgentBots({ store, apiBase: cfg.discordApi, gatewayUrl: cfg.discordGateway, tokenFor, log: activity });
   const tgBots = new TelegramBots({ store, apiBase: cfg.telegramApi, tokenFor, log: activity });
-  const skBots = new SlackBots({ store, apiBase: cfg.slackApi, tokenFor, log: activity });
+  const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
+  const slackApps = new SlackApps({ store, apiBase: cfg.slackApi, refreshToken: cfg.slackConfigToken || tokenFor("CORA_SLACK_CONFIG_TOKEN"), storeSecret, log: activity });
+  const skBots = new SlackBots({ store, apiBase: cfg.slackApi, tokenFor, log: activity, apps: slackApps });
   const channels = new Channels({ store, discord, bots, telegram, tgBots, slack, skBots });
   const pickListener = () => {
     if (listenerToken) return;
@@ -117,8 +120,9 @@ export function startCora(overrides = {}) {
     reviewUrl: () => (instanceUrl ? `${instanceUrl}/#/brain/revisione` : ""),
   });
   const scheduler = new Scheduler({ store, orchestrator, brain, librarian, companyBrain, backups: join(cfg.home, "backups"), timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
-  const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian });
+  // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
+  const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -156,6 +160,7 @@ export function startCora(overrides = {}) {
     activity({ type: "slack", text: `connessa come @${slack.user?.name} su ${slack.team?.name || "Slack"}` });
     if (slack.team?.id && slack.team.id !== store.settings.slackTeamId) store.updateSettings({ slackTeamId: slack.team.id });
     slack.listChannels().catch(() => {});
+    syncMainSlackApp().catch(() => {});
     clearTimeout(catchUpTimer);
     catchUpTimer = setTimeout(() => {
       if (stopping) return;
