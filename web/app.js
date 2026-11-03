@@ -685,14 +685,15 @@ function agentCard(agent, index) {
 function traceRow(trace, { withAgent = false } = {}) {
   const agent = S.data.agents.find((item) => item.id === trace.agentId);
   const [label, cls] = TRACE_STATUS[trace.status] || [trace.status, ""];
+  const total = (trace.tokensIn || 0) + (trace.tokensOut || 0);
   const lead = withAgent && agent
     ? avatar(agent, "sm")
-    : h("span", { class: `status-ico ${cls}` }, icon(trace.status === "error" ? "alert" : trace.status === "pass" ? "next" : trace.kind === "sleep" ? "moon" : trace.kind === "routine" ? "clock" : "chat"));
+    : h("span", { class: "goal-total" }, h("b", {}, total ? shortTokens(total) : "—"), h("small", {}, "token"));
+  const spent = total ? `${tr("{in} in · {out} out", { in: shortTokens(trace.tokensIn || 0), out: shortTokens(trace.tokensOut || 0) })} · ` : "";
   return h("a", { class: "row-link", href: `#/agent/${trace.agentId}/ragionamento/${trace.id}` },
     lead,
     h("span", { class: "grow" },
-      h("span", { class: "row-meta" }, withAgent && agent ? h("b", {}, raw(agent.name)) : null, tag(label, cls), tag(TRACE_KIND[trace.kind] || trace.kind), raw(`${fmtTime(trace.startedAt, true)} · ${traceWhere(trace)} · ${duration(trace)}`),
-        trace.tokensIn + trace.tokensOut ? tag(tokenTotal(trace.tokensIn + trace.tokensOut), "tokens") : null),
+      h("span", { class: "row-meta" }, withAgent && agent ? h("b", {}, raw(agent.name)) : null, tag(TRACE_KIND[trace.kind] || trace.kind), tag(label, cls), raw(`${spent}${traceWhere(trace)} · ${fmtTime(trace.startedAt, true)} · ${duration(trace)}`)),
       h("span", { class: "row-text" }, trace.error || trace.output ? raw(trace.error || trace.output) : trace.status === "running" ? "…" : "(niente)"),
       trace.tools?.length ? h("span", { class: "row-tools" }, trace.tools.map((tool) => h("span", {}, icon("tool"), tool))) : null),
     icon("next", "chev"));

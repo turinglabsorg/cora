@@ -321,6 +321,24 @@ test("the brain keeps no secret: credential shapes and values after a secret's w
   for (const [text, expected] of cases) assert.equal(redactSecrets(text), expected, text);
 });
 
+test("every turn in the Reasoning list leads with the token box a goal has, and tokens are never a chip", () => {
+  const panel = panelHarness({ fetch: async () => { throw new Error("offline"); } });
+  panel.run(`S.data = { agents: [{ id: "ada", name: "Ada", color: "#f2a93b" }], settings: {} }`);
+  const row = (trace, options = {}) => panel.run(`traceRow(${JSON.stringify(trace)}, ${JSON.stringify(options)})`);
+  const done = row({ id: "t1", agentId: "ada", kind: "sleep", status: "ok", startedAt: "2026-11-03T19:00:00Z", endedAt: "2026-11-03T19:00:02Z", tokensIn: 1400, tokensOut: 42, output: "Fatto." });
+  assert.equal(done.children[0].className, "goal-total");
+  assert.equal(done.children[0].textContent.replace(/\s/g, ""), "1,4ktoken");
+  assert.match(done.querySelector(".row-meta").textContent, /1,4k in · 42 out · memoria · /);
+  assert.equal(done.querySelectorAll(".tokens").length, 0);
+  const running = row({ id: "t2", agentId: "ada", kind: "sleep", status: "running", startedAt: "2026-11-03T19:00:00Z", tokensIn: 0, tokensOut: 0 });
+  assert.equal(running.children[0].textContent.replace(/\s/g, ""), "—token");
+  assert.doesNotMatch(running.querySelector(".row-meta").textContent, / in · /);
+  const desk = row({ id: "t3", agentId: "ada", kind: "sleep", status: "ok", startedAt: "2026-11-03T19:00:00Z", endedAt: "2026-11-03T19:00:02Z", tokensIn: 989, tokensOut: 0 }, { withAgent: true });
+  assert.match(desk.children[0].className, /\bavatar\b/);
+  assert.equal(desk.querySelectorAll(".goal-total").length, 0);
+  assert.equal(desk.querySelectorAll(".tokens").length, 0);
+});
+
 test("the panel renders markdown as DOM: blocks, inline marks, only web and mail links, [[pages]] only in the brain", () => {
   const panel = panelHarness({ fetch: async () => { throw new Error("offline"); } });
   const render = (text, options = {}) => panel.run(`h("div", {}, markdown(${JSON.stringify(text)}, ${JSON.stringify(options)}))`);
