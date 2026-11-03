@@ -1,6 +1,9 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Scollega app": "Disconnect app",
+  "Conferma scollegamento": "Confirm disconnect",
+  "App Discord scollegata": "Discord app disconnected",
   "Attività avviata": "Task started",
   "Routine e reminder": "Routines and reminders",
   "reminder": "reminder",

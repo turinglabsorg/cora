@@ -1865,6 +1865,19 @@ function discordAccount(agent) {
       tokenForm({ placeholder: "Token del bot Discord", path: `/api/agents/${agent.id}/bot`, ok: "Token salvato" }),
     ];
   }
+  if (bot.configured) {
+    const disconnect = armedButton("Scollega app", "Conferma scollegamento", { icon: "power", onconfirm: async () => {
+      if (disconnect.disabled) return;
+      disconnect.disabled = true;
+      await guard((async () => {
+        await api(`/api/agents/${agent.id}/bot`, { method: "DELETE" });
+        await loadState();
+        render();
+      })(), "App Discord scollegata");
+      disconnect.disabled = false;
+    } });
+    body.push(h("div", { class: "row" }, disconnect));
+  }
   return panel({ icon: "hash", title: "Account Discord", hint: "Il suo utente su Discord.", actions }, body);
 }
 

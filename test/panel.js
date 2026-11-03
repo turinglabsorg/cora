@@ -55,6 +55,10 @@ class Element {
   }
   get elements() { return Object.fromEntries(this.fields.map((field) => [field.attributes.name, field])); }
   scrollIntoView() {}
+  remove() {
+    if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
+    this.parent = null;
+  }
   append(...children) {
     for (const child of children) {
       const node = child instanceof Element ? child : new Element("text", String(child));

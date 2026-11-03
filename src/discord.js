@@ -159,6 +159,7 @@ export class Discord extends EventEmitter {
 
   async connect() {
     if (this.stopped) return;
+    const token = this.token;
     this.setState("connecting");
     let base = this.sessionId && this.resumeUrl ? this.resumeUrl : this.gatewayUrl;
     if (!base) {
@@ -168,6 +169,7 @@ export class Discord extends EventEmitter {
       }
       base = gateway.url;
     }
+    if (this.stopped || token !== this.token) return;
     const url = new URL(base);
     url.searchParams.set("v", "10");
     url.searchParams.set("encoding", "json");
@@ -187,7 +189,7 @@ export class Discord extends EventEmitter {
   }
 
   onPayload(ws, payload) {
-    if (ws !== this.ws) return;
+    if (this.stopped || ws !== this.ws) return;
     if (payload.s !== null && payload.s !== undefined) this.seq = payload.s;
     switch (payload.op) {
       case 10: {

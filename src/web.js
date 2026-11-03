@@ -854,6 +854,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
 
     match = /^\/api\/agents\/([\w-]+)\/bot$/.exec(path);
+    if (match && method === "DELETE" && bots) {
+      const agent = store.agent(match[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      bots.detach(agent);
+      activity({ type: "discord", agentId: agent.id, text: "app Discord scollegata" });
+      return send(res, 200, await publicAgent(agent));
+    }
     if (match && method === "PUT" && bots) {
       const agent = store.agent(match[1]);
       if (!agent) throw new HttpError(404, "agente non trovato");
