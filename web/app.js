@@ -2757,31 +2757,31 @@ function duration(trace) {
  * What each goal cost: every turn that worked toward it, with the tokens they used
  * in and out. A goal opens onto its own turns.
  */
-function goalsPanel(agent, goals) {
-  if (!goals.length) return null;
-  const rows = goals.map((item) => {
-    const turns = h("div", { class: "goal-turns" });
-    const total = item.tokensIn + item.tokensOut;
-    const [label, cls] = TRACE_STATUS[item.status] || [item.status, ""];
-    const row = h("details", { class: "goal-row" },
-      h("summary", {},
-        h("span", { class: "goal-total" }, h("b", {}, total ? shortTokens(total) : "—"), h("small", {}, "token")),
-        h("span", { class: "grow" },
-          h("span", { class: "goal-text" }, raw(item.goal)),
-          h("span", { class: "row-meta" }, tag(label, cls),
-            raw(`${tr(item.turns === 1 ? "1 turno" : "{count} turni", { count: item.turns })} · ${tr("{in} in · {out} out", { in: shortTokens(item.tokensIn), out: shortTokens(item.tokensOut) })} · ${traceWhere(item)} · ${fmtTime(item.last, true)}`))),
-        icon("next", "chev")),
-      turns);
-    row.addEventListener("toggle", async () => {
-      if (!row.open || turns.childElementCount) return;
-      turns.append(skeleton("rows", 2));
-      const list = (await guard(api(`/api/agents/${agent.id}/traces?${new URLSearchParams({ goal: item.goal, limit: "100" })}`))) || [];
-      turns.replaceChildren(h("div", { class: "rows" }, list.map((trace) => traceRow(trace))));
-    });
-    return row;
+/**
+ * A goal and every turn that worked toward it, as one row of the Reasoning
+ * list: what it cost, then, opened, its turns. The turns load when it opens.
+ */
+function goalGroup(agent, item) {
+  const turns = h("div", { class: "goal-turns" });
+  const total = item.tokensIn + item.tokensOut;
+  const [label, cls] = TRACE_STATUS[item.status] || [item.status, ""];
+  const row = h("details", { class: "goal-row" },
+    h("summary", {},
+      h("span", { class: "goal-total" }, h("b", {}, total ? shortTokens(total) : "—"), h("small", {}, "token")),
+      h("span", { class: "grow" },
+        h("span", { class: "row-meta" }, tag("Obiettivo", "agent"), tag(label, cls),
+          raw(`${tr(item.turns === 1 ? "1 turno" : "{count} turni", { count: item.turns })} · ${tr("{in} in · {out} out", { in: shortTokens(item.tokensIn), out: shortTokens(item.tokensOut) })} · ${traceWhere(item)} · ${fmtTime(item.last, true)}`)),
+        h("span", { class: "goal-text" }, raw(item.goal))),
+      icon("next", "chev")),
+    turns);
+  row.addEventListener("toggle", async () => {
+    if (!row.open || turns.childElementCount) return;
+    turns.append(skeleton("rows", 2));
+    const list = ((await guard(api(`/api/agents/${agent.id}/traces?${new URLSearchParams({ goal: item.goal, limit: "100" })}`))) || [])
+      .filter((trace) => (trace.channelId || "") === (item.channelId || ""));
+    turns.replaceChildren(h("div", { class: "rows" }, list.map((trace) => traceRow(trace))));
   });
-  const all = goals.reduce((sum, item) => sum + item.tokensIn + item.tokensOut, 0);
-  return panel({ icon: "chart", title: "Obiettivi", hint: tr("Quanto è costato ogni obiettivo: tutti i turni che ci hanno lavorato. In tutto {total}.", { total: tokenTotal(all) }) }, h("div", { class: "goal-list" }, rows));
+  return row;
 }
 
 async function tracesTab(agent, isCurrent = () => true) {
@@ -2793,9 +2793,21 @@ async function tracesTab(agent, isCurrent = () => true) {
     clearTimeout(pending);
     pending = setTimeout(() => { if (route()[2] === "ragionamento" && !route()[3]) renderAgent(); }, 1500);
   };
+  // One list, newest first: a goal stands for all the turns that worked toward it, the other turns stand alone.
+  const groups = goals?.goals || [];
+  const grouped = (trace) => trace.goal && groups.some((item) => item.goal === trace.goal && (item.channelId || "") === (trace.channelId || ""));
+  const items = [
+    ...groups.map((item) => ({ at: Number(item.last) || Date.parse(item.last) || 0, node: () => goalGroup(agent, item) })),
+    ...(list || []).filter((trace) => !grouped(trace)).map((trace) => ({ at: Number(trace.startedAt) || Date.parse(trace.startedAt) || 0, node: () => traceRow(trace) })),
+  ].sort((a, b) => b.at - a.at);
+  const spent = groups.reduce((sum, item) => sum + item.tokensIn + item.tokensOut, 0)
+    + (list || []).filter((trace) => !grouped(trace)).reduce((sum, trace) => sum + (trace.tokensIn || 0) + (trace.tokensOut || 0), 0);
   const provider = (agent.model || S.data.settings.defaultModel).split("/")[0];
-  return [goalsPanel(agent, goals?.goals || []), panel({ icon: "bulb", title: "Ragionamento", hint: provider === "claude" ? "Ogni turno, anche quando passa. Claude Code mostra i passi e gli strumenti, non il testo del ragionamento." : "Ogni turno, anche quando passa: cosa ha letto, cosa ha pensato, gli strumenti e la risposta." },
-    list?.length ? h("div", { class: "rows" }, list.map((trace) => traceRow(trace))) : empty("bulb", "Ancora nessun turno registrato."))];
+  const hint = provider === "claude"
+    ? "Ogni turno, anche quando passa, e gli obiettivi con tutti i turni che ci hanno lavorato. Claude Code mostra i passi e gli strumenti, non il testo del ragionamento."
+    : "Ogni turno, anche quando passa: cosa ha letto, cosa ha pensato, gli strumenti e la risposta. Un obiettivo raccoglie tutti i turni che ci hanno lavorato.";
+  return panel({ icon: "bulb", title: "Ragionamento", hint, actions: spent ? h("span", { class: "reasoning-total" }, h("b", {}, shortTokens(spent)), h("small", {}, "token")) : null },
+    items.length ? h("div", { class: "reasoning-list" }, items.map((item) => item.node())) : empty("bulb", "Ancora nessun turno registrato."));
 }
 
 function stepEl(step, startedAt) {
