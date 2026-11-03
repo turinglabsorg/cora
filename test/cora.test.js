@@ -1608,6 +1608,151 @@ describe("agents in Discord", () => {
     assert.match(app.store.trace(trace.id).steps.find((item) => item.name === "share_file").result, /error: recipient/);
   });
 
+  test("Discord app binding survives renaming, name reuse, disconnect, restart and replacement", async (t) => {
+    const directory = tempHome();
+    const token = (tail) => `MTQ2NzEyMzQ1Njc4OTAxMjM0NQ.Gabcde.${tail.padEnd(27, "x")}`;
+    const tokens = { CORA_BOT_UNLINK: token("unlink"), CORA_BOT_KEEP: token("keep") };
+    for (const [tail, id] of [["unlink", "600000000000000061"], ["keep", "600000000000000062"], ["replacement", "600000000000000063"], ["reused", "600000000000000064"]]) {
+      discord.state.botUsers.set(token(tail), { id, username: tail });
+    }
+    const seed = new Store(directory);
+    seed.updateSettings({ guildIds: [GUILD] });
+    const agent = seed.createAgent({ name: "Unlink", model: "ollama/test-model", tools: false });
+    const other = seed.createAgent({ name: "Keep", model: "ollama/test-model", tools: false });
+    seed.close();
+    let instance;
+    let root;
+    let session;
+    const start = async () => {
+      instance = startCora({ home: directory, host: "127.0.0.1", port: 0, insecureCookies: true,
+        adminPassword: PASSWORD, sessionKey: "disconnect-fixture-session", discordToken: "", discordApi: discord.url,
+        telegramToken: "", slackToken: "", slackAppToken: "", ollamaUrl: ollama.url, ollamaKey: "", orcaKey: "", brainDatabaseUrl: "",
+        cloudUrl: "", cloudKey: "", cloudSpace: "", botTokenFor: (name) => tokens[name] || "",
+        storeSecret: async (name, value) => { tokens[name] = value; },
+        docker: docker.path, startBoxes: false, schedulerTickMs: 3600000,
+        ownerInstructions: "/not-installed/AGENTS.md", sshAuthorizedKeys: "/not-installed/keys",
+      });
+      await instance.ready;
+      root = `http://127.0.0.1:${instance.server.address().port}`;
+      const login = await fetch(`${root}/api/login`, { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ password: PASSWORD }) });
+      session = login.headers.get("set-cookie").split(";")[0];
+    };
+    const request = (path, options = {}) => fetch(`${root}${path}`, { ...options, headers: { Cookie: session, "X-Cora": "1", "Content-Type": "application/json", ...options.headers } });
+    t.after(async () => { if (instance) await instance.stop(); });
+    await start();
+    await waitFor(() => instance.bots.client(agent.id) && instance.bots.client(other.id) && instance.discord.token === token("unlink"), { what: "agent listener" });
+    const otherClient = instance.bots.client(other.id);
+    const path = `/api/agents/${agent.id}/bot`;
+    const originalClient = instance.bots.client(agent.id);
+    const rename = await request(`/api/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ name: "Renamed" }) });
+    assert.equal(rename.status, 200);
+    assert.equal((await rename.json()).bot.env, "CORA_BOT_UNLINK");
+    assert.equal(instance.bots.client(agent.id), originalClient, "renaming keeps the live bot connection");
+    await waitFor(() => discord.state.profilePatches.some((patch) => patch.token === token("unlink") && patch.username === "Renamed"));
+    replies.set("Renamed", () => ({ content: "Eccomi dopo la rinomina." }));
+    discord.say({ content: "<@600000000000000061> ci sei dopo la rinomina?", mentions: [{ id: "600000000000000061", username: "Renamed" }] });
+    await waitFor(() => discord.state.botPosts.some((post) => post.token === token("unlink") && post.content === "Eccomi dopo la rinomina."), { what: "channel reply after rename" });
+
+    const reused = await (await request("/api/agents", { method: "POST", body: JSON.stringify({ name: "Unlink", model: "ollama/test-model", tools: false, chattiness: 0 }) })).json();
+    assert.equal(reused.bot.configured, false, "reusing the old name cannot borrow the renamed agent's bot");
+    assert.notEqual(reused.bot.env, "CORA_BOT_UNLINK");
+    assert.equal((await request(`/api/agents/${reused.id}/bot`, { method: "PUT", body: JSON.stringify({ token: token("reused") }) })).status, 200);
+    assert.equal(tokens.CORA_BOT_UNLINK, token("unlink"), "a new agent cannot overwrite the renamed agent's credential");
+    assert.equal(tokens[reused.bot.env], token("reused"));
+    await request(`/api/agents/${reused.id}`, { method: "DELETE" });
+    assert.equal((await fetch(`${root}${path}`, { method: "DELETE", headers: { "X-Cora": "1" } })).status, 401);
+    assert.equal((await fetch(`${root}${path}`, { method: "DELETE", headers: { Cookie: session } })).status, 403);
+    assert.equal((await request("/api/agents/ag_missing/bot", { method: "DELETE" })).status, 404);
+    assert.equal(instance.bots.client(agent.id)?.user.id, "600000000000000061", "refusals leave the app connected");
+
+    let deletes = 0;
+    const panel = panelHarness({ language: "it", hash: `#/agent/${agent.id}/profilo`, fetch: (url, options) => {
+      if (url === path && options?.method === "DELETE") deletes++;
+      return request(url, options);
+    } });
+    await panel.run("boot()");
+    const button = await waitFor(() => panel.app.querySelectorAll("button").find((node) => node.textContent === "Scollega app"));
+    button.click();
+    assert.equal(button.textContent, "Conferma scollegamento");
+    assert.equal(deletes, 0, "the first click only asks for confirmation");
+    button.click();
+    button.click();
+    await waitFor(() => !instance.bots.client(agent.id) && !panel.app.querySelectorAll("button").some((node) => node.textContent === "Conferma scollegamento"));
+    assert.equal(deletes, 1, "a pending disconnect cannot be submitted twice");
+    assert.equal(instance.bots.client(other.id), otherClient, "other agents stay connected");
+    assert.equal(instance.discord.token, token("keep"), "shared listening moves to another agent");
+    assert.ok(panel.app.querySelectorAll("input").some((node) => node.attributes.placeholder === "Token del bot Discord"), "the setup is available again");
+    assert.equal((await request(path, { method: "DELETE" })).status, 200, "disconnecting twice is harmless");
+    instance.bots.sync();
+    assert.equal(instance.bots.token(instance.store.agent(agent.id)), "", "the injected old token cannot reconnect");
+    await instance.stop();
+    instance = null;
+    await start();
+    await waitFor(() => instance.bots.client(other.id));
+    const disconnected = await (await request(`/api/agents/${agent.id}`)).json();
+    assert.equal(disconnected.bot.configured, false, "disconnect survives restart");
+    assert.equal(disconnected.bot.env, "CORA_BOT_UNLINK", "the binding keeps its original secret name after restart");
+    const failed = await request(path, { method: "PUT", body: JSON.stringify({ token: "invalid" }) });
+    assert.equal(failed.status, 400);
+    assert.equal(instance.bots.token(instance.store.agent(agent.id)), "", "a failed reconnect keeps the old app disconnected");
+    const connected = await request(path, { method: "PUT", body: JSON.stringify({ token: token("replacement") }) });
+    assert.equal(connected.status, 200);
+    const result = await connected.json();
+    assert.equal(result.bot.user.id, "600000000000000063");
+    assert.equal(JSON.stringify(result).includes(token("replacement")), false);
+    await waitFor(() => discord.state.profilePatches.some((patch) => patch.token === token("replacement") && patch.username === "Renamed"));
+    await instance.stop();
+    instance = null;
+    await start();
+    await waitFor(() => instance.bots.client(agent.id)?.user.id === "600000000000000063", { what: "replacement after restart" });
+    await request(`/api/agents/${other.id}/bot`, { method: "DELETE" });
+    await request(path, { method: "DELETE" });
+    assert.equal(instance.discord.token, "", "disconnecting the last app also stops shared listening");
+
+    const cancelled = await fakeDiscord();
+    t.after(() => cancelled.close());
+    let release;
+    let arrived;
+    const delayed = new Promise((resolve) => { release = resolve; });
+    const requested = new Promise((resolve) => { arrived = resolve; });
+    const gateway = http.createServer(async (_req, res) => {
+      arrived();
+      await delayed;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ url: `${cancelled.url.replace(/^http/, "ws")}/gateway` }));
+    });
+    await new Promise((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    t.after(() => { release(); return new Promise((resolve) => gateway.close(resolve)); });
+    instance.bots.apiBase = `http://127.0.0.1:${gateway.address().port}`;
+    const connecting = instance.bots.attach(agent, token("replacement"), 100);
+    await requested;
+    assert.equal((await request(path, { method: "DELETE" })).status, 200);
+    release();
+    await connecting;
+    await sleep(300);
+    assert.equal(cancelled.state.identifies, 0, "a late gateway response cannot reconnect a disconnected app");
+  });
+
+  test("Discord app disconnect remains available for an invalid token and recovers from a failed request", async () => {
+    let requests = 0;
+    const panel = panelHarness({ language: "en", fetch: async () => {
+      requests++;
+      return new Response(JSON.stringify({ error: "Disconnect failed" }), { status: 503 });
+    } });
+    panel.run('document.body.append(discordAccount({ id: "ag_broken", name: "Broken", bot: { configured: true, state: "error", error: "Invalid token", env: "CORA_BOT_BROKEN" } }))');
+    const button = panel.app.parent.querySelectorAll("button").find((node) => node.textContent === "Disconnect app");
+    assert.ok(button, "even an app without a connected Discord user can be disconnected");
+    button.click();
+    assert.equal(button.textContent, "Confirm disconnect");
+    assert.equal(requests, 0);
+    button.click();
+    await waitFor(() => button.disabled === false);
+    assert.equal(requests, 1);
+    assert.ok(panel.app.parent.textContent.includes("Disconnect failed"));
+    button.click();
+    await waitFor(() => requests === 2 && button.disabled === false);
+  });
+
   test("a bot token pasted in the panel is checked with Discord, stored in hush and connected at once", async () => {
     const LIA = "600000000000000002";
     const token = (tail) => `MTQ2NzEyMzQ1Njc4OTAxMjM0NQ.Gabcde.${tail.padEnd(27, "x")}`;

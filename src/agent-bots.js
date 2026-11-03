@@ -68,6 +68,7 @@ export class AgentBots {
     if (!entry) return;
     try {
       let app = await entry.client.request("GET", "/applications/@me");
+      if (this.clients.get(agentId) !== entry) return;
       // Without it the bot is deaf in every channel, so ask for the limited intent, which an app
       // under 100 servers grants itself. Shared listening needs it on every agent, not just one.
       if (!((app?.flags || 0) & MESSAGE_CONTENT_FLAGS)) {
@@ -79,6 +80,7 @@ export class AgentBots {
         }
       }
       const on = Boolean((app?.flags || 0) & MESSAGE_CONTENT_FLAGS);
+      if (this.clients.get(agentId) !== entry) return;
       // Only a bot allowed to read content asks to hear channels: asking without it closes the gateway for good.
       entry.client.useIntents(on ? LISTENING_INTENTS : DIRECT_MESSAGE_INTENTS);
       if (on !== entry.messageContent) {
@@ -93,8 +95,20 @@ export class AgentBots {
     this.sync();
   }
 
+  envName(agent) {
+    const key = `discordBotEnv:${agent.id}`;
+    const stored = this.store.value(key);
+    if (stored) return stored;
+    const preferred = botEnvName(agent);
+    const reserved = this.store.agents().some((other) => other.id !== agent.id && this.store.value(`discordBotEnv:${other.id}`) === preferred);
+    const env = reserved ? `CORA_BOT_${agent.id.toUpperCase()}` : preferred;
+    this.store.setValue(key, env);
+    return env;
+  }
+
   token(agent) {
-    const env = botEnvName(agent);
+    if (this.store.value(`discordBotDisconnected:${agent.id}`, false)) return "";
+    const env = this.envName(agent);
     return this.added.get(env) || this.tokenFor(env);
   }
 
@@ -116,7 +130,8 @@ export class AgentBots {
 
   /** Use a token stored while running (the next start reads it from hush) and wait for the bot to come online. */
   async attach(agent, token, timeoutMs = 10000) {
-    this.added.set(botEnvName(agent), token);
+    this.store.setValue(`discordBotDisconnected:${agent.id}`, false);
+    this.added.set(this.envName(agent), token);
     this.sync();
     const deadline = Date.now() + timeoutMs;
     let readyAt = 0;
@@ -131,6 +146,15 @@ export class AgentBots {
     return this.client(agent.id);
   }
 
+  detach(agent) {
+    this.store.setValue(`discordBotDisconnected:${agent.id}`, true);
+    this.added.delete(this.envName(agent));
+    this.clients.get(agent.id)?.client.stop();
+    this.clients.delete(agent.id);
+    this.synced.delete(agent.id);
+    this.onChange?.();
+  }
+
   sync() {
     if (!this.active) return;
     const wanted = new Map();
@@ -143,6 +167,7 @@ export class AgentBots {
       if (!next || next.token !== entry.token) {
         entry.client.stop();
         this.clients.delete(agentId);
+        this.synced.delete(agentId);
       }
     }
     for (const [agentId, { agent, token }] of wanted) {
@@ -154,8 +179,12 @@ export class AgentBots {
       const client = new Discord({ token, apiBase: this.apiBase, gatewayUrl: this.gatewayUrl, intents: DIRECT_MESSAGE_INTENTS });
       // No server means a DM to this bot, answered by its agent; anything else is a channel this bot can see,
       // so a private channel is heard as long as one agent's bot is in it. Repeats are dropped by message id.
-      client.on("message", (raw) => { if (raw.guild_id) this.onGuild?.(raw, agentId); else this.onDirect?.(agentId, raw); });
+      client.on("message", (raw) => {
+        if (this.clients.get(agentId)?.client !== client) return;
+        if (raw.guild_id) this.onGuild?.(raw, agentId); else this.onDirect?.(agentId, raw);
+      });
       client.on("ready", () => {
+        if (this.clients.get(agentId)?.client !== client) return;
         this.log?.({ type: "discord", agentId, text: `bot collegato come ${client.user?.username}` });
         this.syncProfile(this.store.agent(agentId));
         this.readFlags(agentId);
@@ -232,7 +261,7 @@ export class AgentBots {
   }
 
   status(agent, guildId) {
-    const env = botEnvName(agent);
+    const env = this.envName(agent);
     const entry = this.clients.get(agent.id);
     if (!entry) return { env, configured: false, state: "missing-token" };
     const user = entry.client.user;
