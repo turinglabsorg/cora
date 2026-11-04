@@ -738,7 +738,6 @@ function agentCard(agent, index) {
     img.addEventListener("error", () => monitor.replaceChildren(h("span", { class: "dark" }, icon("monitor"), "Segnale assente")));
     monitor.append(img);
   } else monitor.append(h("span", { class: "dark" }, icon("monitor"), agent.tools ? "Desktop spento" : "Senza computer"));
-  const pct = Math.round(agent.chattiness * 100);
   const routines = S.data.routines.filter((routine) => routine.agentId === agent.id && routine.enabled).length;
   const [account, accountOn] = agentAccount(agent);
   return h("article", { class: `agent-card${agent.enabled ? "" : " off"}`, vars: { "--ring": agent.color || "#f2a93b", "--delay": `${index * 50}ms` } },
@@ -747,7 +746,6 @@ function agentCard(agent, index) {
       avatar(agent),
       h("span", { class: "grow" }, h("b", {}, raw(agent.name)), h("small", { title: modelLabel(agent.model) }, modelLabel(agent.model, { short: true }))),
       icon("next", "chev")),
-    h("div", { class: "meter", title: tr("Loquacità {value}", { value: pct }) }, h("span", { class: "label" }, "Loquacità"), h("span", { class: "track" }, h("span", { class: "fill", vars: { width: `${pct}%` } })), h("span", { class: "label" }, pct)),
     h("div", { class: "badges" },
       badge(agent.enabled ? "In onda" : "Muto", agent.enabled ? "on" : "", "radio"),
       badge(running ? "Desktop" : "Spento", running ? "on" : "", "monitor"),
@@ -1834,9 +1832,6 @@ function agentForm(agent, { only = "" } = {}) {
   const picture = avatarPicker(agent, colorInput);
   const genderInput = h("select", { name: "gender" },
     [["", "Non indicato"], ["female", "Femminile"], ["male", "Maschile"], ["neutral", "Neutro"]].map(([value, label]) => h("option", { value, selected: (agent.gender || "") === value }, label)));
-  const fader = h("input", { type: "range", class: "fader", name: "chattiness", min: 0, max: 100, value: Math.round((agent.chattiness ?? 0.5) * 100) });
-  const faderValue = h("b", { class: "fader-value" }, fader.value);
-  fader.addEventListener("input", () => { faderValue.textContent = fader.value; });
   const hidden = (agent.channelIds || []).filter((id) => !S.data.channels.some((channel) => channel.id === id));
   // Two choices, not one: who runs the loop, and which model thinks.
   let harness = harnessOf(agent.model || S.data.settings.defaultModel || "");
@@ -1877,9 +1872,8 @@ function agentForm(agent, { only = "" } = {}) {
         setRow("Usa il suo computer", "Un desktop Linux tutto suo, che vedi anche tu.", switchInput("tools", "", agent.tools ?? true)))) : null,
     panel({ icon: "spark", title: "Carattere", hint: "Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri." },
       h("textarea", { name: "personality", class: "tall", placeholder: "Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…" }, agent.personality || "")),
-    panel({ icon: "radio", title: "Ascolto", hint: "Quanto interviene e dove." },
+    panel({ icon: "radio", title: "Ascolto", hint: "Dove ascolta. Parla solo quando qualcuno lo chiama." },
       setRows(
-        setRow("Loquacità", "Quanto spesso interviene quando nessuno lo chiama per nome. Se lo nomini risponde sempre.", h("div", { class: "fader-row" }, fader, faderValue), { stack: true }),
         setRow(tr("Canali {transport}", { transport: TRANSPORTS[S.data.transport].label }), "Nessuno selezionato = li ascolta tutti.", channelChips(agent.channelIds || []), { stack: true }),
         setRow("In onda", "Spento non ascolta e non parla, da nessuna parte.", switchInput("enabled", "", agent.enabled ?? true)))),
     voicePanel(agent, genderInput),
@@ -1901,7 +1895,6 @@ function agentForm(agent, { only = "" } = {}) {
       avatarSeed: data.get("avatarSeed"),
       color: data.get("color"),
       gender: data.get("gender"),
-      chattiness: Number(data.get("chattiness")) / 100,
       channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
       enabled: form.elements.enabled.checked,
       personality: data.get("personality"),
@@ -2195,7 +2188,7 @@ function telegramAccount(agent) {
 }
 
 function renderNew() {
-  shell([pageHead("Nuovo agente", "Dagli un nome, un cervello e un carattere."), agentForm({ chattiness: 0.5, enabled: true, tools: true })], { title: "Nuovo agente", back: "#/agenti" });
+  shell([pageHead("Nuovo agente", "Dagli un nome, un cervello e un carattere."), agentForm({ enabled: true, tools: true })], { title: "Nuovo agente", back: "#/agenti" });
 }
 
 async function renderAgent() {
@@ -2929,7 +2922,7 @@ function renderSalotto() {
   S.live = null;
   const slot = h("div", { class: "chat-slot" }, skeleton("chat"));
   shell([
-    pageHead(h("span", {}, "Il ", h("em", {}, "salotto")), "Tutti gli agenti in onda: chi nomini risponde, gli altri intervengono secondo la loquacità."),
+    pageHead(h("span", {}, "Il ", h("em", {}, "salotto")), "Tutti gli agenti in onda: risponde chi chiami per nome."),
     requestsStrip(),
     slot,
   ], { title: "Salotto", mode: "chat" });

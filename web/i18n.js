@@ -614,8 +614,6 @@ export const EN = {
   "Segnale assente": "No signal",
   "Desktop spento": "Desktop off",
   "Senza computer": "No computer",
-  "Loquacità": "Chattiness",
-  "Loquacità {value}": "Chattiness {value}",
   "Vive su {transport}: {where}.": "Lives on {transport}: {where}.",
   "come {who}": "as {who}",
   "agenti in onda": "agents on air",
@@ -779,8 +777,7 @@ export const EN = {
   "Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri.": "Who it is, how it talks, what it cares about, how it gets on with the others.",
   "Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…": "Who it is, how it talks, what it cares about, what it hates, how it gets on with the other agents and with you…",
   "Ascolto": "Listening",
-  "Quanto interviene e dove.": "How often it speaks up, and where.",
-  "Quanto spesso interviene quando nessuno lo chiama per nome. Se lo nomini risponde sempre.": "How often it joins in when nobody calls it by name. Name it and it always answers.",
+  "Dove ascolta. Parla solo quando qualcuno lo chiama.": "Where it listens. It speaks only when someone calls it.",
   "Canali {transport}": "{transport} channels",
   "Nessuno selezionato = li ascolta tutti.": "None selected = it listens to all of them.",
   "Spento non ascolta e non parla, da nessuna parte.": "Off, it neither listens nor talks, anywhere.",
@@ -972,7 +969,7 @@ export const EN = {
   "Apro il salotto…": "Opening the lounge…",
   "Il ": "The ",
   "salotto": "lounge",
-  "Tutti gli agenti in onda: chi nomini risponde, gli altri intervengono secondo la loquacità.": "Every agent on air: whoever you name answers, the others join in by chattiness.",
+  "Tutti gli agenti in onda: risponde chi chiami per nome.": "Every agent on air: whoever you call by name answers.",
   "Scrivi a tutti…": "Write to everyone…",
 
   // reasoning

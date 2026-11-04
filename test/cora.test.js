@@ -936,8 +936,8 @@ describe("panel auth", () => {
       assert.ok(titles.includes(expected.active));
       assert.ok(titles.includes(expected.plural));
       assert.ok(titles.some((title) => title.endsWith(expected.empty)));
-      const card = panel.run('agentCard({ id:"test", name:"Memoria", model:"ollama/test-model", enabled:true, tools:false, chattiness:0.5 }, 0)');
-      assert.equal(card.querySelector(".meter").attributes.title, language === "en" ? "Chattiness 50" : "Loquacità 50");
+      const card = panel.run('agentCard({ id:"test", name:"Memoria", model:"ollama/test-model", enabled:true, tools:false }, 0)');
+      assert.equal(card.querySelector(".meter"), null, "no chattiness meter: agents speak only when called");
       assert.equal(card.querySelector(".monitor").attributes["aria-label"], language === "en" ? "Memoria's desktop" : "Desktop di Memoria");
       failUsage = true;
       await panel.navigate("#/agenti");
@@ -1012,7 +1012,7 @@ describe("agents in Discord", () => {
 
   test("an agent answers the owner through a webhook with its own name", async () => {
     replies.set("Marta", () => ({ content: "Ciao capo, eccomi." }));
-    discord.say({ content: "ciao a tutti" });
+    discord.say({ content: "ciao Marta, ci sei?" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Marta"), { what: "Marta's reply" });
     assert.equal(post.content, "Ciao capo, eccomi.");
     assert.equal(fakeOllama.lastAuth, "Bearer test-ollama-key");
@@ -2010,18 +2010,25 @@ describe("talking with the agents", () => {
     }
   });
 
-  test("a message that names nobody gets one answer, not a chorus", async () => {
+  test("in a channel too an agent speaks only when called: a message that calls nobody gets no answer, a bot naming an agent in passing calls nobody", async () => {
     replies.set("Olga", () => ({ content: "Dico la mia." }));
     replies.set("Pino", () => ({ content: "Dico la mia anche io." }));
     const before = posts("Olga").length + posts("Pino").length;
-    // Both are as chatty as can be and both are in the channel: still, one voice answers.
-    for (let round = 0; round < 4; round += 1) {
+    // Both are in the channel and as chatty as they were ever allowed to be: still nobody was called.
+    for (let round = 0; round < 3; round += 1) {
       discord.say({ content: `ragazzi, che si fa oggi? (${round})` });
       await sleep(1800);
       await quiet();
     }
-    const after = posts("Olga").length + posts("Pino").length;
-    assert.equal(after - before, 4, "four messages, four answers, never two voices on the same one");
+    discord.say({ content: "Ho girato a Olga e Pino il riepilogo di ieri.", author: "700000000000000077", username: "Reporter", bot: true });
+    await sleep(2500);
+    await quiet();
+    assert.equal(posts("Olga").length + posts("Pino").length - before, 0, "nobody called, nobody speaks");
+    // Called directly by another bot, the agent answers.
+    discord.say({ content: "@Pino, mi confermi il riepilogo?", author: "700000000000000077", username: "Reporter", bot: true });
+    await waitFor(() => posts("Pino").length === 1, { what: "Pino called by the bot" });
+    await quiet();
+    assert.equal(posts("Olga").length, 0);
   });
 
   test("in a thread agents stay out unless summoned by name", async () => {
@@ -2801,7 +2808,8 @@ describe("shared listening", () => {
     let unexpected = 0;
     replies.set("Vale", () => { unexpected++; return { content: "Non devo entrare." }; });
     replies.set("Pia", () => ({ content: "Leggo io il documento nel mio canale." }));
-    fake.say({ channel: SHARED, content: "Analizziamo questo documento" });
+    // Both named, but only Pia's bot can read the channel: Vale, called as she is, stays out.
+    fake.say({ channel: SHARED, content: "Pia e Vale, analizziamo questo documento" });
     await waitFor(() => fake.state.botPosts.some((item) => item.channelId === SHARED && item.content === "Leggo io il documento nel mio canale."), { what: "only the agent able to read the listener's channel responding" });
     assert.equal(unexpected, 0, "the main listener's access never admits an absent colleague");
     assert.ok(!fake.state.webhookPosts.some((item) => item.channelId === SHARED && item.username === "Vale"));

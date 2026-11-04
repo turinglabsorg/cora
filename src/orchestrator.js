@@ -9,7 +9,6 @@ import { asksToStop } from "./brain.js";
 import { VOICE_MESSAGE } from "./discord.js";
 import { AUDIO_LIMIT_BYTES, VOICE_LANGUAGES, speakable } from "./voice.js";
 
-const MAX_PARALLEL_AGENTS = 4;
 const HUMAN_DEBOUNCE_MS = 1200;
 // A follow-up without names within this window goes to the agents the human was talking to.
 const FOCUS_MS = 5 * 60 * 1000;
@@ -509,7 +508,7 @@ export class Orchestrator {
       // Another bot can call an agent, directly (@Name, or Name: opening a line); it never gets the owner's tools.
       const called = this.agentsFor(state.id).some((agent) => addresses(item.content, agent.name));
       if (called) state.ownerOrigin = false;
-      if (called || state.budget > 0) this.schedule(state, called ? HUMAN_DEBOUNCE_MS : 2500);
+      if (called) this.schedule(state, HUMAN_DEBOUNCE_MS);
     }
   }
 
@@ -785,39 +784,17 @@ export class Orchestrator {
     }
   }
 
-  pickCandidates(state, last, agents, { summonedOnly = false } = {}) {
+  pickCandidates(state, last, agents) {
     const fromHuman = last.kind === "owner" || last.kind === "human";
     const pool = agents.filter((agent) => agent.id !== last.agentId);
-    // A person calls an agent by naming it; another agent or bot only by calling it directly.
-    const calls = (agent) => (fromHuman ? mentions : addresses)(last.content, agent.name);
-    // In a thread agents stay out unless someone summons them (or they are mid-conversation with that person).
-    if (summonedOnly) {
-      const forced = pool.filter((agent) => calls(agent) || (fromHuman && last.addressed?.includes(agent.id)));
-      return { forced, optional: [] };
-    }
-    if (last.kind === "bot") {
-      const called = pool.filter(calls);
-      if (called.length) return { forced: called, optional: [] };
-    }
-    if (!fromHuman && state.budget <= 0) return { forced: [], optional: [] };
+    // In a room or a DM of one agent, whatever a person writes is for it.
     if (fromHuman && (roomAgentId(state.id) || this.dmAgentId(state.id))) return { forced: pool, optional: [] };
-    const forced = pool.filter((agent) => calls(agent) || (fromHuman && last.addressed?.includes(agent.id)));
-    if (fromHuman && forced.length) return { forced, optional: [] };
-    if (fromHuman && last.toOthers) return { forced: [], optional: [] };
-    // While the human is talking to someone, the others join only when called by name.
-    if (!fromHuman && state.focus && Date.now() - state.focus.at < FOCUS_MS) return { forced, optional: [] };
-    // Nobody was named: one message from a human gets exactly one answer, never a chorus.
-    // Chattiness decides who feels like speaking; the chattiest answers when nobody does.
-    if (fromHuman) {
-      const willing = pool.filter((agent) => Math.random() < agent.chattiness);
-      const one = willing.length
-        ? willing[Math.floor(Math.random() * willing.length)]
-        : [...pool].sort((a, b) => (b.chattiness - a.chattiness) || (Math.random() - 0.5))[0];
-      return { forced: one ? [one] : [], optional: [] };
-    }
-    const optional = pool.filter((agent) => !forced.includes(agent) && Math.random() < agent.chattiness * 0.6)
-      .sort(() => Math.random() - 0.5).slice(0, Math.max(0, MAX_PARALLEL_AGENTS - forced.length));
-    return { forced, optional };
+    // Everywhere else an agent speaks only when called, in a channel as in a thread: named by a person (or still in
+    // the conversation that person is having with it), called directly by another agent or bot. Nobody called,
+    // nobody answers; agents calling each other stop when the turn budget is spent.
+    if (last.kind === "agent" && state.budget <= 0) return { forced: [], optional: [] };
+    const calls = (agent) => (fromHuman ? mentions : addresses)(last.content, agent.name);
+    return { forced: pool.filter((agent) => calls(agent) || (fromHuman && last.addressed?.includes(agent.id))), optional: [] };
   }
 
   async round(state) {
@@ -831,10 +808,11 @@ export class Orchestrator {
     let eligible = this.agentsFor(state.id);
     // A channel the main bot cannot see is private: only the agents whose own bot is in it can read or post there.
     if (state.mainBlind && state.heardFrom.size) eligible = eligible.filter((agent) => state.heardFrom.has(agent.id));
-    const summonedOnly = Boolean(this.channelMeta(state.id).parentId);
+    // A message that calls nobody is for nobody, except in a room or a DM of one agent.
+    const direct = Boolean(roomAgentId(state.id) || this.dmAgentId(state.id));
     for (const [id, item] of state.humanQueue) {
       if (item.toOthers || (item.addressed?.length && !eligible.some((agent) => item.addressed.includes(agent.id)))
-        || (summonedOnly && !item.addressed?.length && !eligible.some((agent) => mentions(item.content, agent.name)))) state.humanQueue.delete(id);
+        || (!direct && !item.addressed?.length && !eligible.some((agent) => mentions(item.content, agent.name)))) state.humanQueue.delete(id);
     }
     if (!isWebRoom(state.id) && !isTelegramChannel(state.id) && !this.dmAgentId(state.id) && this.bots) {
       const access = await Promise.allSettled(eligible.map((agent) => this.bots.canRead(agent, state.id)));
@@ -847,7 +825,7 @@ export class Orchestrator {
     if (pending.length && !queued) return;
     const last = queued || state.history[state.history.length - 1];
     if (!last || last.passive) return;
-    const { forced, optional } = this.pickCandidates(state, last, agents, { summonedOnly });
+    const { forced, optional } = this.pickCandidates(state, last, agents);
     if (!forced.length && !optional.length) return;
     if (queued && this.threadWork.has(state.id) && forced.some((agent) =>
       agent.tools && (queued.kind === "owner" || this.authorized(queued, agent, state)))) return;

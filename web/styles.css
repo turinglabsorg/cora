@@ -270,9 +270,6 @@ a.stat:hover { border-color: var(--line-strong); }
 .agent-ident b { display: block; font: 600 20px/1.05 var(--display); letter-spacing: -0.025em; }
 .agent-ident small { display: block; margin-top: 3px; color: var(--muted); font: 400 11px/1.4 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chev { color: var(--faint); }
-.meter { display: flex; align-items: center; gap: 10px; padding: 0 14px; }
-.meter .track { flex: 1; height: 6px; border-radius: 3px; background: #070707; border: 1px solid var(--line); overflow: hidden; }
-.meter .fill { display: block; height: 100%; background: linear-gradient(90deg, #b8761b, var(--amber)); }
 .agent-card .badges { padding: 12px 14px 0; }
 .agent-actions { display: flex; gap: 8px; padding: 12px 14px 14px; margin-top: auto; }
 .agent-actions .btn:not(.only-icon) { flex: 1; }
@@ -328,7 +325,6 @@ a.stat:hover { border-color: var(--line-strong); }
 .model-pick input { font-family: var(--mono); }
 .field small { color: var(--faint); font-size: 12px; line-height: 1.4; }
 .field-row { display: flex; align-items: center; justify-content: space-between; }
-.fader-value { font: 600 20px/1 var(--display); color: var(--amber); }
 input[type=text], input[type=email], input[type=url], input[type=password], input[type=number], input[type=search], input[type=datetime-local], select, textarea {
   width: 100%; min-width: 0; height: 44px; padding: 0 12px; background: var(--well); border: 1px solid var(--line); border-radius: var(--r-md);
   outline: none; font-size: 15px; transition: border-color 0.15s, box-shadow 0.15s; -webkit-appearance: none; appearance: none;
@@ -413,18 +409,6 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
   border-radius: var(--r-lg); border: 1px solid var(--line); background: rgba(5, 5, 5, 0.92); backdrop-filter: blur(10px); box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.8);
 }
 
-.fader { -webkit-appearance: none; appearance: none; width: 100%; height: 34px; background: transparent; cursor: pointer; }
-.fader::-webkit-slider-runnable-track {
-  height: 6px; border-radius: 3px; background: #070707; border: 1px solid var(--line);
-  background-image: repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), var(--line) calc(10% - 1px) 10%);
-}
-.fader::-moz-range-track { height: 6px; border-radius: 3px; background: #070707; border: 1px solid var(--line); }
-.fader::-webkit-slider-thumb {
-  -webkit-appearance: none; width: 22px; height: 30px; margin-top: -13px; border-radius: 4px;
-  background: linear-gradient(180deg, #ffd08a, var(--amber) 45%, #b8761b); border: 1px solid #6b4610;
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.6), inset 0 -2px 0 rgba(0, 0, 0, 0.25);
-}
-.fader::-moz-range-thumb { width: 22px; height: 30px; border-radius: 4px; background: var(--amber); border: 1px solid #6b4610; }
 
 .switch { display: flex; align-items: center; gap: 12px; cursor: pointer; user-select: none; -webkit-user-select: none; min-height: 32px; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
@@ -535,8 +519,6 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .set-control .switch { min-height: 0; }
 .set-control > input[type=text], .set-control > input[type=email] { width: min(300px, 100%); }
 .set-row.stack .set-control > input[type=text] { width: 100%; }
-.fader-row { display: flex; align-items: center; gap: 18px; }
-.fader-row .fader { flex: 1; min-width: 0; }
 .voice-pick { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .voice-pick select { width: auto; min-width: 210px; }
 .avatar-pick .avatar-actions { align-self: center; }
@@ -1006,7 +988,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .tabs a .ico { width: 14px; height: 14px; }
   .agent-ident { padding: 12px 12px 8px; }
   .agent-ident b { font-size: 18px; }
-  .agent-card .badges, .meter { padding-left: 12px; padding-right: 12px; }
+  .agent-card .badges { padding-left: 12px; padding-right: 12px; }
   .agent-actions { padding: 10px 12px 12px; }
   .row-link, .row-item { padding: 10px 2px; gap: 10px; }
   .row-title { font-size: 16px; }

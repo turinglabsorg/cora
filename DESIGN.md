@@ -1,6 +1,6 @@
 # Cora — Design System
 
-The admin panel is a **radio studio mixing desk**. Each agent is a channel strip on the desk: a fader for how chatty it is, LEDs for its state, a small monitor showing its desktop. Discord is the "ON AIR" lamp. The live activity feed is a teletype strip. Dark and tactile: one amber light on near-pure black, never brown.
+The admin panel is a **radio studio mixing desk**. Each agent is a channel strip on the desk: LEDs for its state, a small monitor showing its desktop. Discord is the "ON AIR" lamp. The live activity feed is a teletype strip. Dark and tactile: one amber light on near-pure black, never brown.
 
 ## Colors (CSS custom properties in `web/styles.css`)
 
@@ -16,7 +16,7 @@ The admin panel is a **radio studio mixing desk**. Each agent is a channel strip
 | `--text` | `#f5f5f3` | primary text |
 | `--muted` | `#8f8f8a` | secondary text, labels |
 | `--faint` | `#5c5c58` | placeholders, disabled |
-| `--amber` | `#f2a93b` | primary accent: active tab, fader cap, primary button |
+| `--amber` | `#f2a93b` | primary accent: active tab, primary button |
 | `--amber-glow` | `rgba(242,169,59,.35)` | lamp/LED glow, focus ring |
 | `--amber-line` / `--amber-wash` | amber at 38% / 8% | borders and fills of amber things (owner bubbles, requests, answers, switches) |
 | `--red` | `#e5533d` | ON AIR lamp lit, destructive actions, errors |
@@ -72,8 +72,7 @@ The panel behaves like an installed app (web manifest, apple-touch-icon, no pinc
 
 - **Your account** (`accountButton()`, `.profile-*`): the signed-in person's mark (`.user-mark`: the picture their sign-in gave, else their initials in amber DM Mono on `--panel-2`) in a round button at the phone top bar's right end, and their name and email at the sidebar's foot with a chevron. Either opens one menu, a `--panel` card with a `--line-strong` hairline and a deep shadow, below the button on a phone (over a 45% black scrim) and above the foot on a desktop (300px wide): the mark, name in the display font, email in mono and the role badge (*Owner* / *Utente*), then *Accesso*, *Lingua e notifiche*, a hairline and *Esci*. *Esci* never signs out at once: the menu turns into *Vuoi uscire?* with one line on what follows (on usecora.space you also leave the cloud and sign in again; locally the password is needed again), *Annulla* (ghost) and *Esci* (primary). Esc, a tap outside, navigation and a resize close the menu; opened from the keyboard it takes the focus.
 - **ON AIR lamp** (`.onair`): in the sidebar's channel card on desktop; phones show a channel's state in Settings, and the top bar's right end is your account. Lit red with glow when Discord is `ready`, amber blinking while connecting, dark when off/error (error text in the tooltip and the dashboard).
-- **Channel strip** (`.strip`): agent card on the dashboard. Top: monitor (desktop thumbnail, 16:10, scanline overlay, "SPENTO" when off). Middle: avatar (its color ring, or the drawn picture's own circle), name (display font), model (mono). Bottom: horizontal fader showing chattiness, LEDs (`.led` on/off/warn) for *attivo*, *desktop*, *strumenti*. Whole strip is a link to the agent.
-- **Fader** (`input[type=range].fader`): track with tick marks, amber cap. Used for chattiness.
+- **Channel strip** (`.strip`): agent card on the dashboard. Top: monitor (desktop thumbnail, 16:10, scanline overlay, "SPENTO" when off). Middle: avatar (its color ring, or the drawn picture's own circle), name (display font), model (mono). Bottom: LEDs (`.led` on/off/warn) for *attivo*, *desktop*, *strumenti*. Whole strip is a link to the agent.
 - **Teletype** (`.teletype`): paper strip with perforation edges, mono text, newest on top, each line `time · who · what`; tool calls in blue, errors in red, agent messages in the agent's color.
 - **Tabs** (`.tabs`): hardware buttons; active one is lit amber with a small LED dot. Scroll horizontally on phones.
 - **Buttons**: `.btn` (panel-2, line border), `.btn.primary` (amber fill, ink text), `.btn.danger` (red outline), `.btn.ghost`. 36px tall, 44px on touch.
