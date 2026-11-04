@@ -339,22 +339,57 @@ test("every turn in the Reasoning list leads with the token box a goal has, and 
   assert.equal(desk.querySelectorAll(".tokens").length, 0);
 });
 
-test("on a phone the top bar's right end is Esci, which signs out of the panel and, on usecora.space, of the cloud too", async () => {
+test("the top bar ends with your account: a menu with who you are, your access and language, and Esci, which asks first", async () => {
   const calls = [];
   const panel = panelHarness({ fetch: async (path, options) => { calls.push([options?.method || "GET", path]); return { ok: true, status: 200, json: async () => ({ ok: true }) }; } });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [], currentUser: { id: "u1", name: "Ada Lovelace", email: "ada@team.example", role: "owner", avatar: "" } }`);
   panel.run(`S.cloud = { login: "https://usecora.test/go/team", logout: "https://usecora.test/logout" }`);
   panel.run(`shell(h("p", {}, "x"), { title: "Impostazioni" })`);
   const bar = panel.app.querySelector(".appbar");
   assert.equal(bar.querySelectorAll(".onair").length, 0, "the lamp has left the top bar");
-  const out = bar.children.at(-1);
-  assert.equal(out.className, "appbar-logout");
-  assert.equal(out.attributes["aria-label"], "Esci");
-  assert.match(out.textContent, /Esci/);
-  assert.equal(panel.app.querySelectorAll(".side-logout").length, 1, "the desktop keeps Esci in the sidebar");
-  out.click();
+  const trigger = bar.children.at(-1);
+  assert.equal(trigger.className, "profile-btn");
+  assert.equal(trigger.attributes["aria-haspopup"], "menu");
+  assert.equal(trigger.textContent, "AL");
+  assert.equal(panel.app.querySelectorAll(".side-logout").length, 0, "Esci lives in the menu, on the desktop too");
+  assert.match(panel.app.querySelector(".side-identity").textContent, /Ada Lovelace.*ada@team\.example/);
+  const menu = () => panel.run("document.body").querySelectorAll(".profile-menu");
+  const items = () => menu()[0].querySelectorAll(".profile-item");
+
+  trigger.click();
+  assert.equal(menu().length, 1);
+  assert.equal(trigger.attributes["aria-expanded"], "true");
+  assert.match(menu()[0].querySelector(".profile-head").textContent, /Ada Lovelace.*ada@team\.example.*Owner/);
+  assert.deepEqual(items().map((item) => item.textContent), ["Accesso", "Lingua e notifiche", "Esci"]);
+  items()[0].click();
+  assert.equal(panel.run("location.hash"), "#/settings/accesso");
+  assert.equal(menu().length, 0, "choosing an entry closes the menu");
+  assert.equal(trigger.attributes["aria-expanded"], "false");
+
+  trigger.click();
+  items()[2].click();
+  assert.deepEqual(calls, [], "Esci only asks");
+  const confirm = menu()[0].querySelector(".profile-confirm");
+  assert.match(confirm.textContent, /Vuoi uscire\?.*usecora\.space/);
+  confirm.querySelector(".profile-actions").children[0].click();
+  assert.deepEqual(items().map((item) => item.textContent), ["Accesso", "Lingua e notifiche", "Esci"], "Annulla goes back to the menu");
+  assert.deepEqual(calls, []);
+  items()[2].click();
+  menu()[0].querySelector(".profile-actions").children[1].click();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, [["POST", "/api/logout"]]);
   assert.equal(panel.run("location.href"), "https://usecora.test/logout");
+  assert.equal(menu().length, 0);
+
+  panel.run(`S.data.currentUser = { id: "u2", name: "", email: "bo@team.example", role: "member" }; S.cloud = null`);
+  panel.run(`shell(h("p", {}, "x"), { title: "Impostazioni" })`);
+  panel.app.querySelector(".profile-btn").click();
+  assert.match(menu()[0].querySelector(".profile-head").textContent, /bo@team\.example.*Utente/);
+  menu()[0].querySelectorAll(".profile-item")[2].click();
+  assert.match(menu()[0].querySelector(".profile-confirm").textContent, /password/);
+  panel.run("closeAccountMenu()");
+  assert.equal(menu().length, 0);
 });
 
 test("the panel renders markdown as DOM: blocks, inline marks, only web and mail links, [[pages]] only in the brain", () => {

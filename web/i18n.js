@@ -547,6 +547,9 @@ export const EN = {
   "Impostazioni": "Settings",
   "Nuovo agente": "New agent",
   "Esci": "Log out",
+  "Vuoi uscire?": "Log out?",
+  "Esci anche da usecora.space: per rientrare rifai il login.": "You also leave usecora.space: to come back, sign in again.",
+  "Per rientrare ti servirà di nuovo la password.": "To come back you will need the password again.",
   "Indietro": "Back",
 
   // states

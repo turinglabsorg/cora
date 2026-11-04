@@ -544,17 +544,95 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
         h("span", { class: "label" }, "Agenti"),
         S.data ? S.data.agents.map((agent) => h("a", { href: `#/agent/${agent.id}/chat`, class: section === "agent" && current === agent.id ? "active" : "" }, avatar(agent, "xs"), h("span", { class: "grow" }, raw(agent.name)), agentDot(agent))) : skeleton("rows"),
         h("a", { href: "#/new", class: section === "new" ? "active" : "" }, h("span", { class: "avatar xs add" }, icon("plus")), h("span", { class: "grow" }, "Nuovo agente"))),
-      S.data?.currentUser ? h("a", { class: "side-identity", href: "#/settings/accesso" }, icon("user"),
-        h("span", { class: "grow" }, h("b", {}, raw(S.data.currentUser.name || S.data.currentUser.email || "Owner")),
-          h("small", {}, raw(S.data.currentUser.email || tr("Owner"))))) : null,
-      h("button", { class: "side-logout", type: "button", onclick: logout }, icon("logout"), h("span", {}, "Esci"))),
+      h("div", { class: "side-account" }, accountButton("side"))),
     h("header", { class: "appbar" },
       back ? h("a", { class: "icon-btn", href: back, "aria-label": "Indietro" }, icon("back")) : h("a", { class: "appbar-brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "Cora" })),
       h("h1", {}, title),
-      h("button", { class: "appbar-logout", type: "button", onclick: logout, "aria-label": "Esci" }, icon("logout"), h("span", {}, "Esci"))),
+      accountButton("bar")),
     h("main", { class: "content" }, h("div", { class: "wrap" }, content)),
     h("nav", { class: "tabbar" }, nav.map(([key, label, name, active]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label))))));
   updateLamp();
+}
+
+/* ---------- your account ---------- */
+/** The signed-in person as a round mark: the picture their sign-in gave, or their initials. */
+function userMark(user, size = "") {
+  const label = user?.name || user?.email || tr("Owner");
+  const initials = label.split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "?";
+  const el = h("span", { class: `user-mark${size ? ` ${size}` : ""}`, "aria-hidden": "true" }, initials);
+  if (/^https:\/\//.test(user?.avatar || "")) {
+    const img = h("img", { src: user.avatar, alt: "", referrerpolicy: "no-referrer" });
+    img.addEventListener("error", () => img.remove());
+    el.append(img);
+  }
+  return el;
+}
+
+/** Who is signed in, top right on a phone and at the foot of the sidebar: it opens the account menu. */
+function accountButton(where) {
+  const user = S.data?.currentUser;
+  const open = S.accountMenu?.where === where;
+  const trigger = where === "bar"
+    ? h("button", { class: "profile-btn", type: "button", "aria-haspopup": "menu", "aria-expanded": String(open), "aria-label": "Il tuo account" }, userMark(user))
+    : h("button", { class: "side-identity", type: "button", "aria-haspopup": "menu", "aria-expanded": String(open) }, userMark(user, "sm"),
+      h("span", { class: "grow" }, h("b", {}, raw(user?.name || user?.email || tr("Owner"))), h("small", {}, raw(user?.email || tr("Owner")))),
+      icon("next", "up"));
+  if (open) S.accountMenu.trigger = trigger;
+  // A click from the keyboard has no detail: then the menu takes the focus, a pointer leaves it where it is.
+  trigger.addEventListener("click", (event) => (S.accountMenu ? closeAccountMenu(true) : openAccountMenu(trigger, where, !event.detail)));
+  return trigger;
+}
+
+/** The account menu: who you are here, your access, language, and Esci, which asks before signing out. */
+function openAccountMenu(trigger, where, byKeyboard = false) {
+  closeAccountMenu();
+  const user = S.data?.currentUser;
+  const go = (hash) => () => { closeAccountMenu(); location.hash = hash; };
+  const item = (label, name, onclick, cls = "") => h("button", { class: `profile-item${cls ? ` ${cls}` : ""}`, type: "button", role: "menuitem", onclick }, icon(name), h("span", {}, label));
+  const body = h("div", { class: "profile-body" });
+  const showMenu = () => {
+    body.replaceChildren(
+      item("Accesso", "shield", go("#/settings/accesso")),
+      item("Lingua e notifiche", "globe", go("#/settings/preferenze")),
+      h("hr"),
+      item("Esci", "logout", askToLeave, "out"));
+    if (byKeyboard) body.querySelector(".profile-item")?.focus?.();
+  };
+  const askToLeave = () => {
+    const stay = btn("Annulla", { cls: "ghost", onclick: showMenu });
+    body.replaceChildren(h("div", { class: "profile-confirm", role: "alertdialog", "aria-label": "Vuoi uscire?" },
+      h("b", {}, "Vuoi uscire?"),
+      h("p", {}, S.cloud ? "Esci anche da usecora.space: per rientrare rifai il login." : "Per rientrare ti servirà di nuovo la password."),
+      h("div", { class: "profile-actions" }, stay, btn("Esci", { icon: "logout", cls: "primary", onclick: () => { closeAccountMenu(); logout(); } }))));
+    if (byKeyboard) stay.focus?.();
+  };
+  const menu = h("div", { class: `profile-menu ${where}`, role: "menu", "aria-label": "Il tuo account" },
+    h("div", { class: "profile-head" }, userMark(user, "lg"),
+      h("div", { class: "grow" }, h("b", {}, raw(user?.name || user?.email || tr("Owner"))), user?.email ? h("small", {}, raw(user.email)) : null),
+      badge(user?.role === "member" ? "Utente" : "Owner", "on")),
+    body);
+  const box = trigger.getBoundingClientRect?.();
+  if (box && where === "bar") menu.style.setProperty("--top", `${Math.round(box.bottom + 8)}px`);
+  if (box && where === "side") {
+    menu.style.setProperty("--left", `${Math.round(box.left)}px`);
+    menu.style.setProperty("--bottom", `${Math.round(window.innerHeight - box.top + 8)}px`);
+    menu.style.setProperty("--width", `${Math.round(Math.max(box.width, 300))}px`);
+  }
+  const scrim = h("div", { class: `profile-scrim ${where}`, onclick: () => closeAccountMenu(true) });
+  document.body.append(scrim, menu);
+  trigger.setAttribute("aria-expanded", "true");
+  S.accountMenu = { where, trigger, menu, scrim };
+  showMenu();
+}
+
+function closeAccountMenu(refocus = false) {
+  const open = S.accountMenu;
+  if (!open) return;
+  S.accountMenu = null;
+  open.menu.remove();
+  open.scrim.remove();
+  open.trigger.setAttribute("aria-expanded", "false");
+  if (refocus) open.trigger.focus?.();
 }
 
 async function logout() {
@@ -4628,6 +4706,7 @@ function renderLogin() {
 
 /* ---------- boot ---------- */
 async function render() {
+  closeAccountMenu();
   if (!S.data) return;
   const [page] = route();
   S.live = null;
@@ -4707,4 +4786,6 @@ document.addEventListener("touchmove", (event) => {
   if (event.scale !== undefined && event.scale !== 1) event.preventDefault();
 }, { passive: false });
 window.addEventListener("hashchange", () => render());
+window.addEventListener("resize", () => closeAccountMenu());
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && S.accountMenu) closeAccountMenu(true); });
 boot();
