@@ -30,7 +30,11 @@ const invite = (accountId) => {
 
 try {
   if (command === "space" && sub === "add" && arg && values.upstream) {
-    const owner = values.owner ? store.account(values.owner) : store.createAccount({ name: values.name || "" });
+    // Someone who already signed in owns the space with the account they have: a new one would never be theirs.
+    const known = [...new Set([...(values.google || []).map((email) => store.accountFor("google", email)), ...(values.github || []).map((login) => store.accountFor("github", login))].filter(Boolean))];
+    if (known.length > 1) throw new Error(`those identities belong to different accounts (${known.join(", ")}): choose one with --owner`);
+    if (values.owner && known.length && known[0] !== values.owner) throw new Error(`that identity belongs to ${known[0]}, not ${values.owner}`);
+    const owner = values.owner ? store.account(values.owner) : known.length ? store.account(known[0]) : store.createAccount({ name: values.name || "" });
     if (!owner) throw new Error(`no account ${values.owner}`);
     invite(owner.id);
     const space = store.addSpace({ slug: arg, accountId: owner.id, upstream: values.upstream, publicUrl: values.public || "" });

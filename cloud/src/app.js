@@ -326,9 +326,10 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
     if (method === "GET" && go) {
       const space = store.space(go[1]);
       if (!space) return html(res, 404, views.notFound({ ...page, slug: go[1] }));
-      const owner = space.accountId === account.id;
+      let owner = space.accountId === account.id;
       const email = store.verifiedEmailOf(account.id);
-      const identity = { sub: account.id, name: account.name, email: owner ? account.email : email, emailVerified: Boolean(email) && (!owner || email === account.email), avatar: account.avatar, role: owner ? "owner" : "member" };
+      const identityFor = (isOwner) => ({ sub: account.id, name: account.name, email: isOwner ? account.email : email, emailVerified: Boolean(email) && (!isOwner || email === account.email), avatar: account.avatar, role: isOwner ? "owner" : "member" });
+      let identity = identityFor(owner);
       if (!owner) {
         let allowed = false;
         try {
@@ -340,6 +341,11 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
           allowed = response.ok && (await response.json()).allowed === true;
         } catch {}
         if (!allowed) return html(res, 403, views.accessDenied({ ...page, slug: space.slug }));
+        if (store.claimUnownedSpace(space.slug, account.id)) {
+          owner = true;
+          identity = identityFor(true);
+          log({ type: "space-claimed", accountId: account.id, space: space.slug });
+        }
       }
       const pass = signPass(keys.privateKey, { aud: spaceAudience(space), ...identity });
       store.recordSpaceEntry(space.slug, account.id);

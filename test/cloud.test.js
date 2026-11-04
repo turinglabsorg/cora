@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
+import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { createCloud } from "../cloud/src/app.js";
 import { CloudStore } from "../cloud/src/store.js";
@@ -332,6 +334,82 @@ describe("usecora.space", () => {
     assert.equal(down.status, 502);
     assert.match(down.body, /acme is not answering/);
     assert.ok(logs.some((event) => event.type === "space-offline" && event.space === "acme"));
+  });
+});
+
+describe("who owns a space", () => {
+  test("when nobody ever signed in with the account a space was opened for, the first person it lets in owns it", async (t) => {
+    const asked = [];
+    const instance = http.createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        if (req.url === "/api/cloud/access") asked.push(verifyPass(cloud.publicKey, JSON.parse(Buffer.concat(chunks).toString("utf8")).pass, { audience: `access:team.${DOMAIN}` }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ allowed: true }));
+      });
+    });
+    await new Promise((resolve) => instance.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => { instance.closeAllConnections(); instance.close(resolve); }));
+    // Opened for an address whose person had already signed in with another account: the invite waits forever.
+    const placeholder = store.createAccount({ name: "Team" });
+    store.invite(placeholder.id, "google", "lead@team.example");
+    store.addSpace({ slug: "team", accountId: placeholder.id, upstream: `http://127.0.0.1:${instance.address().port}` });
+    const enter = async (cookie) => {
+      const go = await request("/go/team", { headers: { cookie } });
+      assert.equal(go.status, 302);
+      return verifyPass(cloud.publicKey, new URL(go.headers.location).searchParams.get("pass"), { audience: `team.${DOMAIN}` });
+    };
+
+    const lead = await signIn("google", { sub: "g-lead", email: "colleague@team.example", email_verified: true, name: "Lead" });
+    const first = await enter(lead.cookie);
+    assert.equal(asked.at(-1).role, "member", "the space is asked about a member, as for anyone it does not know");
+    assert.equal(first.role, "owner");
+    assert.equal(first.email, "colleague@team.example");
+    assert.equal(first.emailVerified, true);
+    const leadAccount = first.sub;
+    assert.equal(store.space("team").accountId, leadAccount);
+    assert.equal(store.account(placeholder.id), null, "the empty account goes, with its invite");
+    assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM invites WHERE hint = 'lead@team.example'").get().n, 0);
+    assert.ok(logs.some((event) => event.type === "space-claimed" && event.space === "team" && event.accountId === leadAccount));
+    assert.match((await request("/account", { headers: { cookie: lead.cookie } })).body, /<b>team<\/b>/);
+
+    const second = await signIn("google", { sub: "g-second", email: "second@team.example", email_verified: true, name: "Second" });
+    assert.equal((await enter(second.cookie)).role, "member", "the second person is a member");
+    assert.equal(store.space("team").accountId, leadAccount);
+    assert.equal((await enter(lead.cookie)).role, "owner");
+    // A space whose owner has signed in never changes hands, even for someone it lets in.
+    const settled = store.signIn("github", { subject: "settled-owner", login: "settled-owner", name: "Settled" });
+    store.addSpace({ slug: "settled", accountId: settled.id, upstream: `http://127.0.0.1:${instance.address().port}` });
+    assert.equal(store.claimUnownedSpace("settled", leadAccount), false);
+    assert.equal(store.space("settled").accountId, settled.id);
+  });
+
+  test("opening a space for someone who already signed in gives it to their account, and an invite for them is refused", async (t) => {
+    const home = tempHome();
+    const own = new CloudStore(home);
+    const boss = own.signIn("google", { subject: "g-boss", email: "Boss@Firm.example", emailVerified: true, name: "Boss" });
+    const unverified = own.signIn("google", { subject: "g-maybe", email: "maybe@firm.example", emailVerified: false, name: "Maybe" });
+    own.close();
+    const cli = (...args) => new Promise((resolve) => execFile(process.execPath, [fileURLToPath(new URL("../cloud/cli.js", import.meta.url)), ...args],
+      { env: { ...process.env, CORA_CLOUD_HOME: home } }, (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr })));
+
+    const added = await cli("space", "add", "firm", "--upstream", "http://127.0.0.1:9", "--google", "boss@firm.example");
+    assert.equal(added.code, 0, added.stderr);
+    assert.match(added.stdout, new RegExp(`owned by ${boss.id}`));
+    const unknown = await cli("space", "add", "later", "--upstream", "http://127.0.0.1:9", "--google", "maybe@firm.example");
+    assert.equal(unknown.code, 0, unknown.stderr);
+    const refused = await cli("invite", unverified.id, "--google", "boss@firm.example");
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, new RegExp(`already has the account ${boss.id}`));
+
+    const after = new CloudStore(home);
+    t.after(() => after.close());
+    assert.equal(after.space("firm").accountId, boss.id);
+    assert.equal(after.db.prepare("SELECT COUNT(*) AS n FROM invites WHERE hint = 'boss@firm.example'").get().n, 0);
+    const later = after.space("later");
+    assert.notEqual(later.accountId, unverified.id, "an unverified address is not proof of whose it is");
+    assert.equal(after.db.prepare("SELECT account_id FROM invites WHERE hint = 'maybe@firm.example'").get().account_id, later.accountId);
   });
 });
 

@@ -109,7 +109,21 @@ export class CloudStore {
     if (!PROVIDERS.includes(provider)) throw new Error(`unknown provider ${provider}`);
     const clean = String(hint || "").trim().toLowerCase();
     if (!clean) throw new Error("empty invite");
+    // An invite is only claimed by a first sign-in: for someone already here it would wait forever.
+    const known = this.accountFor(provider, clean);
+    if (known && known !== accountId) throw new Error(`${clean} already has the account ${known}: use it with --owner`);
+    if (known) return;
     this.stmt("INSERT OR REPLACE INTO invites (provider, hint, account_id) VALUES (?, ?, ?)").run(provider, clean, accountId);
+  }
+
+  /** The account someone already signed in with: a verified Google address or a GitHub login. */
+  accountFor(provider, hint) {
+    const clean = String(hint || "").trim().toLowerCase();
+    if (!clean) return "";
+    const row = provider === "google"
+      ? this.stmt("SELECT account_id FROM identities WHERE provider = 'google' AND lower(email) = ? AND email_verified = 1 ORDER BY last_login DESC LIMIT 1").get(clean)
+      : provider === "github" ? this.stmt("SELECT account_id FROM identities WHERE provider = 'github' AND lower(login) = ? ORDER BY last_login DESC LIMIT 1").get(clean) : null;
+    return row?.account_id || "";
   }
 
   /**
@@ -187,6 +201,22 @@ export class CloudStore {
     this.stmt("INSERT INTO spaces (slug, account_id, upstream, public_url, created_at) VALUES (?, ?, ?, ?, ?)").run(slug, accountId, url.origin, own, Date.now());
     this.stmt("DELETE FROM requests WHERE account_id = ?").run(accountId);
     return this.space(slug);
+  }
+
+  /**
+   * The first person a space lets in owns it, when nobody has ever signed in with
+   * the account it was opened for (an invite never claimed). The empty account
+   * and its invites go; a space with a real owner never changes hands.
+   */
+  claimUnownedSpace(slug, accountId) {
+    const space = this.space(slug);
+    if (!space || space.accountId === accountId) return false;
+    const placeholder = space.accountId;
+    const moved = this.stmt("UPDATE spaces SET account_id = ? WHERE slug = ? AND account_id = ? AND NOT EXISTS (SELECT 1 FROM identities WHERE account_id = ?)")
+      .run(accountId, slug, placeholder, placeholder).changes;
+    if (!moved) return false;
+    if (!this.spacesOf(placeholder).length) this.stmt("DELETE FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM identities WHERE account_id = ?)").run(placeholder, placeholder);
+    return true;
   }
 
   space(slug) {

@@ -98,6 +98,9 @@ On the cloud:
 cloud/cli.js space add <slug> --upstream https://cora.example.com --public https://cora.example.com --google <owner email>
 ```
 
+If the owner has already signed in to usecora.space with that address, the space goes to their account. If nobody
+ever signs in with the account the space was opened for, the first person the instance lets in becomes its owner.
+
 On the instance, in `~/.cora/env` (not secret, read by `bin/run.sh`):
 
 ```
