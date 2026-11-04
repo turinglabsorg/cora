@@ -98,6 +98,17 @@ export class Channels {
     return null;
   }
 
+  /** What a bot knows about a Discord channel or thread: the main one first, then the agents' own, the only ones in a private channel. */
+  discordInfo(channelId) {
+    const own = this.discord.channelInfo(channelId);
+    if (own) return own;
+    for (const [, entry] of this.bots?.clients || []) {
+      const info = entry.client.channelInfo(channelId);
+      if (info) return info;
+    }
+    return null;
+  }
+
   /** Channels of the active transport the cora listens to. */
   list() {
     if (this.active === "telegram") {
@@ -177,7 +188,7 @@ export class Channels {
         place: direct ? "su Slack, in un messaggio diretto" : `su Slack, nello spazio "${team}"`,
       };
     }
-    const info = this.discord.channelInfo(id);
+    const info = this.discordInfo(id);
     if (!info) return { id, kind: "discord", name: id, guildId: null, guildName: "", parentId: null, where: `in #${id}`, place: "su Discord" };
     return { ...info, kind: "discord", where: `in #${info.name}`, place: `su Discord, nel server "${info.guildName}"` };
   }
@@ -190,7 +201,7 @@ export class Channels {
       if (info.direct) return "messaggio diretto (Slack)";
       return info.threadTs ? `thread in #${info.name} (Slack)` : `#${info.name} (Slack)`;
     }
-    const info = this.discord.channelInfo(id);
+    const info = this.discordInfo(id);
     return info ? `#${info.name}` : `#${id}`;
   }
 

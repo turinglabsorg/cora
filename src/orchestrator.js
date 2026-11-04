@@ -52,6 +52,16 @@ export function mentions(text, name) {
   return new RegExp(`(^|[^\\p{L}\\p{N}])@?${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(normalize(text));
 }
 
+/**
+ * Whether a text calls this name directly: "@Name" (a real tag reads that way here), or the name said to
+ * someone, followed by a comma, colon, "!" or "?" ("Marta, salutami", "ci sei, Nico?"). Naming someone in
+ * passing ("the stop meant for Nico and his reply") calls nobody.
+ */
+export function addresses(text, name) {
+  const escaped = normalize(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}([^\\p{L}\\p{N}]|$)|(^|[^\\p{L}\\p{N}_@])${escaped}\\s*[,:!?]`, "u").test(normalize(text));
+}
+
 function describeMessage(raw, nameFor = () => null) {
   const parts = [];
   if (raw.content) {
@@ -143,7 +153,7 @@ export class Orchestrator {
       return agent?.enabled ? [agent] : [];
     }
     const transport = transportOf(channelId);
-    const info = transport === "discord" ? this.discord.channelInfo(channelId) : transport === "slack" ? this.channels.info(channelId) : null;
+    const info = transport === "discord" ? this.channels.discordInfo(channelId) : transport === "slack" ? this.channels.info(channelId) : null;
     return this.store.agents().filter((agent) => {
       if (!agent.enabled) return false;
       const chosen = agent.channelIds.filter((id) => transportOf(id) === transport);
@@ -233,9 +243,14 @@ export class Orchestrator {
     // People or bots named with a real Discord mention who are not agents (e.g. "@GROG ci sei?").
     const others = (raw.mentions || []).filter((user) => !this.bots?.agentIdForUser(user.id)).map((user) => user.global_name || user.username);
     const space = raw.guild_id || this.channelMeta(raw.channel_id).guildId;
-    if (who.kind === "owner" || who.kind === "human") this.learnPerson(space, raw.author?.id, [who.authorName, raw.author?.global_name, raw.author?.username]);
+    // Who an agent can tag here: the people, and the other bots with an account of their own (another agent
+    // like GROG), never a webhook, Cora or its agents.
+    const ownBot = (id) => !id || id === this.discord.user?.id || Boolean(this.bots?.agentIdForUser(id));
+    if (who.kind === "owner" || who.kind === "human" || (who.kind === "bot" && !raw.webhook_id && !ownBot(raw.author?.id))) {
+      this.learnPerson(space, raw.author?.id, [who.authorName, raw.author?.global_name, raw.author?.username]);
+    }
     for (const user of raw.mentions || []) {
-      if (!user.bot && !this.bots?.agentIdForUser(user.id)) this.learnPerson(space, user.id, [user.member?.nick, user.global_name, user.username]);
+      if (!ownBot(user.id)) this.learnPerson(space, user.id, [user.member?.nick, user.global_name, user.username]);
     }
     return {
       id: raw.id,
@@ -315,7 +330,7 @@ export class Orchestrator {
   }
 
   async onMessage(raw, viaAgentId = null) {
-    const guildId = raw.guild_id || this.discord.channelInfo(raw.channel_id)?.guildId;
+    const guildId = raw.guild_id || this.channels.discordInfo(raw.channel_id)?.guildId;
     if (!guildId || !this.allowedGuild(guildId)) return;
     // Only real messages and replies: joins, pins, boosts and the like have no text for the agents.
     if (raw.type !== undefined && raw.type !== 0 && raw.type !== 19) return;
@@ -491,8 +506,8 @@ export class Orchestrator {
       state.ownerOrigin = item.kind === "owner";
       this.schedule(state, HUMAN_DEBOUNCE_MS);
     } else if (item.kind === "bot") {
-      // Another bot can call an agent by name; it never gets the owner's tools.
-      const called = this.agentsFor(state.id).some((agent) => mentions(item.content, agent.name));
+      // Another bot can call an agent, directly (@Name, or Name: opening a line); it never gets the owner's tools.
+      const called = this.agentsFor(state.id).some((agent) => addresses(item.content, agent.name));
       if (called) state.ownerOrigin = false;
       if (called || state.budget > 0) this.schedule(state, called ? HUMAN_DEBOUNCE_MS : 2500);
     }
@@ -773,18 +788,20 @@ export class Orchestrator {
   pickCandidates(state, last, agents, { summonedOnly = false } = {}) {
     const fromHuman = last.kind === "owner" || last.kind === "human";
     const pool = agents.filter((agent) => agent.id !== last.agentId);
-    // In a thread agents stay out unless someone summons them by name (or they are mid-conversation with that name).
+    // A person calls an agent by naming it; another agent or bot only by calling it directly.
+    const calls = (agent) => (fromHuman ? mentions : addresses)(last.content, agent.name);
+    // In a thread agents stay out unless someone summons them (or they are mid-conversation with that person).
     if (summonedOnly) {
-      const forced = pool.filter((agent) => mentions(last.content, agent.name) || (fromHuman && last.addressed?.includes(agent.id)));
+      const forced = pool.filter((agent) => calls(agent) || (fromHuman && last.addressed?.includes(agent.id)));
       return { forced, optional: [] };
     }
     if (last.kind === "bot") {
-      const called = pool.filter((agent) => mentions(last.content, agent.name));
+      const called = pool.filter(calls);
       if (called.length) return { forced: called, optional: [] };
     }
     if (!fromHuman && state.budget <= 0) return { forced: [], optional: [] };
     if (fromHuman && (roomAgentId(state.id) || this.dmAgentId(state.id))) return { forced: pool, optional: [] };
-    const forced = pool.filter((agent) => mentions(last.content, agent.name) || (fromHuman && last.addressed?.includes(agent.id)));
+    const forced = pool.filter((agent) => calls(agent) || (fromHuman && last.addressed?.includes(agent.id)));
     if (fromHuman && forced.length) return { forced, optional: [] };
     if (fromHuman && last.toOthers) return { forced: [], optional: [] };
     // While the human is talking to someone, the others join only when called by name.

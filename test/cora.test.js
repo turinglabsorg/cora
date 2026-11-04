@@ -2806,6 +2806,58 @@ describe("shared listening", () => {
     assert.equal(unexpected, 0, "the main listener's access never admits an absent colleague");
     assert.ok(!fake.state.webhookPosts.some((item) => item.channelId === SHARED && item.username === "Vale"));
   });
+  test("a thread only an agent's bot can see is still a thread: nobody called, nobody answers, a bot naming the agent in passing calls nobody, and its people get real tags", async (t) => {
+    const fake = await fakeDiscord();
+    const PIA = "600000000000000040";
+    const VALE = "600000000000000041";
+    const GROG = "600000000000000049";
+    fake.state.botUsers.set("pia-token", { id: PIA, username: "Pia", appFlags: 1 << 19 });
+    fake.state.botUsers.set("vale-token", { id: VALE, username: "Vale", appFlags: 1 << 19 });
+    const PRIVATE = "1599000000000000910";
+    const THREAD = "1599000000000000911";
+    fake.state.privateTo.set(PRIVATE, "vale-token");
+    fake.state.privateTo.set(THREAD, "vale-token");
+    const otherHome = tempHome();
+    const seed = new Store(otherHome);
+    seed.updateSettings({ guildIds: [GUILD] });
+    const pia = seed.createAgent({ name: "Pia", model: "ollama/test-model", chattiness: 1, tools: false });
+    const vale = seed.createAgent({ name: "Vale", model: "ollama/test-model", chattiness: 1, tools: false });
+    seed.close();
+    const other = startCora({
+      home: otherHome, host: "127.0.0.1", port: 0, adminPassword: "x", sessionKey: "y", insecureCookies: true,
+      discordToken: "", discordApi: fake.url, telegramApi: telegram.url, telegramPollTimeout: 1, ollamaUrl: ollama.url, ollamaKey: "k",
+      claudeBin: cli.claude, codexBin: cli.codex, codexModelsFile: cli.models, ownerInstructions: join(home, "owner-AGENTS.md"),
+      botTokenFor: (name) => ({ CORA_BOT_PIA: "pia-token", CORA_BOT_VALE: "vale-token" })[name] || "",
+      storeSecret: async () => {}, docker: docker.path, schedulerTickMs: 3600000, startBoxes: false,
+    });
+    t.after(async () => { await other.stop(); await fake.close(); });
+    await other.ready;
+    await waitFor(() => other.discord.user?.id === PIA, { what: "Pia listening as the main bot" });
+    await waitFor(() => [pia.id, vale.id].every((id) => other.bots.client(id)?.intents === LISTENING_INTENTS), { what: "both bots listening to their channels" });
+    // The thread opens under a channel only Vale's bot is in: only her connection hears about it.
+    fake.dispatchTo(VALE, "THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: PRIVATE, type: 11, name: "REF-9" });
+    await waitFor(() => other.channels.info(THREAD).parentId === PRIVATE, { what: "the thread known through the bot that is in it" });
+    assert.equal(other.channels.info(THREAD).name, "REF-9");
+
+    let spoke = 0;
+    replies.set("Vale", () => { spoke += 1; return { content: "Mi intrometto." }; });
+    replies.set("Pia", () => { spoke += 1; return { content: "Anche io." }; });
+    // The owner talks to someone else in the thread, then another bot names Vale in passing.
+    fake.sayTo({ botUserId: VALE, channel: THREAD, content: "ok, fai un controllo preciso del codice e vedi se ci siamo scordati altro" });
+    await sleep(2500);
+    fake.sayTo({ botUserId: VALE, channel: THREAD, author: GROG, username: "GROG", bot: true, content: "Ho letto lo stop rivolto a Vale e la sua conferma: proseguo io." });
+    await sleep(2500);
+    await waitFor(() => other.orchestrator.quiet(), { what: "nobody working", timeout: 30000 });
+    assert.equal(spoke, 0, "nobody called directly, nobody speaks, chatty as they are");
+    assert.ok(!fake.state.botPosts.some((item) => item.channelId === THREAD));
+
+    // Called directly she answers in the thread with her own bot, and her @GROG and @Sam are real tags.
+    replies.set("Vale", () => ({ content: "Ok @GROG, ci sono. @Sam, dimmi tu da dove parto." }));
+    fake.sayTo({ botUserId: VALE, channel: THREAD, content: "Vale, ci sei?" });
+    const post = await waitFor(() => fake.state.botPosts.find((item) => item.channelId === THREAD), { what: "Vale answering in the thread", timeout: 30000 });
+    assert.equal(post.token, "vale-token");
+    assert.equal(post.content, `Ok <@${GROG}>, ci sono. <@${OWNER}>, dimmi tu da dove parto.`);
+  });
 });
 
 describe("direct messages", () => {

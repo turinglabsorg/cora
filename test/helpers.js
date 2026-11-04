@@ -261,12 +261,16 @@ export async function fakeDiscord() {
     state,
     url: `http://127.0.0.1:${port}`,
     dispatch,
+    /** An event only one bot's connection receives, like a thread created in a channel only that bot can see. */
+    dispatchTo(botUserId, type, data) {
+      for (const [socket, user] of state.socketUser) if (user?.id === botUserId) send(socket, { op: 0, t: type, s: ++seq, d: data });
+    },
     /** A message in a channel only one bot can see: only that bot's connection receives it. */
-    sayTo({ content, botUserId, channel, author = OWNER, username = "Sam", guild = GUILD }) {
+    sayTo({ content, botUserId, channel, author = OWNER, username = "Sam", guild = GUILD, bot = false }) {
       counter += 1;
       const message = {
         id: id(), type: 0, channel_id: channel, guild_id: guild, content, attachments: [], embeds: [], mentions: [],
-        author: { id: author, username, global_name: username, bot: false }, timestamp: new Date(Date.now() + counter).toISOString(),
+        author: { id: author, username, global_name: username, bot }, timestamp: new Date(Date.now() + counter).toISOString(),
       };
       state.history.set(channel, [...(state.history.get(channel) || []), message]);
       for (const [socket, user] of state.socketUser) if (user?.id === botUserId) send(socket, { op: 0, t: "MESSAGE_CREATE", s: ++seq, d: message });
