@@ -339,6 +339,24 @@ test("every turn in the Reasoning list leads with the token box a goal has, and 
   assert.equal(desk.querySelectorAll(".tokens").length, 0);
 });
 
+test("on a phone the top bar's right end is Esci, which signs out of the panel and, on usecora.space, of the cloud too", async () => {
+  const calls = [];
+  const panel = panelHarness({ fetch: async (path, options) => { calls.push([options?.method || "GET", path]); return { ok: true, status: 200, json: async () => ({ ok: true }) }; } });
+  panel.run(`S.cloud = { login: "https://usecora.test/go/team", logout: "https://usecora.test/logout" }`);
+  panel.run(`shell(h("p", {}, "x"), { title: "Impostazioni" })`);
+  const bar = panel.app.querySelector(".appbar");
+  assert.equal(bar.querySelectorAll(".onair").length, 0, "the lamp has left the top bar");
+  const out = bar.children.at(-1);
+  assert.equal(out.className, "appbar-logout");
+  assert.equal(out.attributes["aria-label"], "Esci");
+  assert.match(out.textContent, /Esci/);
+  assert.equal(panel.app.querySelectorAll(".side-logout").length, 1, "the desktop keeps Esci in the sidebar");
+  out.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [["POST", "/api/logout"]]);
+  assert.equal(panel.run("location.href"), "https://usecora.test/logout");
+});
+
 test("the panel renders markdown as DOM: blocks, inline marks, only web and mail links, [[pages]] only in the brain", () => {
   const panel = panelHarness({ fetch: async () => { throw new Error("offline"); } });
   const render = (text, options = {}) => panel.run(`h("div", {}, markdown(${JSON.stringify(text)}, ${JSON.stringify(options)}))`);

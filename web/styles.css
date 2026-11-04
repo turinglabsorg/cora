@@ -905,6 +905,14 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .appbar h1 { flex: 1; min-width: 0; margin: 0; font: 600 22px/1.1 var(--display); letter-spacing: -0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .appbar-brand { display: grid; place-items: center; width: 40px; height: 40px; }
   .appbar-brand img { width: 32px; height: 32px; border-radius: 8px; }
+  .appbar-logout {
+    flex: none; display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px 0 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--well); color: var(--muted); cursor: pointer;
+    font: 500 10px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap;
+  }
+  .appbar-logout .ico { width: 15px; height: 15px; }
+  .appbar-logout:hover, .appbar-logout:focus-visible { color: var(--text); border-color: var(--line-strong); }
+  .appbar-logout:active { background: var(--panel-2); }
   .tabbar {
     grid-row: 3; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); z-index: 10;
     padding: 6px 6px calc(6px + var(--safe-bottom)); background: rgba(5, 5, 5, 0.97); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-top: 1px solid var(--line);
@@ -972,7 +980,6 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .appbar-brand img { width: 26px; height: 26px; border-radius: 7px; }
   .icon-btn { width: 34px; height: 34px; }
   .icon-btn .ico { width: 20px; height: 20px; }
-  .onair { padding: 4px 8px; font-size: 9px; gap: 6px; }
   .tabbar { padding: 4px 4px max(4px, calc(var(--safe-bottom) - 14px)); }
   .tabbar a { height: 44px; gap: 4px; font-size: 8.5px; letter-spacing: 0.05em; }
   .tabbar a .ico { width: 20px; height: 20px; stroke-width: 1.6; }

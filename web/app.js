@@ -551,7 +551,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     h("header", { class: "appbar" },
       back ? h("a", { class: "icon-btn", href: back, "aria-label": "Indietro" }, icon("back")) : h("a", { class: "appbar-brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "Cora" })),
       h("h1", {}, title),
-      lamp()),
+      h("button", { class: "appbar-logout", type: "button", onclick: logout, "aria-label": "Esci" }, icon("logout"), h("span", {}, "Esci"))),
     h("main", { class: "content" }, h("div", { class: "wrap" }, content)),
     h("nav", { class: "tabbar" }, nav.map(([key, label, name, active]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label))))));
   updateLamp();
