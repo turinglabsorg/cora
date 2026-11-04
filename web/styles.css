@@ -558,9 +558,18 @@ input.num { width: 92px; text-align: right; font-family: var(--mono); }
 /* Settings: every entry in one list on the left, grouped like the desk's sections; its page on the right. */
 .rail { display: grid; grid-template-columns: 272px minmax(0, 1fr); gap: 24px; align-items: start; }
 .rail-nav {
-  position: sticky; top: 16px; max-height: calc(var(--app-h, 100dvh) - 32px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; display: flex; flex-direction: column; gap: 2px; padding: 8px;
+  display: flex; flex-direction: column; min-height: 0; padding: 6px;
   border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 40px -28px rgba(0, 0, 0, 0.9);
+}
+.rail-list { display: flex; flex-direction: column; gap: 2px; min-height: 0; padding: 2px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+/* On a desktop Settings fits the screen: the title stays, the list and the page each scroll in their own column, and the margins above and below never scroll away. */
+@media (min-width: 900px) {
+  .mode-rail .content { overflow: hidden; }
+  .mode-rail .wrap { height: 100%; padding-bottom: 28px; }
+  .mode-rail .rail { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+  .mode-rail .rail-nav { max-height: 100%; align-self: start; }
+  .mode-rail .rail-detail { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 }
 .rail-group:first-child { padding-top: 8px; }
 .rail-group { padding: 14px 12px 6px; font: 500 10px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); }
@@ -628,7 +637,6 @@ input.num { width: 92px; text-align: right; font-family: var(--mono); }
 @media (prefers-reduced-motion: reduce) { .rail-item { transition: none; } .rail-item .led.busy { animation: none; } }
 @media (max-width: 899px) {
   .rail { grid-template-columns: 1fr; gap: 16px; }
-  .rail-nav { position: static; }
   .rail-item { padding: 10px 12px 10px 8px; }
   .rail.open .rail-nav, .rail:not(.open) .rail-detail { display: none; }
   .rail-back { display: inline-flex; }

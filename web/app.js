@@ -3676,6 +3676,14 @@ function renderContext() {
     draw();
     body.querySelector("input[type=text]")?.focus();
   };
+  // A file on the server keeps its name and place: only its text changes, and a missing one is created where Cora looks for it.
+  const beginFile = (source) => {
+    if (editor || busy) return;
+    editor = { fileId: source.id, name: source.title, path: source.path, content: source.available ? source.content : "", expectedRevision: source.revision || "", create: !source.available };
+    errorText = "";
+    draw();
+    body.querySelector("textarea")?.focus();
+  };
   async function load() {
     refresh.disabled = true;
     try { data = await api("/api/context"); if (body.isConnected) draw(); }
@@ -3713,11 +3721,13 @@ function renderContext() {
     selectedId = selected.id;
     const stored = data.sources.filter((source) => source.storage === "database");
     const list = h("nav", { class: "context-files", "aria-label": "File di contesto" });
-    if (editor && !editor.id) list.append(h("span", { class: "context-draft" }, icon("edit"), "Nuovo file"));
+    const drafting = editor && !editor.id && !editor.fileId;
+    const editingHere = (source) => !editor || editor.id || editor.fileId === source.id;
+    if (drafting) list.append(h("span", { class: "context-draft" }, icon("edit"), "Nuovo file"));
     if (stored.length) list.append(h("span", { class: "context-group label" }, "File dello spazio"));
     for (const [index, source] of [...stored, ...data.sources.filter((source) => source.storage !== "database")].entries()) {
       if (stored.length && index === stored.length) list.append(h("span", { class: "context-group label" }, "Istruzioni e memoria"));
-      list.append(h("button", { type: "button", class: `context-file${source.id === selectedId && (!editor || editor.id) ? " active" : ""}`, "aria-pressed": String(source.id === selectedId && (!editor || editor.id)), disabled: busy, onclick: () => choose(source.id) },
+      list.append(h("button", { type: "button", class: `context-file${source.id === selectedId && editingHere(source) ? " active" : ""}`, "aria-pressed": String(source.id === selectedId && Boolean(editingHere(source))), disabled: busy, onclick: () => choose(source.id) },
         icon(source.storage === "database" ? "file" : source.provider === "cora" ? "book" : "file"),
         h("span", { class: "grow" }, h("b", {}, raw(source.title)),
           h("small", {}, source.storage === "database" ? labels[source.status] : raw(source.provider === "codex" ? "ChatGPT / Codex" : source.provider === "claude" ? "Claude" : "Cora"), raw(" · "), scopes[source.scope])),
@@ -3725,7 +3735,24 @@ function renderContext() {
     }
     const error = errorText ? h("p", { class: "context-error", role: "alert" }, icon("alert"), tr(errorText)) : null;
     let document;
-    if (editor) {
+    if (editor?.fileId) {
+      const limit = data.limits.serverFileChars;
+      const counter = () => tr("{count} / {limit} caratteri", { count: editor.content.length.toLocaleString(LOCALE), limit: limit.toLocaleString(LOCALE) });
+      const count = h("small", { class: "context-count" }, counter());
+      const text = h("textarea", { name: "contextContent", class: "context-editor-text", spellcheck: "false", placeholder: "Scrivi le istruzioni in Markdown…", oninput: (event) => { editor.content = event.target.value; count.textContent = counter(); } }, raw(editor.content));
+      const form = h("form", { class: "context-editor" }, error, field("Contenuto", text), count,
+        h("div", { class: "context-editor-actions" }, btn("Annulla", { cls: "ghost", onclick: () => { editor = null; errorText = ""; draw(); } }), btn(busy ? "Salvataggio…" : editor.create ? "Crea il file" : "Salva file", { icon: "check", type: "submit", cls: "primary" })));
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        errorText = !editor.content.trim() ? "inserisci un file di testo non vuoto" : editor.content.length > limit ? "il file supera il limite di 60.000 caratteri" : "";
+        if (errorText) { draw(); return; }
+        const draft = { ...editor };
+        mutate(() => api(`/api/context/files/${encodeURIComponent(draft.fileId)}`, { method: "PUT", body: { content: draft.content, expectedRevision: draft.expectedRevision } }), draft.create ? "File creato" : "File salvato");
+      });
+      document = h("section", { class: "context-document" }, h("header", {}, h("div", { class: "grow" }, h("h2", {}, raw(editor.name)), h("p", { class: "context-path" }, raw(editor.path)))),
+        h("p", { class: "context-explanation" }, editor.create ? "Il file non c'è: salvando lo crei sul server, dove lo cerca chi lo legge." : "Salvando riscrivi il file sul server. Se è un collegamento, cambia il file a cui punta."), form);
+      for (const control of form.querySelectorAll("textarea, button")) control.disabled = busy;
+    } else if (editor) {
       const name = h("input", { type: "text", name: "contextName", value: editor.name, maxlength: 120, autocomplete: "off", placeholder: "es. istruzioni-team.md", oninput: (event) => { editor.name = event.target.value; } });
       const text = h("textarea", { name: "contextContent", class: "context-editor-text", spellcheck: "false", placeholder: "Scrivi le istruzioni o incolla il testo di riferimento…", oninput: (event) => { editor.content = event.target.value; count.textContent = tr("{count} / {limit} caratteri", { count: editor.content.length.toLocaleString(LOCALE), limit: data.limits.fileChars.toLocaleString(LOCALE) }); } }, raw(editor.content));
       const count = h("small", { class: "context-count" }, tr("{count} / {limit} caratteri", { count: editor.content.length.toLocaleString(LOCALE), limit: data.limits.fileChars.toLocaleString(LOCALE) }));
@@ -3760,6 +3787,8 @@ function renderContext() {
           selected.path || custom ? h("p", { class: "context-path" }, custom ? "Salvato nel database di questa istanza" : raw(selected.path)) : null), copy), error,
         h("div", { class: "context-provenance" }, badge(labels[selected.status], selected.status === "applied" ? "on" : ""), selected.updatedAt ? h("time", { datetime: selected.updatedAt }, raw(new Date(selected.updatedAt).toLocaleString(LOCALE, { dateStyle: "medium", timeStyle: "short" }))) : null),
         h("p", { class: "context-explanation" }, explanation), selected.accountLabel ? h("p", { class: "context-explanation" }, raw(selected.accountLabel)) : null,
+        !custom && data.canWriteFiles && selected.editable ? h("div", { class: "context-tools" }, btn(selected.available ? "Modifica" : "Crea il file", { icon: selected.available ? "edit" : "plus", onclick: () => beginFile(selected) })) : null,
+        !custom && data.canWriteFiles && selected.available && !selected.editable ? h("p", { class: "context-explanation" }, "È più lungo di 60.000 caratteri: si modifica solo sul server.") : null,
         custom ? h("div", { class: "context-tools" }, btn("Modifica", { icon: "edit", onclick: () => begin(selected) }),
           btn(selected.enabled ? "Disattiva" : "Attiva", { icon: "power", onclick: () => mutate(() => api(`/api/context/documents/${selected.id}`, { method: "PUT", body: { enabled: !selected.enabled, expectedRevision: selected.revision } }), "Contesto aggiornato") }),
           armedButton("Elimina file", "Conferma eliminazione", { onconfirm: () => mutate(() => api(`/api/context/documents/${selected.id}`, { method: "DELETE" }), "File eliminato") })) : null,
@@ -4203,7 +4232,9 @@ function renderSettings() {
   // The list is drawn as soon as a page asks (an account list redraws it while it is built), so it starts empty.
   let entries = [];
   const fallback = () => S.data.transport || "discord";
-  const nav = h("nav", { class: "rail-nav", "aria-label": tr("Impostazioni") });
+  // The box keeps its margin while the list scrolls inside it.
+  const list = h("div", { class: "rail-list" });
+  const nav = h("nav", { class: "rail-nav", "aria-label": tr("Impostazioni") }, list);
   const pages = new Map();
   const back = () => btn("Impostazioni", { icon: "back", cls: "sm ghost rail-back", onclick: () => show("") });
   const page = (id, ...content) => pages.set(id, h("div", { class: "stack" }, back(), content));
@@ -4508,15 +4539,17 @@ function renderSettings() {
         h("span", { class: "rail-name" }, h("b", {}, raw(tr(entry.label))), h("small", {}, raw(line))),
         led ? h("i", { class: `led ${led}`, "aria-hidden": "true" }) : h("i", { class: "led none", "aria-hidden": "true" }), icon("next", "rail-go")));
     }
-    nav.replaceChildren(...items);
-    requestAnimationFrame(() => nav.querySelector(".rail-item.active")?.scrollIntoView?.({ block: "nearest" }));
+    list.replaceChildren(...items);
+    requestAnimationFrame(() => list.querySelector(".rail-item.active")?.scrollIntoView?.({ block: "nearest" }));
   }
   const slots = new Map([...pages].map(([id, content]) => [id, h("div", { class: "rail-page", "data-page": id, hidden: true }, content)]));
-  const root = h("div", { class: "rail" }, nav, h("div", { class: "rail-detail" }, [...slots.values()]));
+  const detail = h("div", { class: "rail-detail" }, [...slots.values()]);
+  const root = h("div", { class: "rail" }, nav, detail);
   // An empty id is the list alone (phones); on a desktop the list always has a page next to it.
   function show(id, { updateRoute = true } = {}) {
     current = pages.has(id) ? id : "";
     for (const [entry, slot] of slots) slot.hidden = entry !== (current || fallback());
+    detail.scrollTop = 0;
     root.classList.toggle("open", Boolean(current));
     drawNav();
     if (updateRoute) history.replaceState(null, "", current ? `#/settings/${current}` : "#/settings");
@@ -4526,7 +4559,7 @@ function renderSettings() {
   const legacy = { collegamenti: second && second !== "panoramica" ? second : "server", canali: S.data.transport, agenti: "regia" };
   drawResidents();
   show(legacy[first] || first, { updateRoute: false });
-  shell([pageHead("Impostazioni", "Canali, account e preferenze della tua Cora."), root], { title: "Impostazioni" });
+  shell([pageHead("Impostazioni", "Canali, account e preferenze della tua Cora."), root], { title: "Impostazioni", mode: "rail" });
 }
 
 /* ---------- login ---------- */

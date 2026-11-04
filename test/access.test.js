@@ -51,6 +51,9 @@ test("verified domain users get separate sessions and equal operational access w
   assert.equal(state.data.currentUser.role, "member");
   assert.equal(state.data.access.canManage, false);
   for (const method of ["GET", "PUT"]) assert.equal((await request("/api/access", { method, cookie: alice.cookie, ...(method === "PUT" ? { body: { domains: ["other.test"] } } : {}) })).status, 403);
+  assert.equal((await request("/api/context", { cookie: alice.cookie })).data.canWriteFiles, false);
+  assert.equal((await request("/api/context")).data.canWriteFiles, true);
+  assert.equal((await request("/api/context/files/owner", { method: "PUT", cookie: alice.cookie, body: { content: "# Rules\n", expectedRevision: "" } })).status, 403);
   assert.equal((await request("/api/settings", { method: "PUT", cookie: alice.cookie, body: { historySize: 31 } })).status, 200);
   for (const [identity, session] of [[member, alice], [{ sub: "ac_bob", name: "Bob" }, bob]]) {
     const message = await request("/api/rooms/web/messages", { method: "POST", cookie: session.cookie, body: { text: "Fixture message", user: owner } });

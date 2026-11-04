@@ -19,7 +19,7 @@ import { nextRuns } from "./scheduler.js";
 import { SHARED } from "./store.js";
 import { BRAIN_KINDS } from "./company-brain.js";
 import { VOICE_LANGUAGES } from "./voice.js";
-import { contextSources } from "./context.js";
+import { contextSources, writeContextFile } from "./context.js";
 import { brainsInUse, testRule } from "./rule-test.js";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
@@ -301,7 +301,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { ok: true }, { "Set-Cookie": `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${config.insecureCookies ? "" : "; Secure"}` });
     }
 
-    if (path === "/api/context" && method === "GET") return send(res, 200, contextSources({ config, store, subscriptions, brain }));
+    if (path === "/api/context" && method === "GET") return send(res, 200, { ...contextSources({ config, store, subscriptions, brain }), canWriteFiles: user.role === "owner" });
+    const contextFile = /^\/api\/context\/files\/([A-Za-z0-9._-]{1,80})$/.exec(path);
+    if (contextFile && method === "PUT") {
+      if (user.role !== "owner") throw new HttpError(403, "solo l'owner scrive i file del server");
+      const id = writeContextFile({ config, store, subscriptions }, contextFile[1], await readJson(req));
+      return send(res, 200, contextSources({ config, store, subscriptions, brain }).sources.find((source) => source.id === id));
+    }
     if (path === "/api/context/documents" && method === "POST") {
       const document = store.saveContextDocument(await readJson(req), { userId: user.id });
       return send(res, 201, document);

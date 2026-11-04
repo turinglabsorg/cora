@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Store } from "../src/store.js";
@@ -180,4 +180,59 @@ test("active context budget, count limit and instance isolation prevent silent t
   assert.equal(documents.length, 20);
   assert.equal(documents.filter((source) => source.enabled).reduce((sum, source) => sum + source.content.length, 0), 60000);
   assert.equal((await two.request()).data.sources.some((source) => source.storage === "database"), false);
+});
+
+test("the owner writes the known instruction files from the panel: creates a missing one, edits through links, never an arbitrary path", async (t) => {
+  const { app, home, residentDirectories, ownerInstructions, request } = await fixture(t);
+  const sources = async () => (await request()).data;
+  const source = async (id) => (await sources()).sources.find((item) => item.id === id);
+  assert.equal((await sources()).canWriteFiles, true);
+
+  const missing = await source("resident-codex-AGENTS.override.md");
+  assert.equal(missing.status, "missing");
+  assert.equal(missing.editable, true);
+  const created = await request("/api/context/files/resident-codex-AGENTS.override.md", true, { method: "PUT", body: { content: "# Override\nCreated from the panel.\n", expectedRevision: "" } });
+  assert.equal(created.status, 200);
+  assert.equal(created.data.available, true);
+  assert.equal(readFileSync(join(residentDirectories.codex, "AGENTS.override.md"), "utf8"), "# Override\nCreated from the panel.\n");
+
+  const owner = await source("owner");
+  const edited = await request("/api/context/files/owner", true, { method: "PUT", body: { content: "# Shared instructions\nEdited from the panel.\n", expectedRevision: owner.revision } });
+  assert.equal(edited.status, 200);
+  assert.match(app.brain.ownerInstructions(), /Edited from the panel/);
+  const stale = await request("/api/context/files/owner", true, { method: "PUT", body: { content: "Lost update", expectedRevision: owner.revision } });
+  assert.equal(stale.status, 409);
+  assert.match(readFileSync(ownerInstructions, "utf8"), /Edited from the panel/);
+
+  const shared = join(home, "shared-rules.md");
+  writeFileSync(shared, "# Shared rules\n");
+  const link = join(residentDirectories.claude, "CLAUDE.md");
+  rmSync(link);
+  symlinkSync(shared, link);
+  const linked = await source("resident-claude-CLAUDE.md");
+  assert.equal((await request("/api/context/files/resident-claude-CLAUDE.md", true, { method: "PUT", body: { content: "# Shared rules\nThrough the link.\n", expectedRevision: linked.revision } })).status, 200);
+  assert.equal(lstatSync(link).isSymbolicLink(), true);
+  assert.equal(readFileSync(shared, "utf8"), "# Shared rules\nThrough the link.\n");
+
+  const secret = join(home, "fixture-auth.json");
+  writeFileSync(secret, '{"fixture_private_value":"keep"}');
+  rmSync(join(residentDirectories.codex, "AGENTS.md"));
+  symlinkSync(secret, join(residentDirectories.codex, "AGENTS.md"));
+  assert.equal((await request("/api/context/files/resident-codex-AGENTS.md", true, { method: "PUT", body: { content: "overwrite", expectedRevision: "" } })).status, 400);
+  assert.equal(readFileSync(secret, "utf8"), '{"fixture_private_value":"keep"}');
+  symlinkSync(join(home, "nowhere.md"), join(home, "CLAUDE.md"));
+  assert.equal((await source("instance-claude")).status, "unavailable");
+  assert.equal((await request("/api/context/files/instance-claude", true, { method: "PUT", body: { content: "follow", expectedRevision: "" } })).status, 400);
+  assert.equal(existsSync(join(home, "nowhere.md")), false);
+
+  for (const id of ["../../etc/passwd", "..%2F..%2Fsecret.md", "account-sub_000000000000", "ctx_000000000000"]) {
+    assert.equal((await request(`/api/context/files/${id}`, true, { method: "PUT", body: { content: "x", expectedRevision: "" } })).status, 404, id);
+  }
+  writeFileSync(ownerInstructions, "a".repeat(60001));
+  const long = await source("owner");
+  assert.equal(long.editable, false);
+  assert.equal((await request("/api/context/files/owner", true, { method: "PUT", body: { content: "short", expectedRevision: long.revision } })).status, 400);
+  assert.equal(readFileSync(ownerInstructions, "utf8").length, 60001);
+  assert.equal((await request("/api/context/files/owner", true, { method: "PUT", body: { content: "x".repeat(60001), expectedRevision: long.revision } })).status, 400);
+  assert.deepEqual(readdirSync(residentDirectories.codex).filter((name) => name.endsWith(".tmp")), []);
 });
