@@ -503,3 +503,77 @@ test("Segreti: names and who may use them, never a value; what agents asked to s
   assert.match(rows[2].textContent, /chiesto da Vera/);
   assert.doesNotMatch(panel.app.textContent, /sk_|value/i, "nothing on the page could be a value");
 });
+
+test("Artefatti, File: folders to walk into from the address, and files uploaded where you stand", async () => {
+  const at = Date.parse("2026-11-05T09:00:00Z");
+  const sha = (char) => char.repeat(64);
+  const head = { id: "ac_000000000009", short: "0000000", folderId: "af_000000000001", message: "Sito", author: { kind: "agent", id: "ag_x", name: "Nico" }, status: "published", createdAt: at, publishedAt: at, files: 4, bytes: 65, changes: { added: 4, modified: 0, deleted: 0 } };
+  const data = {
+    folder: { id: "af_000000000001", path: "clienti/acme/sito", title: "Sito", description: "", kind: "site", policy: "review", head: head.id, writers: ["*"], reviewers: [] },
+    canReview: true, canManage: true, shareHosting: false, shareSuffix: "", shares: [], commits: [head],
+    tree: [
+      { path: "chi-siamo/img/logo.png", sha: sha("c"), size: 30 },
+      { path: "chi-siamo/index.html", sha: sha("b"), size: 20 },
+      { path: "css/style.css", sha: sha("d"), size: 5 },
+      { path: "index.html", sha: sha("a"), size: 10 },
+    ],
+  };
+  const calls = [];
+  let status = "published";
+  const reply = (body, code = 200) => ({ ok: code < 400, status: code, statusText: "", json: async () => body });
+  const panel = panelHarness({ fetch: async (path, options = {}) => {
+    calls.push({ path, method: options.method || "GET", body: options.body });
+    if (path === "/api/artifacts/folders/af_000000000001") return reply(data);
+    if (path.endsWith("/blobs")) return reply({ sha: sha(String(calls.filter((call) => call.path.endsWith("/blobs")).length)), size: options.body.size }, 201);
+    if (path.endsWith("/upload")) return reply({ commit: { id: "ac_00000000000a", status, message: "Caricati 2 file in chi-siamo" } }, 201);
+    return reply({});
+  } });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [], artifacts: { reviews: 0 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
+  const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  await panel.navigate("#/artefatti/af_000000000001/file/chi-siamo");
+  await settle();
+  assert.deepEqual(panel.app.querySelector(".art-crumbs").querySelectorAll("a").map((link) => [link.textContent, link.attributes.href, link.className]),
+    [["sito", "#/artefatti/af_000000000001/file", ""], ["chi-siamo", "#/artefatti/af_000000000001/file/chi-siamo", "on"]], "the path in the address is where you stand");
+  const rows = panel.app.querySelector(".art-tree").children;
+  assert.deepEqual(rows.map((row) => row.textContent), ["..su", "img/1 file", "index.html20 B"], "one level at a time: up, the folders inside, then the files");
+  assert.equal(rows[0].attributes.href, "#/artefatti/af_000000000001/file");
+  assert.equal(rows[1].attributes.href, "#/artefatti/af_000000000001/file/chi-siamo/img");
+  assert.equal(panel.app.querySelector(".art-drop-where").textContent, "clienti/acme/sito/chi-siamo/", "the upload says where the files will go");
+
+  const [, pickDir] = panel.app.querySelectorAll("input").filter((input) => input.attributes.type === "file");
+  assert.equal(pickDir.attributes.webkitdirectory, "", "a whole folder can be chosen too");
+  pickDir.files = [{ name: "a.html", size: 3, webkitRelativePath: "bozze/a.html" }, { name: "HEAD", size: 1, webkitRelativePath: "bozze/.git/HEAD" }, { name: "b.css", size: 4, webkitRelativePath: "bozze/css/b.css" }];
+  pickDir.dispatch("change");
+  await settle();
+  const blobs = calls.filter((call) => call.path.endsWith("/blobs"));
+  assert.equal(blobs.length, 2, "what a repository keeps for itself stays behind");
+  assert.ok(blobs.every((call) => call.method === "POST"));
+  const commit = calls.find((call) => call.path.endsWith("/upload"));
+  assert.deepEqual(JSON.parse(commit.body), { dir: "chi-siamo", base: head.id, files: [{ path: "bozze/a.html", sha: sha("1") }, { path: "bozze/css/b.css", sha: sha("2") }] });
+  assert.match(panel.app.querySelector(".art-tree").textContent, /img\//, "published at once, the folder is drawn again where it was");
+
+  status = "proposed";
+  await panel.navigate("#/artefatti/af_000000000001/file");
+  await settle();
+  assert.deepEqual(panel.app.querySelector(".art-tree").children.map((row) => row.textContent), ["chi-siamo/2 file", "css/1 file", "index.html10 B"]);
+  assert.equal(panel.app.querySelector(".art-drop-where").textContent, "clienti/acme/sito/");
+  const big = panel.app.querySelectorAll("input").find((input) => input.attributes.type === "file" && input.attributes.webkitdirectory === undefined);
+  big.files = [{ name: "video.mov", size: 200 * 1024 * 1024 }];
+  big.dispatch("change");
+  await settle();
+  assert.match(panel.run(`document.querySelector(".toast")?.textContent || ""`), /video\.mov supera i 100 MB/);
+  const small = panel.app.querySelectorAll("input").find((input) => input.attributes.type === "file" && input.attributes.webkitdirectory === undefined);
+  small.files = [{ name: "nota.txt", size: 2 }];
+  small.dispatch("change");
+  await settle();
+  assert.equal(JSON.parse(calls.filter((call) => call.path.endsWith("/upload")).at(-1).body).dir, "", "at the folder's root the files go to its root");
+  assert.equal(panel.run("location.hash"), "#/artefatti/af_000000000001/c/ac_00000000000a", "a proposal opens its review");
+});
+
+test("a new link's access starts with the team in; an edited link keeps what it had", () => {
+  const panel = panelHarness({ fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+  assert.deepEqual(JSON.parse(panel.run("JSON.stringify(shareAccessPicker({}).value())")), { mode: "people", emails: "", domains: "", members: true });
+  assert.equal(JSON.parse(panel.run(`JSON.stringify(shareAccessPicker({ mode: "people", emails: ["giulia@cliente.it"], domains: [], members: false }).value())`)).members, false);
+  assert.equal(JSON.parse(panel.run(`JSON.stringify(shareAccessPicker({ mode: "people", emails: [], domains: ["cliente.it"], members: true }).value())`)).domains, "cliente.it");
+});

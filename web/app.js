@@ -121,6 +121,7 @@ const ICONS = {
   folder: '<path d="M3.5 7.5a2 2 0 0 1 2-2h3.8l2 2.5h7.2a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
   commit: '<circle cx="12" cy="12" r="3.5"/><path d="M3 12h5.5M15.5 12H21"/>',
   download: '<path d="M12 4v11"/><path d="M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 19.5h15"/>',
+  upload: '<path d="M12 16V5"/><path d="M7.5 9.5 12 5l4.5 4.5"/><path d="M4.5 19.5h15"/>',
   grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
   chart: '<path d="M3.5 20.5h17"/><rect x="5" y="12" width="3.5" height="6" rx="1"/><rect x="10.2" y="7.5" width="3.5" height="10.5" rx="1"/><rect x="15.4" y="4" width="3.5" height="14" rx="1"/>',
   chat: '<path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3 21l1.9-5.3A8.5 8.5 0 1 1 21 11.5z"/>',
@@ -3792,7 +3793,7 @@ function renderArtifacts() {
   const [, id, view, commitId] = route();
   if (id === "segreti") return renderSecrets();
   if (id && view === "c" && commitId) return renderArtifactCommit(id, commitId);
-  if (id) return renderArtifactFolder(id, view || "file");
+  if (id) return renderArtifactFolder(id, view || "file", view === "file" ? artifactDir(route().slice(3)) : "");
   const body = h("div", { class: "stack" }, skeleton("rows", 4));
   let data = null;
   let creating = false;
@@ -3929,7 +3930,71 @@ async function artifactPreview(url, path, size) {
   return [head, h("div", { class: "art-noview" }, icon("file"), h("p", {}, "Il pannello non mostra questo tipo di file: scaricalo."), download.cloneNode(true))];
 }
 
-async function renderArtifactFolder(id, tab) {
+/** The folder a File tab is looking at, from the address: segments as typed, never ".." or empty. */
+function artifactDir(parts) {
+  const dir = [];
+  for (const part of parts) {
+    let name;
+    try { name = decodeURIComponent(part); } catch { return ""; }
+    if (!name || name === "." || name === ".." || name.includes("/")) continue;
+    dir.push(name);
+  }
+  return dir.join("/");
+}
+
+const artifactDirHref = (folderId, dir) => `#/artefatti/${folderId}/file${dir ? `/${dir.split("/").map(encodeURIComponent).join("/")}` : ""}`;
+
+// What never leaves a computer with a folder, as on the agents' desktops.
+const UPLOAD_SKIP = /(^|\/)(\.git|node_modules|__pycache__)(\/|$)|(^|\/)(\.DS_Store|Thumbs\.db)$/;
+const UPLOAD_MAX = 100 * 1024 * 1024;
+
+/** Files dropped on the page, folders walked into, each with the path it had under what was dropped. */
+async function droppedFiles(transfer) {
+  const entries = [...(transfer.items || [])].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return [...(transfer.files || [])].map((file) => ({ file, path: file.name }));
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      out.push({ file, path: `${prefix}${file.name}` });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child, `${prefix}${entry.name}/`);
+      }
+    }
+  };
+  for (const entry of entries) await walk(entry, "");
+  return out;
+}
+
+/**
+ * Sends files into a folder at a path: each file's bytes on their own, then one
+ * commit that lays them there. Returns the commit, published or proposed.
+ */
+async function uploadArtifactFiles(folder, { dir, base, items, onProgress = () => {} }) {
+  const kept = items.filter((item) => !UPLOAD_SKIP.test(item.path));
+  const tooBig = kept.find((item) => item.file.size > UPLOAD_MAX);
+  if (tooBig) throw new Error(tr("{name} supera i 100 MB: caricalo a parte, o fallo caricare a un agente", { name: tooBig.path }));
+  if (!kept.length) throw new Error(tr("Nessun file da caricare"));
+  const placed = [];
+  let sent = 0;
+  const total = kept.reduce((sum, item) => sum + item.file.size, 0);
+  for (const item of kept) {
+    onProgress({ done: placed.length, count: kept.length, sent, total, name: item.path });
+    const response = await fetch(`/api/artifacts/folders/${folder.id}/blobs`, { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/octet-stream" }, body: item.file, credentials: "same-origin" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`${item.path}: ${data.error || response.statusText}`);
+    placed.push({ path: item.path, sha: data.sha });
+    sent += item.file.size;
+  }
+  onProgress({ done: placed.length, count: kept.length, sent, total, name: "" });
+  return api(`/api/artifacts/folders/${folder.id}/upload`, { method: "POST", body: { dir, base, files: placed } });
+}
+
+async function renderArtifactFolder(id, tab, dir = "") {
   const view = location.hash;
   const slot = h("div", { class: "stack" }, panel({}, skeleton("rows", 4)));
   shell([slot], { title: "Artefatti", back: "#/artefatti" });
@@ -3961,14 +4026,34 @@ async function renderArtifactFolder(id, tab) {
     content,
   ], { title: folder.title, back: "#/artefatti" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data) : artifactFiles(data, head);
+  const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data) : artifactFiles(data, head, dir);
   content.replaceChildren(...[shown].flat().filter(Boolean));
 }
 
-/** The served version's files beside a preview of the one chosen. */
-function artifactFiles(data, head) {
-  if (!head || !data.tree.length) {
-    return panel({ icon: "file", title: "File" }, empty("radio", data.commits.length ? "Nessuna versione è ancora in onda: approva un commit per vederne i file qui." : "Ancora nessun commit: quando un agente carica qualcosa, lo trovi qui."));
+/**
+ * The served version as folders to walk into, beside a preview of the file chosen,
+ * and an upload that lands where the person is standing.
+ */
+function artifactFiles(data, head, dir = "") {
+  const { folder } = data;
+  const all = head ? data.tree : [];
+  const inside = dir ? `${dir}/` : "";
+  if (dir && !all.some((file) => file.path.startsWith(inside))) dir = "";
+  const here = dir ? `${dir}/` : "";
+  const dirs = new Map();
+  const files = [];
+  for (const file of all) {
+    if (!file.path.startsWith(here)) continue;
+    const rest = file.path.slice(here.length);
+    const slash = rest.indexOf("/");
+    if (slash === -1) files.push({ ...file, name: rest });
+    else {
+      const name = rest.slice(0, slash);
+      const entry = dirs.get(name) || { name, count: 0, size: 0 };
+      entry.count += 1;
+      entry.size += file.size;
+      dirs.set(name, entry);
+    }
   }
   const preview = h("div", { class: "art-preview" }, h("div", { class: "art-noview" }, icon("eye"), h("p", {}, "Scegli un file per vederlo.")));
   let chosen = null;
@@ -3980,24 +4065,76 @@ function artifactFiles(data, head) {
     if (chosen === file.path) preview.replaceChildren(...shown.flat().filter(Boolean));
     if (scroll && matchMedia("(max-width: 899px)").matches) preview.scrollIntoView({ block: "start", behavior: "smooth" });
   };
-  let lastDir = null;
-  const rows = [];
-  // Files at the top first, then each folder with its own.
-  const files = [...data.tree].sort((a, b) => (a.path.includes("/") - b.path.includes("/")) || (a.path < b.path ? -1 : 1));
-  for (const file of files) {
-    const dir = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/") + 1) : "";
-    if (dir !== lastDir && dir) rows.push(h("div", { class: "art-dir" }, icon("folder"), raw(dir)));
-    lastDir = dir;
-    const row = h("button", { type: "button", class: `art-file${dir ? " nested" : ""}`, onclick: () => open(file, row) },
-      icon(artifactKind(file.path) === "image" ? "eye" : "file"), h("span", { class: "grow" }, raw(file.path.slice(dir.length))), h("small", {}, raw(fmtBytes(file.size))));
-    rows.push(row);
+  const parts = dir ? dir.split("/") : [];
+  const crumbs = h("nav", { class: "art-crumbs", "aria-label": tr("Dove sei nella cartella") },
+    h("a", { href: artifactDirHref(folder.id, ""), class: parts.length ? "" : "on" }, icon("folder"), raw(folder.path.split("/").at(-1))),
+    parts.map((part, index) => [h("span", { class: "sep", "aria-hidden": "true" }, "/"),
+      h("a", { href: artifactDirHref(folder.id, parts.slice(0, index + 1).join("/")), class: index === parts.length - 1 ? "on" : "" }, raw(part))]).flat());
+  const rows = [
+    parts.length ? h("a", { class: "art-file art-up", href: artifactDirHref(folder.id, parts.slice(0, -1).join("/")) }, icon("back"), h("span", { class: "grow" }, ".."), h("small", {}, tr("su"))) : null,
+    ...[...dirs.values()].sort((a, b) => a.name.localeCompare(b.name)).map((entry) => h("a", { class: "art-file art-subdir", href: artifactDirHref(folder.id, `${here}${entry.name}`) },
+      icon("folder"), h("span", { class: "grow" }, raw(`${entry.name}/`)), h("small", {}, raw(fileCount(entry.count))))),
+    ...files.sort((a, b) => a.name.localeCompare(b.name)).map((file) => {
+      const row = h("button", { type: "button", class: "art-file", onclick: () => open(file, row) },
+        icon(artifactKind(file.path) === "image" ? "eye" : "file"), h("span", { class: "grow" }, raw(file.name)), h("small", {}, raw(fmtBytes(file.size))));
+      return row;
+    }),
+  ].filter(Boolean);
+  const list = h("div", { class: "art-tree" }, rows.length ? rows : h("p", { class: "art-tree-empty" }, "Ancora nessun file qui."));
+
+  // The upload: buttons for files and for a whole folder, and the page itself as a drop zone.
+  const where = h("code", { class: "art-drop-where" }, raw(`${folder.path}/${here}`));
+  const status = h("span", { class: "art-drop-status", role: "status" });
+  const pick = h("input", { type: "file", multiple: true, hidden: true });
+  const pickDir = h("input", { type: "file", multiple: true, webkitdirectory: true, hidden: true });
+  const verb = data.canReview ? "Carica qui" : "Proponi qui";
+  const send = async (items) => {
+    if (!items.length || drop.classList.contains("busy")) return;
+    drop.classList.add("busy");
+    try {
+      const done = await uploadArtifactFiles(folder, { dir, base: head?.id || "", items, onProgress: ({ done: count, count: all, sent, total }) => {
+        status.textContent = tr("{done} di {count} file · {sent} di {total}", { done: count, count: all, sent: fmtBytes(sent), total: fmtBytes(total) });
+      } });
+      const commit = done.commit;
+      toast(commit.status === "published" ? tr("In onda: {message}", { message: commit.message }) : commit.status === "conflict" ? "Caricati, ma in conflitto con la versione in onda: decidi tu nella revisione" : "Proposti: aspettano una revisione");
+      if (commit.status === "published") renderArtifactFolder(folder.id, "file", dir);
+      else location.hash = `#/artefatti/${folder.id}/c/${commit.id}`;
+    } catch (error) {
+      toast(error.message, true);
+      status.textContent = "";
+    } finally {
+      drop.classList.remove("busy");
+    }
+  };
+  pick.addEventListener("change", () => send([...pick.files].map((file) => ({ file, path: file.name }))));
+  pickDir.addEventListener("change", () => send([...pickDir.files].map((file) => ({ file, path: file.webkitRelativePath || file.name }))));
+  const drop = h("div", { class: "art-drop" },
+    h("span", { class: "art-drop-ico" }, icon("upload")),
+    h("span", { class: "grow art-drop-text" },
+      h("b", {}, tr(data.canReview ? "Trascina qui file o cartelle, oppure" : "Trascina qui file o cartelle da proporre, oppure")),
+      h("small", {}, tr("finiscono in"), " ", where, " ", status)),
+    btn(verb, { icon: "upload", cls: "sm primary", onclick: () => pick.click() }),
+    btn("Una cartella", { icon: "folder", cls: "sm ghost", onclick: () => pickDir.click() }),
+    pick, pickDir);
+  const zone = h("div", { class: "stack-sm art-zone" }, drop, head ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, crumbs, list), preview) : null);
+  let depth = 0;
+  zone.addEventListener("dragenter", (event) => { if (![...(event.dataTransfer?.types || [])].includes("Files")) return; event.preventDefault(); depth += 1; zone.classList.add("over"); });
+  zone.addEventListener("dragover", (event) => { if ([...(event.dataTransfer?.types || [])].includes("Files")) event.preventDefault(); });
+  zone.addEventListener("dragleave", () => { depth = Math.max(0, depth - 1); if (!depth) zone.classList.remove("over"); });
+  zone.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    depth = 0;
+    zone.classList.remove("over");
+    send(await droppedFiles(event.dataTransfer));
+  });
+
+  if (!head) {
+    return panel({ icon: "file", title: "File", hint: data.commits.length ? "Nessuna versione è ancora in onda: approva un commit, o carica i primi file." : "Ancora nessun file: caricali da qui, o chiedi a un agente di farlo." }, zone);
   }
-  const list = h("div", { class: "art-tree" }, rows);
   const total = data.tree.reduce((sum, file) => sum + file.size, 0);
-  const first = data.tree.find((file) => /(^|\/)index\.html?$/i.test(file.path)) || data.tree.find((file) => /readme/i.test(file.path)) || data.tree[0];
-  setTimeout(() => { const row = [...list.querySelectorAll(".art-file")][files.indexOf(first)]; if (row) open(first, row, { scroll: false }); });
-  return panel({ icon: "file", title: tr("File in onda"), hint: raw(tr("{count} file · {size} · commit {id}", { count: data.tree.length, size: fmtBytes(total), id: head.short })) },
-    h("div", { class: "art-files" }, list, preview));
+  const first = files.find((file) => /^index\.html?$/i.test(file.name)) || files.find((file) => /^readme/i.test(file.name)) || (dir ? null : files[0]);
+  if (first) setTimeout(() => { const row = [...list.querySelectorAll("button.art-file")][files.indexOf(first)]; if (row) open(first, row, { scroll: false }); });
+  return panel({ icon: "file", title: tr("File in onda"), hint: raw(tr("{count} file · {size} · commit {id}", { count: data.tree.length, size: fmtBytes(total), id: head.short })) }, zone);
 }
 
 /** The folder's history as takes on a tape: the one on air lit, proposals waiting, the rest as they went. */
@@ -4045,7 +4182,8 @@ function shareAccessPicker(access = {}) {
   for (const input of [emails, domains]) input.addEventListener("input", () => { const at = input.selectionStart; input.value = input.value.toLowerCase(); input.setSelectionRange?.(at, at); });
   const kept = current === "password";
   const password = h("input", { type: "password", name: "password", minlength: 6, autocomplete: "new-password", "aria-label": tr("Password"), placeholder: kept ? tr("lasciala vuota per tenere quella di ora") : "" });
-  const team = switchInput("members", "Anche il team", Boolean(access.members), "chi può già entrare in questo pannello, senza scriverli uno per uno");
+  // The team is in unless someone took it out of this link.
+  const team = switchInput("members", "Anche il team", access.mode === "people" ? Boolean(access.members) : true, "chi può già entrare in questo pannello, senza scriverli uno per uno");
   const parts = {
     public: h("p", { class: "notice warn" }, icon("globe"), h("span", {}, "Lo apre chiunque abbia il link, senza entrare da nessuna parte. Non finisce nei motori di ricerca, ma chi lo riceve può inoltrarlo.")),
     people: h("div", { class: "stack-sm" },

@@ -93,7 +93,7 @@ What the agents make on their computers and has to be kept or shown (a report, a
   - **Who gets in.** Each link is one of three kinds:
     - **Public:** anyone with the link, signed in nowhere. It still stays out of search engines.
     - **With a password:** the link asks for it on its own address. Only a hash is kept. Ten wrong tries in ten minutes pause it, and a new password signs out whoever came in with the old one.
-    - **Specific people:** the addresses and company domains it names, and, if chosen, the team (whoever can already enter the panel). Addresses and domains are kept and compared lowercase.
+    - **Specific people:** the addresses and company domains it names, and the team (whoever can already enter the panel), included unless switched off. Addresses and domains are kept and compared lowercase.
   - **How a named person gets in.** They prove who they are at usecora.space, with Google or with a sign-in link sent by email from usecora.space (Resend; Cora's ambox mailbox when Resend has no key), then the space checks its own list and sets a cookie for that host alone.
   - **What counts for a whole domain.** A domain grant counts with Google only for that domain's Workspace accounts. Otherwise the mailbox has to receive the link. Webmail domains cannot be granted whole.
   - **Changing access.** Narrowing a link's access, letting it expire or revoking it closes it for everyone already in.
@@ -101,7 +101,7 @@ What the agents make on their computers and has to be kept or shown (a report, a
   - **Commit previews.** A reviewer opens a proposed commit on an address of its own (`p-<commit>--<space>`), so a site is seen as it will be.
 - **The panel.** **Artefatti** shows:
   - the folders by group, with what waits for review;
-  - each folder's files with a preview;
+  - each folder's files, one level at a time with the path in the address, a preview, and an upload: files or a whole folder, chosen or dropped, land in the folder you are looking at. The owner and the folder's reviewers put them on air at once; anyone else proposes them for review;
   - its commits, like takes on a tape, with the one on air lit;
   - each commit's changes as a diff.
 
