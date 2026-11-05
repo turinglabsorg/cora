@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { dirname, join } from "node:path";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { drawnAvatar } from "./avatar.js";
 import { passLedger, verifyPass } from "./pass.js";
+import { shareHosts } from "./share-host.js";
 import { pngSize } from "./png.js";
 import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
 import { Slack } from "./slack.js";
@@ -24,7 +25,11 @@ import { brainsInUse, testRule } from "./rule-test.js";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
 const COOKIE = "cora_session";
+// Over HTTPS the session cookie is __Host-: no sibling host under the same domain (a share) can plant one.
+const HOST_COOKIE = "__Host-cora_session";
 const SESSION_DAYS = 30;
+// Sessions issued before the __Host- name still arrive under the old one; they are moved over once.
+const LEGACY_SESSIONS_UNTIL = Date.parse("2026-11-07T00:00:00Z") + SESSION_DAYS * 86400000;
 const STATIC = {
   "/": ["index.html", "text/html; charset=utf-8"],
   "/assets/app.js": ["app.js", "text/javascript; charset=utf-8"],
@@ -85,6 +90,29 @@ function safeEqual(a, b) {
   return timingSafeEqual(left, right);
 }
 
+/** The host an Origin header names, or null when it names none ("null" from a sandboxed page). */
+function originHost(origin) {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Requests another site, or a sibling host under the same domain, may not make here:
+ * only a top-level visit to a page. The panel's API, its event stream and the desktops
+ * answer only the panel itself.
+ */
+function foreignRequest(req, path) {
+  const site = req.headers["sec-fetch-site"];
+  if (site !== "same-site" && site !== "cross-site") return false;
+  if (path === "/healthz" || path === "/auth/cloud" || path === "/auth/link" || path.startsWith("/avatars/") || path.startsWith("/api/cloud/")) return false;
+  const visit = req.headers["sec-fetch-mode"] === "navigate" && (req.headers["sec-fetch-dest"] || "document") === "document";
+  if (path.startsWith("/api/")) return true;
+  return !visit && path.startsWith("/box/");
+}
+
 function parseCookies(header) {
   const out = {};
   for (const part of String(header || "").split(";")) {
@@ -93,6 +121,14 @@ function parseCookies(header) {
   }
   return out;
 }
+
+// What the panel may show of an artifact as it is: pictures, sound and video. SVG only as an image, sandboxed.
+const INERT_MEDIA = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", avif: "image/avif", svg: "image/svg+xml",
+  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", m4a: "audio/mp4", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+};
+// Readable as text: valid UTF-8 without control characters other than tabs and line breaks.
+const TEXTUAL = /^[^\u0000-\u0008\u000e-\u001f\ufffd]*$/;
 
 const RULE_KEY = /^[a-z][a-z0-9_]{0,40}$/;
 const RULE_TARGETS = ["reply", "comment"];
@@ -137,7 +173,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -151,6 +187,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     logout: `${config.cloudUrl.replace(/\/$/, "")}/logout`,
   } : null;
   const firstUse = passLedger();
+  // A share's own address: answered before anything of the panel, which never runs there.
+  const shares = shareHosts({ config, store, artifacts, cloud, firstUse, sessionKey, activity });
 
   /**
    * Who may put the agents to work besides the owner: the people who wrote in the chats
@@ -188,22 +226,43 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     store.createPanelSession(sessionHash(token), user.id, expires);
     const value = `v2.${token}.${sign(sessionKey, `session.v2.${token}`)}`;
     store.auditAccess(user.id, "sign-in");
-    return `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_DAYS * 86400}${config.insecureCookies ? "" : "; Secure"}`;
+    return sessionCookieLine(value);
+  };
+  const cookieName = config.insecureCookies ? COOKIE : HOST_COOKIE;
+  const sessionCookieLine = (value, maxAge = SESSION_DAYS * 86400) =>
+    `${cookieName}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${config.insecureCookies ? "" : "; Secure"}`;
+  const clearedCookies = () => [sessionCookieLine("", 0), ...(cookieName === COOKIE ? [] : [`${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Secure`])];
+
+  /** The session cookie a request carries: its own name, or the old one for a session issued before the rename. */
+  const sessionValue = (req) => {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies[cookieName]) return { value: cookies[cookieName], legacy: false };
+    if (cookieName !== COOKIE && cookies[COOKIE]) return { value: cookies[COOKIE], legacy: true };
+    return { value: "", legacy: false };
   };
 
-  const sessionUser = (req) => {
-    if (!sessionKey) return null;
-    const value = parseCookies(req.headers.cookie)[COOKIE];
+  const sessionFrom = ({ value, legacy }) => {
     if (!value) return null;
     const parts = value.split(".");
     if (parts[0] === "v2") {
       const [, token, signature, extra] = parts;
       if (!token || !signature || extra || !safeEqual(signature, sign(sessionKey, `session.v2.${token}`))) return null;
+      if (legacy && !(store.panelSessionExpiry(sessionHash(token)) < LEGACY_SESSIONS_UNTIL)) return null;
       return store.panelSession(sessionHash(token));
     }
     const [expires, signature, extra] = parts;
-    if (extra || !expires || !signature || Number(expires) < Date.now() || !safeEqual(signature, sign(sessionKey, `session.${expires}`))) return null;
+    if (extra || !expires || !signature || Number(expires) < Date.now() || (legacy && Number(expires) >= LEGACY_SESSIONS_UNTIL)) return null;
+    if (!safeEqual(signature, sign(sessionKey, `session.${expires}`))) return null;
     return localOwner();
+  };
+
+  const sessionUser = (req) => (sessionKey ? sessionFrom(sessionValue(req)) : null);
+
+  /** A valid session under the old name moves to the __Host- one, and the old cookie goes. */
+  const moveLegacyCookie = (req, res) => {
+    const found = sessionValue(req);
+    if (!found.legacy || !sessionKey || !sessionFrom(found)) return;
+    res.setHeader("Set-Cookie", [sessionCookieLine(found.value), `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Secure`]);
   };
   const authed = (req) => Boolean(sessionUser(req));
   const accessConnections = new Set();
@@ -222,6 +281,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "SAMEORIGIN",
       ...headers,
     });
     res.end(payload);
@@ -292,13 +352,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const user = sessionUser(req);
     if (!user) throw new HttpError(401, "login richiesto");
     if (!["GET", "HEAD"].includes(method) && path !== "/api/logout") {
-      const action = path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/brain") ? "brain" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
+      const action = path.startsWith("/api/artifacts") ? "artifacts" : path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/brain") ? "brain" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
     if (path === "/api/logout" && method === "POST") {
-      const token = parseCookies(req.headers.cookie)[COOKIE]?.split(".")[1];
+      const token = sessionValue(req).value.split(".")[1];
       if (token) store.deletePanelSession(sessionHash(token));
-      return send(res, 200, { ok: true }, { "Set-Cookie": `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${config.insecureCookies ? "" : "; Secure"}` });
+      return send(res, 200, { ok: true }, { "Set-Cookie": clearedCookies() });
     }
 
     if (path === "/api/context" && method === "GET") return send(res, 200, { ...contextSources({ config, store, subscriptions, brain }), canWriteFiles: user.role === "owner" });
@@ -430,6 +490,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         subscriptions: subscriptions.list(),
         boxImage: { name: config.boxImage, ready: imageReady },
         timezone: config.timezone,
+        artifacts: artifacts ? { reviews: artifacts.reviewsFor(user).length } : null,
       });
     }
     if (path === "/api/subscriptions" && method === "GET") return send(res, 200, subscriptions.list());
@@ -864,6 +925,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, trace);
     }
 
+    if (path.startsWith("/api/artifacts") && artifacts) return artifactsApi(req, res, url, user);
+
     match = /^\/api\/files\/([0-9a-f]{24})$/.exec(path);
     if (match && method === "GET" && config.filesDir) {
       const file = join(config.filesDir, match[1]);
@@ -1043,6 +1106,156 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   }
 
   /**
+   * The artifacts in the panel: folders, their commits, the reviews. Files come back
+   * inert — media plays, text reads as text, anything else downloads: nothing an
+   * agent made ever runs on the panel's own address.
+   */
+  async function artifactsApi(req, res, url, user) {
+    const path = url.pathname;
+    const method = req.method;
+    const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
+    if (path === "/api/artifacts" && method === "GET") {
+      return send(res, 200, {
+        folders: artifacts.folders(),
+        reviews: artifacts.reviewsFor(user).map((commit) => artifacts.commitSummary(commit)),
+        quota: { used: store.artifactBytes(), limit: artifacts.quota },
+        people: store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })),
+        canManage: user.role === "owner",
+      });
+    }
+    if (path === "/api/artifacts/folders" && method === "POST") {
+      const body = await readJson(req, 16384);
+      const owner = user.role === "owner";
+      const folder = artifacts.createFolder({
+        path: body.path, title: body.title, description: body.description, kind: body.kind, writers: body.writers,
+        policy: owner ? body.policy : "review", reviewers: owner ? body.reviewers : [], createdBy: by,
+      });
+      return send(res, 201, artifacts.folderView(folder));
+    }
+    let match = /^\/api\/artifacts\/folders\/(af_[a-f0-9]{12})(?:\/(restore|shares))?$/.exec(path);
+    if (match) {
+      const folder = store.artifactFolder(match[1]);
+      if (!folder) throw new HttpError(404, "cartella non trovata");
+      if (match[2] === "restore" && method === "POST") {
+        const body = await readJson(req, 4096);
+        return send(res, 200, await artifacts.restore(folder.id, String(body.commit || ""), user));
+      }
+      if (match[2] === "shares" && method === "POST") {
+        if (!artifacts.canReview(folder, user)) throw new HttpError(403, "condividono una cartella solo il proprietario e i suoi revisori");
+        const body = await readJson(req, 32768);
+        const share = artifacts.createShare(folder.id, { label: body.label, view: body.view, access: body.access, commit: body.commit, expiresAt: body.expiresAt, createdBy: by });
+        return send(res, 201, share);
+      }
+      if (match[2]) throw new HttpError(404, "not found");
+      if (method === "GET") {
+        const head = folder.head ? artifacts.store.artifactCommit(folder.head) : null;
+        return send(res, 200, {
+          folder: artifacts.folderView(folder),
+          canReview: artifacts.canReview(folder, user),
+          canManage: user.role === "owner",
+          shareHosting: Boolean(artifacts.shareSuffix),
+          shareSuffix: artifacts.shareSuffix,
+          shares: store.artifactShares(folder.id).map((share) => artifacts.shareView(share)),
+          commits: store.artifactCommits(folder.id, { limit: 200 }).map((commit) => artifacts.commitSummary(commit)),
+          tree: head ? [...artifacts.readTree(head.tree).entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([name, file]) => ({ path: name, sha: file.sha, size: file.size })) : [],
+        });
+      }
+      if (method === "PUT") {
+        if (!artifacts.canReview(folder, user)) throw new HttpError(403, "cambiano una cartella solo il proprietario e i suoi revisori");
+        const body = await readJson(req, 16384);
+        return send(res, 200, artifacts.folderView(artifacts.updateFolder(folder.id, body, user)));
+      }
+      if (method === "DELETE") {
+        if (user.role !== "owner") throw new HttpError(403, "solo il proprietario elimina una cartella");
+        artifacts.deleteFolder(folder.id);
+        activity({ type: "artifact", text: `${by.name} ha eliminato la cartella ${folder.path}` });
+        return send(res, 200, { ok: true });
+      }
+      throw new HttpError(405, "method not allowed");
+    }
+    match = /^\/api\/artifacts\/commits\/(ac_[a-f0-9]{12})(?:\/(review|files\/.+|objects\/[a-f0-9]{64}))?$/.exec(path);
+    if (match) {
+      const commit = store.artifactCommit(match[1]);
+      if (!commit) throw new HttpError(404, "commit non trovato");
+      const folder = store.artifactFolder(commit.folderId);
+      if (!match[2] && method === "GET") {
+        const canReview = artifacts.canReview(folder, user);
+        return send(res, 200, { ...artifacts.commitView(commit.id), canReview, previewUrl: canReview ? artifacts.previewUrl(commit.id) : "" });
+      }
+      if (match[2] === "review" && method === "POST") {
+        const body = await readJson(req, 8192);
+        return send(res, 200, await artifacts.review(commit.id, { decision: String(body.decision || ""), note: body.note, user }));
+      }
+      if (match[2] && method === "GET") {
+        let file;
+        if (match[2].startsWith("files/")) {
+          let name;
+          try { name = decodeURIComponent(match[2].slice("files/".length)); } catch { throw new HttpError(400, "percorso non valido"); }
+          file = artifacts.fileAt(commit.id, name);
+        } else {
+          const sha = match[2].slice("objects/".length);
+          // A file the commit replaced or removed: what the reviewer compares against.
+          if (artifacts.commitHolds(commit.id, sha)) file = { sha, path: url.searchParams.get("name") || sha, size: statSync(artifacts.objectPath(sha)).size };
+        }
+        if (!file) throw new HttpError(404, "file non trovato");
+        return inertFile(req, res, file, url.searchParams.get("download") === "1");
+      }
+      throw new HttpError(405, "method not allowed");
+    }
+    match = /^\/api\/artifacts\/shares\/(as_[a-f0-9]{12})$/.exec(path);
+    if (match) {
+      const share = store.artifactShare(match[1]);
+      const folder = share ? store.artifactFolder(share.folderId) : null;
+      if (!share || !folder) throw new HttpError(404, "link non trovato");
+      if (!artifacts.canReview(folder, user)) throw new HttpError(403, "cambiano un link solo il proprietario e i revisori della cartella");
+      if (method === "PUT") return send(res, 200, artifacts.updateShare(share.id, await readJson(req, 32768), user));
+      if (method === "DELETE") {
+        store.deleteArtifactShare(share.id);
+        activity({ type: "artifact", text: `${by.name} ha eliminato il link ${share.label}` });
+        return send(res, 200, { ok: true });
+      }
+      throw new HttpError(405, "method not allowed");
+    }
+    throw new HttpError(404, "not found");
+  }
+
+  /** One stored file for the panel: media inline (with ranges), text as plain text, the rest as a download. */
+  function inertFile(req, res, file, download) {
+    const name = file.path.split("/").at(-1) || "file";
+    const extension = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
+    let type = download ? "" : INERT_MEDIA[extension] || "";
+    if (!type && !download && file.size <= 2 * 1024 * 1024) {
+      const data = artifacts.readObject(file.sha);
+      if (data && !data.subarray(0, 8192).includes(0) && TEXTUAL.test(data.subarray(0, 8192).toString("utf8"))) type = "text/plain; charset=utf-8";
+    }
+    const headers = {
+      "Content-Type": type || "application/octet-stream",
+      "Content-Disposition": `${type ? "inline" : "attachment"}; filename="${name.replace(/[^\w.-]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+      "Cross-Origin-Resource-Policy": "same-origin",
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "private, max-age=300",
+      "Accept-Ranges": "bytes",
+      "Referrer-Policy": "no-referrer",
+    };
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ""));
+    if (range && (range[1] || range[2])) {
+      let start = range[1] ? Number(range[1]) : Math.max(0, file.size - Number(range[2]));
+      let end = range[1] && range[2] ? Math.min(Number(range[2]), file.size - 1) : file.size - 1;
+      if (start >= file.size || start > end) {
+        res.writeHead(416, { ...headers, "Content-Range": `bytes */${file.size}` });
+        return res.end();
+      }
+      res.writeHead(206, { ...headers, "Content-Range": `bytes ${start}-${end}/${file.size}`, "Content-Length": end - start + 1 });
+      if (req.method === "HEAD") return res.end();
+      return artifacts.stream(file.sha, { start, end }).on("error", () => res.destroy()).pipe(res);
+    }
+    res.writeHead(200, { ...headers, "Content-Length": file.size });
+    if (req.method === "HEAD") return res.end();
+    artifacts.stream(file.sha).on("error", () => res.destroy()).pipe(res);
+  }
+
+  /**
    * A notice from usecora.space (someone joined the waitlist), signed with the
    * cloud's key: this installation only needs the public key (CORA_CLOUD_KEY).
    */
@@ -1077,6 +1290,21 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     res.writeHead(302, { Location: safeNext(url.searchParams.get("next")), "Set-Cookie": sessionCookie(identity), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
     res.end();
+  }
+
+  /**
+   * The cloud asks before it mails a sign-in link: may this address open that share?
+   * It only sends when the answer is yes, and tells the visitor the same either way.
+   */
+  async function cloudShareAccess(req, res) {
+    if (!cloud || !artifacts) throw new HttpError(404, "not found");
+    const body = await readJson(req, 8192);
+    const fields = verifyPass(cloud.key, body.pass, { audience: `share-access:${cloud.audience}` });
+    if (!fields?.email || !fields.host || !firstUse(fields)) throw new HttpError(403, "refused");
+    const target = shares.match({ headers: { host: String(fields.host) } });
+    const resolved = target ? artifacts.resolveHost(target.label) : null;
+    const allowed = Boolean(resolved && artifacts.allows(resolved, { email: fields.email, via: "email" }));
+    return send(res, 200, { allowed, title: allowed ? resolved.folder.title : "", language: store.settings.language || "it" });
   }
 
   async function cloudAccess(req, res) {
@@ -1125,7 +1353,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const headers = { ...req.headers, host: `127.0.0.1:${target.port}` };
     delete headers.cookie;
     const upstream = http.request({ host: "127.0.0.1", port: target.port, method: req.method, path: target.path, headers }, (response) => {
-      res.writeHead(response.statusCode || 502, { ...response.headers, "Cache-Control": "no-store" });
+      res.writeHead(response.statusCode || 502, { ...response.headers, "Cache-Control": "no-store", "X-Frame-Options": "SAMEORIGIN", "Content-Security-Policy": "frame-ancestors 'self'" });
       response.pipe(res);
     });
     upstream.on("error", () => {
@@ -1137,16 +1365,30 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
+    const shared = shares.match(req);
+    if (shared) {
+      try {
+        return await shares.handle(req, res, shared);
+      } catch (error) {
+        activity({ type: "error", text: `link ${shared.label}: ${error.message}` });
+        if (!res.headersSent) send(res, 500, "error");
+        else res.destroy();
+        return;
+      }
+    }
     try {
       if (req.method !== "GET" && req.method !== "HEAD") {
         if (req.headers["x-cora"] !== "1") throw new HttpError(403, "missing X-Cora header");
         const origin = req.headers.origin;
-        if (origin && new URL(origin).host !== req.headers.host) throw new HttpError(403, "cross-origin request");
+        if (origin && originHost(origin) !== req.headers.host) throw new HttpError(403, "cross-origin request");
       }
+      if (foreignRequest(req, url.pathname)) throw new HttpError(403, "cross-site request");
       if (url.pathname === "/healthz") return send(res, 200, "ok");
+      moveLegacyCookie(req, res);
       if (url.pathname === "/auth/cloud" || url.pathname === "/auth/link") return signInFrom(req, res, url);
       if (url.pathname === "/api/cloud/access" && req.method === "POST") return await cloudAccess(req, res);
       if (url.pathname === "/api/cloud/notice" && req.method === "POST") return await cloudNotice(req, res);
+      if (url.pathname === "/api/cloud/share-access" && req.method === "POST") return await cloudShareAccess(req, res);
       if (url.pathname === "/api/events") return events(req, res);
       const picture = /^\/avatars\/([\w-]+)\.png$/.exec(url.pathname);
       if (picture && (req.method === "GET" || req.method === "HEAD")) return avatarFile(res, url, picture[1]);
@@ -1176,9 +1418,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     };
     try {
+      if (shares.match(req)) return reject(404, "Not Found");
       if (!authed(req)) return reject(401, "Unauthorized");
       const origin = req.headers.origin;
-      if (origin && new URL(origin).host !== req.headers.host) return reject(403, "Forbidden");
+      if (origin && originHost(origin) !== req.headers.host) return reject(403, "Forbidden");
+      if (foreignRequest(req, new URL(req.url, "http://localhost").pathname)) return reject(403, "Forbidden");
       const target = await boxTarget(req);
       const user = sessionUser(req);
       if (!user) return reject(401, "Unauthorized");

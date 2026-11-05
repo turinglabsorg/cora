@@ -14,6 +14,8 @@ const config = {
   // The space that hears about waitlist sign-ups (its Cora needs CORA_CLOUD_KEY).
   notify: env.CORA_CLOUD_NOTIFY || "",
   waitlistWebhookUrl: env.CORA_WAITLIST_WEBHOOK_URL || "",
+  // Sign-in links for shares go out from Cora's own ambox mailbox.
+  mail: { url: env.CORA_CLOUD_AMBOX_URL || "https://ambox.dev", key: env.CORA_CLOUD_AMBOX_API_KEY || "" },
   clients: {
     google: { id: env.GOOGLE_CLIENT_ID || "", secret: env.GOOGLE_CLIENT_SECRET || "" },
     github: { id: env.GITHUB_CLIENT_ID || "", secret: env.GITHUB_CLIENT_SECRET || "" },

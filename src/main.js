@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { AgentBots } from "./agent-bots.js";
+import { Artifacts } from "./artifacts.js";
 import { Channels } from "./channels.js";
 import { Slack } from "./slack.js";
 import { SlackBots } from "./slack-bots.js";
@@ -114,6 +115,15 @@ export function startCora(overrides = {}) {
   const instanceUrl = cfg.publicHost ? `https://${cfg.publicHost}` : cfg.cloudUrl && cfg.cloudSpace ? `https://${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
   // The agents' pictures are served from here, so Slack and Discord fetch them from this address.
   store.setAvatarBase(instanceUrl);
+  // What the agents make on their desktops, versioned and reviewed on this server.
+  // Shares answer on <label>--<space>.<cloud domain>: only for a space the cloud routes, not one on its own domain.
+  const shareSuffix = !cfg.publicHost && cfg.cloudUrl && cfg.cloudSpace ? `--${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
+  const artifacts = new Artifacts({
+    store, home: cfg.home, boxes, companyBrain, log: activity, instanceUrl, shareSuffix,
+    push: { notify: (notice) => (push.enabled ? push.notify(notice) : Promise.resolve()) },
+    notice: (channelId, text) => orchestrator.notice(channelId, text),
+  });
+  brain.artifacts = artifacts;
   const librarian = new Librarian({
     brain: companyBrain, store, llm, log: activity, traces, timezone: cfg.timezone,
     channelLabel: (id) => brain.channelLabel(id),
@@ -121,10 +131,10 @@ export function startCora(overrides = {}) {
     messageOwner: (text) => orchestrator.messageOwner(text),
     reviewUrl: () => (instanceUrl ? `${instanceUrl}/#/brain/revisione` : ""),
   });
-  const scheduler = new Scheduler({ store, orchestrator, brain, librarian, companyBrain, backups: join(cfg.home, "backups"), timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
+  const scheduler = new Scheduler({ store, orchestrator, brain, librarian, companyBrain, artifacts, backups: join(cfg.home, "backups"), timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
   const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -226,7 +236,7 @@ export function startCora(overrides = {}) {
     await companyBrain.close();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, server: web.server };
 }
 
 const isMain = (() => {

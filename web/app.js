@@ -117,6 +117,10 @@ const STATE_LABEL = {
 };
 
 const ICONS = {
+  archive: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M4.5 9v9.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M10 13h4"/>',
+  folder: '<path d="M3.5 7.5a2 2 0 0 1 2-2h3.8l2 2.5h7.2a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
+  commit: '<circle cx="12" cy="12" r="3.5"/><path d="M3 12h5.5M15.5 12H21"/>',
+  download: '<path d="M12 4v11"/><path d="M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 19.5h15"/>',
   grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
   chart: '<path d="M3.5 20.5h17"/><rect x="5" y="12" width="3.5" height="6" rx="1"/><rect x="10.2" y="7.5" width="3.5" height="10.5" rx="1"/><rect x="15.4" y="4" width="3.5" height="14" rx="1"/>',
   chat: '<path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3 21l1.9-5.3A8.5 8.5 0 1 1 21 11.5z"/>',
@@ -529,6 +533,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     ["banco", "Banco", "grid", section === "banco"],
     ["contesto", "Contesto", "book", section === "contesto"],
     ["brain", "Brain", "bulb", section === "brain"],
+    ["artefatti", "Artefatti", "archive", section === "artefatti", S.data?.artifacts?.reviews || 0],
     ["settings", "Impostazioni", "sliders", section === "settings"],
   ];
   const info = S.data ? transportInfo() : { icon: "radio", label: "Cora", where: tr("Caricamento…") };
@@ -539,7 +544,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
         h("span", { class: "panel-ico" }, icon(info.icon)),
         h("span", { class: "grow" }, h("b", {}, info.label), h("small", {}, info.where)),
         lamp()),
-      h("nav", { class: "side-nav" }, nav.map(([key, label, name, active]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label)))),
+      h("nav", { class: "side-nav" }, nav.map(([key, label, name, active, count]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "nav-count", title: tr("{count} da rivedere", { count }) }, raw(String(count))) : null))),
       h("div", { class: "side-agents" },
         h("span", { class: "label" }, "Agenti"),
         S.data ? S.data.agents.map((agent) => h("a", { href: `#/agent/${agent.id}/chat`, class: section === "agent" && current === agent.id ? "active" : "" }, avatar(agent, "xs"), h("span", { class: "grow" }, raw(agent.name)), agentDot(agent))) : skeleton("rows"),
@@ -550,7 +555,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
       h("h1", {}, title),
       accountButton("bar")),
     h("main", { class: "content" }, h("div", { class: "wrap" }, content)),
-    h("nav", { class: "tabbar" }, nav.map(([key, label, name, active]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label))))));
+    h("nav", { class: "tabbar" }, nav.map(([key, label, name, active, count]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "nav-count", "aria-label": tr("{count} da rivedere", { count }) }, raw(String(count))) : null)))));
   updateLamp();
 }
 
@@ -3723,6 +3728,532 @@ async function renderBrainReview() {
   load();
 }
 
+/* ---------- artifacts ---------- */
+const ARTIFACT_STATUS = {
+  proposed: ["Da rivedere", "warn"], conflict: ["In conflitto", "err"], published: ["Pubblicato", "on"], rejected: ["Rifiutato", "err"], superseded: ["Sostituito", ""],
+};
+const ARTIFACT_IMAGE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+const ARTIFACT_VIDEO = /\.(mp4|webm|mov)$/i;
+const ARTIFACT_AUDIO = /\.(mp3|wav|ogg|m4a)$/i;
+const ARTIFACT_TEXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|html?|css|scss|js|mjs|cjs|ts|tsx|jsx|xml|ya?ml|toml|ini|env\.example|py|rb|go|rs|java|kt|swift|php|sh|sql|log|svg|txt|vue|svelte)$/i;
+
+/** Bytes as people read them, in the panel's language. */
+function fmtBytes(value) {
+  const n = Number(value) || 0;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = n;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+  return `${size.toLocaleString(LANG === "en" ? "en-GB" : "it-IT", { maximumFractionDigits: size < 10 && unit ? 1 : 0 })} ${units[unit]}`;
+}
+
+const fileCount = (count) => (count === 1 ? tr("1 file") : tr("{count} file", { count }));
+
+/** A file's path inside a commit, as the API takes it: every segment escaped, the slashes kept. */
+const artifactPath = (path) => String(path).split("/").map(encodeURIComponent).join("/");
+
+/** Who made a commit: an agent with its picture, a person with their mark. */
+function artifactAuthor(author) {
+  const agent = author?.kind === "agent" ? S.data.agents.find((item) => item.id === author.id) : null;
+  return h("span", { class: "art-author" }, agent ? avatar(agent, "xs") : userMark({ name: author?.name || "?" }, "sm"), raw(author?.name || "?"));
+}
+
+/** +added ~changed −deleted, each only when there is some. */
+function artifactCounts(changes) {
+  const parts = [["add", "+", changes?.added], ["mod", "~", changes?.modified], ["del", "−", changes?.deleted]].filter(([, , count]) => count);
+  return h("span", { class: "art-counts", title: tr("{added} aggiunti, {modified} cambiati, {deleted} eliminati", { added: changes?.added || 0, modified: changes?.modified || 0, deleted: changes?.deleted || 0 }) },
+    parts.length ? parts.map(([cls, sign, count]) => h("i", { class: cls }, raw(`${sign}${count}`))) : h("i", {}, "—"));
+}
+
+/** The count beside Artefatti in the navigation, kept in step with what the page just learned. */
+function setArtifactReviews(count) {
+  if (!S.data?.artifacts) return;
+  S.data.artifacts.reviews = count;
+  const links = [...document.querySelectorAll(".side-nav"), ...document.querySelectorAll(".tabbar")].flatMap((nav) => [...nav.querySelectorAll("a")]);
+  for (const link of links) {
+    if ((link.getAttribute ? link.getAttribute("href") : link.attributes.href) !== "#/artefatti") continue;
+    link.querySelector(".nav-count")?.remove();
+    if (count) link.append(h("i", { class: "nav-count", title: tr("{count} da rivedere", { count }) }, raw(String(count))));
+  }
+}
+
+function artifactLed(folder) {
+  const [cls, label] = folder.conflicts ? ["err", "In conflitto"] : folder.pending ? ["busy", "Da rivedere"] : folder.head ? ["on", "In onda"] : ["", "Niente in onda"];
+  return h("i", { class: `led${cls ? ` ${cls}` : ""}`, title: tr(label), "aria-label": tr(label) });
+}
+
+/** The folder's path with its last segment lit: where it sits, then what it is. */
+function artifactPathLabel(path) {
+  const parts = String(path).split("/");
+  return h("span", { class: "art-path" }, parts.length > 1 ? h("span", { class: "art-path-dir" }, raw(`${parts.slice(0, -1).join("/")}/`)) : null, h("b", {}, raw(parts.at(-1))));
+}
+
+function renderArtifacts() {
+  const [, id, view, commitId] = route();
+  if (id && view === "c" && commitId) return renderArtifactCommit(id, commitId);
+  if (id) return renderArtifactFolder(id, view || "file");
+  const body = h("div", { class: "stack" }, skeleton("rows", 4));
+  let data = null;
+  let creating = false;
+  const search = h("input", { type: "search", placeholder: tr("Cerca tra le cartelle…"), "aria-label": tr("Cerca tra le cartelle"), autocomplete: "off" });
+  const newButton = btn("Nuova cartella", { icon: "plus", cls: "primary", onclick: () => { creating = !creating; draw(); if (creating) body.querySelector(".art-new input")?.focus(); } });
+  search.addEventListener("input", () => drawList());
+  const list = h("div", { class: "art-groups" });
+
+  function drawList() {
+    const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const folders = data.folders.filter((folder) => !words.length || words.every((word) => `${folder.path} ${folder.title} ${folder.description}`.toLowerCase().includes(word)));
+    if (!data.folders.length) {
+      list.replaceChildren(empty("archive", "Ancora nessuna cartella. Quando un agente deve conservare o mostrare qualcosa ti chiede dove metterlo, oppure creane una tu.", creating ? null : btn("Nuova cartella", { icon: "plus", onclick: () => newButton.click() })));
+      return;
+    }
+    if (!folders.length) { list.replaceChildren(empty("search", "Nessuna cartella con queste parole.")); return; }
+    const groups = new Map();
+    for (const folder of folders) {
+      const group = folder.path.includes("/") ? folder.path.split("/")[0] : "";
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(folder);
+    }
+    list.replaceChildren(...[...groups.entries()].sort(([a], [b]) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b))).map(([group, items]) => h("section", { class: "art-group" },
+      h("h3", { class: "label" }, group ? raw(group) : tr("Senza gruppo"), h("span", {}, raw(String(items.length)))),
+      h("div", { class: "art-list" }, items.map((folder) => h("a", { class: "art-row", href: `#/artefatti/${folder.id}` },
+        artifactLed(folder),
+        h("span", { class: "panel-ico" }, icon(folder.kind === "site" ? "globe" : "folder")),
+        h("span", { class: "grow art-row-text" }, artifactPathLabel(folder.path), h("small", {}, raw(folder.title !== folder.path.split("/").at(-1) ? folder.title : folder.description || folder.title))),
+        h("span", { class: "art-row-meta" },
+          folder.pending ? badge(tr("{count} da rivedere", { count: folder.pending }), "warn") : null,
+          folder.conflicts ? badge("Conflitto", "err", "alert") : null,
+          folder.shares ? badge(String(folder.shares), "", "link") : null,
+          h("small", {}, raw(folder.head ? `${fileCount(folder.files)} · ${fmtBytes(folder.bytes)}` : tr("niente in onda")), raw(` · ${fmtTime(new Date(folder.lastActivity).toISOString(), true)}`))),
+        icon("next", "chev")))))));
+  }
+
+  function newFolderForm() {
+    const kind = { value: "files" };
+    const kinds = h("div", { class: "segmented", role: "radiogroup", "aria-label": tr("Cosa contiene") },
+      [["files", "File", "file"], ["site", "Sito", "globe"]].map(([key, label, name]) => h("button", { type: "button", role: "radio", class: key === kind.value ? "on" : "", "aria-checked": String(key === kind.value), onclick: (event) => {
+        kind.value = key;
+        for (const button of kinds.children) { button.classList.toggle("on", button === event.currentTarget); button.setAttribute("aria-checked", String(button === event.currentTarget)); }
+      } }, icon(name), label)));
+    const path = h("input", { type: "text", name: "path", class: "mono", placeholder: "clienti/acme/report", autocomplete: "off", spellcheck: "false", required: true, pattern: "[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*){0,5}", "aria-label": tr("Percorso") });
+    path.addEventListener("input", () => { path.value = path.value.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9/-]/g, ""); });
+    const direct = data.canManage ? switchInput("direct", "Pubblica subito", false, "Senza revisione: ogni caricamento va in onda appena arriva.") : null;
+    const form = h("form", { class: "art-new stack" },
+      h("div", { class: "grid2" },
+        field("Percorso", path, "parole minuscole e trattini, fino a sei livelli"),
+        field("Titolo", h("input", { type: "text", name: "title", placeholder: tr("Report trimestrali di Acme"), maxlength: 80 }))),
+      field("Cosa ci va", h("textarea", { name: "description", rows: 2, maxlength: 600, placeholder: tr("Gli agenti lo leggono per capire dove mettere le cose.") })),
+      h("div", { class: "row" }, field("Contiene", kinds), direct, h("span", { class: "spacer" }),
+        btn("Annulla", { cls: "ghost", onclick: () => { creating = false; draw(); } }),
+        btn("Crea la cartella", { icon: "check", cls: "primary", type: "submit" })));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const values = new FormData(form);
+      const created = await guard(api("/api/artifacts/folders", { method: "POST", body: { path: values.get("path"), title: values.get("title"), description: values.get("description"), kind: kind.value, policy: values.get("direct") ? "direct" : "review" } }), "Cartella creata");
+      if (created) location.hash = `#/artefatti/${created.id}`;
+    });
+    return panel({ icon: "folder", title: "Nuova cartella", hint: "Gli agenti la trovano nel brain e con artifact_folders: scrivi bene cosa ci va." }, form);
+  }
+
+  function draw() {
+    const reviews = data.reviews;
+    const onAir = data.folders.filter((folder) => folder.head).length;
+    body.replaceChildren(...[
+      h("div", { class: "stats" },
+        statCard({ icon: "archive", value: String(data.folders.length), label: "cartelle" }),
+        statCard({ icon: "check", value: String(reviews.length), label: "da rivedere", href: reviews.length ? `#/artefatti/${reviews[0].folderId}/c/${reviews[0].id}` : null }),
+        statCard({ icon: "radio", value: String(onAir), label: "in onda" }),
+        statCard({ icon: "layers", value: raw(fmtBytes(data.quota.used)), label: "spazio", sub: raw(tr("di {limit}", { limit: fmtBytes(data.quota.limit) })) })),
+      reviews.length ? h("section", { class: "requests art-reviews", "aria-label": tr("Da rivedere") },
+        h("span", { class: "label" }, tr("Aspettano te"), h("i", { class: "count" }, raw(String(reviews.length)))),
+        reviews.slice(0, 8).map((commit) => {
+          const folder = data.folders.find((item) => item.id === commit.folderId);
+          return h("a", { class: "art-review", href: `#/artefatti/${commit.folderId}/c/${commit.id}` },
+            artifactAuthor(commit.author),
+            h("span", { class: "grow" }, h("b", {}, raw(commit.message)), h("small", {}, folder ? artifactPathLabel(folder.path) : null)),
+            artifactCounts(commit.changes),
+            commit.status === "conflict" ? badge("Conflitto", "err", "alert") : null,
+            h("small", { class: "faint" }, raw(fmtTime(new Date(commit.createdAt).toISOString(), true))),
+            icon("next", "chev"));
+        })) : null,
+      creating ? newFolderForm() : null,
+      data.folders.length > 6 ? h("div", { class: "art-search" }, search) : null,
+      list].filter(Boolean));
+    drawList();
+  }
+
+  async function load() {
+    try {
+      data = await api("/api/artifacts");
+      setArtifactReviews(data.reviews.length);
+      if (body.isConnected) draw();
+    } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+  }
+  shell([pageHead("Artefatti", "Quello che gli agenti fanno sui loro computer, con tutte le versioni. Ogni caricamento è un commit e va in onda solo quando lo approvi.", [newButton]), body], { title: "Artefatti" });
+  load();
+}
+
+/** What a file is, read from its name: what the preview can do with it. */
+function artifactKind(path) {
+  if (ARTIFACT_IMAGE.test(path)) return "image";
+  if (ARTIFACT_VIDEO.test(path)) return "video";
+  if (ARTIFACT_AUDIO.test(path)) return "audio";
+  if (ARTIFACT_TEXT.test(path) || !/\.[a-z0-9]+$/i.test(path.split("/").at(-1))) return "text";
+  return "other";
+}
+
+/**
+ * One file, shown the way the panel may show it: pictures and media as they are,
+ * text as text with line numbers, anything else to download. Never rendered as a page.
+ */
+async function artifactPreview(url, path, size) {
+  const kind = artifactKind(path);
+  const download = btn("Scarica", { icon: "download", cls: "sm ghost", href: `${url}?download=1` });
+  const head = h("header", { class: "art-preview-head" }, h("span", { class: "grow" }, h("b", {}, raw(path.split("/").at(-1))), h("small", {}, raw(`${path} · ${fmtBytes(size)}`))), download);
+  if (kind === "image") return [head, h("div", { class: "art-media checker" }, h("img", { src: url, alt: raw(path) }))];
+  if (kind === "video") return [head, h("div", { class: "art-media" }, h("video", { src: url, controls: true, preload: "metadata" }))];
+  if (kind === "audio") return [head, h("div", { class: "art-media" }, h("audio", { src: url, controls: true, preload: "metadata" }))];
+  if (kind === "text" && size <= 2 * 1024 * 1024) {
+    try {
+      const response = await fetch(url, { credentials: "same-origin" });
+      if (response.ok && /^text\/plain/.test(response.headers.get("content-type") || "")) {
+        const lines = (await response.text()).split("\n");
+        const shown = lines.slice(0, 3000);
+        return [head, h("pre", { class: "art-code" }, h("code", {}, shown.map((line, index) => h("span", { class: "art-line" }, h("i", { "aria-hidden": "true" }, raw(String(index + 1))), raw(line || " "))))),
+          lines.length > shown.length ? h("p", { class: "muted small" }, tr("Mostrate le prime {shown} righe di {total}: scarica il file per il resto.", { shown: shown.length, total: lines.length })) : null];
+      }
+    } catch {}
+  }
+  return [head, h("div", { class: "art-noview" }, icon("file"), h("p", {}, "Il pannello non mostra questo tipo di file: scaricalo."), download.cloneNode(true))];
+}
+
+async function renderArtifactFolder(id, tab) {
+  const view = location.hash;
+  const slot = h("div", { class: "stack" }, panel({}, skeleton("rows", 4)));
+  shell([slot], { title: "Artefatti", back: "#/artefatti" });
+  let data;
+  try { data = await api(`/api/artifacts/folders/${id}`); }
+  catch (error) { slot.replaceChildren(empty("archive", error.message, btn("Torna agli artefatti", { icon: "back", href: "#/artefatti" }))); return; }
+  if (location.hash !== view) return;
+  const { folder } = data;
+  const head = data.commits.find((commit) => commit.id === folder.head) || null;
+  const pending = data.commits.filter((commit) => commit.status === "proposed" || commit.status === "conflict");
+  const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ["permessi", "Permessi", "shield"]];
+  const content = h("div", { class: "stack" });
+  shell([
+    pageHead(raw(folder.title), h("span", { class: "art-head-meta" }, artifactPathLabel(folder.path),
+      badge(folder.kind === "site" ? "Sito" : "File", "", folder.kind === "site" ? "globe" : "folder"),
+      badge(folder.policy === "direct" ? "Pubblica subito" : "Con revisione", folder.policy === "direct" ? "warn" : "", folder.policy === "direct" ? "spark" : "check"))),
+    folder.description ? h("p", { class: "lead art-lead" }, raw(folder.description)) : null,
+    h("div", { class: `art-onair${head ? " on" : ""}` },
+      h("span", { class: `art-lamp${head ? " on" : ""}` }, h("i"), h("span", {}, head ? tr("In onda") : tr("Spento"))),
+      head ? h("span", { class: "grow art-onair-text" },
+        h("b", {}, raw(head.message)),
+        h("small", {}, h("code", {}, raw(head.short)), artifactAuthor(head.author), raw(` · ${fmtTime(new Date(head.publishedAt || head.createdAt).toISOString(), true)} · ${fileCount(head.files)} · ${fmtBytes(head.bytes)}`)))
+        : h("span", { class: "grow art-onair-text" }, h("b", {}, "Niente in onda"), h("small", {}, "Il primo commit approvato va in onda qui.")),
+      pending.length ? btn(tr("Rivedi ({count})", { count: pending.length }), { icon: "check", cls: "primary sm", href: `#/artefatti/${folder.id}/c/${pending[0].id}` }) : null),
+    h("nav", { class: "tabs" }, TABS.map(([key, label, name]) => {
+      const count = key === "commit" ? data.commits.length : key === "file" ? data.tree.length : key === "condivisione" ? data.shares.filter((share) => share.status !== "revoked").length : null;
+      return h("a", { href: `#/artefatti/${folder.id}/${key}`, class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, raw(String(count))) : null);
+    })),
+    content,
+  ], { title: folder.title, back: "#/artefatti" });
+  document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
+  const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data) : artifactFiles(data, head);
+  content.replaceChildren(...[shown].flat().filter(Boolean));
+}
+
+/** The served version's files beside a preview of the one chosen. */
+function artifactFiles(data, head) {
+  if (!head || !data.tree.length) {
+    return panel({ icon: "file", title: "File" }, empty("radio", data.commits.length ? "Nessuna versione è ancora in onda: approva un commit per vederne i file qui." : "Ancora nessun commit: quando un agente carica qualcosa, lo trovi qui."));
+  }
+  const preview = h("div", { class: "art-preview" }, h("div", { class: "art-noview" }, icon("eye"), h("p", {}, "Scegli un file per vederlo.")));
+  let chosen = null;
+  const open = async (file, row, { scroll = true } = {}) => {
+    chosen = file.path;
+    for (const item of list.querySelectorAll(".art-file")) item.classList.toggle("on", item === row);
+    preview.replaceChildren(skeleton("rows", 2));
+    const shown = await artifactPreview(`/api/artifacts/commits/${head.id}/files/${artifactPath(file.path)}`, file.path, file.size);
+    if (chosen === file.path) preview.replaceChildren(...shown.flat().filter(Boolean));
+    if (scroll && matchMedia("(max-width: 899px)").matches) preview.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
+  let lastDir = null;
+  const rows = [];
+  // Files at the top first, then each folder with its own.
+  const files = [...data.tree].sort((a, b) => (a.path.includes("/") - b.path.includes("/")) || (a.path < b.path ? -1 : 1));
+  for (const file of files) {
+    const dir = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/") + 1) : "";
+    if (dir !== lastDir && dir) rows.push(h("div", { class: "art-dir" }, icon("folder"), raw(dir)));
+    lastDir = dir;
+    const row = h("button", { type: "button", class: `art-file${dir ? " nested" : ""}`, onclick: () => open(file, row) },
+      icon(artifactKind(file.path) === "image" ? "eye" : "file"), h("span", { class: "grow" }, raw(file.path.slice(dir.length))), h("small", {}, raw(fmtBytes(file.size))));
+    rows.push(row);
+  }
+  const list = h("div", { class: "art-tree" }, rows);
+  const total = data.tree.reduce((sum, file) => sum + file.size, 0);
+  const first = data.tree.find((file) => /(^|\/)index\.html?$/i.test(file.path)) || data.tree.find((file) => /readme/i.test(file.path)) || data.tree[0];
+  setTimeout(() => { const row = [...list.querySelectorAll(".art-file")][files.indexOf(first)]; if (row) open(first, row, { scroll: false }); });
+  return panel({ icon: "file", title: tr("File in onda"), hint: raw(tr("{count} file · {size} · commit {id}", { count: data.tree.length, size: fmtBytes(total), id: head.short })) },
+    h("div", { class: "art-files" }, list, preview));
+}
+
+/** The folder's history as takes on a tape: the one on air lit, proposals waiting, the rest as they went. */
+function artifactTakes(data) {
+  const { folder } = data;
+  if (!data.commits.length) return panel({ icon: "commit", title: "Commit" }, empty("commit", "Ancora nessun commit."));
+  return panel({ icon: "commit", title: "Commit", hint: "Ogni caricamento, dal più recente. Va in onda quello approvato." },
+    h("ol", { class: "art-takes" }, data.commits.map((commit) => {
+      const [label, cls] = ARTIFACT_STATUS[commit.status] || [commit.status, ""];
+      const live = commit.id === folder.head;
+      const waiting = commit.status === "proposed" || commit.status === "conflict";
+      const restore = data.canReview && commit.status === "published" && !live
+        ? armedButton("Ripristina", "Conferma: torna in onda", { icon: "refresh", cls: "sm ghost", onconfirm: async () => {
+          if (await guard(api(`/api/artifacts/folders/${folder.id}/restore`, { method: "POST", body: { commit: commit.id } }), "Versione ripristinata")) renderArtifacts();
+        } }) : null;
+      return h("li", { class: `art-take ${commit.status}${live ? " live" : ""}` },
+        h("i", { class: "art-take-mark", "aria-hidden": "true" }),
+        h("a", { class: "grow art-take-text", href: `#/artefatti/${folder.id}/c/${commit.id}` },
+          h("span", { class: "row tight" }, h("code", {}, raw(commit.short)), h("b", { class: "grow" }, raw(commit.message)),
+            live ? h("span", { class: "art-lamp on mini" }, h("i"), h("span", {}, tr("In onda"))) : badge(label, cls)),
+          h("small", {}, artifactAuthor(commit.author), raw(` · ${fmtTime(new Date(commit.createdAt).toISOString(), true)}`), artifactCounts(commit.changes),
+            commit.review?.note ? h("span", { class: "art-take-note" }, raw(`«${commit.review.note}»`)) : null)),
+        waiting ? btn("Rivedi", { icon: "check", cls: "sm primary", href: `#/artefatti/${folder.id}/c/${commit.id}` }) : restore);
+    })));
+}
+
+const SHARE_STATE = { active: ["Attivo", "on"], proposed: ["Da attivare", "warn"], revoked: ["Revocato", "err"] };
+
+/** Who may open a share, as chips: the addresses, the domains, the people of this space. */
+function shareAccessChips(access) {
+  return h("span", { class: "share-access" },
+    access.members ? h("span", { class: "chip on" }, icon("users"), "Chi entra in questo spazio") : null,
+    access.domains.map((domain) => h("span", { class: "chip on" }, icon("globe"), raw(`@${domain}`))),
+    access.emails.map((email) => h("span", { class: "chip" }, raw(email))));
+}
+
+/**
+ * The folder's links, each a host of its own that opens only for the people it names,
+ * and the form for a new one. Nothing is ever public.
+ */
+function artifactShares(data) {
+  const { folder } = data;
+  if (!data.shareHosting) {
+    return panel({ icon: "link", title: "Condivisione" },
+      h("p", { class: "notice" }, icon("info"), h("span", {}, "I link di condivisione hanno un indirizzo loro su usecora.space: ci sono quando questo spazio passa da lì.")));
+  }
+  const reload = () => renderArtifactFolder(folder.id, "condivisione");
+  const rows = data.shares.map((share) => {
+    const [label, cls] = share.expired && share.status === "active" ? ["Scaduto", "err"] : SHARE_STATE[share.status] || [share.status, ""];
+    const live = share.status === "active" && !share.expired;
+    const copy = btn("", { icon: "copy", cls: "sm ghost", title: "Copia il link", onclick: () => navigator.clipboard?.writeText(share.url).then(() => toast("Link copiato"), () => toast("Non riesco a copiare: selezionalo a mano", true)) });
+    const actions = !data.canReview ? null : share.status === "proposed"
+      ? [btn("Attiva il link", { icon: "check", cls: "sm primary", onclick: async () => { if (await guard(api(`/api/artifacts/shares/${share.id}`, { method: "PUT", body: { status: "active" } }), "Link attivato")) reload(); } }),
+        armedButton("Elimina", "Conferma", { cls: "sm", onconfirm: async () => { if (await guard(api(`/api/artifacts/shares/${share.id}`, { method: "DELETE" }), "Link eliminato")) reload(); } })]
+      : share.status === "active"
+        ? armedButton("Revoca", "Conferma: chiudi il link", { cls: "sm", onconfirm: async () => { if (await guard(api(`/api/artifacts/shares/${share.id}`, { method: "PUT", body: { status: "revoked" } }), "Link revocato")) reload(); } })
+        : armedButton("Elimina", "Conferma", { cls: "sm", onconfirm: async () => { if (await guard(api(`/api/artifacts/shares/${share.id}`, { method: "DELETE" }), "Link eliminato")) reload(); } });
+    return h("li", { class: `share-row ${share.status}` },
+      h("i", { class: `led${live ? " on" : share.status === "proposed" ? " busy" : ""}`, "aria-hidden": "true" }),
+      h("div", { class: "grow share-text" },
+        h("div", { class: "row tight" }, live ? h("a", { class: "share-url", href: share.url, target: "_blank", rel: "noopener" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))) : h("span", { class: "share-url" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))), badge(label, cls), badge(share.view === "files" ? "File" : "Sito", "", share.view === "files" ? "folder" : "globe")),
+        shareAccessChips(share.access),
+        h("small", {}, raw([
+          share.createdBy?.name ? tr(share.status === "proposed" ? "chiesto da {name}" : "creato da {name}", { name: share.createdBy.name }) : "",
+          share.reason ? `«${share.reason}»` : "",
+          share.expiresAt ? tr("scade {when}", { when: fmtTime(new Date(share.expiresAt).toISOString(), true) }) : tr("non scade"),
+          share.commit ? tr("fissato alla versione {id}", { id: share.commit.slice(3, 10) }) : tr("segue la versione in onda"),
+        ].filter(Boolean).join(" · ")))),
+      h("div", { class: "row-actions" }, live ? copy : null, actions));
+  });
+  let form = null;
+  if (data.canReview) {
+    const suffix = data.shareSuffix || "";
+    const label = h("input", { type: "text", name: "label", class: "mono", required: true, minlength: 3, maxlength: 40, placeholder: "report-acme", autocomplete: "off", spellcheck: "false", "aria-label": tr("Nome del link") });
+    label.addEventListener("input", () => { label.value = label.value.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-{2,}/g, "-"); });
+    const view = { value: folder.kind };
+    const views = h("div", { class: "segmented", role: "radiogroup", "aria-label": tr("Come si vede") },
+      [["site", "Sito", "globe"], ["files", "Elenco di file", "folder"]].map(([key, text, name]) => h("button", { type: "button", role: "radio", class: key === view.value ? "on" : "", "aria-checked": String(key === view.value), onclick: (event) => {
+        view.value = key;
+        for (const button of views.children) { button.classList.toggle("on", button === event.currentTarget); button.setAttribute("aria-checked", String(button === event.currentTarget)); }
+      } }, icon(name), text)));
+    const expiry = h("select", { name: "expiry", "aria-label": tr("Scadenza") }, [["0", "Non scade"], ["7", "Tra 7 giorni"], ["30", "Tra 30 giorni"], ["90", "Tra 90 giorni"]].map(([value, text]) => h("option", { value }, text)));
+    form = h("form", { class: "share-new stack" },
+      h("div", { class: "grid2" },
+        field("Nome del link", h("div", { class: "share-host" }, label, suffix ? h("span", { class: "mono" }, raw(suffix)) : null), "lettere minuscole, cifre e trattini"),
+        field("Come si vede", views)),
+      field("Indirizzi", h("textarea", { name: "emails", rows: 2, placeholder: "giulia@cliente.it, mario@cliente.it" }), "chi può aprirlo, separati da virgole o a capo"),
+      h("div", { class: "grid2" },
+        field("Domini aziendali", h("input", { type: "text", name: "domains", class: "mono", placeholder: "cliente.it" }), "chiunque abbia un indirizzo di quel dominio (mai gmail.com e simili)"),
+        field("Scadenza", expiry)),
+      h("div", { class: "row" }, switchInput("members", "Anche chi entra in questo spazio", false), h("span", { class: "spacer" }), btn("Crea il link", { icon: "link", cls: "primary", type: "submit" })));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const values = new FormData(form);
+      const days = Number(values.get("expiry"));
+      const created = await guard(api(`/api/artifacts/folders/${folder.id}/shares`, { method: "POST", body: {
+        label: values.get("label"), view: view.value, expiresAt: days ? Date.now() + days * 86400000 : 0,
+        access: { emails: String(values.get("emails") || ""), domains: String(values.get("domains") || ""), members: Boolean(values.get("members")) },
+      } }), "Link creato");
+      if (created) reload();
+    });
+  }
+  return [
+    panel({ icon: "link", title: "Link di condivisione", hint: "Ogni link ha un indirizzo suo e si apre solo per chi nomina: con Google o con un link via email. Mai pubblico." },
+      rows.length ? h("ul", { class: "share-list" }, rows) : empty("link", "Ancora nessun link per questa cartella.")),
+    form ? panel({ icon: "plus", title: "Nuovo link" }, form) : null,
+  ];
+}
+
+/** Who pushes, who reviews, whether it waits: rows that save as they change. */
+function artifactPermissions(data) {
+  const { folder } = data;
+  const save = async (changes, row) => {
+    try {
+      Object.assign(folder, await api(`/api/artifacts/folders/${folder.id}`, { method: "PUT", body: changes }));
+    } catch (error) { toast(error.message, true); return false; }
+    const mark = row?.querySelector(".set-saved");
+    if (mark) {
+      mark.textContent = tr("salvato");
+      mark.classList.add("on");
+      clearTimeout(mark.timer);
+      mark.timer = setTimeout(() => { mark.classList.remove("on"); mark.textContent = ""; }, 1800);
+    }
+    return true;
+  };
+  const editable = data.canReview;
+  const title = h("input", { type: "text", value: folder.title, maxlength: 80, disabled: !editable, "aria-label": tr("Titolo") });
+  const titleRow = setRow("Titolo", "Come la vedete nel pannello.", title);
+  title.addEventListener("change", () => save({ title: title.value }, titleRow));
+  const description = h("textarea", { rows: 3, maxlength: 600, disabled: !editable, "aria-label": tr("Cosa ci va") }, raw(folder.description || ""));
+  const descriptionRow = setRow("Cosa ci va", "Gli agenti lo leggono per decidere dove mettere le cose: finisce anche nel brain.", description, { stack: true });
+  description.addEventListener("change", () => save({ description: description.value }, descriptionRow));
+  const direct = h("label", { class: "switch" }, h("input", { type: "checkbox", checked: folder.policy === "direct", disabled: !data.canManage }), h("span", { class: "rocker" }));
+  const directRow = setRow("Pubblica subito", data.canManage ? "Spento: ogni caricamento aspetta che tu o un revisore lo approviate. Acceso: va in onda appena arriva." : "Lo decide il proprietario.", direct);
+  direct.querySelector("input").addEventListener("change", (event) => save({ policy: event.target.checked ? "direct" : "review" }, directRow));
+  const everyone = folder.writers.includes("*");
+  const writers = h("div", { class: "set-switches" },
+    h("label", { class: "switch" }, h("input", { type: "checkbox", value: "*", checked: everyone, disabled: !editable }), h("span", { class: "rocker" }), h("span", { class: "switch-text" }, "Tutti gli agenti", h("small", {}, "anche quelli che arriveranno"))),
+    S.data.agents.map((agent) => h("label", { class: "switch" }, h("input", { type: "checkbox", value: agent.id, checked: everyone || folder.writers.includes(agent.id), disabled: !editable || everyone }), h("span", { class: "rocker" }),
+      h("span", { class: "switch-text" }, raw(agent.name), agent.tools ? null : h("small", {}, "senza computer: non può caricare")))));
+  const writersRow = setRow("Chi può caricare", "Gli agenti che possono fare un commit qui.", writers, { stack: true });
+  writers.addEventListener("change", async (event) => {
+    const all = writers.querySelector('input[value="*"]');
+    const chosen = all.checked ? ["*"] : [...writers.querySelectorAll('input:not([value="*"])')].filter((input) => input.checked).map((input) => input.value);
+    if (event.target === all) for (const input of writers.querySelectorAll('input:not([value="*"])')) { input.disabled = all.checked; input.checked = all.checked || folder.writers.includes(input.value); }
+    await save({ writers: chosen }, writersRow);
+  });
+  const people = (data.people || []).filter((person) => person.role !== "owner");
+  const reviewers = !data.canManage ? null : people.length ? h("div", { class: "set-switches" }, people.map((person) => h("label", { class: "switch" },
+    h("input", { type: "checkbox", value: person.id, checked: folder.reviewers.includes(person.id) }), h("span", { class: "rocker" }),
+    h("span", { class: "switch-text" }, raw(person.name), h("small", { class: "mono" }, raw(person.email || "")))))) : h("p", { class: "muted small" }, "Nessun altro entra in questo spazio: per ora rivedi solo tu.");
+  const reviewersRow = data.canManage ? setRow("Revisori", "Oltre a te, chi può approvare o rifiutare i commit di questa cartella.", reviewers, { stack: true }) : null;
+  if (people.length) reviewers?.addEventListener("change", () => save({ reviewers: [...reviewers.querySelectorAll("input")].filter((input) => input.checked).map((input) => input.value) }, reviewersRow));
+  const removeRow = data.canManage ? setRow("Elimina la cartella", "Con tutte le versioni e i link. I file restano solo nei backup della notte.", armedButton("Elimina", "Conferma: elimina tutto", { onconfirm: async () => {
+    if (await guard(api(`/api/artifacts/folders/${folder.id}`, { method: "DELETE" }), "Cartella eliminata")) location.hash = "#/artefatti";
+  } })) : null;
+  return [
+    panel({ icon: "edit", title: "La cartella" }, setRows(titleRow, descriptionRow)),
+    panel({ icon: "shield", title: "Permessi", hint: editable ? null : "Li cambiano il proprietario e i revisori della cartella." }, setRows(directRow, writersRow, reviewersRow, removeRow)),
+  ];
+}
+
+/** One changed file, opened: the lines it lost and gained, or the two pictures side by side. */
+async function artifactChange(commit, change) {
+  const after = change.after ? `/api/artifacts/commits/${commit.id}/files/${artifactPath(change.path)}` : null;
+  const before = change.before ? `/api/artifacts/commits/${commit.id}/objects/${change.before.sha}?name=${encodeURIComponent(change.path.split("/").at(-1))}` : null;
+  const kind = artifactKind(change.path);
+  if (kind === "image") {
+    return h("div", { class: "art-compare" },
+      before ? h("figure", {}, h("figcaption", { class: "label" }, "Prima"), h("div", { class: "art-media checker" }, h("img", { src: before, alt: "" }))) : null,
+      after ? h("figure", {}, h("figcaption", { class: "label" }, change.before ? "Dopo" : "Nuovo"), h("div", { class: "art-media checker" }, h("img", { src: after, alt: "" }))) : null);
+  }
+  const small = (file) => !file || file.size <= 400 * 1024;
+  if (kind === "text" && small(change.before) && small(change.after)) {
+    const read = async (url) => {
+      if (!url) return "";
+      const response = await fetch(url, { credentials: "same-origin" });
+      if (!response.ok || !/^text\/plain/.test(response.headers.get("content-type") || "")) throw new Error("binary");
+      return response.text();
+    };
+    try {
+      const [a, b] = await Promise.all([read(before), read(after)]);
+      if (a.split("\n").length + b.split("\n").length <= 4000) return brainDiff(a, b);
+    } catch {}
+  }
+  return h("div", { class: "art-noview row" }, icon("file"),
+    h("p", { class: "grow" }, raw([change.before ? tr("prima {size}", { size: fmtBytes(change.before.size) }) : "", change.after ? tr("dopo {size}", { size: fmtBytes(change.after.size) }) : ""].filter(Boolean).join(" · "))),
+    before ? btn("Prima", { icon: "download", cls: "sm ghost", href: `${before}&download=1` }) : null,
+    after ? btn(change.before ? "Dopo" : "Scarica", { icon: "download", cls: "sm ghost", href: `${after}?download=1` }) : null);
+}
+
+async function renderArtifactCommit(folderId, commitId) {
+  const view = location.hash;
+  const slot = h("div", { class: "stack" }, panel({}, skeleton("rows", 4)));
+  shell([slot], { title: "Commit", back: `#/artefatti/${folderId}/commit` });
+  let commit;
+  try { commit = await api(`/api/artifacts/commits/${commitId}`); }
+  catch (error) { slot.replaceChildren(empty("commit", error.message, btn("Torna alla cartella", { icon: "back", href: `#/artefatti/${folderId}` }))); return; }
+  if (location.hash !== view) return;
+  const [label, cls] = ARTIFACT_STATUS[commit.status] || [commit.status, ""];
+  const waiting = commit.status === "proposed" || commit.status === "conflict";
+  const merge = commit.mergeability;
+  const note = h("textarea", { rows: 2, maxlength: 500, placeholder: tr("Una nota per chi l'ha fatto (facoltativa): la legge nella chat da cui l'ha caricato.") , "aria-label": tr("Nota") });
+  const decide = async (decision, done) => {
+    for (const button of slot.querySelectorAll(".art-decide button")) button.disabled = true;
+    const result = await guard(api(`/api/artifacts/commits/${commit.id}/review`, { method: "POST", body: { decision, note: note.value } }));
+    if (result?.conflict) toast("Non è andato in onda: gli stessi file sono cambiati nel frattempo", true);
+    else if (result) toast(done);
+    const left = await api("/api/artifacts").catch(() => null);
+    if (left) setArtifactReviews(left.reviews.length);
+    renderArtifactCommit(folderId, commitId);
+  };
+  const decideBar = waiting && commit.canReview ? panel({ icon: "check", title: "La tua decisione", hint: commit.status === "conflict" ? "Rifiutalo, o forzalo: per i file in conflitto vince questo commit." : "Approvato, va in onda subito. Rifiutato, resta nella storia con la tua nota." },
+    h("div", { class: "art-decide stack" }, note,
+      h("div", { class: "row" }, h("span", { class: "spacer" }),
+        btn("Rifiuta", { icon: "close", cls: "ghost", onclick: () => decide("reject", "Commit rifiutato") }),
+        commit.status === "conflict" ? armedButton("Forza", "Conferma: vince questo", { icon: "alert", onconfirm: () => decide("force", "In onda") }) : null,
+        commit.status === "proposed" ? btn("Approva e metti in onda", { icon: "radio", cls: "primary", onclick: () => decide("approve", "In onda") }) : null))) : null;
+  const mergeNotice = !merge ? null : merge.state === "fast-forward"
+    ? h("p", { class: "notice" }, icon("check"), h("span", {}, "Fatto sulla versione in onda: se lo approvi va in onda così com'è."))
+    : merge.state === "rebase"
+      ? h("p", { class: "notice" }, icon("layers"), h("span", {}, "Nel frattempo è andata in onda un'altra versione, ma ha toccato file diversi: le modifiche di questo commit si aggiungono sopra."))
+      : h("div", { class: "notice warn" }, icon("alert"), h("span", {}, "Gli stessi file sono cambiati anche nella versione in onda:", h("span", { class: "art-conflicts" }, merge.conflicts.map((path) => h("code", {}, raw(path))))));
+  const changes = commit.changed.map((change) => {
+    const details = h("details", { class: `art-change ${change.kind}` },
+      h("summary", {}, h("i", { class: "art-change-kind", "aria-hidden": "true" }, change.kind === "added" ? "A" : change.kind === "deleted" ? "D" : "M"),
+        h("code", { class: "grow" }, raw(change.path)),
+        h("small", {}, raw(change.kind === "added" ? tr("nuovo · {size}", { size: fmtBytes(change.after.size) }) : change.kind === "deleted" ? tr("eliminato") : `${fmtBytes(change.before.size)} → ${fmtBytes(change.after.size)}`))),
+      h("div", { class: "art-change-body" }, skeleton("rows", 1)));
+    let loaded = false;
+    details.addEventListener("toggle", async () => {
+      if (!details.open || loaded) return;
+      loaded = true;
+      details.lastChild.replaceChildren(await artifactChange(commit, change));
+    });
+    return details;
+  });
+  const deleted = commit.changed.filter((change) => change.kind === "deleted").length;
+  slot.replaceChildren(...[
+    pageHead(raw(commit.message), h("span", { class: "art-head-meta" }, h("code", {}, raw(commit.short)), badge(label, cls),
+      commit.folder ? h("a", { href: `#/artefatti/${commit.folder.id}` }, artifactPathLabel(commit.folder.path)) : null),
+      commit.previewUrl ? [btn("Apri anteprima", { icon: "external", cls: "ghost", href: commit.previewUrl, target: "_blank" })] : null),
+    h("div", { class: "art-byline" }, artifactAuthor(commit.author),
+      commit.requestedBy?.name ? h("small", {}, tr("chiesto da {name}", { name: commit.requestedBy.name })) : null,
+      h("small", {}, raw(fmtTime(new Date(commit.createdAt).toISOString(), true))), artifactCounts(commit.changes),
+      commit.supersedes ? h("small", {}, tr("sostituisce una proposta precedente")) : null),
+    commit.review ? h("p", { class: `notice${commit.status === "rejected" ? " warn" : ""}` }, icon(commit.status === "rejected" ? "close" : "check"),
+      h("span", {}, tr(commit.review.decision === "reject" ? "Rifiutato da {name}" : commit.review.decision === "force" ? "Forzato in onda da {name}" : "Approvato da {name}", { name: commit.review.by?.name || "?" }),
+        raw(` · ${fmtTime(new Date(commit.review.at).toISOString(), true)}`), commit.review.note ? h("q", { class: "art-review-note" }, raw(commit.review.note)) : null)) : null,
+    mergeNotice,
+    decideBar,
+    panel({ icon: "layers", title: tr("Cosa cambia"), hint: commit.comparedWith ? tr("Rispetto alla versione {id}.", { id: commit.comparedWith.replace(/^ac_/, "").slice(0, 7) }) : tr("È il primo commit della cartella."),
+      actions: deleted ? badge(tr("{count} eliminati", { count: deleted }), "err", "trash") : null },
+      changes.length ? h("div", { class: "art-changes" }, changes) : empty("check", "Nessun file cambiato.")),
+    panel({ icon: "file", title: tr("Tutti i file ({count})", { count: commit.tree.length }) },
+      h("details", { class: "art-alltree" }, h("summary", {}, tr("Mostra l'elenco")), h("ul", {}, commit.tree.map((file) => h("li", {}, h("code", {}, raw(file.path)), h("small", {}, raw(fmtBytes(file.size))))))))].filter(Boolean));
+}
+
 function renderContext() {
   const body = h("div", { class: "context-browser" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
   let selectedId = route()[1] || "owner";
@@ -3995,7 +4526,7 @@ function instanceAccessPanel() {
         btn("", { icon: "close", cls: "ghost", title: tr("Rimuovi {value}", { value }), onclick: () => update(() => api("/api/access", { method: "PUT", body: { [kind]: data[kind].filter((entry) => entry !== value) } })) })))
         : h("li", { class: "access-no-rules" }, kind === "domains" ? "Nessun dominio autorizzato." : "Nessun indirizzo aggiunto.")));
   };
-  const actions = { "sign-in": "Accesso effettuato", settings: "Impostazioni aggiornate", agent: "Agente modificato", message: "Messaggio inviato", connections: "Collegamenti aggiornati", "access-policy": "Accessi aggiornati", context: "Contesto aggiornato" };
+  const actions = { "sign-in": "Accesso effettuato", settings: "Impostazioni aggiornate", agent: "Agente modificato", message: "Messaggio inviato", connections: "Collegamenti aggiornati", "access-policy": "Accessi aggiornati", context: "Contesto aggiornato", artifacts: "Artefatti aggiornati" };
   function draw() {
     const users = h("div", { class: "access-users" }, data.users.map((user) => h("div", { class: "access-user" },
       h("span", { class: "access-user-mark", "aria-hidden": "true" }, icon(user.role === "owner" ? "shield" : "user")),
@@ -4710,6 +5241,7 @@ async function render() {
   else if (page === "archivio") renderRoutineArchive();
   else if (page === "contesto") renderContext();
   else if (page === "brain") renderBrain();
+  else if (page === "artefatti") renderArtifacts();
   else if (page === "settings") renderSettings();
   else if (page === "salotto") renderSalotto();
   else renderAgents();
@@ -4719,7 +5251,7 @@ document.documentElement.lang = LANG;
 document.title = "Cora · Computer-Operating Resident Agents";
 
 /** While the state loads, the page being opened in outline: its own name, not always the agents page. */
-const BOOT_TITLES = { agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", settings: "Impostazioni", archivio: "Archivio" };
+const BOOT_TITLES = { agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", settings: "Impostazioni", archivio: "Archivio" };
 
 function bootSkeleton() {
   const [section] = route();

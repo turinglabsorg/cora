@@ -4,7 +4,205 @@ import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const OUTPUT_LIMIT = 24000;
+
+/**
+ * Lists a file or a folder under /home/agent/work for a push: one JSON line per
+ * regular file with its size and sha256, symlinks and special files skipped, the
+ * usual clutter ignored, and anything that looks like a secret refused by name.
+ */
+const MANIFEST_SCRIPT = String.raw`import hashlib,json,os,re,stat,sys
+WORK='/home/agent/work'
+SKIP={'.git','node_modules','__pycache__','.DS_Store','.cora-artifact.json'}
+SECRET_NAME=re.compile(r'^(\.env(\..*)?|.*\.(pem|key|p12|pfx|keystore|jks)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.htpasswd)$',re.I)
+SECRET_DIRS={'.ssh','.aws','.gnupg','.docker','.kube'}
+LIMIT=int(sys.argv[2])
+def out(o): sys.stdout.write(json.dumps(o)+'\n')
+if os.path.islink(WORK): sys.exit('/home/agent/work must not be a symlink')
+work=os.path.realpath(WORK)
+target=sys.argv[1]
+if os.path.islink(target): sys.exit('the path is a symlink: give the real file or folder')
+real=os.path.realpath(target)
+if real==work or not real.startswith(work+os.sep): sys.exit('choose a file or a folder inside /home/agent/work, not the whole work folder')
+if not os.path.exists(real): sys.exit('no such file or folder: '+target)
+count=0
+def add(full,rel):
+  global count
+  try: fd=os.open(full,os.O_RDONLY|os.O_NOFOLLOW)
+  except OSError: out({'skip':rel,'why':'unreadable'}); return
+  try:
+    st=os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode): out({'skip':rel,'why':'not a regular file'}); return
+    count+=1
+    if count>LIMIT: out({'limit':'files'}); sys.exit(0)
+    h=hashlib.sha256(); n=0
+    while True:
+      b=os.read(fd,1<<20)
+      if not b: break
+      h.update(b); n+=len(b)
+    out({'p':rel,'s':n,'h':h.hexdigest()})
+  finally: os.close(fd)
+def walk(path,rel):
+  with os.scandir(path) as it: entries=sorted(it,key=lambda e:e.name)
+  for e in entries:
+    r=rel+'/'+e.name if rel else e.name
+    if e.name in SKIP: out({'skip':r,'why':'ignored'}); continue
+    if e.is_symlink(): out({'skip':r,'why':'symlink'}); continue
+    if e.is_dir(follow_symlinks=False):
+      if e.name in SECRET_DIRS: out({'refuse':r+'/','why':'secret folder'}); continue
+      walk(e.path,r)
+    elif e.is_file(follow_symlinks=False):
+      if SECRET_NAME.match(e.name): out({'refuse':r,'why':'secret file'}); continue
+      add(e.path,r)
+    else: out({'skip':r,'why':'not a regular file'})
+st=os.lstat(real)
+if stat.S_ISDIR(st.st_mode):
+  marker=None
+  mp=os.path.join(real,'.cora-artifact.json')
+  if os.path.isfile(mp) and not os.path.islink(mp) and os.path.getsize(mp)<4096:
+    try:
+      with open(mp) as f: marker=json.load(f)
+    except Exception: marker=None
+  out({'kind':'dir','root':os.path.relpath(real,work),'marker':marker})
+  walk(real,'')
+elif stat.S_ISREG(st.st_mode):
+  name=os.path.basename(real)
+  parent=os.path.dirname(real)
+  out({'kind':'file','root':'' if parent==work else os.path.relpath(parent,work)})
+  if SECRET_NAME.match(name): out({'refuse':name,'why':'secret file'})
+  else: add(real,name)
+else: sys.exit('not a file or a folder: '+target)
+`;
+
+/**
+ * Streams the files Cora asked for, in order, each as an 8-byte length and its
+ * bytes, hashing as it goes: a file that changed since it was listed stops the push.
+ */
+const SEND_SCRIPT = String.raw`import hashlib,json,os,struct,sys
+WORK='/home/agent/work'
+work=os.path.realpath(WORK)
+root=os.path.realpath(os.path.join(work,sys.argv[1])) if sys.argv[1] else work
+if not (root==work or root.startswith(work+os.sep)): sys.exit('the folder left /home/agent/work')
+wanted=json.loads(sys.stdin.buffer.read())
+outb=sys.stdout.buffer
+for rel,size,sha in wanted:
+  full=os.path.join(root,rel)
+  if not os.path.realpath(full).startswith(root+os.sep): sys.exit('a path left the folder: '+rel)
+  fd=os.open(full,os.O_RDONLY|os.O_NOFOLLOW)
+  try:
+    if os.fstat(fd).st_size!=size: sys.exit('changed while pushing: '+rel)
+    outb.write(struct.pack('>Q',size))
+    h=hashlib.sha256(); n=0
+    while n<size:
+      b=os.read(fd,min(1<<20,size-n))
+      if not b: break
+      h.update(b); outb.write(b); n+=len(b)
+    if n!=size or h.hexdigest()!=sha: sys.exit('changed while pushing: '+rel)
+  finally: os.close(fd)
+outb.flush()
+`;
+
+/**
+ * Writes a folder's files under /home/agent/work/artifacts/<dest>, walking every
+ * directory by descriptor without following links; a folder that already holds
+ * files is replaced only when asked. The marker remembers which commit this is.
+ */
+const CHECKOUT_SCRIPT = String.raw`import json,os,shutil,stat,struct,sys
+inp=sys.stdin.buffer
+head=json.loads(inp.readline())
+def opendir(parent,name):
+  try: os.mkdir(name,0o755,dir_fd=parent)
+  except FileExistsError: pass
+  return os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+fd=os.open('/home/agent',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+for part in ['work','artifacts']+head['dest'].split('/'):
+  child=opendir(fd,part); os.close(fd); fd=child
+existing=os.listdir(fd)
+if existing:
+  if not head.get('overwrite'): sys.exit('/home/agent/work/artifacts/'+head['dest']+' already has files: pull again with overwrite to replace them')
+  for name in existing:
+    if stat.S_ISDIR(os.lstat(name,dir_fd=fd).st_mode): shutil.rmtree(name,dir_fd=fd)
+    else: os.unlink(name,dir_fd=fd)
+for path,size in head['files']:
+  parts=path.split('/')
+  d=os.dup(fd)
+  for part in parts[:-1]:
+    child=opendir(d,part); os.close(d); d=child
+  (n,)=struct.unpack('>Q',inp.read(8))
+  if n!=size: sys.exit('bad frame for '+path)
+  with os.fdopen(os.open(parts[-1],os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o644,dir_fd=d),'wb') as w:
+    left=n
+    while left:
+      b=inp.read(min(1<<20,left))
+      if not b: sys.exit('the stream ended early')
+      w.write(b); left-=len(b)
+  os.close(d)
+with os.fdopen(os.open('.cora-artifact.json',os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o644,dir_fd=fd),'w') as w: json.dump(head['marker'],w)
+os.close(fd)
+sys.stdout.write(json.dumps({'path':'/home/agent/work/artifacts/'+head['dest'],'files':len(head['files'])})+'\n')
+`;
 const BROWSER_SECCOMP = fileURLToPath(new URL("../box/seccomp.json", import.meta.url));
+
+/**
+ * A child whose output is handed over as it comes, for transfers too large to
+ * hold: stopped when it is silent for idleMs or runs past timeoutMs. `input` is a
+ * Buffer or an async iterable of Buffers written with backpressure.
+ */
+export function streamProcess(command, args, { input, onData = () => {}, timeoutMs = 600000, idleMs = 120000 } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const stderr = [];
+    let stopped = "";
+    let failure = null;
+    const stop = (why) => {
+      if (!stopped) stopped = why;
+      child.kill("SIGKILL");
+    };
+    const total = setTimeout(() => stop("timed out"), timeoutMs);
+    let idle = setTimeout(() => stop("stalled"), idleMs);
+    child.stdout.on("data", (chunk) => {
+      clearTimeout(idle);
+      idle = setTimeout(() => stop("stalled"), idleMs);
+      try {
+        onData(chunk);
+      } catch (error) {
+        failure = error;
+        stop("refused");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.reduce((sum, item) => sum + item.length, 0) < 64 * 1024) stderr.push(chunk);
+    });
+    child.stdin.on("error", () => {});
+    child.on("error", (error) => {
+      clearTimeout(total);
+      clearTimeout(idle);
+      resolve({ code: -1, stderr: error.message, stopped, error: failure });
+    });
+    child.on("close", (code) => {
+      clearTimeout(total);
+      clearTimeout(idle);
+      resolve({ code, stderr: Buffer.concat(stderr).toString("utf8"), stopped, error: failure });
+    });
+    if (input === undefined) child.stdin.end();
+    else if (Buffer.isBuffer(input) || typeof input === "string") child.stdin.end(input);
+    else (async () => {
+      try {
+        for await (const chunk of input) {
+          if (!child.stdin.write(chunk)) await new Promise((done) => child.stdin.once("drain", done));
+        }
+      } catch (error) {
+        failure = error;
+        stop("refused");
+      }
+      child.stdin.end();
+    })();
+  });
+}
+
+/** The last line a script wrote to stderr: its own reason, not Python's traceback. */
+function lastLine(text, fallback) {
+  return String(text || "").trim().split("\n").at(-1).slice(0, 300) || fallback;
+}
 
 export function runProcess(command, args, { input, timeoutMs = 60000, maxBytes = 20 * 1024 * 1024 } = {}) {
   return new Promise((resolve) => {
@@ -283,6 +481,99 @@ export class Boxes {
     if (result.code !== 0) throw new Error(result.stderr.trim().slice(0, 200) || `cannot read ${path}`);
     if (result.truncated) throw new Error(`file larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
     return result.stdout;
+  }
+
+  /**
+   * What a push would send: `{kind, root, marker, files: [{path, size, sha256}], skipped, refused, tooMany}`.
+   * The listing is only a claim: Cora checks every path and size itself.
+   */
+  async artifactManifest(agentId, path, { maxFiles = 5000 } = {}) {
+    if (posix.normalize(String(path)).replace(/\/+$/, "") === "/home/agent/work") throw new Error("choose a file or a folder inside /home/agent/work, not the whole work folder");
+    if (!String(path).startsWith("/home/agent/work/")) throw new Error("push a file or a folder inside /home/agent/work");
+    const result = await runProcess(this.docker, this.execArgs(agentId, ["python3", "-c", MANIFEST_SCRIPT, String(path), String(maxFiles)]), { timeoutMs: 300000, maxBytes: 16 * 1024 * 1024 });
+    if (result.code !== 0 || result.truncated) throw new Error(result.truncated ? "the file list is too long" : lastLine(result.stderr, "cannot list the files"));
+    const lines = result.stdout.toString("utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const head = lines.shift();
+    if (!head?.kind) throw new Error("cannot list the files");
+    const manifest = { kind: head.kind, root: String(head.root || ""), marker: head.marker || null, files: [], skipped: [], refused: [], tooMany: false };
+    for (const line of lines) {
+      if (line.limit) manifest.tooMany = true;
+      else if (line.skip !== undefined) manifest.skipped.push({ path: String(line.skip), why: String(line.why || "") });
+      else if (line.refuse !== undefined) manifest.refused.push({ path: String(line.refuse), why: String(line.why || "") });
+      else manifest.files.push({ path: String(line.p), size: Number(line.s), sha256: String(line.h) });
+    }
+    return manifest;
+  }
+
+  /**
+   * Streams the listed files out of the desktop: `open(index)` returns a writer
+   * `{write(chunk), end()}` for each file in turn. A file that changed since the
+   * listing, or a writer that refuses, stops the transfer.
+   */
+  async artifactSend(agentId, root, files, open) {
+    let index = -1;
+    let left = 0;
+    let header = Buffer.alloc(0);
+    let writer = null;
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    const onData = (chunk) => {
+      let offset = 0;
+      while (offset < chunk.length) {
+        if (!writer) {
+          const need = 8 - header.length;
+          header = Buffer.concat([header, chunk.subarray(offset, offset + need)]);
+          offset += Math.min(need, chunk.length - offset);
+          if (header.length < 8) return;
+          index += 1;
+          left = Number(header.readBigUInt64BE(0));
+          header = Buffer.alloc(0);
+          if (index >= files.length || left !== files[index].size) throw new Error("the desktop sent an unexpected file");
+          writer = open(index);
+          if (!left) {
+            writer.end();
+            writer = null;
+          }
+          continue;
+        }
+        const piece = chunk.subarray(offset, offset + left);
+        writer.write(piece);
+        offset += piece.length;
+        left -= piece.length;
+        if (!left) {
+          writer.end();
+          writer = null;
+        }
+      }
+    };
+    const result = await streamProcess(this.docker, this.execArgs(agentId, ["python3", "-c", SEND_SCRIPT, String(root)]), {
+      input: Buffer.from(JSON.stringify(files.map((file) => [file.path, file.size, file.sha256]))), onData,
+      timeoutMs: 120000 + Math.ceil(total / (2 * 1024 * 1024)) * 1000, idleMs: 120000,
+    });
+    if (result.error) throw result.error;
+    if (result.code !== 0) throw new Error(result.stopped && result.stopped !== "refused" ? `the transfer ${result.stopped}` : lastLine(result.stderr, "the transfer failed"));
+    if (index !== files.length - 1 || writer) throw new Error("the transfer ended early");
+  }
+
+  /** Writes files (`[{path, size, read(): AsyncIterable<Buffer>}]`) into /home/agent/work/artifacts/<dest>. */
+  async artifactCheckout(agentId, dest, files, { marker, overwrite = false } = {}) {
+    if (!/^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/.test(dest)) throw new Error("invalid destination");
+    async function* frames() {
+      yield Buffer.from(`${JSON.stringify({ dest, overwrite, marker, files: files.map((file) => [file.path, file.size]) })}\n`);
+      for (const file of files) {
+        const size = Buffer.alloc(8);
+        size.writeBigUInt64BE(BigInt(file.size));
+        yield size;
+        for await (const chunk of file.read()) yield chunk;
+      }
+    }
+    let output = "";
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    const result = await streamProcess(this.docker, this.execArgs(agentId, ["python3", "-c", CHECKOUT_SCRIPT]), {
+      input: frames(), onData: (chunk) => { output += chunk.toString("utf8"); }, timeoutMs: 120000 + Math.ceil(total / (2 * 1024 * 1024)) * 1000,
+    });
+    if (result.error) throw result.error;
+    if (result.code !== 0) throw new Error(lastLine(result.stderr, "the pull failed"));
+    return JSON.parse(output.trim().split("\n").at(-1));
   }
 
   async shareFile(sourceId, recipientId, path) {

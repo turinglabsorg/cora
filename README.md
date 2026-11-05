@@ -65,6 +65,41 @@ web panel (password, PWA) ──► REST API + live events (SSE) + noVNC proxy +
 - **Upgrades:** the deploy rebuilds the desktop image only when `box/` changes, and Cora recreates outdated desktops when it starts. The home (`cora-home-<id>`) and system (`cora-sys-<id>`: Tailscale state, SSH host keys) volumes survive.
 - Desktop tools (`shell`, `screenshot`, `computer`, `open_url`, `send_file`, routine tools) are available only when the owner started the conversation, or inside a routine.
 
+## Artifacts
+
+What the agents make on their computers and has to be kept or shown (a report, a folder of files, a whole website) goes into **artifact folders** on the Cora server, versioned like git.
+
+- **Folders.** Each has a path (`clienti/acme/sito`), a title and a line on what goes in it.
+  - An agent never picks a new folder on its own. `artifact_folders` and the brain say where things go. When nothing fits, it asks the person who asked, proposing a path.
+  - It creates the folder (`artifact_push` with `create`) only after that person confirms, and only in a turn a person started.
+  - One approved brain page, `artefatti`, lists the folders and what goes in each. It is rewritten when a folder is created, changed or removed, so every agent's brain search knows where things go.
+- **Commits.** `artifact_push` sends a file or a folder from `/home/agent/work`.
+  - The desktop lists its files with their sha256, and only what this folder does not hold yet travels, streamed and checked.
+  - A push merges: it adds and overwrites. `mirror` also deletes.
+  - Files that look like secrets by name (`.env`, keys, `id_rsa`…) never leave the desktop, and a file with a token or a private key inside is refused. Symlinks, `.git` and `node_modules` are skipped.
+  - Limits: 5000 files, 100 MB per file, 500 MB per push, and the instance quota (`settings.artifactQuotaBytes`, 20 GB by default).
+- **Review.**
+  - In a folder with review (every folder an agent creates), a commit stays *proposed* until the owner or one of the folder's reviewers approves it. Then it goes on air.
+  - A proposal made on an older version is laid over the new one when the two touched different files. It is a *conflict* when both changed the same file, and the reviewer either rejects it or forces it.
+  - A rejected commit stays in the history with the reviewer's note, and any published version can be restored.
+  - The agent's receipt says PROPOSED or PUBLISHED. Cora posts a passive notice in the conversation the push came from, and the owner gets a push notification.
+- **Pull.** `artifact_pull` writes a folder's served version onto a desktop, in `/home/agent/work/artifacts/<path>`, so an agent can continue another's work and push it back.
+- **Sharing, never public.** A folder can be opened to people outside the space through a link with an address of its own, `<label>--<space>.usecora.space`.
+  - **What it serves.** The served version, or a pinned one. It shows as a site (index pages, clean URLs, `404.html`) or as a list of files, where pages and scripts download instead of running.
+  - **Who gets in.** Only the addresses and company domains the link names, or the people of the space.
+  - **How a visitor gets in.** They prove who they are at usecora.space, with Google or with a sign-in link sent by email through Cora's ambox mailbox, then the space checks its own list and sets a cookie for that host alone.
+  - **What counts for a whole domain.** A domain grant counts with Google only for that domain's Workspace accounts. Otherwise the mailbox has to receive the link. Webmail domains cannot be granted whole.
+  - **Changing access.** Narrowing a link's access, letting it expire or revoking it closes it for everyone already in.
+  - **Requests from agents.** An agent can only ask for a link (`artifact_share_request`), and the owner or a folder reviewer turns it on.
+  - **Commit previews.** A reviewer opens a proposed commit on an address of its own (`p-<commit>--<space>`), so a site is seen as it will be.
+- **The panel.** **Artefatti** shows:
+  - the folders by group, with what waits for review;
+  - each folder's files with a preview;
+  - its commits, like takes on a tape, with the one on air lit;
+  - each commit's changes as a diff.
+
+  Files are shown inert on the panel's address: pictures and media as they are, text as text, everything else as a download. Nothing an agent made ever runs there.
+
 ## Memory
 
 | Layer | What | When it is used |

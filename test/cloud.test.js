@@ -6,7 +6,7 @@ import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { createCloud } from "../cloud/src/app.js";
-import { CloudStore } from "../cloud/src/store.js";
+import { CloudStore, validSlug } from "../cloud/src/store.js";
 import { verifyPass } from "../src/pass.js";
 import { tempHome, waitFor } from "./helpers.js";
 
@@ -550,5 +550,179 @@ describe("waitlist Discord webhook", () => {
     assert.equal(f.store.waitlist()[0].email, "malformed@example.com");
     assert.ok(!JSON.stringify(f.events).includes("test-private-path"));
     assert.equal(f.received.length, 0);
+  });
+});
+
+describe("shared folders: <label>--<space> hosts and their way in", () => {
+  let shareCloud;
+  let sharePort;
+  let shareOrigin;
+  let shareStore;
+  let space;
+  let ambox;
+  const mails = [];
+  const asked = [];
+  const shareLogs = [];
+  const decode = (pass) => JSON.parse(Buffer.from(String(pass).split(".")[0], "base64url").toString("utf8"));
+  const call = (path, { host = DOMAIN, method = "GET", headers = {}, body } = {}) => new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port: sharePort, method, path, headers: { host: `${host}:${sharePort}`, ...headers } }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+  const form = (fields) => ({ method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: shareOrigin }, body: new URLSearchParams(fields).toString() });
+
+  before(async () => {
+    // The space answers who may open its shares; ambox takes the mail.
+    space = http.createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        if (req.url === "/api/cloud/share-access") {
+          const fields = decode(JSON.parse(Buffer.concat(chunks).toString("utf8")).pass);
+          asked.push(fields);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ allowed: fields.email.endsWith("@cliente.test"), title: "Report Q3", language: "it" }));
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ host: req.headers.host, path: req.url }));
+      });
+    });
+    ambox = http.createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        mails.push({ auth: req.headers.authorization, path: req.url, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message_id: "m1" }));
+      });
+    });
+    await Promise.all([space, ambox].map((server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))));
+    shareStore = new CloudStore(tempHome());
+    const owner = shareStore.createAccount({ name: "Owner" });
+    shareStore.addSpace({ slug: "acme", accountId: owner.id, upstream: `http://127.0.0.1:${space.address().port}` });
+    shareStore.addSpace({ slug: "onprem", accountId: owner.id, upstream: "http://127.0.0.1:9", publicUrl: "https://cora.customer.test" });
+    const probe = net.createServer();
+    await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    sharePort = probe.address().port;
+    await new Promise((resolve) => probe.close(resolve));
+    shareOrigin = `http://${DOMAIN}:${sharePort}`;
+    shareCloud = createCloud({
+      config: {
+        domain: DOMAIN, publicOrigin: shareOrigin, seed: SEED, insecureCookies: true,
+        clients: { google: { id: "google-id", secret: "google-secret" } },
+        mail: { url: `http://127.0.0.1:${ambox.address().port}`, key: "ambox-test-key" },
+      },
+      store: shareStore, endpoints: providers.endpoints, log: (event) => shareLogs.push(event),
+    });
+    await new Promise((resolve) => shareCloud.server.listen(sharePort, "127.0.0.1", resolve));
+  });
+
+  after(async () => {
+    shareCloud.server.closeAllConnections();
+    await new Promise((resolve) => shareCloud.server.close(resolve));
+    for (const server of [space, ambox]) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
+    shareStore.close();
+  });
+
+  test("a share host reaches its space with the Host kept; a space on its own domain, or none, has no shares", async () => {
+    const proxied = await call("/docs?x=1", { host: "report--acme.usecora.test" });
+    assert.equal(proxied.status, 200);
+    assert.deepEqual(JSON.parse(proxied.body), { host: `report--acme.usecora.test:${sharePort}`, path: "/docs?x=1" });
+    assert.equal((await call("/", { host: "report--nope.usecora.test" })).status, 404);
+    const onprem = await call("/", { host: "report--onprem.usecora.test" });
+    assert.equal(onprem.status, 404);
+    assert.equal(onprem.headers.location, undefined, "never a redirect to the customer's own domain");
+    assert.equal(validSlug("share"), false);
+    assert.equal(validSlug("p"), false);
+  });
+
+  test("Google opens a share with a pass for that host alone, and keeps nothing here", async () => {
+    const before = shareStore.db.prepare("SELECT count(*) AS n FROM accounts").get().n;
+    assert.equal((await call("/share?to=evil.example.com")).status, 404);
+    const gate = await call(`/share?${new URLSearchParams({ to: "report--acme.usecora.test", next: "/docs" })}`, { headers: { "accept-language": "it-IT,it;q=0.9" } });
+    assert.equal(gate.status, 200);
+    assert.match(gate.body, /<html lang="it">/);
+    assert.match(gate.body, /Apri una cartella condivisa/);
+    assert.match(gate.body, /auth\/google\?share=report--acme\.usecora\.test&amp;next=%2Fdocs/);
+    const google = async (user) => {
+      const start = await call(`/auth/google?${new URLSearchParams({ share: "report--acme.usecora.test", next: "/docs" })}`);
+      assert.equal(start.status, 302);
+      const to = new URL(start.headers.location);
+      const code = `code_${Math.random().toString(36).slice(2)}`;
+      providers.approve(code, { provider: "google", challenge: to.searchParams.get("code_challenge"), user });
+      return call(`/auth/google/callback?code=${code}&state=${to.searchParams.get("state")}`, { headers: { cookie: (start.headers["set-cookie"] || [])[0].split(";")[0] } });
+    };
+    const back = await google({ sub: "g-boss", email: "Boss@Cliente.test", email_verified: true, name: "Boss", hd: "cliente.test" });
+    assert.equal(back.status, 302);
+    const into = new URL(back.headers.location);
+    assert.equal(into.host, "report--acme.usecora.test");
+    assert.equal(into.pathname, "/_cora/auth");
+    assert.equal(into.searchParams.get("next"), "/docs");
+    const fields = verifyPass(shareCloud.publicKey, into.searchParams.get("pass"), { audience: "share:report--acme.usecora.test" });
+    assert.equal(fields.email, "boss@cliente.test");
+    assert.equal(fields.via, "google");
+    assert.equal(fields.hd, "cliente.test");
+    assert.ok(!(back.headers["set-cookie"] || []).some((line) => line.startsWith("cora_cloud=")), "no cloud session for a visitor");
+    assert.equal(shareStore.db.prepare("SELECT count(*) AS n FROM accounts").get().n, before, "no account for a visitor");
+    const unverified = await google({ sub: "g-x", email: "x@cliente.test", email_verified: false });
+    assert.match(unverified.headers.location, /\/share\?to=report--acme\.usecora\.test&next=%2Fdocs&error=unverified/);
+    assert.equal((await call(`/auth/github?${new URLSearchParams({ share: "report--acme.usecora.test" })}`)).status, 404, "only Google opens a share");
+  });
+
+  test("a sign-in link goes out only to an address the space lets in, works once, and a mail scanner cannot use it", async () => {
+    const sent = (email) => call("/share/email", form({ to: "report--acme.usecora.test", next: "/docs", email }));
+    const yes = await sent("Giulia@Cliente.test");
+    const no = await sent("mario@other.test");
+    assert.equal(yes.status, 200);
+    assert.equal(no.status, 200);
+    assert.equal(yes.body.replace(/giulia@cliente\.test/g, "X"), no.body.replace(/mario@other\.test/g, "X"), "the visitor sees the same answer either way");
+    await waitFor(() => mails.length === 1, { what: "the mail" });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(mails.length, 1, "no mail for an address the space does not let in");
+    assert.equal(mails[0].auth, "Bearer ambox-test-key");
+    assert.equal(mails[0].path, "/v1/send");
+    assert.deepEqual(mails[0].body.to, ["giulia@cliente.test"]);
+    assert.match(mails[0].body.subject, /Il tuo link per aprire Report Q3/);
+    assert.deepEqual(asked.map((fields) => [fields.aud, fields.host, fields.email]), [
+      ["share-access:acme.usecora.test", "report--acme.usecora.test", "giulia@cliente.test"],
+      ["share-access:acme.usecora.test", "report--acme.usecora.test", "mario@other.test"],
+    ]);
+    const link = /http:\/\/[^\s]+\/share\/email\/([A-Za-z0-9_-]{43})/.exec(mails[0].body.body_text);
+    assert.ok(link, "the mail carries the link");
+    assert.ok(!shareLogs.some((event) => JSON.stringify(event).includes("giulia")), "no address in the cloud's logs");
+    const path = `/share/email/${link[1]}`;
+    for (let i = 0; i < 2; i += 1) {
+      const scanned = await call(path);
+      assert.equal(scanned.status, 200, "opening the link only shows a button");
+      assert.match(scanned.headers["content-security-policy"], /form-action 'self' http:\/\/report--acme\.usecora\.test/);
+    }
+    assert.equal((await call(path, { method: "POST", headers: { Origin: "http://evil.test" } })).status, 403);
+    const opened = await call(path, { method: "POST", headers: { Origin: shareOrigin } });
+    assert.equal(opened.status, 302);
+    const into = new URL(opened.headers.location);
+    const fields = verifyPass(shareCloud.publicKey, into.searchParams.get("pass"), { audience: "share:report--acme.usecora.test" });
+    assert.deepEqual([fields.email, fields.via, into.searchParams.get("next")], ["giulia@cliente.test", "email", "/docs"]);
+    assert.equal((await call(path, { method: "POST", headers: { Origin: shareOrigin } })).status, 410, "a link works once");
+    assert.equal((await call("/share/email/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).status, 410);
+
+    const bot = await call("/share/email", form({ to: "report--acme.usecora.test", email: "giulia@cliente.test", website: "http://spam" }));
+    assert.equal(bot.status, 200);
+    assert.equal(asked.length, 2, "a bot filling the hidden field asks nobody");
+    await sent("giulia@cliente.test");
+    await sent("giulia@cliente.test");
+    const busy = await sent("giulia@cliente.test");
+    assert.equal(busy.status, 302);
+    assert.match(busy.headers.location, /error=busy/, "three links an address in ten minutes");
+  });
+
+  test("signing out of the cloud happens only on a page of its own, not from an image or a form elsewhere", async () => {
+    assert.equal((await call("/logout", { headers: { "sec-fetch-dest": "image" } })).status, 403);
+    assert.equal((await call("/logout", { method: "POST", headers: { Origin: "http://report--acme.usecora.test" } })).status, 403);
+    assert.equal((await call("/logout", { headers: { "sec-fetch-dest": "document" } })).status, 302);
   });
 });

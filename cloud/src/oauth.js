@@ -87,6 +87,8 @@ export class OAuth {
       name: String(user.name || ""),
       avatar: String(user.picture || ""),
       login: "",
+      // The Workspace domain the account belongs to: a company address on a personal account has none.
+      hd: String(user.hd || "").toLowerCase(),
     };
   }
 

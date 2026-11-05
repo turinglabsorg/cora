@@ -91,8 +91,9 @@ export function nextRuns(expression, timezone, count = 3, from = new Date()) {
 }
 
 export class Scheduler {
-  constructor({ store, orchestrator, brain, librarian = null, companyBrain = null, backups = "", timezone, tickMs, log }) {
+  constructor({ store, orchestrator, brain, librarian = null, companyBrain = null, artifacts = null, backups = "", timezone, tickMs, log }) {
     this.librarian = librarian;
+    this.artifacts = artifacts;
     this.companyBrain = companyBrain;
     this.backups = backups;
     this.store = store;
@@ -116,6 +117,15 @@ export class Scheduler {
 
   async nightly(day) {
     if (this.backups) await this.backup(day);
+    // Artifact files nothing points at any more, once no kept backup can need them.
+    if (this.artifacts) {
+      try {
+        const removed = this.artifacts.collect();
+        if (removed) this.log({ type: "artifact", text: `artefatti: ${removed} file non più usati eliminati` });
+      } catch (error) {
+        this.log({ type: "error", text: `artefatti: pulizia: ${error.message}` });
+      }
+    }
     if (this.librarian) await this.librarian.run({ reason: "notte" });
   }
 

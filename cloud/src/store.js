@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS requests (
 export const PROVIDERS = ["google", "github"];
 /** A space name: a DNS label people can type, not one of ours. */
 export const SLUG = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/;
-const RESERVED = new Set(["www", "api", "app", "admin", "auth", "login", "mail", "status", "docs", "help", "cloud", "cora", "up", "static", "assets"]);
+const RESERVED = new Set(["www", "api", "app", "admin", "auth", "login", "mail", "status", "docs", "help", "cloud", "cora", "up", "static", "assets", "share", "preview", "send", "p"]);
 
 export function validSlug(slug) {
   return SLUG.test(String(slug || "")) && !RESERVED.has(slug) && !slug.includes("--");
@@ -82,12 +82,34 @@ export class CloudStore {
       account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
       last_entered INTEGER NOT NULL, PRIMARY KEY(slug,account_id)
     )`);
+    // Sign-in links sent by email to open a share: only a hash of each, used once, gone after a while.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS share_links (
+      token_hash TEXT PRIMARY KEY, host TEXT NOT NULL, next TEXT NOT NULL, email TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER
+    )`);
     this.statements = new Map();
   }
 
   stmt(sql) {
     if (!this.statements.has(sql)) this.statements.set(sql, this.db.prepare(sql));
     return this.statements.get(sql);
+  }
+
+  addShareLink({ hash, host, next, email, expiresAt }) {
+    this.stmt("DELETE FROM share_links WHERE expires_at < ?").run(Date.now() - 86400000);
+    this.stmt("INSERT INTO share_links (token_hash, host, next, email, expires_at) VALUES (?, ?, ?, ?, ?)").run(hash, host, next, String(email).toLowerCase(), expiresAt);
+  }
+
+  /** A link still good to use, without using it: what the confirmation page shows. */
+  shareLink(hash) {
+    const row = this.stmt("SELECT host, next, email FROM share_links WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?").get(hash, Date.now());
+    return row ? { host: row.host, next: row.next, email: row.email } : null;
+  }
+
+  /** Uses a link once: a second try, or a late one, finds nothing. */
+  takeShareLink(hash) {
+    const link = this.shareLink(hash);
+    if (!link) return null;
+    return this.stmt("UPDATE share_links SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?").run(Date.now(), hash, Date.now()).changes === 1 ? link : null;
   }
 
   close() {

@@ -4,6 +4,7 @@ import http from "node:http";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { passKeys, signPass } from "../../src/pass.js";
+import { createMailer } from "./mail.js";
 import { OAuth, pkce } from "./oauth.js";
 import { proxyRequest, proxyUpgrade } from "./proxy.js";
 import { PROVIDERS } from "./store.js";
@@ -24,6 +25,9 @@ const TYPES = {
 const SESSION_DAYS = 30;
 const WAITLIST_PER_MINUTE = 20;
 const OAUTH_MINUTES = 10;
+const SHARE_LINK_MINUTES = 15;
+// Sign-in links by email: per address, per visitor, per shared folder, and for the whole day.
+const SHARE_LIMITS = { email: [3, 10 * 60000], ip: [10, 10 * 60000], host: [40, 3600000], day: [500, 86400000] };
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
@@ -189,6 +193,35 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
     }).catch((error) => log({ type: "notify-failed", space: space.slug, error: error.message }));
   };
   const joins = [];
+  const mailer = createMailer({ ...(config.mail || {}), log });
+  const sent = new Map();
+  /** Whether one more sign-in link may go out for this key; counts it when it may. */
+  const allowSend = (kind, key) => {
+    const [limit, windowMs] = SHARE_LIMITS[kind];
+    const now = Date.now();
+    const times = (sent.get(`${kind}:${key}`) || []).filter((at) => now - at < windowMs);
+    if (times.length >= limit) return false;
+    times.push(now);
+    sent.set(`${kind}:${key}`, times);
+    return true;
+  };
+  /** A share's host as people reach it: <label>--<space>.<domain>, the space proxied here. */
+  const shareTarget = (value) => {
+    const host = String(value || "").toLowerCase();
+    if (!host.endsWith(`.${domain}`)) return null;
+    const label = host.slice(0, -domain.length - 1);
+    const at = label.lastIndexOf("--");
+    if (at < 1 || label.includes(".") || !/^[a-z0-9-]+$/.test(label)) return null;
+    const space = store.space(label.slice(at + 2));
+    return space && !space.publicUrl ? { host, label: label.slice(0, at), space } : null;
+  };
+  const shareLanguage = (req) => (/^\s*it\b/i.test(String(req.headers["accept-language"] || "")) ? "it" : "en");
+  /** Into the share, with a pass its space checks: who this is and how they proved it. */
+  const enterShare = (res, target, identity, next, extra = {}) => {
+    const pass = signPass(keys.privateKey, { aud: `share:${target.host}`, ...identity });
+    log({ type: "share-enter", space: target.space.slug, via: identity.via });
+    return redirect(res, `${origin.protocol}//${target.host}/_cora/auth?${new URLSearchParams({ pass, next: safeNext(next, "/") })}`, extra);
+  };
 
   /** The apex: landing, sign-in, the account page and the way into a space. */
   async function site(req, res, url) {
@@ -243,13 +276,83 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       return html(res, 200, views.login({ ...page, next, providers: providers(), error: url.searchParams.get("error") || "" }));
     }
 
+    if (method === "GET" && path === "/share") {
+      const target = shareTarget(url.searchParams.get("to"));
+      const language = shareLanguage(req);
+      if (!target) return html(res, 404, views.shareGone({ language }));
+      return html(res, 200, views.shareGate({ language, to: target.host, next: safeNext(url.searchParams.get("next"), "/"), google: oauth.enabled("google"), error: url.searchParams.get("error") === "unverified" ? "unverified" : url.searchParams.get("error") === "busy" ? "busy" : "" }));
+    }
+
+    if (method === "POST" && path === "/share/email") {
+      if (req.headers.origin && req.headers.origin !== origin.origin) return html(res, 403, views.notFound(page));
+      const form = await readForm(req, 4096);
+      const language = shareLanguage(req);
+      const target = shareTarget(form.to);
+      if (!target) return html(res, 404, views.shareGone({ language }));
+      const next = safeNext(form.next, "/");
+      const email = String(form.email || "").trim().toLowerCase();
+      const done = () => html(res, 200, views.shareSent({ language, to: target.host, email }));
+      // The field people never see: a bot fills it, and gets the same answer.
+      if (form.website || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return done();
+      const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+      if (!allowSend("ip", ip) || !allowSend("email", email) || !allowSend("host", target.host) || !allowSend("day", "all")) {
+        return redirect(res, `/share?${new URLSearchParams({ to: target.host, next, error: "busy" })}`);
+      }
+      let answer = null;
+      try {
+        const response = await fetch(`${target.space.upstream}/api/cloud/share-access`, {
+          method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" },
+          body: JSON.stringify({ pass: signPass(keys.privateKey, { aud: `share-access:${spaceAudience(target.space)}`, host: target.host, email }) }),
+          signal: AbortSignal.timeout(10000), redirect: "error",
+        });
+        if (response.ok) answer = await response.json();
+      } catch {}
+      if (answer?.allowed === true) {
+        const token = randomBytes(32).toString("base64url");
+        store.addShareLink({ hash: createHash("sha256").update(token).digest("hex"), host: target.host, next, email, expiresAt: Date.now() + SHARE_LINK_MINUTES * 60000 });
+        const words = answer.language === "en" ? "en" : "it";
+        const link = `${origin.origin}/share/email/${token}`;
+        const title = String(answer.title || target.label).slice(0, 120);
+        const text = views.shareWords(words, "mailText", { title, host: target.host, link }).replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+        mailer.send({
+          to: email, subject: views.shareWords(words, "mailSubject", { title }).replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"'),
+          text, html: `<p>${views.shareWords(words, "mailText", { title, host: target.host, link: "LINK" }).replace(/\n\n/g, "</p><p>").replace("LINK", `<a href="${views.esc(link)}">${views.esc(link)}</a>`)}</p>`,
+        }).then(() => log({ type: "share-link-sent", space: target.space.slug })).catch((error) => log({ type: "share-link-failed", space: target.space.slug, error: error.message }));
+      } else log({ type: "share-link-refused", space: target.space.slug });
+      return done();
+    }
+
+    const emailLink = /^\/share\/email\/([A-Za-z0-9_-]{43})$/.exec(path);
+    if (emailLink) {
+      const language = shareLanguage(req);
+      const hash = createHash("sha256").update(emailLink[1]).digest("hex");
+      // Mail scanners open every link they see: opening it only shows a button, the button uses it.
+      if (method === "GET") {
+        const link = store.shareLink(hash);
+        if (!link) return html(res, 410, views.shareExpired({ language }));
+        return html(res, 200, views.shareOpen({ language, to: link.host, email: link.email, token: emailLink[1] }),
+          { "Content-Security-Policy": policy.replace("form-action 'self'", `form-action 'self' ${origin.protocol}//${link.host}`) });
+      }
+      if (method === "POST") {
+        if (req.headers.origin && req.headers.origin !== origin.origin) return html(res, 403, views.notFound(page));
+        const link = store.takeShareLink(hash);
+        const target = link ? shareTarget(link.host) : null;
+        if (!link || !target) return html(res, 410, views.shareExpired({ language, to: link?.host || "", next: link?.next || "/" }));
+        return enterShare(res, target, { sub: `email:${link.email}`, email: link.email, emailVerified: true, via: "email" }, link.next);
+      }
+    }
+
     const start = /^\/auth\/(google|github)$/.exec(path);
     if (method === "GET" && start) {
       const provider = start[1];
+      // Signing in to open a share: Google only, and nothing is kept here, no account made.
+      const shared = url.searchParams.get("share") ? shareTarget(url.searchParams.get("share")) : null;
+      if (url.searchParams.get("share") && (!shared || provider !== "google")) return html(res, 404, views.shareGone({ language: shareLanguage(req) }));
       if (!oauth.enabled(provider)) return redirect(res, `/login?error=unavailable`);
       const { verifier, challenge } = pkce();
       const state = randomBytes(18).toString("base64url");
-      const body = Buffer.from(JSON.stringify({ p: provider, s: state, v: verifier, n: safeNext(url.searchParams.get("next")), e: Date.now() + OAUTH_MINUTES * 60000 })).toString("base64url");
+      const body = Buffer.from(JSON.stringify({ p: provider, s: state, v: verifier, n: safeNext(url.searchParams.get("next")), e: Date.now() + OAUTH_MINUTES * 60000,
+        ...(shared ? { x: shared.host } : {}) })).toString("base64url");
       return redirect(res, oauth.authorizeUrl(provider, { state, challenge }), {
         "Set-Cookie": cookie(STATE, `${body}.${mac(sessionKey, `oauth.${body}`)}`, { maxAge: OAUTH_MINUTES * 60 }),
       });
@@ -278,12 +381,22 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       } catch (error) {
         return fail("provider", error.message);
       }
+      if (saved.x) {
+        const target = shareTarget(saved.x);
+        if (!target) return html(res, 404, views.shareGone({ language: shareLanguage(req) }), { "Set-Cookie": clear });
+        if (!who.emailVerified || !who.email) return redirect(res, `/share?${new URLSearchParams({ to: target.host, next: safeNext(saved.n, "/"), error: "unverified" })}`, { "Set-Cookie": clear });
+        return enterShare(res, target, { sub: `google:${who.subject}`, email: who.email, emailVerified: true, hd: who.hd || "", via: "google", name: who.name }, saved.n, { "Set-Cookie": clear });
+      }
       const signedIn = store.signIn(provider, who);
       log({ type: "signin", provider, accountId: signedIn.id });
       return redirect(res, safeNext(saved.n), { "Set-Cookie": [clear, sessionCookie(signedIn)] });
     }
 
     if (path === "/logout" && (method === "GET" || method === "POST")) {
+      // A page under the domain (a shared site) may not sign people out with an image or a form of its own.
+      const dest = req.headers["sec-fetch-dest"];
+      const from = req.headers.origin;
+      if ((method === "GET" && dest && dest !== "document") || (method === "POST" && from && from !== origin.origin)) return html(res, 403, views.notFound(page));
       if (account && url.searchParams.get("everywhere") === "1" && method === "POST") store.bumpEpoch(account.id);
       return redirect(res, "/", { "Set-Cookie": cookie(SESSION, "", { maxAge: 0 }) });
     }
@@ -357,19 +470,32 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
     return html(res, 404, views.notFound(page));
   }
 
-  /** The space a request is for, from its Host: one label below the domain. */
+  /** The space a request is for, from its Host: one label below the domain, or a share of it (<label>--<space>). */
   const spaceOf = (req) => {
     const host = String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "");
     if (!host.endsWith(`.${domain}`)) return { host, slug: null };
     const label = host.slice(0, -domain.length - 1);
-    return { host, slug: label.includes(".") ? "" : label };
+    if (label.includes(".")) return { host, slug: "" };
+    const at = label.lastIndexOf("--");
+    return at > 0 ? { host, slug: label.slice(at + 2), share: label.slice(0, at) } : { host, slug: label };
   };
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, origin.origin);
     try {
-      const { host, slug } = spaceOf(req);
+      const { host, slug, share } = spaceOf(req);
       if (slug === "www") return redirect(res, `${origin.origin}${url.pathname}${url.search}`);
+      if (slug && share) {
+        // A share answers from its space, Host and all; a space on its own domain has none here.
+        const space = store.space(slug);
+        if (!space || space.publicUrl) return html(res, 404, views.shareGone({ language: shareLanguage(req) }));
+        return proxyRequest(req, res, space.upstream, {
+          onError: (error) => {
+            log({ type: "space-offline", space: slug, error: error.message });
+            html(res, 502, views.offline({ slug }));
+          },
+        });
+      }
       if (slug) {
         const space = store.space(slug);
         if (!space) return html(res, 404, views.notFound({ slug }));
@@ -392,8 +518,8 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
   });
 
   server.on("upgrade", (req, socket, head) => {
-    const { slug } = spaceOf(req);
-    const found = slug && slug !== "www" ? store.space(slug) : null;
+    const { slug, share } = spaceOf(req);
+    const found = slug && slug !== "www" && !share ? store.space(slug) : null;
     const space = found?.publicUrl ? null : found;
     if (!space) {
       socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");

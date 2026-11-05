@@ -24,7 +24,7 @@ const NUDGES = 4;
 /** Tools that talk about work without doing any. */
 const TALK_TOOLS = new Set(["say", "notify", "list_channels", "ask_owner"]);
 /** Tools that look things up: they can back "ho controllato", never "ho creato". */
-const LOOKUP_TOOLS = new Set(["list_routines", "routine_history", "recall", "screenshot", "brain_search", "brain_page"]);
+const LOOKUP_TOOLS = new Set(["list_routines", "routine_history", "recall", "screenshot", "brain_search", "brain_page", "artifact_folders", "artifact_log"]);
 /**
  * What an agent says of itself, agreed with its gender: Italian says "acceso" or
  * "accesa", and a neutral agent picks sentences that ask for neither.
@@ -176,8 +176,9 @@ export function effortOf(agent) {
 }
 
 export class Brain {
-  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null, companyBrain = null }) {
+  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null, companyBrain = null, artifacts = null }) {
     this.companyBrain = companyBrain;
+    this.artifacts = artifacts;
     // The orchestrator admits one task per thread. Its current goal belongs to that task only.
     this.channelGoals = new Map();
     this.activeTurns = new Map();
@@ -269,6 +270,14 @@ export class Brain {
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
     if (this.companyBrain?.enabled) {
       sections.push("## Il brain aziendale\nÈ la memoria comune di quest'azienda: pagine su clienti, progetti, persone, decisioni e procedure, tenute da un bibliotecario con le fonti. In ogni turno ti arrivano le pagine pertinenti; con brain_search cerchi nelle pagine e in ciò che è stato detto nelle chat, con brain_page leggi una pagina intera. Prima di chiedere al proprietario una cosa che l'azienda potrebbe già sapere, guarda lì. Quando impari qualcosa che vale per tutta l'azienda (una decisione, la preferenza di un cliente, chi fa cosa), segnalalo con brain_note: il bibliotecario lo mette nel brain. La tua memoria personale resta remember. Una pagina «da rivedere» non è ancora stata vista dal proprietario, ma vale.");
+    }
+    if (this.artifacts) {
+      sections.push([
+        "## Gli artefatti",
+        "Quello che produci sul tuo computer e va conservato o fatto vedere (file, report, un sito, qualunque cosa) va nelle cartelle degli artefatti del server Cora, che funzionano come git: ogni caricamento è un commit con un messaggio, e ogni cartella ha i suoi permessi.",
+        "Prima di caricare guarda dove va: artifact_folders, e il brain se c'è. Se nessuna cartella va bene, non sceglierne una da solo: chiedi a chi te l'ha chiesto quale usare, proponendo un percorso (es. clienti/acme/sito) e cosa ci va. Creala (artifact_push con create) solo dopo la sua conferma, e se ti dice una regola («i report di Acme vanno in clienti/acme») annotala con brain_note.",
+        "Nella maggior parte delle cartelle un commit è PROPOSTO finché il proprietario o un revisore non lo approva: finché la ricevuta non dice PUBLISHED non dire che è pubblicato o online. Per continuare il lavoro di un altro scarica la cartella con artifact_pull e ricaricala da lì. La storia di una cartella, con le note di chi ha rifiutato un commit, è in artifact_log.",
+      ].join("\n"));
     }
     sections.push("## Routine, reminder e storico\nGestisci i tuoi compiti ricorrenti con set_routine, quelli da fare una sola volta con set_reminder (run_at ISO 8601 con fuso). list_routines mostra ciò che è ancora in programma; con l'id ti dà una routine intera, prompt compreso: leggila così prima di cambiarla e rimanda tutto il testo che non ti è stato chiesto di cambiare. routine_history consulta esecuzioni e attività archiviate, con risultati e verifiche; ogni esecuzione conserva il prompt con cui è girata (routine_id e full per leggerlo intero). Prima di ripetere un'azione già richiesta, consulta lo storico. Un reminder viene archiviato da Cora solo dopo una verifica positiva: non ricrearlo se è già riuscito. Se è bloccato o interrotto, controlla prima gli effetti già prodotti e poi chiedi o prepara una nuova prova senza duplicarli.");
     if (withoutComputer) {
@@ -362,8 +371,10 @@ export class Brain {
     const request = replyTo || history.filter((item) => item.kind === "owner" || item.kind === "human").at(-1);
     const requestIndex = request ? history.findIndex((item) => item.id === request.id) : -1;
     const goalContext = requestIndex > 0 ? formatTranscript(history.slice(0, requestIndex).filter((item) => ["owner", "human", "agent"].includes(item.kind)).slice(-6).map((item) => ({ ...item, content: String(item.content || "").slice(0, 2000) })), agent, this.timezone, { dates: true }).slice(-6000) : "";
+    const requester = computer && request && (request.kind === "owner" || request.kind === "human")
+      ? { kind: request.kind === "owner" ? "owner" : "authorized", id: String(request.authorId || ""), name: String(request.authorName || "") } : null;
     const turn = (prompt) => this.loop({
-      agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled,
+      agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled, requester,
       maxSteps: computer ? TASK_STEPS : CHAT_STEPS, deadline: Date.now() + (computer ? TASK_DEADLINE_MS : CHAT_DEADLINE_MS),
       images: (last?.images || []).slice(0, 2), task: Boolean(computer),
       goalRequest: request?.content || "", goalContext,
@@ -517,11 +528,11 @@ export class Brain {
     }
   }
 
-  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null }) {
+  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null, requester = null }) {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
     // The company brain's tools exist only where there is a brain to read.
-    const tools = caps.tools ? TOOL_DEFS.filter((tool) => (OWN_TOOLS.has(tool.name) || computer) && (this.companyBrain?.enabled || !tool.name.startsWith("brain_"))) : [];
+    const tools = caps.tools ? TOOL_DEFS.filter((tool) => (OWN_TOOLS.has(tool.name) || computer) && (this.companyBrain?.enabled || !tool.name.startsWith("brain_")) && (this.artifacts || !tool.name.startsWith("artifact_"))) : [];
     const place = channel.place || "";
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
     let { goal, usage: goalCost } = task && goalRequest ? await this.goalFor(goalRequest, "", goalContext) : { goal: "", usage: null };
@@ -593,6 +604,8 @@ export class Brain {
     } : null;
     const ctx = {
       agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push, companyBrain: this.companyBrain,
+      // Who asked, when a person did: only then may an agent open a new artifact folder.
+      artifacts: this.artifacts, requester, traceId: trace.id,
       // The question goes where this conversation is, not to a separate place.
       ask: this.ask ? async (request) => {
         const posted = await this.ask(agent, request, { channelId: channel.id });

@@ -178,6 +178,12 @@ CREATE TABLE IF NOT EXISTS traces (
 CREATE INDEX IF NOT EXISTS traces_agent ON traces(agent_id, started_at);
 CREATE TABLE IF NOT EXISTS trace_systems (hash TEXT PRIMARY KEY, text TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS push_subscriptions (endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS artifact_folders (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, head TEXT NOT NULL DEFAULT '', data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS artifact_commits (id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS artifact_commits_folder ON artifact_commits(folder_id, created_at);
+CREATE TABLE IF NOT EXISTS artifact_objects (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS artifact_uploads (folder_id TEXT NOT NULL, agent_id TEXT NOT NULL, sha TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (folder_id, agent_id, sha));
+CREATE TABLE IF NOT EXISTS artifact_shares (id TEXT PRIMARY KEY, label TEXT NOT NULL UNIQUE, folder_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
 `;
 const TRACES_KEPT_PER_AGENT = 300;
 
@@ -649,6 +655,10 @@ export class Store {
   createPanelSession(hash, userId, expiresAt) {
     this.stmt("DELETE FROM panel_sessions WHERE expires_at < ?").run(Date.now());
     this.stmt("INSERT INTO panel_sessions (hash,user_id,expires_at) VALUES (?,?,?)").run(hash, userId, expiresAt);
+  }
+
+  panelSessionExpiry(hash) {
+    return this.stmt("SELECT expires_at FROM panel_sessions WHERE hash = ?").get(hash)?.expires_at ?? null;
   }
 
   panelSession(hash) {
@@ -1307,6 +1317,118 @@ export class Store {
 
   pushSubscriptions() {
     return this.stmt("SELECT * FROM push_subscriptions").all().map((row) => ({ endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth }, device: row.device }));
+  }
+
+  /* ---------- artifacts ---------- */
+  artifactFolders() {
+    return this.stmt("SELECT head, data FROM artifact_folders ORDER BY path").all().map((row) => ({ ...JSON.parse(row.data), head: row.head }));
+  }
+
+  artifactFolder(id) {
+    const row = this.stmt("SELECT head, data FROM artifact_folders WHERE id = ?").get(String(id));
+    return row ? { ...JSON.parse(row.data), head: row.head } : null;
+  }
+
+  artifactFolderByPath(path) {
+    const row = this.stmt("SELECT head, data FROM artifact_folders WHERE path = ?").get(String(path));
+    return row ? { ...JSON.parse(row.data), head: row.head } : null;
+  }
+
+  /** Writes a folder's description; its head moves only through moveArtifactHead. */
+  writeArtifactFolder(folder) {
+    const { head, ...data } = folder;
+    this.stmt("INSERT INTO artifact_folders (id, path, head, data) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET path = excluded.path, data = excluded.data")
+      .run(folder.id, folder.path, head || "", JSON.stringify(data));
+  }
+
+  /** Compare-and-swap: the head moves only if it is still the one the caller saw. */
+  moveArtifactHead(folderId, expected, next) {
+    return this.stmt("UPDATE artifact_folders SET head = ? WHERE id = ? AND head = ?").run(next, folderId, expected || "").changes === 1;
+  }
+
+  deleteArtifactFolder(id) {
+    this.tx(() => {
+      this.stmt("DELETE FROM artifact_commits WHERE folder_id = ?").run(id);
+      this.stmt("DELETE FROM artifact_uploads WHERE folder_id = ?").run(id);
+      this.stmt("DELETE FROM artifact_shares WHERE folder_id = ?").run(id);
+      this.stmt("DELETE FROM artifact_folders WHERE id = ?").run(id);
+    });
+  }
+
+  artifactCommits(folderId, { limit = 200, status = "" } = {}) {
+    const rows = status
+      ? this.stmt("SELECT data FROM artifact_commits WHERE folder_id = ? AND status = ? ORDER BY created_at DESC, rowid DESC LIMIT ?").all(folderId, status, limit)
+      : this.stmt("SELECT data FROM artifact_commits WHERE folder_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?").all(folderId, limit);
+    return rows.map((row) => JSON.parse(row.data));
+  }
+
+  artifactCommitsByStatus(status) {
+    return this.stmt("SELECT data FROM artifact_commits WHERE status = ? ORDER BY created_at DESC").all(status).map((row) => JSON.parse(row.data));
+  }
+
+  artifactCommit(id) {
+    const row = this.stmt("SELECT data FROM artifact_commits WHERE id = ?").get(String(id));
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  writeArtifactCommit(commit) {
+    this.stmt("INSERT INTO artifact_commits (id, folder_id, status, created_at, data) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data")
+      .run(commit.id, commit.folderId, commit.status, commit.createdAt, JSON.stringify(commit));
+  }
+
+  /** Every tree any commit points at: what the collector must keep. */
+  artifactTrees() {
+    return this.stmt("SELECT DISTINCT json_extract(data, '$.tree') AS tree FROM artifact_commits").all().map((row) => row.tree).filter(Boolean);
+  }
+
+  addArtifactObject(sha, size) {
+    this.stmt("INSERT OR IGNORE INTO artifact_objects (sha, size, created_at) VALUES (?, ?, ?)").run(sha, size, Date.now());
+  }
+
+  artifactObjects() {
+    return this.stmt("SELECT sha, size, created_at FROM artifact_objects").all().map((row) => ({ sha: row.sha, size: row.size, createdAt: row.created_at }));
+  }
+
+  artifactBytes() {
+    return Number(this.stmt("SELECT COALESCE(SUM(size), 0) AS total FROM artifact_objects").get().total);
+  }
+
+  removeArtifactObject(sha) {
+    this.stmt("DELETE FROM artifact_objects WHERE sha = ?").run(sha);
+  }
+
+  addArtifactUpload(folderId, agentId, sha) {
+    this.stmt("INSERT INTO artifact_uploads (folder_id, agent_id, sha, at) VALUES (?, ?, ?, ?) ON CONFLICT DO UPDATE SET at = excluded.at").run(folderId, agentId, sha, Date.now());
+  }
+
+  /** What this agent already sent for this folder lately: a push cut short resumes from there. */
+  artifactUploads(folderId, agentId, since) {
+    this.stmt("DELETE FROM artifact_uploads WHERE at < ?").run(Date.now() - 7 * 86400000);
+    return new Set(this.stmt("SELECT sha FROM artifact_uploads WHERE folder_id = ? AND agent_id = ? AND at >= ?").all(folderId, agentId, since).map((row) => row.sha));
+  }
+
+  artifactShares(folderId = "") {
+    const rows = folderId ? this.stmt("SELECT data FROM artifact_shares WHERE folder_id = ? ORDER BY rowid").all(folderId) : this.stmt("SELECT data FROM artifact_shares ORDER BY rowid").all();
+    return rows.map((row) => JSON.parse(row.data));
+  }
+
+  artifactShare(id) {
+    const row = this.stmt("SELECT data FROM artifact_shares WHERE id = ?").get(String(id));
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  artifactShareByLabel(label) {
+    const row = this.stmt("SELECT data FROM artifact_shares WHERE label = ?").get(String(label));
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  writeArtifactShare(share) {
+    this.stmt("INSERT INTO artifact_shares (id, label, folder_id, status, data) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET label = excluded.label, status = excluded.status, data = excluded.data")
+      .run(share.id, share.label, share.folderId, share.status, JSON.stringify(share));
+  }
+
+  deleteArtifactShare(id) {
+    this.stmt("DELETE FROM artifact_shares WHERE id = ?").run(id);
   }
 
   /* ---------- activity log ---------- */

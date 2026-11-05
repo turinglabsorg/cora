@@ -31,7 +31,7 @@ export function searchText(...parts) {
  * that follows "secret", "password", "token", "chiave" and the like, also
  * with a word or two in between ("secret attiva …", "chiave pubblicabile …").
  */
-const SECRET_SHAPES = /\b(?:xox[abprs]-|xapp-|sk-(?:ant-|proj-)?|sk_live_|rk_live_|pk_live_|ghp_|gho_|ghs_|github_pat_|glpat-|AKIA|AIza|hf_)[A-Za-z0-9_-]{8,}/g;
+export const SECRET_SHAPES = /\b(?:xox[abprs]-|xapp-|sk-(?:ant-|proj-)?|sk_live_|rk_live_|pk_live_|ghp_|gho_|ghs_|github_pat_|glpat-|AKIA|AIza|hf_)[A-Za-z0-9_-]{8,}/g;
 const SECRET_AFTER_WORD = /\b(secret|password|passwd|pwd|token|api[ _-]?key|key|chiave|segreto|passphrase)\b((?:\s+\p{L}{2,14}(?![\p{L}\p{N}_-])){0,2}\s*(?:[:=]|è|is)?\s*[`'"«]?)(?=[A-Za-z0-9_\-./+=]*\d)(?=[A-Za-z0-9_\-./+=]*[A-Za-z])[A-Za-z0-9_\-./+=]{7,}[A-Za-z0-9_+=-]/giu;
 const SCRUB_VERSION = 2;
 export const SECRET_MARK = "[segreto omesso]";

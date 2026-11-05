@@ -180,3 +180,79 @@ export function accessDenied({ account, slug }) {
   return layout({ title: "Access not granted · Cora", page: "plain", account,
     body: card(`<div class="card-mark dim">${MARK}</div><h1>This space is private.</h1><p class="lead">Ask the owner of <b>${esc(slug)}</b> to authorize your email address or your company domain.</p><a class="btn ghost" href="${BASE}/account">Your account</a>`, "status-card") });
 }
+
+/** The pages around a shared folder, for people who are not Cora's users: Italian or English, as their browser asks. */
+const SHARE_COPY = {
+  en: {
+    gateTitle: "Open a shared folder", gateLead: "<b>{host}</b> is shared with specific people. Show who you are: if you are one of them, you go straight in.",
+    google: "Continue with Google", or: "or get a sign-in link by email", emailLabel: "Your email address", send: "Email me a link",
+    fine: "Your address is only checked against the people this folder is shared with.",
+    sentTitle: "Check your email", sentLead: "If <b>{email}</b> may open {host}, a sign-in link is on its way. It works once, for 15 minutes.",
+    openTitle: "Open the shared folder", openLead: "This link signs you in to <b>{host}</b> as <b>{email}</b>. It works once.", open: "Open",
+    expiredTitle: "This link is used up", expiredLead: "Sign-in links work once, for 15 minutes. Ask for a new one.", again: "Ask for a new link",
+    busy: "Too many requests: try again in a few minutes.", unverified: "Google does not confirm this address: ask for a link by email instead.",
+    gone: "This shared folder does not exist.",
+    mailSubject: "Your link to open {title}", mailText: "You can open {title} ({host}) with this link, once, within 15 minutes:\n\n{link}\n\nIf you did not ask for it, ignore this email.",
+  },
+  it: {
+    gateTitle: "Apri una cartella condivisa", gateLead: "<b>{host}</b> è condivisa con persone precise. Fatti riconoscere: se sei una di loro, entri subito.",
+    google: "Continua con Google", or: "oppure ricevi un link di accesso per email", emailLabel: "Il tuo indirizzo email", send: "Mandami il link",
+    fine: "Il tuo indirizzo serve solo a controllare se la cartella è condivisa con te.",
+    sentTitle: "Controlla la posta", sentLead: "Se <b>{email}</b> può aprire {host}, ti stiamo mandando un link di accesso. Vale una volta, per 15 minuti.",
+    openTitle: "Apri la cartella condivisa", openLead: "Questo link ti fa entrare in <b>{host}</b> come <b>{email}</b>. Vale una volta.", open: "Apri",
+    expiredTitle: "Questo link è già stato usato", expiredLead: "I link di accesso valgono una volta, per 15 minuti. Chiedine uno nuovo.", again: "Chiedi un nuovo link",
+    busy: "Troppe richieste: riprova tra qualche minuto.", unverified: "Google non conferma questo indirizzo: chiedi un link per email.",
+    gone: "Questa cartella condivisa non esiste.",
+    mailSubject: "Il tuo link per aprire {title}", mailText: "Puoi aprire {title} ({host}) con questo link, una volta, entro 15 minuti:\n\n{link}\n\nSe non l'hai chiesto tu, ignora questa email.",
+  },
+};
+
+export function shareWords(language, key, vars = {}) {
+  const text = (SHARE_COPY[language] || SHARE_COPY.en)[key] || "";
+  return text.replace(/\{(\w+)\}/g, (_, name) => esc(vars[name] ?? ""));
+}
+
+function shareLayout(language, title, content) {
+  return layout({ title: `${title} · Cora`, body: card(content, "login-card share-card"), page: "plain" }).replace('<html lang="en">', `<html lang="${language === "it" ? "it" : "en"}">`);
+}
+
+export function shareGate({ language, to, next, google, error = "", email = "" }) {
+  const w = (key, vars) => shareWords(language, key, vars);
+  const alert = error ? `<p class="alert" role="alert">${w(error)}</p>` : "";
+  const query = new URLSearchParams({ share: to, next }).toString();
+  return shareLayout(language, w("gateTitle"), `
+    <div class="card-mark">${MARK}</div>
+    <h1>${w("gateTitle")}</h1>
+    <p class="lead">${w("gateLead", { host: to })}</p>
+    ${alert}
+    ${google ? `<div class="providers"><a class="btn provider google" href="${BASE}/auth/google?${esc(query)}">${ICONS.google}<span>${w("google")}</span></a></div><p class="muted share-or">${w("or")}</p>` : ""}
+    <form class="share-email" method="post" action="${BASE}/share/email">
+      <input type="hidden" name="to" value="${esc(to)}"><input type="hidden" name="next" value="${esc(next)}">
+      <label for="email">${w("emailLabel")}</label>
+      <input id="email" name="email" type="email" required autocomplete="email" value="${esc(email)}">
+      <input class="hp" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+      <button class="btn primary" type="submit">${w("send")}</button>
+    </form>
+    <p class="fine">${w("fine")}</p>`);
+}
+
+export function shareSent({ language, to, email }) {
+  const w = (key, vars) => shareWords(language, key, vars);
+  return shareLayout(language, w("sentTitle"), `<div class="card-mark">${MARK}</div><h1>${w("sentTitle")}</h1><p class="lead">${w("sentLead", { email, host: to })}</p>`);
+}
+
+export function shareOpen({ language, to, email, token }) {
+  const w = (key, vars) => shareWords(language, key, vars);
+  return shareLayout(language, w("openTitle"), `<div class="card-mark">${MARK}</div><h1>${w("openTitle")}</h1><p class="lead">${w("openLead", { host: to, email })}</p>
+    <form method="post" action="${BASE}/share/email/${esc(token)}"><button class="btn primary" type="submit">${w("open")}${ICONS.arrow}</button></form>`);
+}
+
+export function shareExpired({ language, to = "", next = "/" }) {
+  const w = (key, vars) => shareWords(language, key, vars);
+  const again = to ? `<a class="btn ghost" href="${BASE}/share?${esc(new URLSearchParams({ to, next }).toString())}">${w("again")}</a>` : "";
+  return shareLayout(language, w("expiredTitle"), `<div class="card-mark dim">${MARK}</div><h1>${w("expiredTitle")}</h1><p class="lead">${w("expiredLead")}</p>${again}`);
+}
+
+export function shareGone({ language }) {
+  return shareLayout(language, shareWords(language, "gone"), `<div class="card-mark dim">${MARK}</div><h1>${shareWords(language, "gone")}</h1><a class="btn ghost" href="${BASE}/">Cora</a>`);
+}

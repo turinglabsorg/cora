@@ -13,7 +13,7 @@ export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget
  * changing, pausing or deleting one touches nothing else — so they are not
  * locked behind the computer, which only opens when the owner is the one asking.
  */
-export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history"]);
+export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history", "artifact_folders", "artifact_log"]);
 
 export const TOOL_DEFS = [
   {
@@ -223,6 +223,61 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: "artifact_folders",
+    description: "List the artifact folders on the Cora server: where the files, sites and anything else you make on your computer are kept, versioned and served from; what goes in each, whether each push waits for a review, and whether you may push there. Look here (and in the brain) before pushing anything.",
+    parameters: { type: "object", properties: { query: { type: "string", description: "optional words to filter by path, title or what goes in the folder" } } },
+  },
+  {
+    name: "artifact_log",
+    description: "The history of one artifact folder, like git log: its commits, who made them, which one is served, which wait for review, and a reviewer's notes on a rejected one.",
+    parameters: { type: "object", properties: { folder: { type: "string", description: "the folder path, e.g. clienti/acme/report-q3" }, limit: { type: "number" } }, required: ["folder"] },
+  },
+  {
+    name: "artifact_push",
+    description: "Upload a file or a folder from /home/agent/work to an artifact folder on the Cora server as a commit, like git: only files the server does not have yet travel. In most folders the commit is PROPOSED and is served only after the owner or a reviewer approves it: never say it is published unless the receipt says PUBLISHED. If the folder does not exist yet, do not choose one yourself: ask the person who asked you which folder to use, proposing a path (e.g. clienti/acme/sito) and what goes in it, and push with create only after they confirm. Files that look like secrets (.env, keys, tokens) are refused.",
+    parameters: {
+      type: "object",
+      properties: {
+        folder: { type: "string", description: "artifact folder path: lowercase words and dashes separated by /, e.g. clienti/acme/report-q3" },
+        path: { type: "string", description: "absolute path of the file or folder on your computer, inside /home/agent/work" },
+        message: { type: "string", description: "the commit message: what changed and why, in one line" },
+        to: { type: "string", description: "optional subfolder inside the artifact folder to put it in" },
+        mirror: { type: "boolean", description: "also delete the files under `to` that are not in what you push (default false: add and overwrite only)" },
+        create: {
+          type: "object",
+          description: "only when the person confirmed a new folder: its title, what goes in it, and kind (files or site)",
+          properties: { title: { type: "string" }, description: { type: "string" }, kind: { type: "string", enum: ["files", "site"] } },
+          required: ["description"],
+        },
+      },
+      required: ["folder", "path", "message"],
+    },
+  },
+  {
+    name: "artifact_pull",
+    description: "Copy an artifact folder (the version it serves, or a given commit) onto your computer under /home/agent/work/artifacts/<folder>, to continue that work; push that directory back with artifact_push when you are done.",
+    parameters: {
+      type: "object",
+      properties: { folder: { type: "string" }, commit: { type: "string", description: "optional commit id; default the served version" }, overwrite: { type: "boolean", description: "replace what is already in that directory" } },
+      required: ["folder"],
+    },
+  },
+  {
+    name: "artifact_share_request",
+    description: "Ask the owner for a link that opens an artifact folder to specific people (their emails, or a company domain): it is created switched off, and only the owner or a folder reviewer turns it on. Links are never public. Use it when someone asked you to share a folder, and tell them the owner has to approve it.",
+    parameters: {
+      type: "object",
+      properties: {
+        folder: { type: "string" },
+        label: { type: "string", description: "the link's name: lowercase letters, digits and dashes, e.g. report-acme" },
+        emails: { type: "array", items: { type: "string" } },
+        domains: { type: "array", items: { type: "string" }, description: "company domains, e.g. acme.com (never gmail.com and the like)" },
+        reason: { type: "string", description: "who asked for it and why, in one line" },
+      },
+      required: ["folder", "label", "reason"],
+    },
+  },
+  {
     name: "send_file",
     description: "Post a file from your computer to the current Discord channel (an image, a PDF, a CSV, ...). Max 8 MB.",
     parameters: {
@@ -257,6 +312,10 @@ export function summarizeArgs(name, args) {
   if (name === "forget") return String(args.memory_id || "");
   if (name === "send_file") return String(args.path || "");
   if (name === "share_file") return `${String(args.path || "")} → ${String(args.agent || "")}`;
+  if (name === "artifact_push") return `${String(args.path || "")} → ${String(args.folder || "")}${args.create ? " (nuova)" : ""}`;
+  if (name === "artifact_pull" || name === "artifact_log") return String(args.folder || "");
+  if (name === "artifact_folders") return String(args.query || "");
+  if (name === "artifact_share_request") return `${String(args.folder || "")} → ${String(args.label || "")}`;
   if (name === "notify") return String(args.message || "").slice(0, 200);
   if (name === "say") return String(args.text || "").slice(0, 200);
   if (name === "brain_search") return String(args.query || "").slice(0, 200);
@@ -496,6 +555,40 @@ export async function executeTool(call, ctx) {
         await boxes.ensure(recipient);
         const receipt = await boxes.shareFile(agent.id, recipient.id, String(args.path || ""));
         return { text: JSON.stringify({ recipient: recipient.name, ...receipt }) };
+      }
+      case "artifact_folders": {
+        if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
+        const folders = ctx.artifacts.foldersFor(agent, args.query);
+        return { text: JSON.stringify(folders.length ? { folders } : { folders, note: "no folder yet: ask the person which folder to use before pushing" }) };
+      }
+      case "artifact_log": {
+        if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
+        return { text: JSON.stringify(ctx.artifacts.history(args.folder, args.limit)) };
+      }
+      case "artifact_push": {
+        if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
+        await boxes.ensure(agent);
+        const result = await ctx.artifacts.push({
+          agent, folder: args.folder, path: String(args.path || ""), to: args.to, message: args.message, mirror: args.mirror === true,
+          create: args.create && typeof args.create === "object" ? args.create : null, requester: ctx.requester || null, channelId, traceId: ctx.traceId || "",
+        });
+        return { text: ctx.artifacts.pushReceipt(result) };
+      }
+      case "artifact_pull": {
+        if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
+        await boxes.ensure(agent);
+        return { text: await ctx.artifacts.pull({ agent, folder: args.folder, commit: args.commit, overwrite: args.overwrite === true }) };
+      }
+      case "artifact_share_request": {
+        if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
+        const folder = ctx.artifacts.findFolder(args.folder);
+        if (!folder) return { text: "error: no such folder: list them with artifact_folders" };
+        const share = ctx.artifacts.createShare(folder.id, {
+          label: args.label, access: { emails: args.emails || [], domains: args.domains || [] }, status: "proposed",
+          createdBy: { kind: "agent", id: agent.id, name: agent.name }, requestedBy: ctx.requester || null, reason: args.reason,
+        });
+        ctx.artifacts.announceShare?.(folder, share, { agent, channelId });
+        return { text: `REQUESTED, NOT ACTIVE: the link ${share.url || share.label} opens only after the owner or a reviewer of ${folder.path} turns it on in the panel. Say so; do not send the link as if it worked.` };
       }
       case "send_file": {
         if (!postFile || !channelId) return { text: "error: there is no channel to post to right now" };

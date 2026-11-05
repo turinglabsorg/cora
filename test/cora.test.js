@@ -15,7 +15,7 @@ import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDoc, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
@@ -1099,6 +1099,76 @@ describe("agents in Discord", () => {
     await call(`/api/agents/${marta.id}`, { method: "PUT", body: { tools: false } });
   });
 
+  test("artifacts: before its first push an agent asks which folder, pushes on the owner's word, and nothing is served until the owner approves", async () => {
+    await call(`/api/agents/${marta.id}`, { method: "PUT", body: { tools: true } });
+    const site = join(docker.desktop(marta.id), "work", "sito");
+    mkdirSync(join(site, "css"), { recursive: true });
+    writeFileSync(join(site, "index.html"), "<h1>Acme</h1><script>fetch('/api/state')</script>");
+    writeFileSync(join(site, "css", "style.css"), "h1{color:#ffc400}");
+    const push = { folder: "clienti/acme/sito", path: "/home/agent/work/sito", message: "prima versione del sito" };
+    const results = [];
+    replies.set("Marta", (body) => {
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "tool") {
+        results.push(last.content);
+        return /there is no folder/.test(last.content)
+          ? { content: "In quale cartella lo metto? Propongo clienti/acme/sito, per il sito di Acme." }
+          : { content: `Fatto. ${last.content.split("\n")[0]}` };
+      }
+      if (/rispondi solo DONE/.test(String(last.content))) return { content: "DONE" };
+      const confirmed = /mettilo in clienti\/acme\/sito/.test(JSON.stringify(body.messages));
+      return { tool_calls: [{ function: { name: "artifact_push", arguments: confirmed ? { ...push, create: { title: "Sito Acme", description: "Il sito di Acme, deciso col proprietario", kind: "site" } } : push } }] };
+    });
+    discord.say({ content: "Marta, carica il sito che hai fatto" });
+    const question = await waitFor(() => discord.state.webhookPosts.find((item) => item.content?.startsWith("In quale cartella")), { what: "the folder question" });
+    assert.equal(question.username, "Marta");
+    assert.match(results[0], /there is no folder clienti\/acme\/sito yet.*ask the person/s);
+    assert.equal((await call("/api/artifacts")).data.folders.length, 0, "no folder is made without the owner's word");
+    await quiet();
+
+    discord.say({ content: "Marta, sì, mettilo in clienti/acme/sito" });
+    const done = await waitFor(() => discord.state.webhookPosts.find((item) => item.content?.startsWith("Fatto. PROPOSED")), { what: "the push receipt" });
+    assert.match(done.content, /waiting for review by the owner: it is NOT served yet/);
+    const notice = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Cora" && /Marta ha proposto «prima versione del sito» in \*\*clienti\/acme\/sito\*\*/.test(item.content)), { what: "Cora's notice" });
+    assert.ok(notice);
+
+    const list = await call("/api/artifacts");
+    const folder = list.data.folders.find((item) => item.path === "clienti/acme/sito");
+    assert.equal(folder.pending, 1);
+    assert.equal(folder.head, "");
+    assert.equal(folder.policy, "review");
+    assert.equal(folder.requestedBy.kind, "owner");
+    assert.equal(list.data.reviews.length, 1);
+    assert.equal((await call("/api/state")).data.artifacts.reviews, 1);
+    const detail = await call(`/api/artifacts/folders/${folder.id}`);
+    assert.equal(detail.data.canReview, true);
+    const commit = detail.data.commits[0];
+    assert.equal(commit.status, "proposed");
+    const view = await call(`/api/artifacts/commits/${commit.id}`);
+    assert.deepEqual(view.data.changed.map((item) => `${item.kind} ${item.path}`), ["added css/style.css", "added index.html"]);
+    assert.equal(view.data.mergeability.state, "fast-forward");
+
+    const html = await fetch(`${base}/api/artifacts/commits/${commit.id}/files/index.html`, { headers: { Cookie: cookie } });
+    assert.equal(html.headers.get("content-type"), "text/plain; charset=utf-8", "an agent's page is shown as text on the panel, never run");
+    assert.match(html.headers.get("content-security-policy"), /default-src 'none'.*sandbox/);
+    assert.equal(html.headers.get("x-content-type-options"), "nosniff");
+    assert.match(await html.text(), /<script>/);
+    const download = await fetch(`${base}/api/artifacts/commits/${commit.id}/files/index.html?download=1`, { headers: { Cookie: cookie } });
+    assert.equal(download.headers.get("content-type"), "application/octet-stream");
+    assert.match(download.headers.get("content-disposition"), /^attachment/);
+    assert.equal((await fetch(`${base}/api/artifacts/commits/${commit.id}/files/index.html`)).status, 401);
+    assert.equal((await call(`/api/artifacts/commits/${commit.id}/review`, { method: "POST", body: { decision: "approve" }, headers: { "Sec-Fetch-Site": "same-site" } })).status, 403,
+      "a page on a sibling host cannot approve through the owner's session");
+
+    const approved = await call(`/api/artifacts/commits/${commit.id}/review`, { method: "POST", body: { decision: "approve", note: "va bene" } });
+    assert.equal(approved.data.commit.status, "published");
+    assert.equal((await call(`/api/artifacts/folders/${folder.id}`)).data.folder.head, commit.id);
+    await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Cora" && /Owner ha pubblicato «prima versione del sito» di Marta/.test(item.content)), { what: "the review notice" });
+    assert.equal((await call("/api/state")).data.artifacts.reviews, 0);
+    await quiet();
+    await call(`/api/agents/${marta.id}`, { method: "PUT", body: { tools: false } });
+  });
+
   test("falls back to plain bot messages when webhooks are not allowed", async () => {
     app.discord.webhooks.clear();
     discord.state.webhookAllowed = false;
@@ -1365,7 +1435,7 @@ describe("agents in Discord", () => {
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
     // Its own routines travel with it: they are the agent's own, not the owner's computer.
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner"]);
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);

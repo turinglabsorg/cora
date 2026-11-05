@@ -420,6 +420,19 @@ export function fakeDocker() {
   const dir = mkdtempSync(join(tmpdir(), "cora-docker-"));
   const log = join(dir, "calls.log");
   const script = join(dir, "docker");
+  // Cora's Python on a desktop runs for real, against <dir>/desktops/cora-box-<agentId> as /home/agent.
+  writeFileSync(join(dir, "python.mjs"), `import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+const args = process.argv.slice(2);
+const index = args.findIndex((arg) => arg.startsWith("cora-box-"));
+const root = join(${JSON.stringify(dir)}, "desktops", args[index]);
+mkdirSync(join(root, "work"), { recursive: true });
+const at = args.indexOf("python3", index);
+const script = args[at + 2].replaceAll("/home/agent", root);
+const parameters = args.slice(at + 3).map((arg) => (arg.startsWith("/home/agent/") ? root + arg.slice("/home/agent".length) : arg));
+spawn("python3", ["-c", script, ...parameters], { stdio: "inherit" }).on("exit", (code) => process.exit(code ?? 1));
+`);
   writeFileSync(script, `#!/bin/sh
 echo "$@" >> "${log}"
 case "$1" in
@@ -433,6 +446,7 @@ case "$1" in
   run|start|stop|restart|rm|volume) echo ok; exit 0 ;;
   exec)
     case "$*" in
+      *" python3 -c "*) exec "${process.execPath}" "${dir}/python.mjs" "$@" ;;
       *cora_authorized_keys*) cat > "${dir}/authorized_keys"; exit 0 ;;
       *"tailscale status --json"*) if [ -f "${dir}/tailscale.json" ]; then cat "${dir}/tailscale.json"; else echo '{"BackendState":"NeedsLogin","AuthURL":""}'; fi; exit 0 ;;
       *"tailscale up"*) echo '{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/test"}' > "${dir}/tailscale.json"; exit 0 ;;
@@ -447,7 +461,7 @@ esac
 exit 0
 `);
   chmodSync(script, 0o755);
-  return { path: script, log, dir };
+  return { path: script, log, dir, desktop: (agentId) => join(dir, "desktops", `cora-box-${agentId}`) };
 }
 
 /**

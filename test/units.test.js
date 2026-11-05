@@ -441,3 +441,35 @@ test("the panel renders markdown as DOM: blocks, inline marks, only web and mail
   assert.equal(render("Vedi [[acme]].").textContent, "Vedi [[acme]].", "outside the brain [[slug]] is text");
   assert.equal(render("**grassetto *e corsivo***").querySelector("strong").querySelector("em").textContent, "e corsivo");
 });
+
+test("Artefatti: the count of reviews waits beside its entry, proposals come first, folders sit in their groups", async () => {
+  const folder = (id, path, extra = {}) => ({ id, path, title: path.split("/").at(-1), description: "", kind: "files", policy: "review", head: "", pending: 0, conflicts: 0, shares: 0, files: 0, bytes: 0, lastActivity: Date.parse("2026-11-05T09:00:00Z"), ...extra });
+  const listing = {
+    folders: [folder("af_000000000001", "clienti/acme/sito", { kind: "site", head: "ac_000000000009", files: 3, bytes: 2048, pending: 1 }), folder("af_000000000002", "clienti/acme/report", { conflicts: 1 }), folder("af_000000000003", "comunicati", { head: "ac_000000000008", files: 1, bytes: 10 })],
+    reviews: [{ id: "ac_000000000010", folderId: "af_000000000001", message: "Numeri del Q3", author: { kind: "agent", id: "ag_x", name: "Nico" }, status: "proposed", createdAt: Date.parse("2026-11-05T09:00:00Z"), changes: { added: 1, modified: 1, deleted: 0 } }],
+    quota: { used: 4096, limit: 20 * 1024 ** 3 }, people: [], canManage: true,
+  };
+  const panel = panelHarness({ fetch: async (path) => ({ ok: true, status: 200, json: async () => (path === "/api/artifacts" ? listing : {}) }) });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [], artifacts: { reviews: 3 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
+  panel.run(`location.hash = "#/artefatti"`);
+  panel.run("renderArtifacts()");
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  const nav = panel.app.querySelector(".side-nav").querySelectorAll("a").find((link) => link.attributes.href === "#/artefatti");
+  assert.equal(nav.className, "active");
+  assert.equal(nav.querySelector(".nav-count").textContent, "1", "the count follows what the server says waits for this viewer");
+  const reviews = panel.app.querySelectorAll(".art-review");
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0].attributes.href, "#/artefatti/af_000000000001/c/ac_000000000010");
+  assert.match(reviews[0].textContent, /Nico.*Numeri del Q3.*clienti\/acme\/sito.*\+1~1/);
+  const groups = panel.app.querySelectorAll(".art-group");
+  assert.deepEqual(groups.map((group) => group.querySelector("h3").textContent), ["clienti2", "Senza gruppo1"]);
+  const rows = panel.app.querySelectorAll(".art-row");
+  assert.deepEqual(rows.map((row) => row.attributes.href), ["#/artefatti/af_000000000001", "#/artefatti/af_000000000002", "#/artefatti/af_000000000003"]);
+  assert.match(rows[0].textContent, /1 da rivedere.*3 file · 2 KB/);
+  assert.match(rows[1].textContent, /Conflitto.*niente in onda/);
+  assert.match(rows[2].textContent, /1 file · 10 B/);
+  assert.equal(rows[0].querySelector(".led").className, "led busy");
+  assert.equal(rows[1].querySelector(".led").className, "led err");
+  assert.equal(rows[2].querySelector(".led").className, "led on");
+});

@@ -1,3 +1,4 @@
+import { BRAIN_SLUG as ARTIFACTS_SLUG } from "./artifacts.js";
 import { BODY_LIMIT, BRAIN_KINDS, slugify } from "./company-brain.js";
 import { parseJsonObject } from "./memory.js";
 import { SHARED } from "./store.js";
@@ -179,7 +180,8 @@ export class Librarian {
       const slug = slugify(change.slug || change.title);
       const body = String(change.body || "").trim();
       // A fact with no source it can be traced to is not written: that is how the brain stays honest.
-      if (!slug || !String(change.title || "").trim() || !body || !sources.length) {
+      // The artifact catalog is Cora's own: it follows the folders, not the chats.
+      if (!slug || slug === ARTIFACTS_SLUG || !String(change.title || "").trim() || !body || !sources.length) {
         done.skipped += 1;
         continue;
       }

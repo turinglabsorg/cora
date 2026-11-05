@@ -923,6 +923,31 @@ export class Orchestrator {
     else if (posted && state.budget > 0 && state.generation === generation) this.schedule(state, 2500 + Math.random() * 4000);
   }
 
+  /**
+   * A notice from Cora herself in a conversation (an artifact proposed or reviewed):
+   * archived as passive, so it wakes nobody. A private conversation with an agent's
+   * own bot has no voice of Cora's and gets nothing.
+   */
+  async notice(channelId, text) {
+    const content = String(text || "").slice(0, 1500);
+    if (!content || this.dmAgent.has(channelId)) return [];
+    if (isWebRoom(channelId)) {
+      const state = this.state(channelId);
+      const item = { id: `web_${randomBytes(8).toString("hex")}`, at: Date.now(), authorId: null, authorName: "Cora", kind: "bot", content, passive: true };
+      this.push(state, item);
+      this.store.appendArchive(state.id, item);
+      this.emit({ type: "web-message", room: state.id, item });
+      return [item];
+    }
+    const chatId = telegramChatId(channelId);
+    if (chatId) return this.telegram.say(chatId, { content, name: "Cora" });
+    if (slackIds(channelId)) {
+      const info = this.channels.info(channelId);
+      return this.slack.say(info.channelId, { content, name: "Cora", threadTs: info.threadTs });
+    }
+    return this.discord.post(channelId, { username: "Cora", content });
+  }
+
   /** A notice from usecora.space, posted as "Cora" in the channel named in settings.noticeChannel. */
   async cloudNotice(fields) {
     const english = this.store.settings.language === "en";
