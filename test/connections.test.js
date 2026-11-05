@@ -268,7 +268,7 @@ test("an account says whose it is, and a member's new agent starts on the accoun
   assert.deepEqual(connections.ids.slice(0, 6), ["discord", "telegram", "slack", "server", "claude", "codex"]);
   const firstKey = connections.ids.indexOf("ollama");
   assert.deepEqual(connections.ids.slice(firstKey, firstKey + 5), ["ollama", "orcarouter", "deepseek", "typesafe", "soniox"]);
-  assert.deepEqual(connections.ids.slice(firstKey + 5), ["regia", "modelli", "permessi", "accesso", "ssh", "controlli", "preferenze"]);
+  assert.deepEqual(connections.ids.slice(firstKey + 5), ["regia", "modelli", "permessi", "accesso", "ssh", "spazio", "controlli", "preferenze"], "Spazio sits with the general settings, for the owner");
   assert.match(connections.codex, /ChatGPT \/ Codex2 accounts/, "the server's account and Sara's, both ready");
   assert.deepEqual([connections.open, connections.className], [["codex"], "rail open"]);
   assert.deepEqual([connections.after, connections.active], [["soniox"], ["soniox"]]);
