@@ -121,8 +121,9 @@ test("an agent's own GitHub App: made from the panel, installed on GitHub, its h
   const gitconfig = readFileSync(join(home, ".gitconfig"), "utf8");
   assert.match(gitconfig, /\[credential "https:\/\/github\.com"\]\n\s*helper = /);
   assert.match(gitconfig, /email = 4242\+nico-acme\[bot\]@users\.noreply\.github\.com/, "its commits are its bot's");
-  assert.match(readFileSync(join(home, ".config/gh/hosts.yml"), "utf8"), /oauth_token: ghs_testtoken0001abcdefghij\n\s*user: nico-acme\[bot\]/);
+  assert.match(readFileSync(join(home, ".config/gh/hosts.yml"), "utf8"), /users:\n\s*nico-acme\[bot\]:\n\s*oauth_token: ghs_testtoken0001abcdefghij[\s\S]*user: nico-acme\[bot\]/);
   assert.doesNotMatch(readFileSync(docker.log, "utf8"), /ghs_testtoken/, "the token never travels on a command line");
+  assert.match(readFileSync(docker.log, "utf8"), new RegExp(`exec -i -u root .*cora-box-${nico.id} sh -c command -v gh`), "gh is put on the running desktop, as root, when missing");
   assert.match(app.brain.systemPrompt(app.store.agent(nico.id), { place: "", computer: true }), /## GitHub\nSu GitHub sei nico-acme\[bot\], la tua app installata su acme/);
 
   await app.github.refreshAll();

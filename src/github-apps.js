@@ -215,6 +215,8 @@ export class GithubApps {
     const token = await this.token(agent);
     if (token.written) return token;
     try {
+      // gh is put on the desktop if it is missing; without it git still pushes, so a failure only gets logged.
+      await this.boxes.ensureGh?.(agent.id).catch((error) => this.log({ type: "github", agentId: agent.id, text: error.message }));
       await this.boxes.githubLogin(agent.id, { token: token.token, ...this.identity(record) });
       token.written = true;
       if (record.error) this.save(agent, { ...this.record(agent), error: "" });

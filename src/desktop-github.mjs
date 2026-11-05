@@ -31,7 +31,9 @@ try {
     if (input.name) git("user.name", String(input.name));
     if (input.email) git("user.email", String(input.email));
     mkdirSync(`${home}/.config/gh`, { recursive: true, mode: 0o700 });
-    writeFileSync(hosts, `${MARK}github.com:\n    oauth_token: ${token}\n    user: ${String(input.login || "")}\n    git_protocol: https\n`, { mode: 0o600 });
+    // gh's own layout (one entry per account, the active one on top), with the token kept in the file.
+    const login = String(input.login || "");
+    writeFileSync(hosts, `${MARK}github.com:\n    users:\n        ${login}:\n            oauth_token: ${token}\n    git_protocol: https\n    user: ${login}\n    oauth_token: ${token}\n`, { mode: 0o600 });
     chmodSync(hosts, 0o600);
   }
 } catch (error) {

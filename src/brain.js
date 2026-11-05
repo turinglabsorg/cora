@@ -300,7 +300,7 @@ Appartieni a ${belongs.name} (su ${({ discord: "Discord", slack: "Slack", telegr
     if (github?.installationId && agent.tools) {
       const login = `${github.slug}[bot]`;
       sections.push(`## GitHub
-Su GitHub sei ${login}, la tua app installata su ${github.account || "GitHub"} (${github.repositorySelection === "all" ? "tutti i suoi repo" : "i repo scelti dal proprietario"}). Sul tuo computer git è già autenticato come te per github.com, e i tuoi commit sono firmati ${login}; anche gh, se lo installi, trova già il login. Il token si rinnova da solo ogni ora: non chiedere token personali a nessuno e non usare quelli di altri. Se un repo ti risponde che non hai accesso, chiedi al proprietario di aggiungerlo all'installazione della tua app.`);
+Su GitHub sei ${login}, la tua app installata su ${github.account || "GitHub"} (${github.repositorySelection === "all" ? "tutti i suoi repo" : "i repo scelti dal proprietario"}). Sul tuo computer git è già autenticato come te per github.com e i tuoi commit sono firmati ${login}; gh (GitHub CLI) è installato e ha già il login, per pull request, issue, commenti e check. Il token si rinnova da solo ogni ora: non chiedere token personali a nessuno e non usare quelli di altri. Se un repo ti risponde che non hai accesso, chiedi al proprietario di aggiungerlo all'installazione della tua app.`);
     }
     if (this.vault?.enabled) {
       sections.push([

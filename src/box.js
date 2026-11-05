@@ -10,6 +10,15 @@ const GIT_SCRIPT = readFileSync(new URL("./desktop-git.sh", import.meta.url), "u
 const SSH_SCRIPT = readFileSync(new URL("./desktop-ssh.mjs", import.meta.url), "utf8");
 const GIT_SETUP_SCRIPT = readFileSync(new URL("./desktop-git-setup.mjs", import.meta.url), "utf8");
 const GITHUB_SCRIPT = readFileSync(new URL("./desktop-github.mjs", import.meta.url), "utf8");
+// gh, GitHub's command line, put on a running desktop when it gets its GitHub App: no image rebuild, no restart.
+const GH_INSTALL = `command -v gh >/dev/null 2>&1 && exit 0
+set -e
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends gh
+rm -rf /var/lib/apt/lists/*
+gh --version >/dev/null`;
 
 /**
  * Lists a file or a folder under /home/agent/work for a push: one JSON line per
@@ -508,6 +517,12 @@ export class Boxes {
       input: JSON.stringify({ token, login, name, email }), timeoutMs: 20000, maxBytes: 4096,
     });
     if (result.code !== 0) throw new Error(`GitHub sul desktop: ${lastLine(result.stderr, "non riesco a scrivere il token")}`);
+  }
+
+  /** gh on the desktop, installed as root the first time it is missing; a few seconds when it is already there. */
+  async ensureGh(agentId) {
+    const result = await runProcess(this.docker, this.execArgs(agentId, ["sh", "-c", GH_INSTALL], { root: true }), { timeoutMs: 300000, maxBytes: 64 * 1024 });
+    if (result.code !== 0) throw new Error(`gh: ${lastLine(result.stderr, "installazione non riuscita")}`);
   }
 
   async githubLogout(agentId) {
