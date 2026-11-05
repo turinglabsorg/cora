@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const OUTPUT_LIMIT = 24000;
+const MAILBOX_SCRIPT = readFileSync(new URL("./desktop-mailbox.mjs", import.meta.url), "utf8");
 
 /**
  * Lists a file or a folder under /home/agent/work for a push: one JSON line per
@@ -258,11 +260,14 @@ export function slug(name) {
 
 export class Boxes {
   /** `access(agent)` gives the box's SSH port on the host and the public keys allowed in. */
-  constructor({ docker, image, timezone, access = () => ({}) }) {
+  constructor({ docker, image, timezone, access = () => ({}), mailbox = null }) {
     this.docker = docker;
     this.image = image;
     this.timezone = timezone;
     this.access = access;
+    this.mailbox = mailbox;
+    this.mailboxChecks = new Map();
+    this.mailboxQueue = Promise.resolve();
     this.pending = new Map();
     this.imageCache = { at: 0, id: null };
   }
@@ -312,9 +317,40 @@ export class Boxes {
    */
   ensure(agent, { upgrade = false } = {}) {
     if (this.pending.has(agent.id)) return this.pending.get(agent.id);
-    const job = this.ensureNow(agent, { upgrade }).finally(() => this.pending.delete(agent.id));
+    const job = this.ensureNow(agent, { upgrade }).then(async (current) => {
+      await this.ensureMailbox(agent);
+      return current;
+    }).finally(() => this.pending.delete(agent.id));
     this.pending.set(agent.id, job);
     return job;
+  }
+
+  ensureMailbox(agent) {
+    const job = this.mailboxQueue.then(() => this.ensureMailboxNow(agent));
+    this.mailboxQueue = job.catch(() => {});
+    return job;
+  }
+
+  async ensureMailboxNow(agent) {
+    if (!this.mailbox?.token || !this.mailbox.domain || !this.mailbox.namespace || !agent.tools || !agent.enabled) return;
+    const previous = this.mailboxChecks.get(agent.id);
+    if (previous?.ready || previous?.at > Date.now() - 60000) return;
+    this.mailboxChecks.set(agent.id, { at: Date.now() });
+    try {
+      const existing = this.mailbox.identity?.(agent);
+      const suffix = slug(this.mailbox.namespace).slice(0, 14).replace(/-$/, "");
+      const local = existing?.email?.endsWith(`@${this.mailbox.domain}`) ? existing.email.split("@")[0] : `${slug(agent.name).slice(0, 31 - suffix.length).replace(/-$/, "")}-${suffix}`;
+      const result = await runProcess(this.docker, this.execArgs(agent.id, ["node", "--input-type=module", "-e", MAILBOX_SCRIPT]), {
+        input: JSON.stringify({ endpoint: this.mailbox.endpoint, domain: this.mailbox.domain, token: this.mailbox.token, local, displayName: agent.name }), timeoutMs: 60000, maxBytes: 64 * 1024,
+      });
+      if (result.code !== 0) throw new Error(`mailbox provisioning failed${result.timedOut ? " (timed out)" : ""}: ${result.stderr.trim().slice(0, 200)}`);
+      const identity = JSON.parse(result.stdout.toString("utf8"));
+      if (identity.email !== `${local}@${this.mailbox.domain}`) throw new Error("unexpected mailbox identity");
+      this.mailbox.changed?.(agent, { ...identity, status: "ready" });
+      this.mailboxChecks.set(agent.id, { at: Date.now(), ready: true });
+    } catch (error) {
+      this.mailbox.changed?.(agent, { status: "blocked", error: error.message });
+    }
   }
 
   async ensureNow(agent, { upgrade = false } = {}) {

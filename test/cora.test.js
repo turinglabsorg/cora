@@ -17,7 +17,7 @@ import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
 import { Boxes } from "../src/box.js";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDoc, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
@@ -4524,6 +4524,120 @@ describe("doc in the Cora harness", () => {
   });
 });
 
+
+describe("agent mailboxes", () => {
+  const fixture = async (t, name) => {
+    const directory = mkdtempSync(join(tmpdir(), "cora-mail-client-"));
+    const calls = [];
+    const state = { status: 200 };
+    const server = http.createServer(async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks));
+      calls.push({ path: req.url, authorization: req.headers.authorization, body });
+      res.writeHead(state.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(state.status === 200 ? { agent_id: `${body.agent_id}@${body.domain}`, email: `${body.agent_id}@${body.domain}`, api_key: "fixture-mailbox-private-api-key" } : { error: "fixture-provider-secret-that-must-not-leak" }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const dockerBin = join(directory, "docker.cjs");
+    writeFileSync(dockerBin, `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nconst { readFileSync } = require('node:fs');\nconst args = process.argv.slice(2);\nconst index = args.indexOf('node');\nif (args[0] !== 'exec' || index < 0) process.exit(99);\nconst result = spawnSync(${JSON.stringify(process.execPath)}, args.slice(index + 1), { input: readFileSync(0), env: { HOME: ${JSON.stringify(directory)}, PATH: process.env.PATH } });\nprocess.stdout.write(result.stdout || '');\nprocess.stderr.write(result.stderr || '');\nprocess.exit(result.status ?? 1);\n`);
+    chmodSync(dockerBin, 0o755);
+    const agent = app.store.createAgent({ name, tools: true, model: "ollama/test-model" });
+    const makeBoxes = () => {
+      const boxes = new Boxes({ docker: dockerBin, image: "unused", timezone: "UTC", mailbox: {
+        endpoint: `http://127.0.0.1:${server.address().port}`, domain: "usecora.space", namespace: "team", token: "fixture-domain-registration-token",
+        identity: (item) => app.store.value(`agentMailbox:${item.id}`, null),
+        changed: (item, value) => app.store.setValue(`agentMailbox:${item.id}`, { ...app.store.value(`agentMailbox:${item.id}`, {}), ...value }),
+      } });
+      boxes.ensureNow = async () => ({ exists: true, running: true });
+      return boxes;
+    };
+    t.after(async () => { await new Promise((resolve) => server.close(resolve)); rmSync(directory, { recursive: true, force: true }); app.store.deleteAgent(agent.id); });
+    return { directory, calls, state, agent, makeBoxes, boxes: makeBoxes() };
+  };
+
+  test("a desktop receives its own custom-domain mailbox and system instructions without exposing credentials", async (t) => {
+    const f = await fixture(t, "MailboxAlpha");
+    assert.equal((await f.boxes.ensure(f.agent)).running, true);
+    const identity = app.store.value(`agentMailbox:${f.agent.id}`);
+    assert.equal(identity.email, "mailboxalpha-team@usecora.space");
+    assert.equal(identity.status, "ready");
+    assert.equal(f.calls[0].path, "/v1/domains/register");
+    assert.equal(f.calls[0].authorization, "Bearer fixture-domain-registration-token");
+    assert.match(f.calls[0].body.public_key_pem, /BEGIN PUBLIC KEY/);
+    assert.equal(f.calls[0].body.recover, true);
+    const client = join(f.directory, ".ambox", "agents", identity.email);
+    assert.equal(statSync(join(client, "private.pem")).mode & 0o777, 0o600);
+    assert.equal(statSync(join(client, "config.json")).mode & 0o777, 0o600);
+    const config = JSON.parse(readFileSync(join(client, "config.json"), "utf8"));
+    assert.equal(config.apiKey, "fixture-mailbox-private-api-key");
+    assert.equal(readFileSync(join(f.directory, ".ambox", "default"), "utf8"), identity.agentId);
+    const response = await call(`/api/agents/${f.agent.id}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.data.mailbox.email, identity.email);
+    const system = app.brain.systemPrompt(f.agent, { place: "private room", computer: true });
+    assert.ok(system.includes(identity.email));
+    assert.match(system, /ambox inbox/);
+    assert.match(system, /ambox send/);
+    assert.doesNotMatch(JSON.stringify(identity) + JSON.stringify(response.data) + system, /fixture-domain-registration-token|fixture-mailbox-private-api-key|BEGIN PRIVATE KEY/);
+  });
+
+  test("creating an agent through the owner API starts mailbox setup with its desktop", async (t) => {
+    const f = await fixture(t, "MailboxTemplate");
+    const ensure = app.boxes.ensure;
+    app.boxes.ensure = f.boxes.ensure.bind(f.boxes);
+    let createdId;
+    t.after(() => { app.boxes.ensure = ensure; if (createdId) app.store.deleteAgent(createdId); });
+    const created = await call("/api/agents", { method: "POST", body: { name: "MailboxCreated", tools: true, model: "ollama/test-model" } });
+    assert.equal(created.status, 201);
+    createdId = created.data.id;
+    await waitFor(() => app.store.value(`agentMailbox:${createdId}`, null)?.status === "ready", { timeout: 20000, what: "new agent mailbox ready" });
+    const response = await call(`/api/agents/${createdId}`);
+    assert.equal(response.data.mailbox.email, "mailboxcreated-team@usecora.space");
+    assert.equal(f.calls.length, 1);
+  });
+
+  test("restart and rename preserve the mailbox and its private key without registering again", async (t) => {
+    const f = await fixture(t, "MailboxBeta");
+    await f.boxes.ensure(f.agent);
+    const identity = app.store.value(`agentMailbox:${f.agent.id}`);
+    const keyPath = join(f.directory, ".ambox", "agents", identity.email, "private.pem");
+    const key = readFileSync(keyPath, "utf8");
+    await f.boxes.ensure(f.agent);
+    await f.makeBoxes().ensure({ ...f.agent, name: "Renamed mailbox agent" });
+    assert.equal(f.calls.length, 1);
+    assert.equal(app.store.value(`agentMailbox:${f.agent.id}`).email, identity.email);
+    assert.equal(readFileSync(keyPath, "utf8"), key);
+  });
+
+  test("a refused registration leaves the desktop available, hides provider data and retries with the same encryption key", async (t) => {
+    const f = await fixture(t, "MailboxGamma");
+    f.state.status = 403;
+    assert.equal((await f.boxes.ensure(f.agent)).running, true);
+    const blocked = app.store.value(`agentMailbox:${f.agent.id}`);
+    assert.equal(blocked.status, "blocked");
+    assert.match(blocked.error, /HTTP 403/);
+    assert.doesNotMatch(JSON.stringify(blocked), /fixture-provider-secret|fixture-domain-registration-token/);
+    assert.doesNotMatch(app.brain.systemPrompt(f.agent, { place: "private room", computer: true }), /La tua casella è/);
+    await f.boxes.ensure(f.agent);
+    assert.equal(f.calls.length, 1, "failed provisioning backs off");
+    f.state.status = 200;
+    f.boxes.mailboxChecks.delete(f.agent.id);
+    await f.boxes.ensure(f.agent);
+    assert.equal(app.store.value(`agentMailbox:${f.agent.id}`).status, "ready");
+    assert.equal(f.calls[1].body.public_key_pem, f.calls[0].body.public_key_pem);
+  });
+
+  test("provisioning is opt-in and agents without an enabled computer receive no mailbox", async (t) => {
+    const f = await fixture(t, "MailboxDelta");
+    await f.boxes.ensure({ ...f.agent, tools: false });
+    await f.boxes.ensure({ ...f.agent, enabled: false });
+    f.boxes.mailbox.token = "";
+    await f.boxes.ensure(f.agent);
+    assert.equal(f.calls.length, 0);
+    assert.equal(app.store.value(`agentMailbox:${f.agent.id}`, null), null);
+  });
+});
 
 describe("Cora commit attribution", () => {
   let agent;

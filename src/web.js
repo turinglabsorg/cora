@@ -314,6 +314,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const pulls = new Set();
   const publicAgent = async (agent) => ({
     ...agent,
+    mailbox: store.value(`agentMailbox:${agent.id}`, null),
     memoryCount: store.memoryCount(agent.id),
     box: await boxStatus(agent),
     bot: bots ? bots.status(agent, store.settings.guildIds[0]) : null,

@@ -53,7 +53,7 @@ test("a Soniox key is tried before it is kept, then the agents' voices can be ch
 });
 
 test("an agent's CLI never inherits the Soniox key or any other Cora secret", () => {
-  const names = ["SONIOX_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "TYPESAFE_API_KEY", "CORA_SK_BOT_ADA", "CORA_SK_APP_ADA", "CORA_BOT_ADA", "CORA_TG_BOT_ADA"];
+  const names = ["SONIOX_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "TYPESAFE_API_KEY", "CORA_MAIL_REGISTRATION_TOKEN", "CORA_SK_BOT_ADA", "CORA_SK_APP_ADA", "CORA_BOT_ADA", "CORA_TG_BOT_ADA"];
   for (const name of names) process.env[name] = "fixture-secret";
   try {
     const env = childEnv();
