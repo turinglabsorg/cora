@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { avatarVersion, drawnAvatar } from "./avatar.js";
 import { plainKeys } from "./box.js";
+import { cleanGithubOrg } from "./github-apps.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS, isSubscriptionProvider } from "./harnesses.js";
 import { VOICE_LANGUAGES } from "./voice.js";
 
@@ -54,6 +55,8 @@ const DEFAULT_SETTINGS = {
   reviewHour: 8,
   // The room the artifacts may take, in GB: 0 is half the disk they live on.
   artifactQuotaGb: 0,
+  // The GitHub organization the agents' own apps are made in; empty means the owner's account.
+  githubOrg: "",
 };
 const SSH_PORT_BASE = 2201;
 export const TRANSPORTS = ["discord", "telegram", "slack"];
@@ -354,6 +357,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     librarianHour: Math.round(clampNumber(merged.librarianHour, 0, 23, 3)),
     reviewHour: Math.round(clampNumber(merged.reviewHour, 0, 23, 8)),
     artifactQuotaGb: Math.round(clampNumber(merged.artifactQuotaGb, 0, 1000000, 0)),
+    githubOrg: cleanGithubOrg(merged.githubOrg),
   };
 }
 

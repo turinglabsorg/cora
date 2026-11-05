@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { drawnAvatar } from "./avatar.js";
 import { passLedger, verifyPass } from "./pass.js";
 import { shareHosts } from "./share-host.js";
-import { sendPages } from "./send-pages.js";
+import { SEND_MARK, SEND_STYLE, sendPages } from "./send-pages.js";
 import { pngSize } from "./png.js";
 import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
 import { Slack } from "./slack.js";
@@ -175,7 +175,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, github = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -193,9 +193,44 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const shares = shareHosts({ config, store, artifacts, vault, cloud, firstUse, sessionKey, activity });
   // The panel frames a PDF from the space's own preview host, never from its own origin.
   const shareDomain = artifacts?.shareSuffix ? artifacts.shareSuffix.split(".").slice(1).join(".") : "";
-  const panelCsp = shareDomain ? CSP.replace("frame-src 'self'", `frame-src 'self' https://*.${shareDomain}`) : CSP;
+  const framedCsp = shareDomain ? CSP.replace("frame-src 'self'", `frame-src 'self' https://*.${shareDomain}`) : CSP;
+  // The manifest of an agent's GitHub App is posted to GitHub straight from the panel.
+  const panelCsp = github ? framedCsp.replace("form-action 'self'", `form-action 'self' ${new URL(github.webBase).origin}`) : framedCsp;
   // The vault's pages for people outside the panel: a request to fill, a send to open.
   const vaultPages = sendPages({ vault, store, timezone: config.timezone, whoOf: (req) => shares.whoOf(req) });
+
+  /**
+   * Where GitHub sends the owner back, from another site: the panel's cookie does not come
+   * along, so the app's state (signed here, used once) and GitHub's own answers say who it is
+   * for. A small page then opens the panel from here, where the cookie comes along again.
+   */
+  const githubReturn = async (res, url) => {
+    const page = (status, title, text, agentId = "") => {
+      const back = agentId ? `/#/agent/${encodeURIComponent(agentId)}/profilo` : "/";
+      const esc = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+      res.writeHead(status, {
+        "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      });
+      res.end(`<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${status === 200 ? `<meta http-equiv="refresh" content="1;url=${esc(back)}">` : ""}<title>${esc(title)}</title><style>${SEND_STYLE}</style></head><body><main>${SEND_MARK}<h1>${esc(title)}</h1><p>${esc(text)}</p><a class="button" href="${esc(back)}">Torna a Cora</a></main></body></html>`);
+    };
+    try {
+      if (url.pathname === "/github/created") {
+        const agent = await github.created({ code: url.searchParams.get("code"), state: url.searchParams.get("state") });
+        return page(200, "App GitHub creata", `L'app di ${agent.name} c'è: ora installala sull'organizzazione dal pannello.`, agent.id);
+      }
+      if (url.pathname === "/github/installed") {
+        const agent = store.agent(String(url.searchParams.get("agent") || ""));
+        if (!agent || !github.record(agent)) return page(404, "Agente non trovato", "Questa installazione non è di un agente di questa Cora.");
+        await github.installed(agent, url.searchParams.get("installation_id"));
+        return page(200, "App GitHub installata", `${agent.name} ora lavora su GitHub con la sua app.`, agent.id);
+      }
+      return page(404, "Non trovato", "Questo indirizzo non porta da nessuna parte.");
+    } catch (error) {
+      activity({ type: "github", text: `ritorno da GitHub: ${error.message}` });
+      return page(error.status && error.status < 500 ? error.status : 502, "Non è andata", error.message);
+    }
+  };
 
   /**
    * Who may put the agents to work besides the owner: the people who wrote in the chats
@@ -325,6 +360,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     bot: bots ? bots.status(agent, store.settings.guildIds[0]) : null,
     telegramBot: tgBots ? await tgBots.status(agent, telegramChatId(channels.list()[0]?.id) || store.settings.telegramChatIds[0]) : null,
     slackBot: skBots ? await skBots.status(agent, slackIds(channels.list()[0]?.id)?.channelId || store.settings.slackChannelIds[0]) : null,
+    github: github ? github.view(agent) : null,
   });
 
   const routineView = (routine) => {
@@ -961,6 +997,24 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       });
     }
 
+    // The agent's own GitHub App: the owner makes it from here and installs it on GitHub.
+    match = /^\/api\/agents\/([\w-]+)\/github(?:\/(manifest|check))?$/.exec(path);
+    if (match && github) {
+      if (user?.role !== "owner") throw new HttpError(403, "l'app GitHub di un agente la gestisce il proprietario");
+      const agent = store.agent(match[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      try {
+        if (!match[2] && method === "GET") return send(res, 200, github.view(agent));
+        if (match[2] === "manifest" && method === "POST") return send(res, 200, github.begin(agent));
+        if (match[2] === "check" && method === "POST") return send(res, 200, await github.check(agent));
+        if (!match[2] && method === "DELETE") return send(res, 200, await github.forget(agent));
+      } catch (error) {
+        if (error.status) throw new HttpError(error.status, error.message);
+        throw error;
+      }
+      throw new HttpError(405, "method not allowed");
+    }
+
     match = /^\/api\/agents\/([\w-]+)\/slack-bot$/.exec(path);
     if (match && method === "PUT" && skBots) {
       const agent = store.agent(match[1]);
@@ -1510,6 +1564,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (url.pathname === "/api/events") return events(req, res);
       const picture = /^\/avatars\/([\w-]+)\.png$/.exec(url.pathname);
       if (picture && (req.method === "GET" || req.method === "HEAD")) return avatarFile(res, url, picture[1]);
+      if (url.pathname.startsWith("/github/") && github && (req.method === "GET" || req.method === "HEAD")) return await githubReturn(res, url);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (url.pathname.startsWith("/box/")) return await proxyBox(req, res);
       const file = STATIC[url.pathname];

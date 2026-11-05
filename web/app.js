@@ -149,6 +149,7 @@ const ICONS = {
   stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
   refresh: '<path d="M20 11.5A8 8 0 1 0 17.7 17M20 4.5v7h-7"/>',
   moon: '<path d="M20.5 13.5A8.5 8.5 0 1 1 10.5 3.5a6.5 6.5 0 0 0 10 10z"/>',
+  github: '<path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/>',
   slack: '<path d="M3.5 9.8h6.3"/><path d="M14.2 3.5v6.3"/><path d="M20.5 14.2h-6.3"/><path d="M9.8 20.5v-6.3"/>',
   hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
   key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M16 7l3 3M18.5 4.5l2 2"/>',
@@ -2136,6 +2137,68 @@ function slackAccount(agent) {
   return panel({ icon: "slack", title: "Account Slack", hint: "La sua app su Slack.", actions }, body);
 }
 
+/**
+ * The agent's own GitHub App: made from here (on GitHub the owner presses Create), installed on the
+ * repositories the owner picks, and from then on git on its desktop is signed in as the app's bot.
+ */
+function githubAccount(agent) {
+  const gh = agent.github;
+  if (!gh || S.data.currentUser?.role !== "owner") return null;
+  const head = { icon: "github", title: "Account GitHub", hint: "La sua app su GitHub: commit, pull request e issue a nome suo." };
+  if (!gh.available) return panel(head, h("p", { class: "muted" }, "Le app GitHub vogliono un indirizzo pubblico di questo spazio, dove GitHub rimanda dopo ogni passo."));
+  const refresh = async () => { await loadState(); renderAgent(); };
+  const check = btn("Ho installato: controlla", { icon: "refresh", cls: "ghost", onclick: async () => {
+    check.disabled = true;
+    const view = await guard(api(`/api/agents/${agent.id}/github/check`, { method: "POST" }));
+    if (view) toast(view.state === "installed" ? "App installata" : "Su GitHub non risulta ancora installata", view.state !== "installed");
+    check.disabled = false;
+    if (view?.state === "installed") refresh();
+  } });
+  // GitHub takes the app's picture only from its own page: the agent's, ready to upload there.
+  const picture = setRow("Immagine", "GitHub non la prende da qui: scarica quella dell'agente e caricala nell'app, in Display information.",
+    h("div", { class: "row" }, avatar(agent, "sm"),
+      h("a", { class: "btn ghost sm", href: `/avatars/${agent.id}.png?v=${agent.avatarVersion || 0}`, download: `${gh.slug || agent.name}.png` }, icon("download"), h("span", {}, tr("Scarica l'immagine"))),
+      btn("Apri l'app su GitHub", { icon: "external", cls: "ghost sm", href: gh.settingsUrl, target: "_blank" })));
+  const forget = setRow("Scollega", "La toglie da Cora e dal suo desktop. Su GitHub l'app resta finché non la elimini tu.",
+    armedButton("Scollega", "Conferma", { cls: "sm", onconfirm: async () => {
+      const done = await guard(api(`/api/agents/${agent.id}/github`, { method: "DELETE" }), "App GitHub scollegata");
+      if (done) refresh();
+    } }));
+  if (gh.state === "none") {
+    const create = btn(tr("Crea l'app di {name}", { name: agent.name }), { icon: "github", cls: "primary", onclick: async () => {
+      create.disabled = true;
+      const made = await guard(api(`/api/agents/${agent.id}/github/manifest`, { method: "POST" }));
+      create.disabled = false;
+      if (!made) return;
+      // GitHub takes the manifest only as a form posted to it: the owner then just presses Create.
+      const form = h("form", { method: "post", action: made.action, hidden: true }, h("input", { type: "hidden", name: "manifest", value: made.manifest }));
+      document.body.append(form);
+      form.submit();
+    } });
+    const where = gh.org ? tr("Nasce nell'organizzazione {org}.", { org: gh.org }) : tr("Nasce nel tuo account GitHub: l'organizzazione si sceglie in Impostazioni → GitHub.");
+    return panel({ ...head, actions: badge("Nessuna app", "", "github") },
+      setRows(setRow("La sua app", `${where} ${tr("Su GitHub premi Create, poi la installi sui repo che scegli: due clic, e torni qui da solo.")}`, create)));
+  }
+  if (gh.state === "created") {
+    return panel({ ...head, actions: badge("Da installare", "warn", "alert") },
+      setRows(
+        setRow("Installala", tr("L'app {slug} c'è. Installala su GitHub e scegli i repo dove lavora: poi torni qui da solo.", { slug: gh.slug }),
+          h("div", { class: "row" }, btn("Installa su GitHub", { icon: "external", cls: "primary", href: gh.installUrl }), check)),
+        gh.keyMissing ? setRow("Chiave", "La chiave dell'app non è più in hush: scollegala e creala di nuovo.", null) : null,
+        picture, forget));
+  }
+  const repos = gh.repositorySelection === "all" ? tr("tutti i repo di {account}", { account: gh.account }) : tr("i repo scelti in {account}", { account: gh.account });
+  const desktop = gh.error ? tr("Non riesco a scrivere il token sul suo desktop: {error}.", { error: gh.error })
+    : gh.tokenUntil ? tr("git è già autenticato come lui; il token si rinnova da solo, ora vale fino alle {time}.", { time: fmtTime(new Date(gh.tokenUntil).toISOString()) })
+      : "git sarà autenticato come lui appena il suo desktop è acceso.";
+  return panel({ ...head, actions: badge(gh.error ? "Desktop da aggiornare" : "Collegata", gh.error ? "warn" : "on", gh.error ? "alert" : "check") },
+    setRows(
+      setRow("Su GitHub è", h("span", {}, h("b", { class: "mono" }, raw(gh.login)), raw(` · ${repos}`)),
+        btn("Repo dell'app", { icon: "external", cls: "ghost sm", href: gh.installationUrl, target: "_blank" })),
+      setRow("Dal suo desktop", desktop, null),
+      picture, forget));
+}
+
 /** How the agent's Slack app follows the panel: its name, description and image. */
 function slackAppSync(agent, bot) {
   if (!S.data.slack?.apps?.configured) return h("small", { class: "muted" }, "Perché l'app Slack prenda da sola il nome e l'immagine dell'agente, collega il token di configurazione in Impostazioni → Slack.");
@@ -2297,7 +2360,7 @@ async function renderAgent() {
   else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent });
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
   else if (tab === "cervello") body = brainTab(agent);
-  else body = [S.data.transport === "slack" ? slackAccount(agent) : S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), agentForm(agent, { only: "profile" })];
+  else body = [S.data.transport === "slack" ? slackAccount(agent) : S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), githubAccount(agent), agentForm(agent, { only: "profile" })].filter(Boolean);
   if (isCurrent()) slot.replaceChildren(...[body].flat().filter(Boolean));
 }
 
@@ -6224,6 +6287,12 @@ function renderSettings() {
   page("modelli", panel({ icon: "chip", title: "Modelli e sonno", hint: "Il modello di chi non ne sceglie uno, e l'ora in cui riordinano la memoria." },
     setRows(modelRow, hourRow, setRow("Cosa gira qui", "Gli harness e i provider che questa macchina può usare adesso.", providerBadges, { stack: true }))));
 
+  // Where the agents' own GitHub Apps are made.
+  const githubOrg = h("input", { type: "text", class: "mono", value: settings.githubOrg || "", placeholder: tr("nome-organizzazione"), autocomplete: "off", spellcheck: "false", "aria-label": tr("Organizzazione GitHub"), disabled: !manage });
+  const githubRow = setRow("Organizzazione", "Il nome dell'organizzazione GitHub dove nascono le app degli agenti, come appare in github.com/nome. Vuoto: nel tuo account. Si salva quando esci dal campo.", githubOrg);
+  githubOrg.addEventListener("change", () => saveSettings({ githubOrg: githubOrg.value.trim() }, githubRow).then(() => { githubOrg.value = S.data.settings.githubOrg || ""; drawNav(); }));
+  page("github", panel({ icon: "github", title: "GitHub", hint: "Ogni agente può avere la sua app GitHub: si crea dalla sua pagina, Profilo → Account GitHub, con due clic su GitHub." }, setRows(githubRow)));
+
   /* ---------- Persone ---------- */
   page("permessi", permissionsPane());
   page("accesso", instanceAccessPanel());
@@ -6252,6 +6321,7 @@ function renderSettings() {
       const known = S.data.models.find((item) => item.id === S.data.settings.defaultModel);
       return [known && known.usable !== false ? null : "warn", S.data.settings.defaultModel || tr("nessun modello")];
     } },
+    { id: "github", group: "Agenti", label: "GitHub", mark: "github", state: () => [null, S.data.settings.githubOrg || tr("le app nel tuo account")] },
     { id: "permessi", group: "Persone", label: "Permessi", mark: "user", state: () => [null, people ? (people === 1 ? tr("1 persona oltre a te") : tr("{count} persone oltre a te", { count: people })) : tr("solo tu")] },
     { id: "accesso", group: "Persone", label: "Accesso", mark: "shield", state: () => [null, tr("chi entra nella tua Cora")] },
     { id: "ssh", group: "Persone", label: "Chiavi SSH", mark: "key", state: () => [null, keyCount ? (keyCount === 1 ? tr("1 chiave in più") : tr("{count} chiavi in più", { count: keyCount })) : tr("solo quelle dell'host")] },

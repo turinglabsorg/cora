@@ -296,6 +296,12 @@ Appartieni a ${belongs.name} (su ${({ discord: "Discord", slack: "Slack", telegr
         "Se qualcuno ti chiede di condividere una cartella, o una sua sottocartella, il link lo fai tu con artifact_share: per le persone che ti indica, con una password, o pubblico solo se ti ha chiesto proprio un link che chiunque apre. Mandagli il link, e la password solo a lui.",
       ].join("\n"));
     }
+    const github = this.github?.record(agent);
+    if (github?.installationId && agent.tools) {
+      const login = `${github.slug}[bot]`;
+      sections.push(`## GitHub
+Su GitHub sei ${login}, la tua app installata su ${github.account || "GitHub"} (${github.repositorySelection === "all" ? "tutti i suoi repo" : "i repo scelti dal proprietario"}). Sul tuo computer git è già autenticato come te per github.com, e i tuoi commit sono firmati ${login}; anche gh, se lo installi, trova già il login. Il token si rinnova da solo ogni ora: non chiedere token personali a nessuno e non usare quelli di altri. Se un repo ti risponde che non hai accesso, chiedi al proprietario di aggiungerlo all'installazione della tua app.`);
+    }
     if (this.vault?.enabled) {
       sections.push([
         "## I segreti",

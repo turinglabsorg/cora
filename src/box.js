@@ -9,6 +9,7 @@ const MAILBOX_SCRIPT = readFileSync(new URL("./desktop-mailbox.mjs", import.meta
 const GIT_SCRIPT = readFileSync(new URL("./desktop-git.sh", import.meta.url), "utf8");
 const SSH_SCRIPT = readFileSync(new URL("./desktop-ssh.mjs", import.meta.url), "utf8");
 const GIT_SETUP_SCRIPT = readFileSync(new URL("./desktop-git-setup.mjs", import.meta.url), "utf8");
+const GITHUB_SCRIPT = readFileSync(new URL("./desktop-github.mjs", import.meta.url), "utf8");
 
 /**
  * Lists a file or a folder under /home/agent/work for a push: one JSON line per
@@ -499,6 +500,18 @@ export class Boxes {
   execArgs(agentId, argv, { root = false } = {}) {
     const user = root ? ["-u", "root"] : ["-u", "agent", "-w", "/home/agent", "-e", "HOME=/home/agent", "-e", "USER=agent"];
     return ["exec", "-i", ...user, "-e", "DISPLAY=:1", "-e", `TZ=${this.timezone}`, this.name(agentId), ...argv];
+  }
+
+  /** The agent's GitHub App token where git and gh read it; passed on stdin, never on a command line. */
+  async githubLogin(agentId, { token, login, name, email }) {
+    const result = await runProcess(this.docker, this.execArgs(agentId, ["node", "--input-type=module", "-e", GITHUB_SCRIPT]), {
+      input: JSON.stringify({ token, login, name, email }), timeoutMs: 20000, maxBytes: 4096,
+    });
+    if (result.code !== 0) throw new Error(`GitHub sul desktop: ${lastLine(result.stderr, "non riesco a scrivere il token")}`);
+  }
+
+  async githubLogout(agentId) {
+    await runProcess(this.docker, this.execArgs(agentId, ["node", "--input-type=module", "-e", GITHUB_SCRIPT]), { input: JSON.stringify({ remove: true }), timeoutMs: 20000, maxBytes: 4096 });
   }
 
   /** Run a shell command as the agent's user. Output is merged and clipped. */

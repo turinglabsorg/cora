@@ -440,6 +440,17 @@ const script = args[at + 2].replaceAll("/home/agent", root);
 const parameters = args.slice(at + 3).map((arg) => (arg.startsWith("/home/agent/") ? root + arg.slice("/home/agent".length) : arg));
 spawn("python3", ["-c", script, ...parameters], { stdio: "inherit" }).on("exit", (code) => process.exit(code ?? 1));
 `);
+  // A desktop's own node script (the GitHub sign-in) runs for real too, with that desktop as its home.
+  writeFileSync(join(dir, "node-desktop.mjs"), `import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+const args = process.argv.slice(2);
+const index = args.findIndex((arg) => arg.startsWith("cora-box-"));
+const root = join(${JSON.stringify(dir)}, "desktops", args[index]);
+mkdirSync(root, { recursive: true });
+const script = args[args.indexOf("-e", index) + 1];
+spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: "inherit", env: { ...process.env, HOME: root, GIT_CONFIG_NOSYSTEM: "1" } }).on("exit", (code) => process.exit(code ?? 1));
+`);
   writeFileSync(script, `#!/bin/sh
 echo "$@" >> "${log}"
 case "$1" in
@@ -454,6 +465,7 @@ case "$1" in
   exec)
     case "$*" in
       *" python3 -c "*) exec "${process.execPath}" "${dir}/python.mjs" "$@" ;;
+      *github-token*) exec "${process.execPath}" "${dir}/node-desktop.mjs" "$@" ;;
       *cora_authorized_keys*) cat > "${dir}/authorized_keys"; exit 0 ;;
       *"tailscale status --json"*) if [ -f "${dir}/tailscale.json" ]; then cat "${dir}/tailscale.json"; else echo '{"BackendState":"NeedsLogin","AuthURL":""}'; fi; exit 0 ;;
       *"tailscale up"*) echo '{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/test"}' > "${dir}/tailscale.json"; exit 0 ;;

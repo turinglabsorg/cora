@@ -52,6 +52,8 @@ export const config = {
   // Soniox: agents hear voice messages and answer in a voice of their own. ffmpeg makes the voice notes.
   sonioxKey: env.SONIOX_API_KEY || "",
   sonioxApi: setting("SONIOX_API") || "https://api.soniox.com",
+  githubApi: setting("GITHUB_API") || "https://api.github.com",
+  githubWeb: setting("GITHUB_WEB") || "https://github.com",
   sonioxTtsUrl: setting("SONIOX_TTS_URL") || "https://tts-rt.soniox.com/tts",
   ffmpeg: setting("FFMPEG") || firstExisting(["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg", "ffmpeg"]),
   // doc's checks on what agents publish and say; Jev judges with this instance's TypeSafe key.

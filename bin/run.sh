@@ -38,7 +38,7 @@ do
     fi
   done
 done
-for name in $(hush list 2>/dev/null | cut -f1 | grep -E '^COR[AO]_(BOT|TG_BOT|SK_BOT|SK_APP)_[A-Z0-9_]*$'); do
+for name in $(hush list 2>/dev/null | cut -f1 | grep -E '^COR[AO]_(BOT|TG_BOT|SK_BOT|SK_APP|GH_KEY)_[A-Z0-9_]*$'); do
   set -- hush run --name "$name" --env "$name" --redact -- "$@"
 done
 exec "$@"
