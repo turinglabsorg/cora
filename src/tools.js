@@ -111,7 +111,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "brain_note",
-    description: "Tell the librarian something the whole company should know: a decision, a client's preference, who does what, a deadline. It goes into the company brain tonight, with you as its source. Your own memory stays remember.",
+    description: "Tell the librarian something the whole company should know: a decision, a client's preference, who does what, a deadline. It queues immediate consolidation into the company brain, with you as its source. Your own memory stays remember.",
     parameters: { type: "object", properties: { text: { type: "string", description: "the fact, short and specific, with who decided and when if you know" } }, required: ["text"] },
   },
   {
@@ -458,7 +458,7 @@ export async function executeTool(call, ctx) {
           if (!text) return { text: "error: empty fact" };
           await ctx.companyBrain.note({ text, agentId: agent.id, author: agent.name, channelId });
           ctx.log?.({ type: "memory", agentId: agent.id, text: `(per il brain) ${text.slice(0, 300)}` });
-          return { text: "noted for the company brain (shared facts go there): the librarian adds it at its next run" };
+          return { text: "noted for the company brain (shared facts go there): immediate librarian consolidation queued" };
         }
         const key = args.shared ? SHARED : agent.id;
         const memory = store.addMemory(key, String(args.fact || ""), "agent", { by: agent.name });
@@ -575,7 +575,7 @@ export async function executeTool(call, ctx) {
         const text = String(args.text || "").trim();
         if (!text) return { text: "error: empty note" };
         await ctx.companyBrain.note({ text, agentId: agent.id, author: agent.name, channelId });
-        return { text: "noted for the librarian: it goes into the company brain at its next run, and the owner sees it in the morning review" };
+        return { text: "noted for the librarian: immediate company brain consolidation queued, and the owner sees it in the morning review" };
       }
       case "say": {
         const text = String(args.text || "").trim();

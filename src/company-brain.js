@@ -152,6 +152,7 @@ export class CompanyBrain {
     this.embed = embed;
     this.embedModel = embedModel;
     this.log = log;
+    this.onNote = null;
     this.db = null;
     this.opening = null;
     this.failedAt = 0;
@@ -455,7 +456,8 @@ export class CompanyBrain {
   /* ---------- notes from agents ---------- */
   async note({ text, agentId = "", author = "", channelId = "" }) {
     const id = newId("bn");
-    await this.q("INSERT INTO brain_notes (id, text, agent_id, author, channel_id) VALUES ($1, $2, $3, $4, $5)", [id, String(text).trim().slice(0, 2000), agentId, author, channelId]);
+    await this.q("INSERT INTO brain_notes (id, text, agent_id, author, channel_id) VALUES ($1, $2, $3, $4, $5)", [id, redactSecrets(text).trim().slice(0, 2000), agentId, author, channelId]);
+    this.onNote?.();
     return id;
   }
 

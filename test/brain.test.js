@@ -46,6 +46,7 @@ test("the librarian turns the chats into the company brain, the agents read it, 
   });
   await app.ready;
   await app.companyBrain.ready;
+  app.librarian.requestRun = () => false;
   t.after(async () => {
     await app.stop();
     await Promise.all([discord.close(), ollama.close()]);
@@ -190,6 +191,7 @@ test("with a company brain the shared memories belong to it: agents keep their o
   });
   await app.ready;
   await app.companyBrain.ready;
+  app.librarian.requestRun = () => false;
   t.after(async () => {
     await app.stop();
     await ollama.close();

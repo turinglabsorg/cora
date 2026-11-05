@@ -17,6 +17,7 @@ import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
 import { Boxes } from "../src/box.js";
+import { executeTool } from "../src/tools.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -4748,5 +4749,149 @@ process.exit(result.status ?? 1);
       return { content: "Posso discutere le modifiche." };
     });
     await app.brain.chatTurn({ agent, history: [{ id: "guest-commit", at: Date.now(), kind: "human", authorName: "Guest", content: "Crea un commit" }], channel: { id: CHANNEL, name: "test" }, forced: true, computer: false });
+  });
+});
+
+describe("immediate company brain consolidation", () => {
+  let instance;
+  let provider;
+  let request;
+  let prompts = [];
+  let reply;
+  let active = 0;
+  let maxActive = 0;
+  let release;
+  const noteSources = (prompt) => [...prompt.matchAll(/^\[(n\d+)\] Ada: (.+)$/gm)];
+
+  before(async () => {
+    provider = await fakeOllama(async (body) => {
+      if (!String(body.messages[0]?.content).startsWith("Sei il bibliotecario del brain aziendale")) return { content: "PASS" };
+      const prompt = String(body.messages.at(-1).content);
+      prompts.push(prompt);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try { return { content: JSON.stringify(await reply(prompt)) }; }
+      finally { active -= 1; }
+    });
+    const directory = tempHome();
+    const seed = new Store(directory);
+    seed.updateSettings({ brainModel: "ollama/test-model" });
+    seed.close();
+    instance = startCora({ home: directory, host: "127.0.0.1", port: 0, insecureCookies: true,
+      adminPassword: PASSWORD, sessionKey: "immediate-brain-fixture", useResidentSubscriptions: false,
+      discordToken: "", telegramToken: "", ollamaUrl: provider.url, ollamaKey: "test-ollama-key", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
+      claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes", grokBin: "/missing/grok", museBin: "/missing/muse", botTokenFor: () => "",
+      brainDatabaseUrl: "pglite:memory", brainEmbedUrl: provider.url,
+      docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
+    });
+    await instance.ready;
+    await instance.companyBrain.ready;
+    const root = `http://127.0.0.1:${instance.server.address().port}`;
+    const login = await fetch(`${root}/api/login`, { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" }, body: JSON.stringify({ password: PASSWORD }) });
+    const session = login.headers.get("set-cookie").split(";")[0];
+    request = async (path, { method = "GET", body, authenticated = true } = {}) => {
+      const response = await fetch(`${root}${path}`, { method, headers: { ...(authenticated ? { Cookie: session } : {}), "Content-Type": "application/json", "X-Cora": "1" }, body: body === undefined ? undefined : JSON.stringify(body) });
+      return { status: response.status, data: await response.json() };
+    };
+  });
+  after(async () => {
+    release?.();
+    await instance?.stop();
+    await provider?.close();
+  });
+  beforeEach(async () => {
+    await waitFor(() => !instance.librarian.running && !instance.librarian.pending);
+    prompts = [];
+    reply = async () => ({ pages: [] });
+  });
+
+  test("brain_note and shared remember drain immediately and serialize notes arriving during a run", async () => {
+    const gate = new Promise((resolve) => { release = resolve; });
+    const facts = new Set();
+    reply = async (prompt) => {
+      const sources = noteSources(prompt);
+      for (const [, , text] of sources) facts.add(text);
+      if (prompts.length === 1) await gate;
+      return { pages: [{ slug: "studio", kind: "topic", title: "Studio", body: [...facts].map((fact) => `- ${fact}`).join("\n"), sources: sources.map(([, id]) => id) }] };
+    };
+    const context = { agent: { id: "ada-fixture", name: "Ada" }, store: instance.store, companyBrain: instance.companyBrain, channelId: "web" };
+    const first = await executeTool({ name: "brain_note", args: { text: "Lo studio chiude venerdì. password: abcd1234efgh" } }, context);
+    assert.match(first.text, /immediate.*queued/);
+    await waitFor(() => prompts.length === 1, { what: "immediate librarian call" });
+    const shared = await executeTool({ name: "remember", args: { fact: "Il referente è Giulia.", shared: true } }, context);
+    assert.match(shared.text, /immediate.*queued/);
+    await instance.companyBrain.note({ text: "La riunione è lunedì.", author: "Ada" });
+    assert.equal((await request("/api/brain")).data.running, true);
+    assert.equal(prompts.length, 1, "new arrivals wait behind the running model call");
+    release();
+    await waitFor(() => prompts.length === 2 && !instance.librarian.running && !instance.librarian.pending, { what: "queued notes consolidated" });
+    assert.equal(maxActive, 1);
+    assert.deepEqual(await instance.companyBrain.notes(), []);
+    assert.doesNotMatch(prompts.join("\n"), /abcd1234efgh/);
+    assert.match(prompts[0], /\[segreto omesso\]/);
+    assert.match(prompts[1], /Il referente è Giulia/);
+    assert.match(prompts[1], /La riunione è lunedì/);
+    assert.doesNotMatch(prompts[1].split("## Note degli agenti")[1], /Lo studio chiude/);
+    const page = (await request("/api/brain/pages/studio")).data;
+    assert.match(page.body, /Lo studio chiude/);
+    assert.match(page.body, /Il referente è Giulia/);
+    assert.equal(page.revisions.length, 2);
+    assert.equal(page.revisions[0].sources.length, 2);
+    assert.equal(page.pending, 2);
+  });
+
+  test("manual additions accept every kind, stay approved, and mutations queue consolidation", async () => {
+    for (const kind of ["client", "project", "person", "decision", "procedure", "topic"]) {
+      const created = await request("/api/brain/pages", { method: "POST", body: { title: `Manual ${kind}`, kind, summary: "Owner knowledge", body: "- Available immediately." } });
+      assert.equal(created.status, 201);
+      assert.equal(created.data.kind, kind);
+      const page = (await request(`/api/brain/pages/${created.data.slug}`)).data;
+      assert.equal(page.pending, 0);
+      assert.equal(page.revisions[0].review, "approved");
+    }
+    await waitFor(async () => !instance.librarian.running && !instance.librarian.pending && (await instance.companyBrain.state("lastRun"))?.reason === "pagina aggiunta");
+    const duplicate = await request("/api/brain/pages", { method: "POST", body: { title: "Manual client" } });
+    assert.equal(duplicate.status, 409);
+    const edit = await request("/api/brain/pages/manual-client", { method: "PUT", body: { summary: "Updated by owner" } });
+    assert.equal(edit.status, 200);
+    await waitFor(async () => !instance.librarian.running && !instance.librarian.pending && (await instance.companyBrain.state("lastRun"))?.reason === "pagina aggiornata");
+    const reviewed = await request("/api/brain/review", { method: "POST", body: { all: true, decision: "approve" } });
+    assert.equal(reviewed.status, 200);
+    assert.equal(reviewed.data.approved, 2);
+    await waitFor(async () => !instance.librarian.running && !instance.librarian.pending && (await instance.companyBrain.state("lastRun"))?.reason === "revisione");
+    assert.deepEqual((await request("/api/brain/review")).data.queue, []);
+    assert.equal((await request("/api/brain/pages", { method: "POST", authenticated: false, body: { title: "Denied page" } })).status, 401);
+    assert.equal((await request("/api/brain/pages/denied-page")).status, 404);
+  });
+
+  test("a failed batch keeps its note for the next request, without an automatic retry loop", async () => {
+    reply = async () => "fixture invalid librarian response";
+    await instance.companyBrain.note({ text: "Da riprovare dopo un errore.", author: "Ada" });
+    await waitFor(async () => !instance.librarian.running && prompts.length > 0 && (await instance.companyBrain.state("lastRun"))?.errors.length);
+    assert.equal((await instance.companyBrain.notes()).length, 1);
+    const attempts = prompts.length;
+    await sleep(100);
+    assert.equal(prompts.length, attempts);
+    reply = async () => ({ pages: [] });
+    await request("/api/brain/review", { method: "POST", body: { all: true, decision: "approve" } });
+    await waitFor(async () => !instance.librarian.running && (await instance.companyBrain.notes()).length === 0);
+    assert.equal((await instance.companyBrain.state("lastRun")).errors.length, 0);
+  });
+
+  test("stopping cancels queued work and waits for the current consolidation", async () => {
+    const gate = new Promise((resolve) => { release = resolve; });
+    reply = async () => { await gate; return { pages: [] }; };
+    await instance.companyBrain.note({ text: "Nota prima dello stop.", author: "Ada" });
+    await waitFor(() => prompts.length === 1);
+    await instance.companyBrain.note({ text: "Nota da riprendere dopo il riavvio.", author: "Ada" });
+    let stopped = false;
+    const stopping = instance.librarian.stop().then(() => { stopped = true; });
+    await sleep(30);
+    assert.equal(stopped, false);
+    release();
+    await stopping;
+    assert.equal(prompts.length, 1);
+    assert.equal((await instance.companyBrain.notes()).length, 1);
+    assert.equal(instance.librarian.requestRun(), false);
   });
 });
