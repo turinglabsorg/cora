@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ThreadState } from "./thread-state.js";
 import { TRANSPORT_LABELS, isSlackChannel, isTelegramChannel, slackChannel, slackIds, telegramChannel, telegramChatId, transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { MEMORY_TOOLS } from "./tools.js";
@@ -10,8 +11,7 @@ import { VOICE_MESSAGE } from "./discord.js";
 import { AUDIO_LIMIT_BYTES, VOICE_LANGUAGES, speakable } from "./voice.js";
 
 const HUMAN_DEBOUNCE_MS = 1200;
-// A follow-up without names within this window goes to the agents the human was talking to.
-const FOCUS_MS = 5 * 60 * 1000;
+const INACTIVITY_MS = 30 * 60 * 1000;
 // After a restart, unanswered human messages this recent are picked up again.
 const CATCH_UP_MS = 15 * 60 * 1000;
 /** How long a round holds its channel before the agents still working carry on in the background. */
@@ -109,8 +109,10 @@ export class Orchestrator {
     // Discord DM channels, each owned by the one agent whose bot received the message.
     this.dmAgent = new Map();
     this.routineRuns = new Set();
-    // One task per thread: what each thread is on, by channel id.
-    this.threadWork = new Map();
+    // One worker per agent and conversation; colleagues keep independent tasks.
+    this.threadWork = new ThreadState();
+    this.engagements = this.store.value("conversationEngagements", {});
+    this.reminding = new Set();
     // The names people go by, by server (or "slack"): who wrote or was tagged since the start, on top of the archive.
     this.knownPeople = new Map();
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
@@ -120,7 +122,7 @@ export class Orchestrator {
   state(channelId) {
     let state = this.states.get(channelId);
     if (!state) {
-      state = { id: channelId, history: [], seen: new Set(), heardFrom: new Set(), humanQueue: new Map(), mainBlind: false, generation: 0, budget: 0, ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
+      state = { id: channelId, history: [], seen: new Set(), heardFrom: new Set(), humanQueue: new Map(), mainBlind: false, focus: this.engagements[channelId] || null, generation: 0, budget: 0, ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
       this.states.set(channelId, state);
     }
     return state;
@@ -349,7 +351,7 @@ export class Orchestrator {
         await this.attachImages(item, raw);
         await this.hearDiscord(state, item, raw);
       }
-      this.ingest(state, item);
+      await this.ingest(state, item);
     });
   }
 
@@ -427,7 +429,7 @@ export class Orchestrator {
       if (item.kind !== "owner" && item.kind !== "human") return;
       await this.attachImages(item, raw);
       await this.hearDiscord(state, item, raw);
-      this.ingest(state, item);
+      await this.ingest(state, item);
     });
   }
 
@@ -446,12 +448,12 @@ export class Orchestrator {
       await this.ensureHistory(state);
       const missed = state.history.filter((item) => !this.store.hasMessage(item.id));
       for (const item of missed) this.store.appendArchive(state.id, item);
-      this.wakeIfMissed(state, missed);
+      await this.wakeIfMissed(state, missed);
     }
   }
 
   /** The last message nobody answered, when it is still recent, starts a round. */
-  wakeIfMissed(state, missed) {
+  async wakeIfMissed(state, missed) {
     const last = state.history[state.history.length - 1];
     if (!last || !missed.includes(last) || Date.now() - last.at > CATCH_UP_MS) return;
     const human = ["owner", "human"].includes(last.kind);
@@ -459,7 +461,7 @@ export class Orchestrator {
     if (!human && !botCall) return;
     this.log({ type: "message", channelId: state.id, author: last.authorName, kind: last.kind, text: `(arrivato mentre ero spenta) ${last.content.slice(0, 280)}` });
     if (human) {
-      this.address(state, last);
+      await this.address(state, last);
       state.humanQueue.set(last.id, last);
       state.budget = this.store.settings.maxAgentTurns;
     }
@@ -472,44 +474,94 @@ export class Orchestrator {
    * Who a human message is for: the agents it names, or else the ones the
    * human was just talking to. Addressed messages keep the others quiet.
    */
-  address(state, item) {
+  async address(state, item) {
     const available = this.agentsFor(state.id);
+    if (!state.focus) state.focus = this.engagements[state.id] || null;
+    if (state.focus) state.focus = { ...state.focus, ids: state.focus.ids.filter((id) => available.some((agent) => agent.id === id)) };
+    const previous = state.focus?.ids || [];
     const named = available.filter((agent) => mentions(item.content, agent.name)).map((agent) => agent.id);
-    if (state.focus) {
-      state.focus.ids = state.focus.ids.filter((id) => available.some((agent) => agent.id === id));
-      if (!state.focus.ids.length) state.focus = null;
-    }
-    const now = Date.now();
-    // An open question to the owner: their next message is the answer, even without the agent's name.
+    const leaving = previous.length ? await this.brain.disengagement({ message: item.content, agents: available.filter((agent) => previous.includes(agent.id)), history: state.history.filter((entry) => entry.id !== item.id) }) : [];
     const asked = item.kind === "owner" && state.request && !item.others?.length ? state.request : null;
-    if (item.kind === "owner" && !item.others?.length) state.request = null;
-    if (named.length) state.focus = { ids: named, at: now };
-    else if (item.others?.length) state.focus = null;
-    else if (asked && this.store.agent(asked.agentId)?.enabled) state.focus = { ids: [asked.agentId], at: now };
-    else if (state.focus && now - state.focus.at < FOCUS_MS) state.focus.at = now;
-    else state.focus = null;
-    item.addressed = state.focus ? [...state.focus.ids] : [];
+    if (asked) state.request = null;
+    const direct = roomAgentId(state.id) || this.dmAgentId(state.id);
+    const recipients = named.length ? named : asked ? [asked.agentId] : previous.length ? previous : direct ? [direct] : [];
+    const ids = [...new Set([...previous, ...recipients])].filter((id) => !leaving.includes(id) && available.some((agent) => agent.id === id));
+    const now = Number(item.at) || Date.now();
+    state.focus = ids.length ? { ids, at: now, remindedAt: 0, owner: item.kind === "owner" || Boolean(state.focus?.owner) } : null;
+    this.engagements[state.id] = state.focus;
+    this.store.setValue("conversationEngagements", this.engagements);
+    item.addressed = recipients.filter((id) => available.some((agent) => agent.id === id));
+    item.handledBy = [...leaving];
     item.toOthers = !named.length && Boolean(item.others?.length);
+    item.disengaged = leaving;
+    for (const id of leaving) {
+      this.acknowledge(state, id, [...state.humanQueue.keys()]);
+      const agent = this.store.agent(id);
+      if (agent) await this.postAs(agent, state, this.store.settings.language === "en" ? "I have stopped listening to this conversation." : "Ho smesso di ascoltare questa conversazione.", undefined, undefined, { passive: true }).catch((error) => this.log({ type: "error", agentId: id, channelId: state.id, text: `disingaggio: ${error.message}` }));
+    }
   }
 
-  /** A message someone else wrote: archive it and wake the agents. */
-  ingest(state, item) {
-    if (!this.push(state, item)) return;
-    this.store.appendArchive(state.id, item);
-    this.log({ type: "message", channelId: state.id, author: item.authorName, kind: item.kind, text: item.content.slice(0, 300) });
-    if (item.kind === "owner" || item.kind === "human") {
-      this.address(state, item);
-      state.humanQueue.set(item.id, item);
-      state.generation += 1;
-      state.budget = this.store.settings.maxAgentTurns;
-      state.ownerOrigin = item.kind === "owner";
-      this.schedule(state, HUMAN_DEBOUNCE_MS);
-    } else if (item.kind === "bot") {
-      // Another bot can call an agent, directly (@Name, or Name: opening a line); it never gets the owner's tools.
-      const called = this.agentsFor(state.id).some((agent) => addresses(item.content, agent.name));
-      if (called) state.ownerOrigin = false;
-      if (called) this.schedule(state, HUMAN_DEBOUNCE_MS);
+  acknowledge(state, agentId, ids) {
+    for (const id of ids) {
+      const item = state.humanQueue.get(id);
+      if (!item || (item.addressed?.length && !item.addressed.includes(agentId))) continue;
+      item.handledBy ??= [];
+      if (!item.handledBy.includes(agentId)) item.handledBy.push(agentId);
+      if (!item.addressed?.length || item.addressed.every((recipient) => item.handledBy.includes(recipient) || !this.store.agent(recipient)?.enabled)) state.humanQueue.delete(id);
     }
+  }
+
+  async checkEngagements(now = Date.now()) {
+    for (const [channelId, focus] of Object.entries(this.engagements)) {
+      if (!focus?.ids?.length || focus.remindedAt || now - focus.at < INACTIVITY_MS || this.reminding.has(channelId) || !this.channels.isActive(channelId)) continue;
+      const channel = this.channelMeta(channelId);
+      if (channel.guildId && !this.allowedGuild(channel.guildId)) continue;
+      this.reminding.add(channelId);
+      try {
+        for (const id of focus.ids) {
+          const agent = this.agentsFor(channelId).find((candidate) => candidate.id === id);
+          if (!agent) continue;
+          if (transportOf(channelId) === "discord" && !this.dmAgentId(channelId) && this.bots && !await this.bots.canRead(agent, channelId)) continue;
+          if (this.engagements[channelId] !== focus) break;
+          const text = this.store.settings.language === "en" ? "It has been 30 minutes since your last message. Should I keep listening to this conversation? I will stay connected until you explicitly ask me to leave." : "Sono passati 30 minuti dal tuo ultimo messaggio. Devo rimanere in ascolto di questa conversazione? Resto collegato finché non mi chiedi esplicitamente di uscire.";
+          await this.postAs(agent, this.state(channelId), text, undefined, undefined, { passive: true });
+          if (this.engagements[channelId] === focus) {
+            focus.remindedAt = now;
+            this.store.setValue("conversationEngagements", this.engagements);
+          }
+          break;
+        }
+      } catch (error) { this.log({ type: "error", channelId, text: `ascolto: ${error.message}` }); }
+      finally { this.reminding.delete(channelId); }
+    }
+  }
+
+  /** Human routing is serialized before the message becomes visible to working agents. */
+  async ingest(state, item) {
+    const pending = state.ingesting || Promise.resolve();
+    const ingestion = pending.catch(() => {}).then(async () => {
+      if (state.seen.has(item.id)) return;
+      const human = item.kind === "owner" || item.kind === "human";
+      if (human) await this.address(state, item);
+      if (!this.push(state, item)) return;
+      this.store.appendArchive(state.id, item);
+      this.log({ type: "message", channelId: state.id, author: item.authorName, kind: item.kind, text: item.content.slice(0, 300) });
+      if (human) {
+        if (item.addressed.some((id) => !item.handledBy.includes(id)) || (!item.disengaged.length && (roomAgentId(state.id) || this.dmAgentId(state.id)))) state.humanQueue.set(item.id, item);
+        state.generation += 1;
+        state.budget = this.store.settings.maxAgentTurns;
+        state.ownerOrigin = item.kind === "owner";
+        this.schedule(state, HUMAN_DEBOUNCE_MS);
+      } else if (item.kind === "bot") {
+        const called = this.agentsFor(state.id).some((agent) => addresses(item.content, agent.name));
+        if (called) state.ownerOrigin = false;
+        if (called) this.schedule(state, HUMAN_DEBOUNCE_MS);
+      }
+    });
+    state.ingesting = ingestion;
+    this.brain.incoming?.set(state.id, ingestion);
+    try { await ingestion; }
+    finally { if (this.brain.incoming?.get(state.id) === ingestion) this.brain.incoming.delete(state.id); }
   }
 
   /* ---------- Telegram ---------- */
@@ -602,7 +654,7 @@ export class Orchestrator {
         read: () => this.telegram.download(audio.file_id, AUDIO_LIMIT_BYTES),
       });
     }
-    this.ingest(state, item);
+    await this.ingest(state, item);
   }
 
   /* ---------- Slack ---------- */
@@ -694,7 +746,7 @@ export class Orchestrator {
       await this.claimSlackOwner(event, client);
       const item = await this.slackItem(event, client);
       await this.hearSlack(state, item, event, client);
-      this.ingest(state, item);
+      await this.ingest(state, item);
     });
   }
 
@@ -714,7 +766,7 @@ export class Orchestrator {
     const item = await this.slackItem(event, client);
     if (item.kind !== "owner" && item.kind !== "human") return;
     await this.hearSlack(state, item, event, client);
-    this.ingest(state, item);
+    await this.ingest(state, item);
   }
 
   /** Slack delivers only what happens while the socket is open: on connect, pick up what was missed. */
@@ -739,7 +791,7 @@ export class Orchestrator {
       }
       if (!missed.length) continue;
       state.history.sort((a, b) => a.at - b.at);
-      this.wakeIfMissed(state, missed);
+      await this.wakeIfMissed(state, missed);
     }
   }
 
@@ -785,8 +837,9 @@ export class Orchestrator {
   }
 
   pickCandidates(state, last, agents) {
+    if (last.toOthers) return { forced: [], optional: [] };
     const fromHuman = last.kind === "owner" || last.kind === "human";
-    const pool = agents.filter((agent) => agent.id !== last.agentId);
+    const pool = agents.filter((agent) => agent.id !== last.agentId && !last.handledBy?.includes(agent.id) && !last.disengaged?.includes(agent.id));
     // In a room or a DM of one agent, whatever a person writes is for it.
     if (fromHuman && (roomAgentId(state.id) || this.dmAgentId(state.id))) return { forced: pool, optional: [] };
     // Everywhere else an agent speaks only when called, in a channel as in a thread: named by a person (or still in
@@ -794,42 +847,38 @@ export class Orchestrator {
     // nobody answers; agents calling each other stop when the turn budget is spent.
     if (last.kind === "agent" && state.budget <= 0) return { forced: [], optional: [] };
     const calls = (agent) => (fromHuman ? mentions : addresses)(last.content, agent.name);
-    return { forced: pool.filter((agent) => calls(agent) || (fromHuman && last.addressed?.includes(agent.id))), optional: [] };
+    return { forced: pool.filter((agent) => (fromHuman ? last.addressed?.includes(agent.id) : calls(agent))), optional: [] };
   }
 
   async round(state) {
     state.working ??= new Set();
-    if (this.threadWork.has(state.id) && !this.brain.activeTurns.has(state.id)) {
-      this.schedule(state, 300);
-      return;
-    }
-    if (await this.brain.settleChannel(state.id)) return;
+    await this.brain.settleChannel(state.id);
     // An agent still on a task gets new messages through its inbox, never a second turn.
     let eligible = this.agentsFor(state.id);
     // A channel the main bot cannot see is private: only the agents whose own bot is in it can read or post there.
     if (state.mainBlind && state.heardFrom.size) eligible = eligible.filter((agent) => state.heardFrom.has(agent.id));
-    // A message that calls nobody is for nobody, except in a room or a DM of one agent.
-    const direct = Boolean(roomAgentId(state.id) || this.dmAgentId(state.id));
-    for (const [id, item] of state.humanQueue) {
-      if (item.toOthers || (item.addressed?.length && !eligible.some((agent) => item.addressed.includes(agent.id)))
-        || (!direct && !item.addressed?.length && !eligible.some((agent) => mentions(item.content, agent.name)))) state.humanQueue.delete(id);
-    }
     if (!isWebRoom(state.id) && !isTelegramChannel(state.id) && !this.dmAgentId(state.id) && this.bots) {
       const access = await Promise.allSettled(eligible.map((agent) => this.bots.canRead(agent, state.id)));
       eligible = eligible.filter((agent, index) => access[index].status === "fulfilled" && access[index].value);
     }
+    // A message that calls nobody is for nobody, except in a room or a DM of one agent.
+    const direct = Boolean(roomAgentId(state.id) || this.dmAgentId(state.id));
+    for (const [id, item] of state.humanQueue) {
+      for (const recipient of item.addressed || []) {
+        if (!eligible.some((agent) => agent.id === recipient)) this.acknowledge(state, recipient, [id]);
+      }
+      if (item.toOthers || (item.kind === "agent" && state.budget <= 0) || (!direct && !item.addressed?.length)
+        || (item.addressed?.length && item.addressed.every((id) => item.handledBy?.includes(id)))) state.humanQueue.delete(id);
+    }
     const agents = eligible.filter((agent) => !state.working.has(agent.id));
     if (!agents.length) return;
     const pending = [...state.humanQueue.values()];
-    const queued = pending.find((item) => !item.addressed?.length || agents.some((agent) => item.addressed.includes(agent.id)));
+    const queued = pending.find((item) => agents.some((agent) => (!item.addressed?.length || item.addressed.includes(agent.id)) && !item.handledBy?.includes(agent.id)));
     if (pending.length && !queued) return;
     const last = queued || state.history[state.history.length - 1];
     if (!last || last.passive) return;
     const { forced, optional } = this.pickCandidates(state, last, agents);
     if (!forced.length && !optional.length) return;
-    if (queued && this.threadWork.has(state.id) && forced.some((agent) =>
-      agent.tools && (queued.kind === "owner" || this.authorized(queued, agent, state)))) return;
-    if (["owner", "human"].includes(last.kind) && !state.focus && forced.length) state.focus = { ids: forced.map((agent) => agent.id), at: Date.now() };
 
     const generation = state.generation;
     const channel = this.channelMeta(state.id);
@@ -844,6 +893,11 @@ export class Orchestrator {
     typeNow();
     const turn = async (agent, isForced) => {
       state.working.add(agent.id);
+      if (last.kind === "agent" && state.focus?.ids.includes(last.agentId) && !state.focus.ids.includes(agent.id)) {
+        state.focus = { ...state.focus, ids: [...state.focus.ids, agent.id] };
+        this.engagements[state.id] = state.focus;
+        this.store.setValue("conversationEngagements", this.engagements);
+      }
       try {
         return await work(agent, isForced);
       } finally {
@@ -851,21 +905,19 @@ export class Orchestrator {
       }
     };
     const work = async (agent, isForced) => {
-      // Every thread gets its own instance of the agent, computer included: one task per
-      // thread, and as many threads at once as people talk to it in.
+      // An agent already working here receives steering, while a colleague gets its own worker.
       // Someone the owner authorized gets the computer the owner would: no "can I?" in between.
       const authorized = this.authorized(queued, agent, state);
-      const computer = agent.tools && (queued ? queued.kind === "owner" || authorized : state.ownerOrigin) && !this.threadWork.has(state.id);
-      for (const [id, item] of state.humanQueue) {
-        if ((id === queued?.id || snapshot.includes(item)) && (!item.addressed?.length || item.addressed.includes(agent.id))) state.humanQueue.delete(id);
-      }
+      const computer = agent.tools && (queued ? queued.kind === "owner" || authorized || queued.delegated : state.ownerOrigin) && !this.threadWork.has(state.id, agent.id);
+      this.acknowledge(state, agent.id, [...state.humanQueue.values()].filter((item) => item.id === queued?.id || snapshot.includes(item)).map((item) => item.id));
+      const delegationAuthorized = queued ? queued.kind === "owner" || Boolean(queued.delegated) : state.ownerOrigin;
       const started = Date.now();
       if (computer) this.threadWork.set(state.id, agent.id);
       // A voice message gets a spoken answer: the final reply, or what was said here with say when that was all.
       const spoken = Boolean(queued?.voice);
       let saidHere = "";
       const say = async (text, target = state.id, { voice = false } = {}) => {
-        const sent = await this.postDirect(agent, state, target, text, { voice, language: voice && spoken ? queued.spokenIn : "" });
+        const sent = await this.postDirect(agent, state, target, text, { voice, language: voice && spoken ? queued.spokenIn : "", delegationAuthorized });
         if (target === state.id) saidHere = sent.voice ? "" : text;
         return sent;
       };
@@ -882,7 +934,7 @@ export class Orchestrator {
           say,
           // Everything already in the channel when the turn starts is old news, not just what the prompt shows.
           inbox: this.inbox(state, state.history.slice()),
-          onMessageHandled: (ids) => { for (const id of ids) state.humanQueue.delete(id); },
+          onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
         });
       } catch (error) {
         this.log({ type: "error", agentId: agent.id, channelId: state.id, text: error.message });
@@ -890,11 +942,11 @@ export class Orchestrator {
         else return;
       } finally {
         working.stop();
-        if (computer) this.threadWork.delete(state.id);
+        if (computer) this.threadWork.delete(state.id, agent.id);
       }
       if (!result.text) {
         if (spoken && saidHere) await this.speak(agent, state, saidHere, queued.spokenIn);
-        for (const id of result.handledMessageIds || []) state.humanQueue.delete(id);
+        this.acknowledge(state, agent.id, result.handledMessageIds || []);
         this.log({ type: "pass", agentId: agent.id, channelId: state.id, ms: Date.now() - started, traceId: result.traceId });
         return;
       }
@@ -904,8 +956,8 @@ export class Orchestrator {
         if (!isForced) postedOptional += 1;
         if (posted > 0) await sleep(700 + Math.random() * 1500);
         try {
-          await this.postAs(agent, state, result.text, undefined, result.traceId, { voice: spoken, language: queued?.spokenIn });
-          for (const id of result.handledMessageIds || []) state.humanQueue.delete(id);
+          await this.postAs(agent, state, result.text, undefined, result.traceId, { voice: spoken, language: queued?.spokenIn, delegationAuthorized });
+          this.acknowledge(state, agent.id, result.handledMessageIds || []);
           posted += 1;
         } catch (error) {
           this.log({ type: "error", agentId: agent.id, channelId: state.id, text: `post: ${error.message}` });
@@ -987,13 +1039,17 @@ export class Orchestrator {
       const run = this.store.pendingRoutineRuns().find((item) => item.routineId === routine.id);
       return this.runRoutine(routine, { resumeTrace: trace, resumeRunId: run?.id || "" });
     }
+    if (Object.hasOwn(this.engagements, trace.channelId) && !this.engagements[trace.channelId]?.ids.includes(agent.id)) {
+      this.store.saveTrace({ ...trace, status: "stopped", endedAt: new Date().toISOString(), error: "The agent was explicitly disengaged from this conversation." });
+      return;
+    }
     if (!isWebRoom(trace.channelId) && !isTelegramChannel(trace.channelId) && !this.dmAgentId(trace.channelId) && this.bots && !await this.bots.canRead(agent, trace.channelId)) {
       this.store.saveTrace({ ...trace, status: "stopped", endedAt: new Date().toISOString(), error: "The agent no longer has access to this channel." });
       this.log({ type: "warning", agentId: agent.id, channelId: trace.channelId, text: "Il lavoro non riparte: il bot dell'agente non ha accesso al canale." });
       return;
     }
     // Each interrupted thread picks up on its own: an agent working in three threads resumes all three.
-    if (this.threadWork.has(trace.channelId)) return;
+    if (this.threadWork.has(trace.channelId, agent.id)) return;
     this.threadWork.set(trace.channelId, agent.id);
     const state = this.state(trace.channelId);
     state.working ??= new Set();
@@ -1008,13 +1064,13 @@ export class Orchestrator {
         postFile: (file, caption) => this.postAs(agent, state, caption, file),
         say: (text, target = state.id, { voice = false } = {}) => this.postDirect(agent, state, target, text, { voice }),
         inbox: this.inbox(state, state.history), routine,
-        onMessageHandled: (ids) => { for (const id of ids) state.humanQueue.delete(id); },
+        onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
       });
       if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId);
-      for (const id of result.handledMessageIds || []) state.humanQueue.delete(id);
+      this.acknowledge(state, agent.id, result.handledMessageIds || []);
     } finally {
       state.working.delete(agent.id);
-      this.threadWork.delete(state.id);
+      this.threadWork.delete(state.id, agent.id);
       if (state.humanQueue.size) this.schedule(state, 300);
     }
   }
@@ -1208,8 +1264,8 @@ export class Orchestrator {
     }
   }
 
-  async deliver(agent, state, text, file, traceId, { ping = "", request, passive = false } = {}) {
-    if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request, passive });
+  async deliver(agent, state, text, file, traceId, { ping = "", request, passive = false, delegationAuthorized = false } = {}) {
+    if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request, passive, delegationAuthorized });
     const chatId = telegramChatId(state.id);
     const slack = slackIds(state.id);
     // The ping (a mention of the owner) goes out with the message but stays out of the archive and the agents' transcripts.
@@ -1252,10 +1308,23 @@ export class Orchestrator {
       };
       this.push(state, item);
       this.store.appendArchive(state.id, item);
-      if (!passive) state.budget -= 1;
+      if (!passive) {
+        state.budget -= 1;
+        this.queueColleagues(state, item, delegationAuthorized);
+      }
     }
     this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
     return sent;
+  }
+
+  queueColleagues(state, item, authorized = false) {
+    if (state.budget <= 0 || !state.focus?.ids.includes(item.agentId)) return;
+    const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId && addresses(item.content, agent.name));
+    if (!called.length) return;
+    item.addressed = called.map((agent) => agent.id);
+    item.delegated = authorized;
+    state.humanQueue.set(item.id, item);
+    this.schedule(state, 300);
   }
 
   /** An agent naming another one turns into a real Slack mention, so that agent is pinged. */
@@ -1310,7 +1379,7 @@ export class Orchestrator {
   }
 
   /** A message in a panel room: archived like a Discord one and pushed live to the panel. */
-  postWeb(agent, state, text, file, traceId, { request, passive = false, silent = false } = {}) {
+  postWeb(agent, state, text, file, traceId, { request, passive = false, silent = false, delegationAuthorized = false } = {}) {
     const item = {
       id: `web_${randomBytes(8).toString("hex")}`,
       at: Date.now(),
@@ -1326,7 +1395,10 @@ export class Orchestrator {
     };
     this.push(state, item);
     this.store.appendArchive(state.id, item);
-    if (text && !passive) state.budget -= 1;
+    if (text && !passive) {
+      state.budget -= 1;
+      this.queueColleagues(state, item, delegationAuthorized);
+    }
     this.emit({ type: "web-message", room: state.id, item });
     this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
     // Nobody has the panel open: the reply reaches the owner's phone.
@@ -1405,15 +1477,8 @@ export class Orchestrator {
       agentId: null,
       content,
     };
-    this.address(state, item);
-    state.humanQueue.set(item.id, item);
-    this.push(state, item);
-    this.store.appendArchive(state.id, item);
+    await this.ingest(state, item);
     this.emit({ type: "web-message", room, item });
-    this.log({ type: "message", channelId: room, author: item.authorName, kind: item.kind, text: content.slice(0, 300) });
-    state.generation += 1;
-    state.budget = this.store.settings.maxAgentTurns;
-    state.ownerOrigin = true;
     this.schedule(state, 400);
     return item;
   }
@@ -1472,7 +1537,7 @@ export class Orchestrator {
     const state = this.state(routine.channelId);
     state.working ??= new Set();
     state.working.add(agent.id);
-    if (!state.focus || Date.now() - state.focus.at >= FOCUS_MS) state.focus = { ids: [agent.id], at: Date.now() };
+
     const typing = setInterval(() => this.typing(routine.channelId, [agent]), 8000);
     try {
       await this.ensureHistory(state);
@@ -1482,12 +1547,12 @@ export class Orchestrator {
         say: (text, target = state.id, { voice = false } = {}) => this.postDirect(agent, state, target, text, { passive: true, voice }),
         inbox: this.inbox(state, state.history),
         onTrace: (traceId) => this.store.attachRoutineTrace(run.id, traceId),
-        onMessageHandled: (ids) => { for (const id of ids) state.humanQueue.delete(id); },
+        onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
       });
       if (result.text) {
         await this.postAs(agent, state, result.text, undefined, result.traceId, { passive: true });
       }
-      for (const id of result.handledMessageIds || []) state.humanQueue.delete(id);
+      this.acknowledge(state, agent.id, result.handledMessageIds || []);
       const current = this.store.routine(routine.id);
       let verification = null;
       let status = result.stopped || !current || current.updatedAt !== snapshot.updatedAt ? "stopped" : result.text ? "posted" : "nothing";
@@ -1512,7 +1577,7 @@ export class Orchestrator {
       clearInterval(typing);
       this.routineRuns.delete(routine.id);
       state.working.delete(agent.id);
-      this.threadWork.delete(routine.channelId);
+      this.threadWork.delete(routine.channelId, agent.id);
       if (state.humanQueue.size) this.schedule(state, 300);
     }
   }

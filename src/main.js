@@ -192,6 +192,7 @@ export function startCora(overrides = {}) {
     if (!cfg.adminPassword) console.error("! CORA_ADMIN_PASSWORD is not set: the panel refuses every login");
     channels.apply();
     botTimer = setInterval(() => {
+      orchestrator.checkEngagements().catch((error) => activity({ type: "error", text: `ascolto: ${error.message}` }));
       bots.sync();
       tgBots.sync();
       skBots.sync();
