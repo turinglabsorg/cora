@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto";
 import { drawnAvatar } from "./avatar.js";
 import { passLedger, verifyPass } from "./pass.js";
 import { shareHosts } from "./share-host.js";
+import { sendPages } from "./send-pages.js";
 import { pngSize } from "./png.js";
 import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
 import { Slack } from "./slack.js";
@@ -41,6 +42,7 @@ const STATIC = {
   "/assets/icon-512.png": ["icon-512.png", "image/png"],
   "/assets/apple-touch-icon.png": ["apple-touch-icon.png", "image/png"],
   "/sw.js": ["sw.js", "text/javascript; charset=utf-8"],
+  "/assets/send.js": ["send.js", "text/javascript; charset=utf-8"],
 };
 const CSP = [
   "default-src 'self'",
@@ -173,7 +175,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -189,6 +191,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const firstUse = passLedger();
   // A share's own address: answered before anything of the panel, which never runs there.
   const shares = shareHosts({ config, store, artifacts, cloud, firstUse, sessionKey, activity });
+  // The vault's pages for people outside the panel: a request to fill, a send to open.
+  const vaultPages = sendPages({ vault, store, timezone: config.timezone });
 
   /**
    * Who may put the agents to work besides the owner: the people who wrote in the chats
@@ -352,7 +356,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const user = sessionUser(req);
     if (!user) throw new HttpError(401, "login richiesto");
     if (!["GET", "HEAD"].includes(method) && path !== "/api/logout") {
-      const action = path.startsWith("/api/artifacts") ? "artifacts" : path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/brain") ? "brain" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
+      const action = path.startsWith("/api/secrets") ? "secrets" : path.startsWith("/api/artifacts") ? "artifacts" : path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/brain") ? "brain" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
     if (path === "/api/logout" && method === "POST") {
@@ -926,6 +930,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
 
     if (path.startsWith("/api/artifacts") && artifacts) return artifactsApi(req, res, url, user);
+    if (path.startsWith("/api/secrets") && vault) return secretsApi(req, res, url, user);
 
     match = /^\/api\/files\/([0-9a-f]{24})$/.exec(path);
     if (match && method === "GET" && config.filesDir) {
@@ -1219,6 +1224,59 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     throw new HttpError(404, "not found");
   }
 
+  /**
+   * The vault in the panel: names, what they are for, who may use them, never a value.
+   * Everyone in the space sees the list; only the owner puts, replaces, asks, sends.
+   */
+  async function secretsApi(req, res, url, user) {
+    const path = url.pathname;
+    const method = req.method;
+    const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
+    const owner = user.role === "owner";
+    if (path === "/api/secrets" && method === "GET") {
+      return send(res, 200, {
+        enabled: vault.enabled, canManage: owner, secrets: vault.list(),
+        requests: owner ? vault.requests().filter((request) => request.status === "open" && !request.expired) : [],
+        sends: owner ? vault.sends().filter((item) => item.status === "proposed" || (item.status === "active" && !item.expired)) : [],
+      });
+    }
+    if (!owner) throw new HttpError(403, "la cassaforte la gestisce solo il proprietario");
+    if (path === "/api/secrets" && method === "POST") {
+      const body = await readJson(req, 96 * 1024);
+      return send(res, 201, vault.put({ name: body.name, value: body.value, description: body.description, agents: body.agents, by }));
+    }
+    if (path === "/api/secrets/requests" && method === "POST") {
+      const body = await readJson(req, 8192);
+      return send(res, 201, vault.requestLink({ name: body.name, description: body.description, agents: body.agents, hours: body.hours, by }));
+    }
+    let match = /^\/api\/secrets\/requests\/(vr_[a-f0-9]{12})$/.exec(path);
+    if (match && method === "DELETE") {
+      vault.cancelRequest(match[1]);
+      return send(res, 200, { ok: true });
+    }
+    match = /^\/api\/secrets\/sends\/(vx_[a-f0-9]{12})(?:\/(approve))?$/.exec(path);
+    if (match && match[2] === "approve" && method === "POST") return send(res, 200, vault.approveSend(match[1], by));
+    if (match && !match[2] && method === "DELETE") {
+      vault.revokeSend(match[1]);
+      return send(res, 200, { ok: true });
+    }
+    match = /^\/api\/secrets\/([A-Z][A-Z0-9_]{1,63})(?:\/(sends))?$/.exec(path);
+    if (match && match[2] === "sends" && method === "POST") {
+      const body = await readJson(req, 8192);
+      return send(res, 201, vault.createSend({ name: match[1], views: body.views, days: body.days, note: body.note, by }));
+    }
+    if (match && !match[2] && method === "PUT") {
+      const body = await readJson(req, 96 * 1024);
+      if (body.value !== undefined) return send(res, 200, vault.put({ name: match[1], value: body.value, description: body.description, agents: body.agents, by }));
+      return send(res, 200, vault.update(match[1], body));
+    }
+    if (match && !match[2] && method === "DELETE") {
+      vault.remove(match[1]);
+      return send(res, 200, { ok: true });
+    }
+    throw new HttpError(404, "not found");
+  }
+
   /** One stored file for the panel: media inline (with ranges), text as plain text, the rest as a download. */
   function inertFile(req, res, file, download) {
     const name = file.path.split("/").at(-1) || "file";
@@ -1377,6 +1435,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
     }
     try {
+      // A request page posts a plain form: it checks its own origin, and the link is the key.
+      if (url.pathname.startsWith("/send/")) return await vaultPages(req, res, url);
       if (req.method !== "GET" && req.method !== "HEAD") {
         if (req.headers["x-cora"] !== "1") throw new HttpError(403, "missing X-Cora header");
         const origin = req.headers.origin;

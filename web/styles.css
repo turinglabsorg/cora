@@ -1635,3 +1635,29 @@ a.share-url:hover { color: var(--amber); }
   .share-host span { max-width: 45%; }
 }
 @media (prefers-reduced-motion: reduce) { .share-row > .led.busy { animation: none; } }
+
+/* The vault: names you can use, values nobody reads back. */
+.art-switch { align-self: flex-start; }
+.vault-list { display: grid; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.vault-row { display: flex; align-items: flex-start; gap: 12px; min-width: 0; padding: 14px 2px; border-bottom: 1px solid var(--line); }
+.vault-row > .panel-ico { width: 34px; height: 34px; flex: none; }
+.vault-text { display: grid; gap: 6px; min-width: 0; }
+.vault-text .row { flex-wrap: wrap; gap: 8px; }
+.vault-name { font: 500 15px/1.3 var(--mono); letter-spacing: 0.02em; color: var(--text); overflow-wrap: anywhere; }
+.vault-text small { color: var(--muted); font-size: 13px; }
+.vault-text small.faint { color: var(--faint); font-size: 11.5px; }
+.vault-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.vault-extra:empty { display: none; }
+.vault-extra { display: grid; gap: 10px; margin-top: 6px; padding: 12px; border: 1px dashed var(--amber-line); border-radius: var(--r-md); background: var(--amber-wash); }
+.vault-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vault-inline input { flex: 1; min-width: 180px; }
+.vault-link { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 12px 14px; border: 1px solid var(--amber-line); border-radius: var(--r-md); background: var(--well); }
+.vault-link code { padding: 0; border: 0; background: none; color: var(--amber); font: 400 13px/1.45 var(--mono); overflow-wrap: anywhere; }
+.vault-link small { grid-column: 1 / -1; color: var(--muted); font-size: 12.5px; }
+.vault-value { display: flex; gap: 8px; align-items: flex-start; }
+.vault-value input, .vault-value textarea { flex: 1; min-width: 0; }
+@media (max-width: 600px) {
+  .vault-row { flex-wrap: wrap; }
+  .vault-actions { width: 100%; justify-content: flex-start; padding-left: 46px; }
+  .vault-value { flex-direction: column; align-items: stretch; }
+}

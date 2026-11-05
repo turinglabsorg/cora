@@ -24,7 +24,7 @@ const NUDGES = 4;
 /** Tools that talk about work without doing any. */
 const TALK_TOOLS = new Set(["say", "notify", "list_channels", "ask_owner"]);
 /** Tools that look things up: they can back "ho controllato", never "ho creato". */
-const LOOKUP_TOOLS = new Set(["list_routines", "routine_history", "recall", "screenshot", "brain_search", "brain_page", "artifact_folders", "artifact_log"]);
+const LOOKUP_TOOLS = new Set(["list_routines", "routine_history", "recall", "screenshot", "brain_search", "brain_page", "artifact_folders", "artifact_log", "secret_list"]);
 /**
  * What an agent says of itself, agreed with its gender: Italian says "acceso" or
  * "accesa", and a neutral agent picks sentences that ask for neither.
@@ -176,9 +176,10 @@ export function effortOf(agent) {
 }
 
 export class Brain {
-  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null, companyBrain = null, artifacts = null }) {
+  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null, companyBrain = null, artifacts = null, vault = null }) {
     this.companyBrain = companyBrain;
     this.artifacts = artifacts;
+    this.vault = vault;
     // The orchestrator admits one task per thread. Its current goal belongs to that task only.
     this.channelGoals = new Map();
     this.activeTurns = new Map();
@@ -277,6 +278,13 @@ export class Brain {
         "Quello che produci sul tuo computer e va conservato o fatto vedere (file, report, un sito, qualunque cosa) va nelle cartelle degli artefatti del server Cora, che funzionano come git: ogni caricamento è un commit con un messaggio, e ogni cartella ha i suoi permessi.",
         "Prima di caricare guarda dove va: artifact_folders, e il brain se c'è. Se nessuna cartella va bene, non sceglierne una da solo: chiedi a chi te l'ha chiesto quale usare, proponendo un percorso (es. clienti/acme/sito) e cosa ci va. Creala (artifact_push con create) solo dopo la sua conferma, e se ti dice una regola («i report di Acme vanno in clienti/acme») annotala con brain_note.",
         "Nella maggior parte delle cartelle un commit è PROPOSTO finché il proprietario o un revisore non lo approva: finché la ricevuta non dice PUBLISHED non dire che è pubblicato o online. Per continuare il lavoro di un altro scarica la cartella con artifact_pull e ricaricala da lì. La storia di una cartella, con le note di chi ha rifiutato un commit, è in artifact_log.",
+      ].join("\n"));
+    }
+    if (this.vault?.enabled) {
+      sections.push([
+        "## I segreti",
+        "Chiavi, password e token stanno nella cassaforte di Cora e si usano per nome, come con hush: tu non vedi mai un valore. secret_list mostra i nomi; con secret_import metti un segreto nell'hush del tuo computer e lo usi solo con `hush run --name NOME --env VARIABILE --redact -- comando`.",
+        "Se ti serve un segreto che non c'è, non chiederlo mai in chat: crea un link con secret_request e mandalo alla persona, che lo inserisce lì. Non stampare, non scrivere su file e non incollare mai un valore. Mandarlo a qualcuno (secret_send) lo approva solo il proprietario.",
       ].join("\n"));
     }
     sections.push("## Routine, reminder e storico\nGestisci i tuoi compiti ricorrenti con set_routine, quelli da fare una sola volta con set_reminder (run_at ISO 8601 con fuso). list_routines mostra ciò che è ancora in programma; con l'id ti dà una routine intera, prompt compreso: leggila così prima di cambiarla e rimanda tutto il testo che non ti è stato chiesto di cambiare. routine_history consulta esecuzioni e attività archiviate, con risultati e verifiche; ogni esecuzione conserva il prompt con cui è girata (routine_id e full per leggerlo intero). Prima di ripetere un'azione già richiesta, consulta lo storico. Un reminder viene archiviato da Cora solo dopo una verifica positiva: non ricrearlo se è già riuscito. Se è bloccato o interrotto, controlla prima gli effetti già prodotti e poi chiedi o prepara una nuova prova senza duplicarli.");
@@ -532,7 +540,7 @@ export class Brain {
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
     // The company brain's tools exist only where there is a brain to read.
-    const tools = caps.tools ? TOOL_DEFS.filter((tool) => (OWN_TOOLS.has(tool.name) || computer) && (this.companyBrain?.enabled || !tool.name.startsWith("brain_")) && (this.artifacts || !tool.name.startsWith("artifact_"))) : [];
+    const tools = caps.tools ? TOOL_DEFS.filter((tool) => (OWN_TOOLS.has(tool.name) || computer) && (this.companyBrain?.enabled || !tool.name.startsWith("brain_")) && (this.artifacts || !tool.name.startsWith("artifact_")) && (this.vault?.enabled || !tool.name.startsWith("secret_"))) : [];
     const place = channel.place || "";
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
     let { goal, usage: goalCost } = task && goalRequest ? await this.goalFor(goalRequest, "", goalContext) : { goal: "", usage: null };
@@ -605,7 +613,7 @@ export class Brain {
     const ctx = {
       agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push, companyBrain: this.companyBrain,
       // Who asked, when a person did: only then may an agent open a new artifact folder.
-      artifacts: this.artifacts, requester, traceId: trace.id,
+      artifacts: this.artifacts, vault: this.vault, requester, traceId: trace.id,
       // The question goes where this conversation is, not to a separate place.
       ask: this.ask ? async (request) => {
         const posted = await this.ask(agent, request, { channelId: channel.id });

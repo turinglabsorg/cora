@@ -576,6 +576,25 @@ export class Boxes {
     return JSON.parse(output.trim().split("\n").at(-1));
   }
 
+  /**
+   * Puts a value into the hush on an agent's desktop under a name: sealed to that
+   * hush's own box key and opened straight into its vault, from stdin to stdin. The
+   * value is never an argument, never printed, never a file left behind.
+   */
+  async importSecret(agentId, name, value) {
+    if (!/^[A-Z][A-Z0-9_]{1,63}$/.test(name)) throw new Error("invalid secret name");
+    const script = [
+      "set -e",
+      'command -v hush >/dev/null 2>&1 || { echo "hush is not installed on this computer" >&2; exit 3; }',
+      'H="${HUSH_HOME:-$HOME/.hush}"',
+      '[ -f "$H/identity" ] || hush --home "$H" init </dev/null >/dev/null',
+      '[ -f "$H/box.pub" ] || hush --home "$H" box init </dev/null >/dev/null',
+      'hush --home "$H" box seal --to self --uses 1 --pubkey-file "$H/box.pub" | hush --home "$H" box open "$1" >/dev/null',
+    ].join("\n");
+    const result = await runProcess(this.docker, this.execArgs(agentId, ["bash", "-c", script, "cora-secret", name]), { input: Buffer.from(value), timeoutMs: 60000, maxBytes: 64 * 1024 });
+    if (result.code !== 0) throw new Error(lastLine(result.stderr, "hush did not take the secret"));
+  }
+
   async shareFile(sourceId, recipientId, path) {
     if (![sourceId, recipientId].every((id) => /^ag_[a-f0-9]{12}$/.test(id)) || sourceId === recipientId) throw new Error("invalid file recipient");
     if (!String(path).startsWith("/home/agent/work/") || !posix.normalize(path).startsWith("/home/agent/work/")) throw new Error("only files in /home/agent/work can be shared");

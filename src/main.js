@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { AgentBots } from "./agent-bots.js";
 import { Artifacts } from "./artifacts.js";
+import { Vault } from "./vault.js";
 import { Channels } from "./channels.js";
 import { Slack } from "./slack.js";
 import { SlackBots } from "./slack-bots.js";
@@ -124,6 +125,13 @@ export function startCora(overrides = {}) {
     notice: (channelId, text) => orchestrator.notice(channelId, text),
   });
   brain.artifacts = artifacts;
+  // Secrets by name: encrypted here, put into an agent's hush, never shown back.
+  const vault = new Vault({
+    store, key: cfg.vaultKey || cfg.sessionKey, boxes, log: activity, instanceUrl,
+    push: { notify: (notice) => (push.enabled ? push.notify(notice) : Promise.resolve()) },
+    notice: (channelId, text) => orchestrator.notice(channelId, text),
+  });
+  brain.vault = vault;
   const librarian = new Librarian({
     brain: companyBrain, store, llm, log: activity, traces, timezone: cfg.timezone,
     channelLabel: (id) => brain.channelLabel(id),
@@ -134,7 +142,7 @@ export function startCora(overrides = {}) {
   const scheduler = new Scheduler({ store, orchestrator, brain, librarian, companyBrain, artifacts, backups: join(cfg.home, "backups"), timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
   const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -236,7 +244,7 @@ export function startCora(overrides = {}) {
     await companyBrain.close();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, server: web.server };
 }
 
 const isMain = (() => {

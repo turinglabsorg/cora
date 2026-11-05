@@ -13,7 +13,7 @@ export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget
  * changing, pausing or deleting one touches nothing else — so they are not
  * locked behind the computer, which only opens when the owner is the one asking.
  */
-export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history", "artifact_folders", "artifact_log"]);
+export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history", "artifact_folders", "artifact_log", "secret_list", "secret_request"]);
 
 export const TOOL_DEFS = [
   {
@@ -278,6 +278,37 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: "secret_list",
+    description: "List the secrets in Cora's vault by name: what each is for and whether you may use it. You never see a value. To use one on your computer, put it in your hush with secret_import, then run commands with `hush run --name NAME --env VAR --redact -- command`.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "secret_request",
+    description: "Get a one-time link where a person puts in a secret you need (an API key, a password, a token), so it never passes through the chat: send them the link and say so. When they submit it, it is stored in Cora's vault under the name you chose and you may use it with secret_import. Never ask anyone to paste a secret in a message.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "the secret's name: capitals, digits and underscores, e.g. ACME_STRIPE_KEY" },
+        description: { type: "string", description: "what it is and what it is for, in one line: the person reads it on the page" },
+      },
+      required: ["name", "description"],
+    },
+  },
+  {
+    name: "secret_import",
+    description: "Put a secret from Cora's vault into the hush on your computer, by name, without seeing it. Then use it only through `hush run --name NAME --env VAR --redact -- command` in shell. Never print it, never write it to a file, never pass it on.",
+    parameters: { type: "object", properties: { name: { type: "string" }, as: { type: "string", description: "optional name in your hush, if a tool expects another" } }, required: ["name"] },
+  },
+  {
+    name: "secret_send",
+    description: "Ask the owner to send a secret from the vault to someone, through a link that opens a set number of times. It is created switched off: only the owner approves it and forwards the link. Use it only when someone authorized asked for it, and say the owner has to approve.",
+    parameters: {
+      type: "object",
+      properties: { name: { type: "string" }, to: { type: "string", description: "who should receive it" }, reason: { type: "string" }, views: { type: "number" }, days: { type: "number" } },
+      required: ["name", "to", "reason"],
+    },
+  },
+  {
     name: "send_file",
     description: "Post a file from your computer to the current Discord channel (an image, a PDF, a CSV, ...). Max 8 MB.",
     parameters: {
@@ -316,6 +347,7 @@ export function summarizeArgs(name, args) {
   if (name === "artifact_pull" || name === "artifact_log") return String(args.folder || "");
   if (name === "artifact_folders") return String(args.query || "");
   if (name === "artifact_share_request") return `${String(args.folder || "")} → ${String(args.label || "")}`;
+  if (name === "secret_import" || name === "secret_request" || name === "secret_send") return String(args.name || "");
   if (name === "notify") return String(args.message || "").slice(0, 200);
   if (name === "say") return String(args.text || "").slice(0, 200);
   if (name === "brain_search") return String(args.query || "").slice(0, 200);
@@ -589,6 +621,29 @@ export async function executeTool(call, ctx) {
         });
         ctx.artifacts.announceShare?.(folder, share, { agent, channelId });
         return { text: `REQUESTED, NOT ACTIVE: the link ${share.url || share.label} opens only after the owner or a reviewer of ${folder.path} turns it on in the panel. Say so; do not send the link as if it worked.` };
+      }
+      case "secret_list": {
+        if (!ctx.vault?.enabled) return { text: "error: this Cora has no vault" };
+        const secrets = ctx.vault.list().map((secret) => ({ name: secret.name, what: secret.description, you_may_use: ctx.vault.canUse(ctx.store.vaultSecret(secret.name), agent), updated: new Date(secret.updatedAt).toISOString() }));
+        return { text: JSON.stringify(secrets.length ? { secrets } : { secrets, note: "the vault is empty: to get a secret, send the person a link with secret_request" }) };
+      }
+      case "secret_request": {
+        if (!ctx.vault?.enabled) return { text: "error: this Cora has no vault" };
+        const request = ctx.vault.requestLink({ name: args.name, description: args.description, agents: [agent.id], by: { kind: "agent", id: agent.id, name: agent.name }, channelId });
+        return { text: `link ready: ${request.url}\nIt opens a page where the person types ${request.name} in, once, within 72 hours; send them the link and tell them so. You will be able to use it with secret_import once they submit it (Cora posts a note here). Never ask for the value in a message.` };
+      }
+      case "secret_import": {
+        if (!ctx.vault?.enabled) return { text: "error: this Cora has no vault" };
+        await boxes.ensure(agent);
+        const stored = await ctx.vault.importInto(agent, args.name, { as: args.as });
+        return { text: `${stored} is in your hush. Use it only like this: hush run --name ${stored} --env THE_VARIABLE_THE_TOOL_READS --redact -- your command. Do not print it or write it anywhere.` };
+      }
+      case "secret_send": {
+        if (!ctx.vault?.enabled) return { text: "error: this Cora has no vault" };
+        const secret = ctx.store.vaultSecret(String(args.name || "").toUpperCase());
+        if (!secret || !ctx.vault.canUse(secret, agent)) return { text: "error: no such secret you may use" };
+        ctx.vault.createSend({ name: secret.name, views: args.views, days: args.days, note: `${String(args.to || "").slice(0, 120)}: ${String(args.reason || "").slice(0, 160)}`, by: { kind: "agent", id: agent.id, name: agent.name }, status: "proposed", channelId });
+        return { text: "REQUESTED, NOT SENT: the owner approves it in the panel and sends the link. Say so; you never get the link or the value." };
       }
       case "send_file": {
         if (!postFile || !channelId) return { text: "error: there is no channel to post to right now" };

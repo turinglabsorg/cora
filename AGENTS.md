@@ -76,6 +76,14 @@ Always-on Discord agents with personalities, layered memory, routines and their 
     - `share_links` stores only token hashes. The link's GET shows a button and its POST spends it, since mail scanners prefetch links.
   - **Relay.** The grog relay serves `*.usecora.space` through one wildcard claim (`tunnel_for()` in `relay.py`, `"*.usecora.space"` in `sites.json`).
   - **Tests.** `test/artifact-shares.test.js`, and the "shared folders" block of `test/cloud.test.js`.
+- **Vault (secrets):** `src/vault.js` (`Vault`), with tables `vault_secrets`, `vault_requests` (token hashes only) and `vault_sends` in `src/store.js`.
+  - **Encryption.** AES-256-GCM under a key from HKDF(`CORA_VAULT_KEY` or `CORA_SESSION_KEY`, "cora vault v1"). The AAD is `<id>.<name>`, so a record moved under another name does not open.
+  - **Into an agent's hush.** `Boxes.importSecret()` runs a bash script on the desktop. The value goes in on stdin: `hush init`/`box init` if missing (both `</dev/null`, or init eats the value), then `box seal --to self --pubkey-file … | box open NAME`. Verified against a throwaway vault.
+  - **Pages.** `src/send-pages.js` serves `/send/r/<token>` (a request form, a plain POST accepted only when `Sec-Fetch-Site: same-origin` or a matching Origin; `Referrer-Policy: same-origin`, because no-referrer makes the form post `Origin: null`) and `/send/s/<token>`. The send page's script `web/send.js` POSTs once per opening and decrypts with WebCrypto using the key in the fragment, which the server never sees. A spent send drops its bytes.
+  - **Agent tools.** `secret_list` and `secret_request` are in `OWN_TOOLS`; `secret_import` and `secret_send` need the computer. `secret_send` only creates a `proposed` send; `approveSend()` arms it, and its link goes to the owner.
+  - **Panel.** `#/artefatti/segreti`, the `/api/secrets*` routes. Writes are owner-only; members see the names.
+  - **Keeping the key from the CLIs.** `childEnv()` strips `CORA_VAULT_KEY`.
+  - **Tests.** `test/vault.test.js`.
 - **Same-site hardening:** share hosts (`<label>--<space>.usecora.space`) are same-site with every panel, so several guards apply.
   - **The panel cookie** is `__Host-cora_session` over HTTPS. The old `cora_session` is read only for sessions issued before 2026-11-07, and is moved once (`moveLegacyCookie`).
   - **`foreignRequest()`** refuses `Sec-Fetch-Site: same-site|cross-site` on `/api/*` (except `/api/cloud/*`), and on `/box/*` unless it is a top-level visit.

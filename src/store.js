@@ -184,6 +184,9 @@ CREATE INDEX IF NOT EXISTS artifact_commits_folder ON artifact_commits(folder_id
 CREATE TABLE IF NOT EXISTS artifact_objects (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS artifact_uploads (folder_id TEXT NOT NULL, agent_id TEXT NOT NULL, sha TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (folder_id, agent_id, sha));
 CREATE TABLE IF NOT EXISTS artifact_shares (id TEXT PRIMARY KEY, label TEXT NOT NULL UNIQUE, folder_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS vault_secrets (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS vault_requests (token_hash TEXT PRIMARY KEY, status TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS vault_sends (token_hash TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT NOT NULL);
 `;
 const TRACES_KEPT_PER_AGENT = 300;
 
@@ -1429,6 +1432,64 @@ export class Store {
 
   deleteArtifactShare(id) {
     this.stmt("DELETE FROM artifact_shares WHERE id = ?").run(id);
+  }
+
+  /* ---------- vault ---------- */
+  vaultSecrets() {
+    return this.stmt("SELECT data FROM vault_secrets ORDER BY name").all().map((row) => JSON.parse(row.data));
+  }
+
+  vaultSecret(name) {
+    const row = this.stmt("SELECT data FROM vault_secrets WHERE name = ?").get(String(name));
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  writeVaultSecret(secret) {
+    this.stmt("INSERT INTO vault_secrets (id, name, data) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, data = excluded.data").run(secret.id, secret.name, JSON.stringify(secret));
+  }
+
+  deleteVaultSecret(name) {
+    this.stmt("DELETE FROM vault_secrets WHERE name = ?").run(String(name));
+  }
+
+  vaultRequests() {
+    this.stmt("DELETE FROM vault_requests WHERE expires_at < ?").run(Date.now() - 30 * 86400000);
+    return this.stmt("SELECT data FROM vault_requests ORDER BY expires_at DESC").all().map((row) => JSON.parse(row.data));
+  }
+
+  vaultRequest(hash) {
+    const row = this.stmt("SELECT data FROM vault_requests WHERE token_hash = ?").get(hash);
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  writeVaultRequest(hash, request) {
+    this.stmt("INSERT INTO vault_requests (token_hash, status, expires_at, data) VALUES (?, ?, ?, ?) ON CONFLICT(token_hash) DO UPDATE SET status = excluded.status, data = excluded.data")
+      .run(hash, request.status, request.expiresAt, JSON.stringify(request));
+  }
+
+  /** Fills an open request once: the second sender, or a late one, finds it closed. */
+  closeVaultRequest(hash, request) {
+    return this.stmt("UPDATE vault_requests SET status = ?, data = ? WHERE token_hash = ? AND status = 'open' AND expires_at > ?").run(request.status, JSON.stringify(request), hash, Date.now()).changes === 1;
+  }
+
+  vaultSends() {
+    this.stmt("DELETE FROM vault_sends WHERE expires_at < ?").run(Date.now() - 30 * 86400000);
+    return this.stmt("SELECT data FROM vault_sends ORDER BY expires_at DESC").all().map((row) => JSON.parse(row.data));
+  }
+
+  vaultSend(hash) {
+    const row = this.stmt("SELECT data FROM vault_sends WHERE token_hash = ?").get(hash);
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  vaultSendById(id) {
+    const row = this.stmt("SELECT token_hash, data FROM vault_sends WHERE id = ?").get(String(id));
+    return row ? { hash: row.token_hash, send: JSON.parse(row.data) } : null;
+  }
+
+  writeVaultSend(hash, send) {
+    this.stmt("INSERT INTO vault_sends (token_hash, id, status, expires_at, data) VALUES (?, ?, ?, ?, ?) ON CONFLICT(token_hash) DO UPDATE SET status = excluded.status, expires_at = excluded.expires_at, data = excluded.data")
+      .run(hash, send.id, send.status, send.expiresAt, JSON.stringify(send));
   }
 
   /* ---------- activity log ---------- */

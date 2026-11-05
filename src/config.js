@@ -17,6 +17,8 @@ export const config = {
   port: Number(env.PORT || setting("PORT") || 4370),
   adminPassword: setting("ADMIN_PASSWORD") || "",
   sessionKey: setting("SESSION_KEY") || "",
+  // The vault's own key when set (hush CORA_VAULT_KEY); otherwise one derived from the session key.
+  vaultKey: setting("VAULT_KEY") || "",
   discordApi: setting("DISCORD_API") || "https://discord.com/api/v10",
   discordGateway: setting("DISCORD_GATEWAY") || "",
   telegramToken: env.TELEGRAM_BOT_TOKEN || "",

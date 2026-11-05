@@ -3790,6 +3790,7 @@ function artifactPathLabel(path) {
 
 function renderArtifacts() {
   const [, id, view, commitId] = route();
+  if (id === "segreti") return renderSecrets();
   if (id && view === "c" && commitId) return renderArtifactCommit(id, commitId);
   if (id) return renderArtifactFolder(id, view || "file");
   const body = h("div", { class: "stack" }, skeleton("rows", 4));
@@ -3859,6 +3860,7 @@ function renderArtifacts() {
     const reviews = data.reviews;
     const onAir = data.folders.filter((folder) => folder.head).length;
     body.replaceChildren(...[
+      artifactsSwitch(""),
       h("div", { class: "stats" },
         statCard({ icon: "archive", value: String(data.folders.length), label: "cartelle" }),
         statCard({ icon: "check", value: String(reviews.length), label: "da rivedere", href: reviews.length ? `#/artefatti/${reviews[0].folderId}/c/${reviews[0].id}` : null }),
@@ -4252,6 +4254,177 @@ async function renderArtifactCommit(folderId, commitId) {
       changes.length ? h("div", { class: "art-changes" }, changes) : empty("check", "Nessun file cambiato.")),
     panel({ icon: "file", title: tr("Tutti i file ({count})", { count: commit.tree.length }) },
       h("details", { class: "art-alltree" }, h("summary", {}, tr("Mostra l'elenco")), h("ul", {}, commit.tree.map((file) => h("li", {}, h("code", {}, raw(file.path)), h("small", {}, raw(fmtBytes(file.size))))))))].filter(Boolean));
+}
+
+/* ---------- vault ---------- */
+/** Cartelle · Segreti: the two halves of Artefatti. */
+function artifactsSwitch(on) {
+  return h("div", { class: "segmented art-switch", role: "tablist", "aria-label": tr("Artefatti") },
+    [["", "Cartelle", "archive"], ["segreti", "Segreti", "key"]].map(([key, label, name]) => h("button", { type: "button", role: "tab", class: key === on ? "on" : "", "aria-selected": String(key === on),
+      onclick: () => { location.hash = key ? `#/artefatti/${key}` : "#/artefatti"; } }, icon(name), label)));
+}
+
+/** A link shown once, to copy and pass on: the vault keeps only its hash. */
+function vaultLink(url, note) {
+  const copy = btn("Copia", { icon: "copy", cls: "sm primary", onclick: () => navigator.clipboard?.writeText(url).then(() => toast("Link copiato"), () => toast("Non riesco a copiare: selezionalo a mano", true)) });
+  return h("div", { class: "vault-link", role: "status" }, h("code", {}, raw(url)), copy, h("small", {}, note));
+}
+
+/** Who may use a secret, as rockers: all agents, or the ones chosen. */
+function vaultAgents(chosen = []) {
+  const all = chosen.includes("*");
+  const list = h("div", { class: "set-switches" },
+    h("label", { class: "switch" }, h("input", { type: "checkbox", value: "*", checked: all }), h("span", { class: "rocker" }), h("span", { class: "switch-text" }, "Tutti gli agenti")),
+    S.data.agents.map((agent) => h("label", { class: "switch" }, h("input", { type: "checkbox", value: agent.id, checked: all || chosen.includes(agent.id), disabled: all }), h("span", { class: "rocker" }),
+      h("span", { class: "switch-text" }, raw(agent.name), agent.tools ? null : h("small", {}, "senza computer: non ha un hush")))));
+  list.addEventListener("change", (event) => {
+    if (event.target.value !== "*") return;
+    for (const input of list.querySelectorAll("input")) if (input.value !== "*") { input.disabled = event.target.checked; if (event.target.checked) input.checked = true; }
+  });
+  list.value = () => {
+    const inputs = [...list.querySelectorAll("input")];
+    return inputs.find((input) => input.value === "*")?.checked ? ["*"] : inputs.filter((input) => input.value !== "*" && input.checked).map((input) => input.value);
+  };
+  return list;
+}
+
+const secretName = () => {
+  const input = h("input", { type: "text", name: "name", class: "mono", required: true, maxlength: 64, placeholder: "ACME_STRIPE_KEY", autocomplete: "off", spellcheck: "false", "aria-label": tr("Nome") });
+  input.addEventListener("input", () => { input.value = input.value.toUpperCase().replace(/[\s-]+/g, "_").replace(/[^A-Z0-9_]/g, ""); });
+  return input;
+};
+
+function renderSecrets() {
+  const body = h("div", { class: "stack" }, skeleton("rows", 3));
+  let data = null;
+  let form = "";
+  let shown = null;
+  const reload = async () => {
+    try {
+      data = await api("/api/secrets");
+      if (body.isConnected) draw();
+    } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+  };
+  const toggle = (name) => () => { form = form === name ? "" : name; shown = null; draw(); };
+  const newButton = btn("Nuovo segreto", { icon: "plus", cls: "primary", onclick: toggle("new") });
+  const askButton = btn("Chiedi un segreto", { icon: "link", cls: "ghost", onclick: toggle("ask") });
+
+  function newForm() {
+    const value = h("input", { type: "password", name: "value", required: true, autocomplete: "new-password", spellcheck: "false", "aria-label": tr("Valore") });
+    const multi = h("textarea", { name: "multi", rows: 4, class: "mono vault-multi", hidden: true, spellcheck: "false", "aria-label": tr("Valore") });
+    const lines = h("button", { type: "button", class: "btn sm ghost", onclick: () => { const wide = multi.hidden; multi.hidden = !wide; value.hidden = wide; value.required = !wide; multi.required = wide; lines.lastChild.textContent = tr(wide ? "Una riga" : "Più righe"); } }, icon("list"), h("span", {}, "Più righe"));
+    const agents = vaultAgents(["*"]);
+    const el = h("form", { class: "stack" },
+      h("div", { class: "grid2" }, field("Nome", secretName(), "maiuscole, cifre e trattini bassi: è il nome in hush"), field("Cosa è", h("input", { type: "text", name: "description", maxlength: 300, placeholder: tr("Chiave API di Stripe per Acme") }))),
+      field("Valore", h("div", { class: "vault-value" }, value, multi, lines), "lo vedi solo mentre lo scrivi: poi nessuno lo rilegge dal pannello"),
+      setRows(setRow("Chi può usarlo", "Gli agenti che possono metterlo nel loro hush.", agents, { stack: true })),
+      h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Annulla", { cls: "ghost", onclick: toggle("new") }), btn("Metti nella cassaforte", { icon: "check", cls: "primary", type: "submit" })));
+    el.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const values = new FormData(el);
+      const saved = await guard(api("/api/secrets", { method: "POST", body: { name: values.get("name"), description: values.get("description"), value: multi.hidden ? values.get("value") : values.get("multi"), agents: agents.value() } }), "Segreto nella cassaforte");
+      if (saved) { form = ""; reload(); }
+    });
+    return panel({ icon: "key", title: "Nuovo segreto" }, el);
+  }
+
+  function askForm() {
+    const agents = vaultAgents([]);
+    const hours = h("select", { name: "hours", "aria-label": tr("Scadenza") }, [["24", "Un giorno"], ["72", "Tre giorni"], ["168", "Una settimana"]].map(([key, label]) => h("option", { value: key, selected: key === "72" }, label)));
+    const el = h("form", { class: "stack" },
+      h("div", { class: "grid2" }, field("Nome", secretName()), field("Cosa è", h("input", { type: "text", name: "description", maxlength: 300, placeholder: tr("La password del pannello di Acme") }), "chi lo inserisce lo legge sulla pagina")),
+      setRows(setRow("Chi potrà usarlo", "Gli agenti che potranno metterlo nel loro hush quando arriva.", agents, { stack: true }), setRow("Il link scade", "", hours)),
+      h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Annulla", { cls: "ghost", onclick: toggle("ask") }), btn("Crea il link", { icon: "link", cls: "primary", type: "submit" })));
+    el.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const values = new FormData(el);
+      const made = await guard(api("/api/secrets/requests", { method: "POST", body: { name: values.get("name"), description: values.get("description"), agents: agents.value(), hours: Number(values.get("hours")) } }), "Link creato");
+      if (made) { form = ""; shown = { title: tr("Mandalo a chi ha {name}", { name: made.name }), link: vaultLink(made.url, tr("Lo scrive lì una volta, e arriva cifrato nella cassaforte. Il link lo vedi solo adesso.")) }; reload(); }
+    });
+    return panel({ icon: "link", title: "Chiedi un segreto", hint: "Un link da mandare a chi ha la chiave o la password: la scrive su una pagina sua, mai in chat." }, el);
+  }
+
+  function secretRow(secret) {
+    const allowed = secret.agents.includes("*") ? [tr("Tutti gli agenti")] : secret.agents.map((id) => S.data.agents.find((agent) => agent.id === id)?.name).filter(Boolean);
+    const extra = h("div", { class: "vault-extra" });
+    const open = (what) => {
+      if (extra.dataset.open === what) { extra.dataset.open = ""; extra.replaceChildren(); return; }
+      extra.dataset.open = what;
+      if (what === "send") {
+        const views = h("select", { name: "views", "aria-label": tr("Aperture") }, [1, 2, 3, 5].map((n) => h("option", { value: n }, n === 1 ? tr("Si apre una volta") : tr("Si apre {count} volte", { count: n }))));
+        const days = h("select", { name: "days", "aria-label": tr("Scadenza") }, [[1, "Un giorno"], [7, "Una settimana"], [30, "Un mese"]].map(([n, label]) => h("option", { value: n, selected: n === 7 }, label)));
+        const note = h("input", { type: "text", maxlength: 300, placeholder: tr("Per chi è (resta nel registro)"), "aria-label": tr("Per chi è") });
+        extra.replaceChildren(h("div", { class: "vault-inline" }, views, days, note, btn("Crea il link", { icon: "send", cls: "sm primary", onclick: async () => {
+          const made = await guard(api(`/api/secrets/${secret.name}/sends`, { method: "POST", body: { views: Number(views.value), days: Number(days.value), note: note.value } }));
+          if (made) extra.replaceChildren(vaultLink(made.url, tr("Chi lo apre vede il segreto; poi il link sparisce. La chiave è nel link: la cassaforte non la conosce.")));
+        } })));
+      } else if (what === "replace") {
+        const value = h("input", { type: "password", autocomplete: "new-password", spellcheck: "false", placeholder: tr("Il nuovo valore"), "aria-label": tr("Il nuovo valore") });
+        extra.replaceChildren(h("div", { class: "vault-inline" }, value, btn("Sostituisci", { icon: "check", cls: "sm primary", onclick: async () => {
+          if (await guard(api(`/api/secrets/${secret.name}`, { method: "PUT", body: { value: value.value } }), "Valore sostituito")) reload();
+        } })));
+      } else if (what === "agents") {
+        const agents = vaultAgents(secret.agents);
+        extra.replaceChildren(agents, h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Salva", { icon: "check", cls: "sm primary", onclick: async () => {
+          if (await guard(api(`/api/secrets/${secret.name}`, { method: "PUT", body: { agents: agents.value() } }), "Salvato")) reload();
+        } })));
+      }
+    };
+    return h("li", { class: "vault-row" },
+      h("span", { class: "panel-ico" }, icon("key")),
+      h("div", { class: "grow vault-text" },
+        h("div", { class: "row tight" }, h("b", { class: "vault-name" }, raw(secret.name)), secret.source === "request" ? badge("Arrivato da un link", "", "link") : null),
+        secret.description ? h("small", {}, raw(secret.description)) : null,
+        h("span", { class: "share-access" }, allowed.length ? allowed.map((name) => h("span", { class: "chip on" }, raw(name))) : h("span", { class: "chip" }, "Nessun agente")),
+        h("small", { class: "faint mono" }, secret.uses
+          ? raw(tr("usato {count} volte · l'ultima {name}, {when}", { count: secret.uses, name: secret.lastUse?.name || "?", when: fmtTime(new Date(secret.lastUse?.at || secret.updatedAt).toISOString(), true) }))
+          : tr("mai usato"), raw(` · ${fmtBytes(secret.size)} · ${tr("aggiornato {when}", { when: fmtTime(new Date(secret.updatedAt).toISOString(), true) })}`)),
+        extra),
+      data.canManage ? h("div", { class: "row-actions vault-actions" },
+        btn("Manda", { icon: "send", cls: "sm ghost", onclick: () => open("send") }),
+        btn("Sostituisci", { icon: "refresh", cls: "sm ghost", onclick: () => open("replace") }),
+        btn("", { icon: "users", cls: "sm ghost", title: "Chi può usarlo", onclick: () => open("agents") }),
+        armedButton("Elimina", "Conferma", { cls: "sm", onconfirm: async () => { if (await guard(api(`/api/secrets/${secret.name}`, { method: "DELETE" }), "Segreto eliminato")) reload(); } })) : null);
+  }
+
+  function draw() {
+    newButton.hidden = askButton.hidden = !data.canManage;
+    if (!data.enabled) {
+      body.replaceChildren(artifactsSwitch("segreti"), panel({ icon: "key", title: "Cassaforte" }, h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Questa Cora non ha una chiave per la cassaforte: serve CORA_SESSION_KEY."))));
+      return;
+    }
+    const proposed = data.sends.filter((item) => item.status === "proposed");
+    const live = data.sends.filter((item) => item.status === "active");
+    body.replaceChildren(...[
+      artifactsSwitch("segreti"),
+      proposed.length ? h("section", { class: "requests art-reviews", "aria-label": tr("Invii da approvare") },
+        h("span", { class: "label" }, tr("Invii da approvare"), h("i", { class: "count" }, raw(String(proposed.length)))),
+        proposed.map((item) => h("div", { class: "art-review" },
+          h("span", { class: "panel-ico" }, icon("send")),
+          h("span", { class: "grow" }, h("b", {}, raw(`${item.name}`)), h("small", {}, raw(`${item.by?.name || "?"} · ${item.note || ""}`))),
+          btn("Rifiuta", { icon: "close", cls: "sm ghost", onclick: async () => { if (await guard(api(`/api/secrets/sends/${item.id}`, { method: "DELETE" }), "Invio rifiutato")) reload(); } }),
+          btn("Approva", { icon: "check", cls: "sm primary", onclick: async () => {
+            const made = await guard(api(`/api/secrets/sends/${item.id}/approve`, { method: "POST" }));
+            if (made) { shown = { title: tr("Il link per {name}", { name: made.name }), link: vaultLink(made.url, tr("Mandalo tu a chi deve riceverlo: l'agente non lo vede.")) }; reload(); }
+          } })))) : null,
+      shown ? panel({ icon: "link", title: shown.title }, shown.link) : null,
+      form === "new" ? newForm() : form === "ask" ? askForm() : null,
+      panel({ icon: "key", title: "Cassaforte", hint: "Si usano per nome: un agente li mette nel suo hush e lancia i comandi con hush run, senza vederli." },
+        data.secrets.length ? h("ul", { class: "vault-list" }, data.secrets.map(secretRow)) : empty("key", "Ancora nessun segreto. Mettine uno, oppure chiedilo con un link a chi lo ha.")),
+      data.requests.length ? panel({ icon: "clock", title: "Aspettano di arrivare" },
+        h("ul", { class: "vault-list" }, data.requests.map((request) => h("li", { class: "vault-row" },
+          h("span", { class: "panel-ico" }, icon("link")),
+          h("div", { class: "grow vault-text" }, h("b", { class: "vault-name" }, raw(request.name)), h("small", {}, raw([request.by?.name ? tr("chiesto da {name}", { name: request.by.name }) : "", tr("scade {when}", { when: fmtTime(new Date(request.expiresAt).toISOString(), true) })].filter(Boolean).join(" · ")))),
+          data.canManage ? armedButton("Annulla", "Conferma", { icon: "close", cls: "sm", onconfirm: async () => { if (await guard(api(`/api/secrets/requests/${request.id}`, { method: "DELETE" }), "Richiesta annullata")) reload(); } }) : null)))) : null,
+      live.length ? panel({ icon: "send", title: "Link di invio aperti" },
+        h("ul", { class: "vault-list" }, live.map((item) => h("li", { class: "vault-row" },
+          h("span", { class: "panel-ico" }, icon("send")),
+          h("div", { class: "grow vault-text" }, h("b", { class: "vault-name" }, raw(item.name)), h("small", {}, raw([tr("si apre ancora {count} volte", { count: item.left }), tr("scade {when}", { when: fmtTime(new Date(item.expiresAt).toISOString(), true) }), item.note].filter(Boolean).join(" · ")))),
+          data.canManage ? armedButton("Revoca", "Conferma", { cls: "sm", onconfirm: async () => { if (await guard(api(`/api/secrets/sends/${item.id}`, { method: "DELETE" }), "Link revocato")) reload(); } }) : null)))) : null,
+    ].filter(Boolean));
+  }
+  shell([pageHead("Segreti", "Chiavi, password e token usati per nome, come con hush: nessuno li rilegge dal pannello.", [askButton, newButton]), body], { title: "Segreti" });
+  reload();
 }
 
 function renderContext() {

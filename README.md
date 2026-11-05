@@ -100,6 +100,15 @@ What the agents make on their computers and has to be kept or shown (a report, a
 
   Files are shown inert on the panel's address: pictures and media as they are, text as text, everything else as a download. Nothing an agent made ever runs there.
 
+### Secrets
+
+Keys, passwords and tokens live in Cora's **vault**, the secrets half of Artefatti, and are used by name, as with hush.
+
+- **Storage.** Values are encrypted on the server: AES-256-GCM, with a key derived from `CORA_SESSION_KEY`, or `CORA_VAULT_KEY` when set. Nobody reads one back from the panel.
+- **Receiving.** The owner, or an agent through `secret_request`, makes a one-time link for a name. Whoever holds the secret types it into that page, and it never passes through a chat. This is Bitwarden Send's receiving side, inside Cora.
+- **Using.** `secret_import` puts a secret into the hush on the agent's own computer. It is sealed to that hush's box key and opened straight into its vault, so the agent then runs `hush run --name NAME --env VAR --redact -- command` without ever seeing it. Each secret says which agents may use it, and each use is recorded.
+- **Sending.** A send link opens a set number of times and expires. The value is encrypted under a key that lives only in the link's fragment, so the server alone cannot open it. The owner creates sends; an agent's `secret_send` waits for the owner's approval, and the link goes to the owner, never to the agent.
+
 ## Memory
 
 | Layer | What | When it is used |
