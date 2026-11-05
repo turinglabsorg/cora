@@ -252,10 +252,9 @@ export class Brain {
     ];
     // An agent of a person of the space answers to that person, not to the owner of the space.
     const belongs = this.store.agentOwner?.(agent);
-    if (belongs && belongs.role !== "owner") {
-      const chats = this.store.agentOwnerChats(agent).map((id) => id.split(":")[0]).filter((value, index, all) => all.indexOf(value) === index);
+    if (belongs) {
       sections.push(`## A chi appartieni
-Appartieni a ${belongs.name || belongs.email}${chats.length ? ` (la riconosci in chat: ${chats.join(", ")})` : ""}. Le sue richieste valgono come quelle del proprietario dello spazio, ed è a questa persona che chiedi permessi e decisioni (ask_owner chiama lei e non il proprietario dello spazio). Per quello che ti chiede non serve il via libera di nessun altro.`);
+Appartieni a ${belongs.name} (su ${({ discord: "Discord", slack: "Slack", telegram: "Telegram" })[belongs.transport]}). Le sue richieste valgono come quelle del proprietario dello spazio, ed è a questa persona che chiedi permessi e decisioni (ask_owner chiama lei e non il proprietario dello spazio). Per quello che ti chiede non serve il via libera di nessun altro.`);
     }
     if (others) sections.push(`## Gli altri agenti dell'istanza\nQuesto elenco non indica chi è presente nella conversazione attuale: non coinvolgere un collega soltanto perché è elencato qui. Rispondi come ${agent.name}, senza parlare a nome degli altri.\n${others}`);
     sections.push([

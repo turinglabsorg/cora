@@ -532,8 +532,9 @@ input.num { width: 92px; text-align: right; font-family: var(--mono); }
 @media (max-width: 600px) {
   /* A switch, a number or an hour stays next to its title; a button or a wide control goes under it. */
   .set-row { gap: 10px 16px; }
-  .set-row:has(> .set-control > :is(.btn, .segmented, .input-row, .row, .stack-sm, input[type=text], .voice-pick)) { grid-template-columns: minmax(0, 1fr); }
-  .set-row:has(> .set-control > :is(.btn, .segmented, .input-row, .row, .stack-sm, input[type=text], .voice-pick)) > .set-control { justify-content: flex-start; flex-wrap: wrap; }
+  .set-row:has(> .set-control > :is(.btn, .segmented, .input-row, .row, .stack-sm, input[type=text], .voice-pick, .owner-pick)) { grid-template-columns: minmax(0, 1fr); }
+  .set-row:has(> .set-control > :is(.btn, .segmented, .input-row, .row, .stack-sm, input[type=text], .voice-pick, .owner-pick)) > .set-control { justify-content: flex-start; flex-wrap: wrap; }
+  .set-control > .owner-pick { width: 100%; }
 }
 
 /* Settings: every entry in one list on the left, grouped like the desk's sections; its page on the right. */
@@ -899,6 +900,14 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .page-title h1 { display: none; }
   .page-title p { margin: 0; font-size: 14px; }
   .page-head { align-items: center; }
+  /* A commit's message is what the page is about: the app bar only says "Commit", so it stays, smaller. */
+  .art-commit-head { flex-direction: column; align-items: stretch; gap: 10px; }
+  .art-commit-head .page-title h1 { display: block; margin-bottom: 10px; font-size: 23px; line-height: 1.2; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+  .art-commit-head .page-actions { justify-content: flex-start; }
+  .art-decide .row { flex-wrap: wrap; }
+  .art-decide .row > .spacer { display: none; }
+  .art-decide .row > .btn { flex: 1 1 0; justify-content: center; }
+  .art-decide .row > .btn.primary { flex-basis: 100%; }
   .mode-chat .page-head { display: none; }
   .mode-chat .wrap { padding-bottom: 8px; gap: 10px; }
   .kbd-open .tabbar { display: none; }

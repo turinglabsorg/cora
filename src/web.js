@@ -317,8 +317,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const pulls = new Set();
   const publicAgent = async (agent) => ({
     ...agent,
-    // Who it answers to: set, or the person of its account; null means the owner of the space.
-    owner: (() => { const person = store.agentOwner(agent); return person ? { id: person.id, name: person.name || person.email, role: person.role, set: agent.ownerId === person.id, chats: store.settings.chatLinks?.[person.id] || [] } : null; })(),
+    // Who it answers to: a real person in the chats; null means the owner of the space.
+    owner: store.agentOwner(agent),
     mailbox: store.value(`agentMailbox:${agent.id}`, null),
     memoryCount: store.memoryCount(agent.id),
     box: await boxStatus(agent),
@@ -790,8 +790,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
 
     if (path === "/api/agents" && method === "POST") {
       const body = await readJson(req);
-      // A person of the space who makes an agent owns it; the owner of the space may name someone else.
-      if (user?.role !== "owner") body.ownerId = user?.id || "";
+      // Whom an agent answers to is the owner of the space's choice.
+      if (user?.role !== "owner") delete body.ownerId;
       const agent = store.createAgent(body);
       bots?.sync();
       tgBots?.sync();

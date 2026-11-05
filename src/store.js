@@ -54,25 +54,15 @@ const DEFAULT_SETTINGS = {
   reviewHour: 8,
   // The room the artifacts may take, in GB: 0 is half the disk they live on.
   artifactQuotaGb: 0,
-  // Who each person of the panel is in the chats: { "<panel user id>": ["discord:<user id>", …] }.
-  chatLinks: {},
 };
 const SSH_PORT_BASE = 2201;
 export const TRANSPORTS = ["discord", "telegram", "slack"];
 
-/** Panel people and who they are in the chats: transport-prefixed ids, a handful each. */
-function cleanChatLinks(value) {
-  const out = {};
-  for (const [userId, ids] of Object.entries(value && typeof value === "object" ? value : {}).slice(0, 200)) {
-    const key = String(userId).replace(/[^\w:-]/g, "").slice(0, 64);
-    const clean = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter((id) => /^(discord|telegram|slack):[\w.-]{1,40}$/.test(id)))].slice(0, 10);
-    if (key && clean.length) out[key] = clean;
-  }
-  return out;
-}
+// A person in the chats, as Cora knows them: the platform and their user id there.
+const CHAT_PERSON = /^(discord|telegram|slack):[\w.-]{1,40}$/;
 
 const AGENT_DEFAULTS = {
-  // Who the agent answers to: a panel person's id; empty means whoever its account belongs to, or the owner.
+  // Who the agent answers to: a real person in the chats ("discord:<user id>"); empty means the owner of the space.
   ownerId: "",
   // What Cora draws the picture from: empty means the agent's id.
   avatarSeed: "",
@@ -293,7 +283,7 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     core: cleanText(merged.core, 4000),
     model: checkModel(merged.model),
     subscriptionId: cleanText(merged.subscriptionId, 80).trim(),
-    ownerId: cleanText(merged.ownerId, 64).replace(/[^\w:-]/g, ""),
+    ownerId: CHAT_PERSON.test(String(merged.ownerId || "")) ? String(merged.ownerId) : "",
     // Ollama decides the card when it starts, so one server per card is how an agent picks one.
     ollamaHost: cleanUrl(merged.ollamaHost),
     chattiness: clampNumber(merged.chattiness, 0, 1, 0.5),
@@ -364,7 +354,6 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     librarianHour: Math.round(clampNumber(merged.librarianHour, 0, 23, 3)),
     reviewHour: Math.round(clampNumber(merged.reviewHour, 0, 23, 8)),
     artifactQuotaGb: Math.round(clampNumber(merged.artifactQuotaGb, 0, 1000000, 0)),
-    chatLinks: cleanChatLinks(merged.chatLinks),
   };
 }
 
@@ -724,22 +713,24 @@ export class Store {
   }
 
   /**
-   * The person of the panel an agent answers to: the one set on it, otherwise the person whose
-   * account it runs on (the subscription's email), otherwise nobody in particular (the owner).
+   * The person an agent answers to, a real one in the chats: their id there, the platform and
+   * the name they last wrote with. Null when it is the owner of the space.
    */
   agentOwner(agent) {
-    const people = this.panelUsers().filter((user) => !user.blocked);
-    const set = agent?.ownerId ? people.find((user) => user.id === agent.ownerId) : null;
-    if (set) return set;
-    const email = agent?.subscriptionId ? String(this.subscription(agent.subscriptionId)?.email || "").toLowerCase() : "";
-    return email ? people.find((user) => String(user.email || "").toLowerCase() === email) || null : null;
+    const id = CHAT_PERSON.test(String(agent?.ownerId || "")) ? agent.ownerId : "";
+    if (!id) return null;
+    const transport = id.slice(0, id.indexOf(":"));
+    const userId = id.slice(transport.length + 1);
+    const channels = transport === "telegram" ? "channel_id LIKE 'tg:%'" : transport === "slack" ? "channel_id LIKE 'sl:%'"
+      : "channel_id NOT LIKE 'tg:%' AND channel_id NOT LIKE 'sl:%' AND channel_id NOT LIKE 'web%'";
+    const name = this.stmt(`SELECT author_name FROM messages WHERE author_id = ? AND kind IN ('owner', 'human') AND ${channels} ORDER BY at DESC LIMIT 1`).get(userId)?.author_name;
+    return { id, transport, userId, name: name || userId };
   }
 
   /** Who an agent's owner is in the chats, as "transport:user id": empty when the owner of the space is. */
   agentOwnerChats(agent) {
     const owner = this.agentOwner(agent);
-    if (!owner || owner.role === "owner") return [];
-    return this.settings.chatLinks?.[owner.id] || [];
+    return owner ? [owner.id] : [];
   }
 
   subscription(id) {

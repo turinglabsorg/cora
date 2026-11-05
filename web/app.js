@@ -1861,42 +1861,21 @@ function avatarPicker(agent, colorInput) {
 }
 
 /**
- * Who an agent answers to: a person of the panel (by default the one whose account it runs on),
- * and who that person is in the chats, so the agent asks them and takes their word as the owner's.
+ * Who an agent answers to: a real person of the chats, picked among the people who wrote there,
+ * by platform. Nobody picked, it answers to the owner of the space.
  */
 function agentOwnerPanel(agent) {
-  const owner = agent.owner;
-  const select = h("select", { name: "ownerId", "aria-label": tr("Proprietario dell'agente") },
-    h("option", { value: "", selected: !agent.ownerId }, owner && !owner.set ? tr("Automatico: {name}, dal suo account", { name: owner.name }) : tr("Automatico: il proprietario dello spazio")));
-  const chats = h("div", { class: "chips owner-chats", role: "group", "aria-label": tr("Chi è in chat") });
-  const hint = h("small", { class: "faint" });
-  let people = [];
-  let users = [];
-  const chosen = () => select.value || (owner && !owner.set ? owner.id : "");
-  const drawChats = () => {
-    const user = users.find((entry) => entry.id === chosen());
-    if (!user || user.role === "owner") {
-      chats.replaceChildren(h("span", { class: "faint" }, tr("Il proprietario dello spazio: lo riconosce già in tutte le chat.")));
-      return;
-    }
-    const linked = S.data.settings.chatLinks?.[user.id] || [];
-    chats.replaceChildren(...(people.length ? people.map((person) => h("button", { type: "button", class: `chip${linked.includes(person.id) ? " on" : ""}`, "aria-pressed": String(linked.includes(person.id)), onclick: async () => {
-      const next = linked.includes(person.id) ? linked.filter((id) => id !== person.id) : [...linked, person.id];
-      await saveSettings({ chatLinks: { ...(S.data.settings.chatLinks || {}), [user.id]: next } });
-      drawChats();
-    } }, icon(TRANSPORTS[person.transport]?.icon || "user"), raw(person.name))) : [h("span", { class: "faint" }, tr("Ancora nessuno ha scritto nei canali."))]));
-    hint.textContent = tr("Chi è {name} nelle chat: le richieste dell'agente vanno a questa persona, e le sue valgono come quelle del proprietario.", { name: user.name || user.email });
-  };
-  select.addEventListener("change", drawChats);
-  Promise.all([api("/api/access"), api("/api/permissions")]).then(([access, permissions]) => {
-    users = access.users.filter((user) => !user.blocked);
-    people = permissions.people;
-    for (const user of users) select.append(h("option", { value: user.id, selected: agent.ownerId === user.id }, raw(`${user.name || user.email}${user.role === "owner" ? ` · ${tr("proprietario")}` : ""}`)));
-    drawChats();
-  }).catch(() => chats.replaceChildren(h("span", { class: "faint" }, tr("Non riesco a leggere le persone del pannello."))));
+  const nobody = h("option", { value: "", selected: !agent.ownerId }, tr("Te, il proprietario dello spazio"));
+  const current = agent.owner ? h("option", { value: agent.owner.id, selected: true }, raw(agent.owner.name)) : null;
+  const select = h("select", { name: "ownerId", class: "owner-pick", "aria-label": tr("A chi risponde") }, nobody, current);
+  api("/api/permissions").then(({ people }) => {
+    const groups = Object.entries(TRANSPORTS).map(([key, info]) => [info.label, people.filter((person) => person.transport === key)]).filter(([, list]) => list.length);
+    const known = people.some((person) => person.id === agent.ownerId);
+    select.replaceChildren(...[nobody, ...groups.map(([label, list]) => h("optgroup", { label }, list.map((person) => h("option", { value: person.id, selected: person.id === agent.ownerId }, raw(person.name))))),
+      current && !known ? current : null].filter(Boolean));
+  }).catch(() => {});
   return panel({ icon: "user", title: "Proprietario", hint: "A chi risponde: chiede a questa persona i permessi, e le sue richieste valgono come le tue." },
-    setRows(setRow("Proprietario dell'agente", "Di base è la persona dell'account su cui gira.", select),
-      setRow("Chi è in chat", "", h("div", { class: "stack-sm" }, chats, hint), { stack: true })));
+    setRows(setRow("Risponde a", "Una persona che scrive nei canali, su Discord, Slack o Telegram.", select)));
 }
 
 /**
@@ -5017,6 +4996,12 @@ async function artifactChange(commit, change) {
     after ? btn(change.before ? "Dopo" : "Scarica", { icon: "download", cls: "sm ghost", href: `${after}?download=1` }) : null);
 }
 
+/** A commit page's head: its message stays on top on a phone too, where page titles give way to the app bar. */
+function artifactCommitHead(head) {
+  head.classList.add("art-commit-head");
+  return head;
+}
+
 async function renderArtifactCommit(folderId, commitId) {
   const view = location.hash;
   const slot = h("div", { class: "stack" }, panel({}, skeleton("rows", 4)));
@@ -5067,9 +5052,9 @@ async function renderArtifactCommit(folderId, commitId) {
   const deleted = commit.changed.filter((change) => change.kind === "deleted").length;
   slot.replaceChildren(...[
     commit.folder ? btn(raw(commit.folder.title || commit.folder.path), { icon: "back", href: `#/artefatti/${commit.folder.id}/commit`, cls: "ghost sm back-link art-back" }) : null,
-    pageHead(raw(commit.message), h("span", { class: "art-head-meta" }, h("code", {}, raw(commit.short)), badge(label, cls),
+    artifactCommitHead(pageHead(raw(commit.message), h("span", { class: "art-head-meta" }, h("code", {}, raw(commit.short)), badge(label, cls),
       commit.folder ? h("a", { href: `#/artefatti/${commit.folder.id}` }, artifactPathLabel(commit.folder.path)) : null),
-      commit.previewUrl ? [btn("Apri anteprima", { icon: "external", cls: "ghost", href: commit.previewUrl, target: "_blank" })] : null),
+      commit.previewUrl ? [btn("Apri anteprima", { icon: "external", cls: "ghost", href: commit.previewUrl, target: "_blank" })] : null)),
     h("div", { class: "art-byline" }, artifactAuthor(commit.author),
       commit.requestedBy?.name ? h("small", {}, tr("chiesto da {name}", { name: commit.requestedBy.name })) : null,
       h("small", {}, raw(fmtTime(new Date(commit.createdAt).toISOString(), true))), artifactCounts(commit.changes),

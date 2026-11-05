@@ -2276,21 +2276,23 @@ describe("talking with the agents", () => {
     await quiet();
   });
 
-  test("an agent belongs to a person of the space: it asks them, and their word counts as the owner's for it", async (t) => {
-    app.store.db.prepare("INSERT INTO panel_users (id, name, email, role, source, created_at, last_seen_at) VALUES (?, ?, ?, 'member', 'cloud', 0, 0)").run("ac_sara0000000001", "Sara", "sara@cliente.test");
-    const sara = (await call("/api/agents", { method: "POST", body: { name: "Saretta", model: "ollama/test-model", chattiness: 1, tools: true, channelIds: [CHANNEL], ownerId: "ac_sara0000000001" } })).data;
-    t.after(() => { app.store.deleteAgent(sara.id); app.store.db.prepare("DELETE FROM panel_users WHERE id = ?").run("ac_sara0000000001"); app.store.updateSettings?.({ chatLinks: {} }); });
-    assert.equal(sara.owner.name, "Sara", "the owner of the space may name whose agent it is");
-    assert.deepEqual(sara.owner.chats, []);
-    const saved = await call("/api/settings", { method: "PUT", body: { chatLinks: { ac_sara0000000001: [`discord:${STRANGER}`, "nonsense"] } } });
-    assert.deepEqual(saved.data.chatLinks, { ac_sara0000000001: [`discord:${STRANGER}`] }, "only real chat ids are kept");
+  test("an agent belongs to a real person of the chats: it asks them, and their word counts as the owner's for it", async (t) => {
+    // Who they are comes from what they wrote: the name they last wrote with.
+    app.store.appendArchive("owner-seed", { id: "owner-seed-1", at: Date.now(), authorId: STRANGER, authorName: "Sara", kind: "human", agentId: null, content: "ciao" });
+    const sara = (await call("/api/agents", { method: "POST", body: { name: "Saretta", model: "ollama/test-model", chattiness: 1, tools: true, channelIds: [CHANNEL], ownerId: `discord:${STRANGER}` } })).data;
+    t.after(() => app.store.deleteAgent(sara.id));
+    assert.deepEqual(sara.owner, { id: `discord:${STRANGER}`, transport: "discord", userId: STRANGER, name: "Sara" }, "the owner of the space names whose agent it is");
+    const panelPerson = (await call("/api/agents", { method: "POST", body: { name: "Nessuna", model: "ollama/test-model", ownerId: "ac_sara0000000001" } })).data;
+    t.after(() => app.store.deleteAgent(panelPerson.id));
+    assert.equal(panelPerson.ownerId, "", "only a real person of the chats can own an agent");
+    assert.equal(panelPerson.owner, null);
     const agent = app.store.agent(sara.id);
     const state = app.orchestrator.state(CHANNEL);
     assert.equal(app.orchestrator.authorized({ kind: "human", authorId: STRANGER }, agent, state), true, "the person it belongs to may put it to work, nobody asked");
     assert.equal(app.orchestrator.authorized({ kind: "human", authorId: "123" }, agent, state), false);
     const olgaAgent = app.store.agent(olga.id);
     assert.equal(app.orchestrator.authorized({ kind: "human", authorId: STRANGER }, olgaAgent, state), false, "but not someone else's agent");
-    assert.match(app.brain.systemPrompt(agent, { place: "", computer: true }), /## A chi appartieni\nAppartieni a Sara \(la riconosci in chat: discord\)/);
+    assert.match(app.brain.systemPrompt(agent, { place: "", computer: true }), /## A chi appartieni\nAppartieni a Sara \(su Discord\)/);
     const before = discord.state.webhookPosts.length;
     await app.orchestrator.askOwner(agent, { question: "Posso usare il desktop per la landing?", choices: ["Sì", "No"] }, { channelId: CHANNEL });
     const asked = discord.state.webhookPosts.slice(before).find((item) => item.username === "Saretta");

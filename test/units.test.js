@@ -942,3 +942,21 @@ test("Artefatti, a commit in conflict: ignore it, reject it or force it", async 
   assert.match(panel.app.textContent, /Ignorato da Ada/);
   assert.equal(panel.app.querySelector(".art-decide"), null, "nothing left to decide");
 });
+
+test("an agent's owner is one pick among the real people of the chats, by platform", async () => {
+  const panel = panelHarness({ fetch: async (path) => {
+    if (path === "/api/permissions") return { ok: true, status: 200, json: async () => ({ canManage: true, people: [
+      { id: "discord:526403555016441894", transport: "discord", name: "Sncl" }, { id: "discord:7001", transport: "discord", name: "Giulia" }, { id: "slack:U0KIM", transport: "slack", name: "Kim" },
+    ] }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  const box = panel.run(`agentOwnerPanel({ id: "ag_1", ownerId: "discord:526403555016441894", owner: { id: "discord:526403555016441894", transport: "discord", userId: "526403555016441894", name: "Sncl" } })`);
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(box.querySelectorAll("select").length, 1, "one control, not two");
+  const select = box.querySelector("select");
+  assert.deepEqual(select.querySelectorAll("optgroup").map((group) => group.attributes.label), ["Discord", "Slack"]);
+  assert.deepEqual(select.querySelectorAll("option").map((option) => [option.value, option.textContent]), [
+    ["", "Te, il proprietario dello spazio"], ["discord:526403555016441894", "Sncl"], ["discord:7001", "Giulia"], ["slack:U0KIM", "Kim"],
+  ]);
+  assert.equal(select.querySelectorAll("option").find((option) => option.selected)?.textContent, "Sncl");
+});
