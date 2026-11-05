@@ -17,6 +17,8 @@ export const BRAIN_SLUG = "artefatti";
 /** A share's name in its host, <label>--<space>.<domain>: one DNS label, never the reserved IDNA or preview shapes. */
 export const SHARE_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const PREVIEW_LABEL = /^p-([a-f0-9]{12})$/;
+// A panel's own look at one file, on an address apart from the panel: a PDF the browser renders, for one.
+const RAW_LABEL = /^r-([a-f0-9]{12})$/;
 // Anyone can have an address there: a grant to the whole domain would be a grant to everyone.
 const WEBMAIL = new Set(["gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "hotmail.it", "live.com", "live.it", "msn.com", "yahoo.com", "yahoo.it", "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com", "pm.me", "gmx.com", "gmx.de", "gmx.net", "web.de", "libero.it", "virgilio.it", "tiscali.it", "alice.it", "tim.it", "tin.it", "fastwebnet.it", "yandex.ru", "yandex.com", "mail.ru", "qq.com", "163.com", "zoho.com", "hey.com", "fastmail.com", "tutanota.com", "ambox.dev"]);
 const EMAIL = /^[^\s@]+@([a-z0-9-]+\.)+[a-z]{2,}$/;
@@ -125,8 +127,25 @@ export class Artifacts {
     for (const name of readdirSync(join(this.dir, "tmp"))) rmSync(join(this.dir, "tmp", name), { force: true });
   }
 
+  /** The disk the artifacts live on: its size and what is free, or null where it cannot be read. */
+  disk() {
+    try {
+      const disk = statfsSync(this.dir);
+      return { total: disk.blocks * disk.bsize, free: disk.bavail * disk.bsize };
+    } catch { return null; }
+  }
+
+  /** The room the artifacts may take: what the owner set, or half the disk they live on. */
   get quota() {
-    return Number(this.store.settings.artifactQuotaBytes) || DEFAULT_QUOTA;
+    const set = Number(this.store.settings.artifactQuotaGb) || 0;
+    if (set > 0) return set * 1024 ** 3;
+    const disk = this.disk();
+    return disk ? Math.floor(disk.total / 2) : DEFAULT_QUOTA;
+  }
+
+  /** What the panel shows about space: used, the limit and where it comes from, the disk. */
+  space() {
+    return { used: this.store.artifactBytes(), limit: this.quota, custom: (Number(this.store.settings.artifactQuotaGb) || 0) > 0, disk: this.disk() };
   }
 
   /** Serializes everything that moves a folder's head: one change at a time per folder. */
@@ -567,7 +586,7 @@ export class Artifacts {
 
   /** Room for this many more bytes: the quota, and the disk underneath. */
   roomFor(incoming) {
-    if (this.store.artifactBytes() + incoming > this.quota) throw new ArtifactError(`gli artefatti supererebbero lo spazio di questo server (${Math.round(this.quota / 1024 / 1024 / 1024)} GB): libera spazio o alzalo nelle impostazioni`, 507);
+    if (this.store.artifactBytes() + incoming > this.quota) throw new ArtifactError(`gli artefatti supererebbero lo spazio a loro riservato (${Math.round(this.quota / 1024 / 1024 / 1024)} GB): libera spazio, o alzalo in Impostazioni → Spazio`, 507);
     try {
       const disk = statfsSync(this.dir);
       if (disk.bavail * disk.bsize - incoming < LIMITS.freeBytes) throw new ArtifactError("il server sta finendo lo spazio su disco", 507);
@@ -892,7 +911,7 @@ export class Artifacts {
 
   validLabel(label) {
     const value = String(label || "").trim().toLowerCase();
-    if (!SHARE_LABEL.test(value) || value.length < 3 || value.includes("--") || value.startsWith("xn") || PREVIEW_LABEL.test(value)) {
+    if (!SHARE_LABEL.test(value) || value.length < 3 || value.includes("--") || value.startsWith("xn") || PREVIEW_LABEL.test(value) || RAW_LABEL.test(value)) {
       throw new ArtifactError("il nome del link è fatto di almeno tre lettere, cifre o trattini singoli");
     }
     const space = this.shareSuffix.replace(/^--/, "").split(".")[0];
@@ -963,6 +982,12 @@ export class Artifacts {
 
   /** What a host under this space's share suffix stands for: a share, a commit's preview, or nothing. */
   resolveHost(label) {
+    const raw = RAW_LABEL.exec(String(label || ""));
+    if (raw) {
+      const commit = this.store.artifactCommit(`ac_${raw[1]}`);
+      const folder = commit ? this.store.artifactFolder(commit.folderId) : null;
+      return commit && folder ? { kind: "raw", folder, commit, scope: `raw:${commit.id}`, revision: 1, view: "files" } : null;
+    }
     const preview = PREVIEW_LABEL.exec(String(label || ""));
     if (preview) {
       const commit = this.store.artifactCommit(`ac_${preview[1]}`);

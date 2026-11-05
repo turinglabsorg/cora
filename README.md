@@ -107,7 +107,8 @@ What the agents make on their computers and has to be kept or shown (a report, a
   - **Commit previews.** A reviewer opens a proposed commit on an address of its own (`p-<commit>--<space>`), so a site is seen as it will be.
 - **The panel.** **Artefatti** shows:
   - the folders by group, with what waits for review;
-  - each folder's files, one level at a time with the path in the address, a preview, and an upload: files or a whole folder, chosen or dropped, land in the folder you are looking at. The owner and the folder's reviewers put them on air at once; anyone else proposes them for review;
+  - the room they may take: half the disk by default, a limit of the owner's in Settings → Spazio, and never less than 5 GB left free;
+  - each folder's files, one level at a time with the path in the address, a preview, and an upload: files or a whole folder, chosen or dropped, land in the folder you are looking at. *Nuova cartella* goes into a new subfolder, which exists once its first files are uploaded. The owner and the folder's reviewers put them on air at once; anyone else proposes them for review. CSV and TSV files show as a table; a PDF shows in a frame served from the space's own preview address, never from the panel's;
   - its commits, like takes on a tape, with the one on air lit;
   - each commit's changes as a diff.
 

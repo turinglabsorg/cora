@@ -629,3 +629,76 @@ test("Artefatti, Registro: who opened, viewed and downloaded what through the li
   all.dispatch("click", { currentTarget: all });
   assert.deepEqual(lines(), ["Visitatore p4ss00 ha sbagliato la password"], "and the folder's own changes step aside");
 });
+
+test("Impostazioni → Spazio: how much the artifacts take, half the disk by default, a limit of the owner's", async () => {
+  const gb = 1024 ** 3;
+  const sent = [];
+  const panel = panelHarness({ fetch: async (path, options = {}) => {
+    if (path === "/api/settings") { sent.push(JSON.parse(options.body)); return { ok: true, status: 200, json: async () => ({ artifactQuotaGb: JSON.parse(options.body).artifactQuotaGb }) }; }
+    if (path === "/api/artifacts") return { ok: true, status: 200, json: async () => ({ quota: { used: 2 * gb, limit: 50 * gb, custom: true, disk: { total: 400 * gb, free: 230 * gb } } }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  panel.run(`S.data = { agents: [], settings: {}, artifacts: { reviews: 0, space: { used: ${2 * gb}, limit: ${200 * gb}, custom: false, disk: { total: ${400 * gb}, free: ${232 * gb} } } } }`);
+  panel.run("app.replaceChildren(artifactSpacePanel())");
+  const text = () => panel.app.querySelector(".space-summary").textContent;
+  assert.match(text(), /2 GB.*occupati dagli artefatti, di 200 GB.*232 GB.*liberi sul disco, di 400 GB/);
+  const [half, own] = panel.app.querySelector(".segmented").querySelectorAll("button");
+  assert.equal(half.textContent, "Metà del disco · 200 GB");
+  assert.equal(half.className, "on");
+  own.dispatch("click", { currentTarget: own });
+  const amount = panel.app.querySelector(".space-custom").querySelector("input");
+  assert.equal(amount.value, 200, "the field starts from the limit in force");
+  amount.value = "50";
+  amount.dispatch("change");
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, [{ artifactQuotaGb: 50 }]);
+  assert.match(text(), /di 50 GB/, "the summary follows what was saved");
+  half.dispatch("click", { currentTarget: half });
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent.at(-1), { artifactQuotaGb: 0 }, "back to half the disk");
+});
+
+test("Artefatti, File: a new subfolder to upload into, a way back, CSV as a table and a PDF framed from apart", async () => {
+  const at = Date.parse("2026-11-05T09:00:00Z");
+  const head = { id: "ac_000000000009", short: "0000000", folderId: "af_000000000001", message: "CRM", author: { kind: "user", id: "u1", name: "Ada" }, status: "published", createdAt: at, publishedAt: at, files: 2, bytes: 30, changes: { added: 2, modified: 0, deleted: 0 } };
+  const data = {
+    folder: { id: "af_000000000001", path: "clienti/crm", title: "CRM", description: "", kind: "files", policy: "review", head: head.id, writers: ["*"], reviewers: [] },
+    canReview: true, canManage: true, shareHosting: true, shareSuffix: "--acme.usecora.space", shares: [], commits: [head], activity: {},
+    tree: [{ path: "crm/clienti.csv", sha: "a".repeat(64), size: 20 }, { path: "crm/contratto.pdf", sha: "b".repeat(64), size: 10 }],
+  };
+  const panel = panelHarness({ fetch: async (path) => {
+    if (path === "/api/artifacts/folders/af_000000000001") return { ok: true, status: 200, json: async () => data };
+    if (path.startsWith("/api/artifacts/commits/ac_000000000009/view?")) return { ok: true, status: 200, json: async () => ({ url: "https://r-000000000009--acme.usecora.space/crm/contratto.pdf?t=1.x" }) };
+    if (path.includes("/files/crm/clienti.csv")) return { ok: true, status: 200, headers: { get: () => "text/plain; charset=utf-8" }, text: async () => 'nome;città;fatturato\\n"Rossi; Bianchi";Ragusa;1200\\nVerdi;Modica;980\\n' };
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [], artifacts: { reviews: 0 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
+  const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  await panel.navigate("#/artefatti/af_000000000001/file/crm");
+  await settle();
+  assert.equal(panel.app.querySelector(".art-back").attributes.href, "#/artefatti", "a way back to the list, on the page itself");
+  const create = panel.app.querySelector(".art-drop").querySelectorAll("button").find((button) => button.textContent === "Nuova cartella");
+  create.click();
+  const form = panel.app.querySelector(".art-newdir");
+  form.querySelector("input").value = "  2026 / novembre ";
+  form.dispatch("submit");
+  assert.equal(panel.run("location.hash"), "#/artefatti/af_000000000001/file/crm/2026/novembre", "a new folder is a place to go and upload into");
+  await panel.navigate("#/artefatti/af_000000000001/file/crm/2026/novembre");
+  await settle();
+  assert.match(panel.app.querySelector(".art-tree").textContent, /Cartella nuova: esiste quando ci carichi i primi file/);
+  assert.equal(panel.app.querySelector(".art-drop-where").textContent, "clienti/crm/crm/2026/novembre/");
+  form.querySelector("input").value = "../fuori";
+  form.dispatch("submit");
+  assert.match(panel.run(`document.querySelector(".toast")?.textContent || ""`), /niente \. o \.\./);
+
+  const table = panel.run(`artifactTable('nome;città;fatturato\\n"Rossi; Bianchi";Ragusa;1200\\n"Verdi\\nsu due righe";Modica;980\\n')`);
+  assert.deepEqual(table.querySelectorAll("th").map((cell) => cell.textContent), ["nome", "città", "fatturato"], "the separator is guessed from the first line");
+  assert.deepEqual(table.querySelectorAll("tr").slice(1).map((row) => row.querySelectorAll("td").map((cell) => cell.textContent)), [["Rossi; Bianchi", "Ragusa", "1200"], ["Verdi\nsu due righe", "Modica", "980"]], "quoted cells keep their separators and their lines");
+  assert.equal(table.querySelector(".num").textContent, "1200");
+  assert.match(table.textContent, /2 righe$/, "records are counted, not lines");
+  const shown = await panel.run(`artifactPreview("/api/artifacts/commits/ac_000000000009/files/crm/contratto.pdf", "crm/contratto.pdf", 10)`);
+  const frame = shown.find((node) => node?.tagName === "iframe");
+  assert.equal(frame.attributes.src, "https://r-000000000009--acme.usecora.space/crm/contratto.pdf?t=1.x", "a PDF is framed from the space's preview host");
+  assert.equal(frame.attributes.referrerpolicy, "no-referrer");
+});

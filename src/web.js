@@ -191,6 +191,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const firstUse = passLedger();
   // A share's own address: answered before anything of the panel, which never runs there.
   const shares = shareHosts({ config, store, artifacts, cloud, firstUse, sessionKey, activity });
+  // The panel frames a PDF from the space's own preview host, never from its own origin.
+  const shareDomain = artifacts?.shareSuffix ? artifacts.shareSuffix.split(".").slice(1).join(".") : "";
+  const panelCsp = shareDomain ? CSP.replace("frame-src 'self'", `frame-src 'self' https://*.${shareDomain}`) : CSP;
   // The vault's pages for people outside the panel: a request to fill, a send to open.
   const vaultPages = sendPages({ vault, store, timezone: config.timezone });
 
@@ -495,7 +498,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         subscriptions: subscriptions.list(),
         boxImage: { name: config.boxImage, ready: imageReady },
         timezone: config.timezone,
-        artifacts: artifacts ? { reviews: artifacts.reviewsFor(user).length } : null,
+        artifacts: artifacts ? { reviews: artifacts.reviewsFor(user).length, ...(user.role === "owner" ? { space: artifacts.space() } : {}) } : null,
       });
     }
     if (path === "/api/subscriptions" && method === "GET") return send(res, 200, subscriptions.list());
@@ -1124,7 +1127,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, {
         folders: artifacts.folders(),
         reviews: artifacts.reviewsFor(user).map((commit) => artifacts.commitSummary(commit)),
-        quota: { used: store.artifactBytes(), limit: artifacts.quota },
+        quota: artifacts.space(),
         people: store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })),
         canManage: user.role === "owner",
       });
@@ -1194,7 +1197,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       throw new HttpError(405, "method not allowed");
     }
-    match = /^\/api\/artifacts\/commits\/(ac_[a-f0-9]{12})(?:\/(review|files\/.+|objects\/[a-f0-9]{64}))?$/.exec(path);
+    match = /^\/api\/artifacts\/commits\/(ac_[a-f0-9]{12})(?:\/(review|view|files\/.+|objects\/[a-f0-9]{64}))?$/.exec(path);
     if (match) {
       const commit = store.artifactCommit(match[1]);
       if (!commit) throw new HttpError(404, "commit non trovato");
@@ -1202,6 +1205,14 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!match[2] && method === "GET") {
         const canReview = artifacts.canReview(folder, user);
         return send(res, 200, { ...artifacts.commitView(commit.id), canReview, previewUrl: canReview ? artifacts.previewUrl(commit.id) : "" });
+      }
+      // A file the browser renders itself (a PDF) is framed from an address apart from the panel, for ten minutes.
+      if (match[2] === "view" && method === "GET") {
+        const name = String(url.searchParams.get("path") || "");
+        if (!artifacts.fileAt(commit.id, name)) throw new HttpError(404, "file non trovato");
+        const view = shares.rawUrl(commit.id, name);
+        if (!view) throw new HttpError(404, "l'anteprima a parte c'è solo negli spazi su usecora.space");
+        return send(res, 200, { url: view });
       }
       if (match[2] === "review" && method === "POST") {
         const body = await readJson(req, 8192);
@@ -1478,7 +1489,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         const body = readFileSync(join(WEB_DIR, file[0]));
         return send(res, 200, body, {
           "Content-Type": file[1],
-          "Content-Security-Policy": CSP,
+          "Content-Security-Policy": panelCsp,
           "X-Frame-Options": "SAMEORIGIN",
           "Cache-Control": "no-cache",
         });

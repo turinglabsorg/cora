@@ -430,3 +430,53 @@ test("a folder of files opens like a drive: cards, search, a page per file, a zi
   await call(`/api/artifacts/shares/${made.data.id}`, { method: "PUT", body: { status: "revoked" } });
   assert.equal((await call(`/api/artifacts/folders/${folderId}/events?share=${made.data.id}`)).data.events[0].action, "revoked");
 });
+
+test("the artifacts may take half the disk they live on, unless the owner sets a limit in Settings", async (t) => {
+  const { app, base, cookie, call, agent } = await fixture(t);
+  const before = await call("/api/artifacts");
+  assert.equal(before.data.quota.custom, false);
+  assert.ok(before.data.quota.disk.total > 0);
+  assert.equal(before.data.quota.limit, Math.floor(before.data.quota.disk.total / 2), "half the disk unless someone chose otherwise");
+  assert.equal((await call("/api/state")).data.artifacts.space.limit, before.data.quota.limit, "the owner's state carries it for Settings");
+  const set = await call("/api/settings", { method: "PUT", body: { artifactQuotaGb: 3 } });
+  assert.equal(set.data.artifactQuotaGb, 3);
+  const after = await call("/api/artifacts");
+  assert.deepEqual([after.data.quota.limit, after.data.quota.custom], [3 * 1024 ** 3, true]);
+  assert.equal((await call("/api/settings", { method: "PUT", body: { artifactQuotaGb: -5 } })).data.artifactQuotaGb, 0, "a negative limit is no limit of the owner's");
+
+  await call("/api/settings", { method: "PUT", body: { artifactQuotaGb: 1 } });
+  const folder = app.artifacts.createFolder({ path: "pieno", description: "per la quota", createdBy: { kind: "user", id: "1", name: "Owner" } });
+  app.store.artifactBytes = () => 1024 ** 3 - 4;
+  const full = await fetch(`${base}/api/artifacts/folders/${folder.id}/blobs`, { method: "POST", headers: { Cookie: cookie, "X-Cora": "1", "Content-Type": "application/octet-stream" }, body: "0123456789" });
+  assert.equal(full.status, 507);
+  assert.match((await full.json()).error, /Impostazioni → Spazio/, "the refusal says where to raise it");
+  assert.ok(agent);
+});
+
+test("the panel frames a PDF from an address apart from itself, signed for one file and a few minutes", async (t) => {
+  const { app, port, base, cookie, call, agent, put, owner } = await fixture(t);
+  put("docs/report.pdf", "%PDF-1.4\n% fixture\n");
+  put("docs/altro.pdf", "%PDF-1.4\n% other\n");
+  const pushed = await app.artifacts.push({ agent, folder: "documenti", path: "/home/agent/work/docs", message: "pdf", requester: { kind: "owner", id: "1", name: "Owner" }, create: { description: "PDF", kind: "files" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  const panel = await fetch(`${base}/`, { headers: { Cookie: cookie } });
+  assert.match(panel.headers.get("content-security-policy"), /frame-src 'self' https:\/\/\*\.usecora\.test/, "the panel may frame its space's preview hosts, nothing else");
+  const view = await call(`/api/artifacts/commits/${pushed.commit.id}/view?${new URLSearchParams({ path: "report.pdf" })}`);
+  assert.equal(view.status, 200);
+  const url = new URL(view.data.url);
+  assert.equal(url.host, `r-${pushed.commit.id.slice(3)}--acme.usecora.test`);
+  assert.equal(url.pathname, "/report.pdf");
+  const shown = await hit(port, url.host, `${url.pathname}${url.search}`);
+  assert.equal(shown.status, 200);
+  assert.equal(shown.headers["content-type"], "application/pdf");
+  assert.equal(shown.headers["content-security-policy"], "frame-ancestors https://acme.usecora.test", "only the panel of this space may frame it");
+  assert.equal(shown.headers["set-cookie"], undefined);
+  assert.equal((await hit(port, url.host, `/altro.pdf${url.search}`)).status, 403, "the signature is for one file");
+  assert.equal((await hit(port, url.host, url.pathname)).status, 403, "and nothing opens without it");
+  const [expires, signature] = url.searchParams.get("t").split(".");
+  assert.equal((await hit(port, url.host, `${url.pathname}?t=${Number(expires) + 600000}.${signature}`)).status, 403, "nor for longer than it was given");
+  assert.equal((await hit(port, url.host, `${url.pathname}${url.search}`, { method: "POST" })).status, 405);
+  assert.equal((await call(`/api/artifacts/commits/${pushed.commit.id}/view?path=nowhere.pdf`)).status, 404);
+  const label = await call(`/api/artifacts/folders/${pushed.folder.id}/shares`, { method: "POST", body: { label: "r-0123456789ab", access: { mode: "public" } } });
+  assert.equal(label.status, 400, "no link can take a preview address's name");
+});

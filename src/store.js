@@ -52,6 +52,8 @@ const DEFAULT_SETTINGS = {
   brainEmbedModel: "bge-m3",
   librarianHour: 3,
   reviewHour: 8,
+  // The room the artifacts may take, in GB: 0 is half the disk they live on.
+  artifactQuotaGb: 0,
 };
 const SSH_PORT_BASE = 2201;
 export const TRANSPORTS = ["discord", "telegram", "slack"];
@@ -344,6 +346,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     brainEmbedModel: cleanText(merged.brainEmbedModel, 80).replace(/[^\w.:/-]/g, "").trim(),
     librarianHour: Math.round(clampNumber(merged.librarianHour, 0, 23, 3)),
     reviewHour: Math.round(clampNumber(merged.reviewHour, 0, 23, 8)),
+    artifactQuotaGb: Math.round(clampNumber(merged.artifactQuotaGb, 0, 1000000, 0)),
   };
 }
 

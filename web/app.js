@@ -3866,7 +3866,7 @@ function renderArtifacts() {
         statCard({ icon: "archive", value: String(data.folders.length), label: "cartelle" }),
         statCard({ icon: "check", value: String(reviews.length), label: "da rivedere", href: reviews.length ? `#/artefatti/${reviews[0].folderId}/c/${reviews[0].id}` : null }),
         statCard({ icon: "radio", value: String(onAir), label: "in onda" }),
-        statCard({ icon: "layers", value: raw(fmtBytes(data.quota.used)), label: "spazio", sub: raw(tr("di {limit}", { limit: fmtBytes(data.quota.limit) })) })),
+        statCard({ icon: "layers", value: raw(fmtBytes(data.quota.used)), label: "spazio", sub: raw(tr("di {limit}", { limit: fmtBytes(data.quota.limit) })), href: data.canManage ? "#/settings/spazio" : null })),
       reviews.length ? h("section", { class: "requests art-reviews", "aria-label": tr("Da rivedere") },
         h("span", { class: "label" }, tr("Aspettano te"), h("i", { class: "count" }, raw(String(reviews.length)))),
         reviews.slice(0, 8).map((commit) => {
@@ -3916,11 +3916,24 @@ async function artifactPreview(url, path, size) {
   if (kind === "image") return [head, h("div", { class: "art-media checker" }, h("img", { src: url, alt: raw(path) }))];
   if (kind === "video") return [head, h("div", { class: "art-media" }, h("video", { src: url, controls: true, preload: "metadata" }))];
   if (kind === "audio") return [head, h("div", { class: "art-media" }, h("audio", { src: url, controls: true, preload: "metadata" }))];
+  // A PDF is rendered by the browser itself, so it is framed from an address apart from the panel.
+  const commitId = /\/api\/artifacts\/commits\/(ac_[a-f0-9]{12})\/files\//.exec(url)?.[1];
+  if (/\.pdf$/i.test(path) && commitId) {
+    try {
+      const view = await api(`/api/artifacts/commits/${commitId}/view?${new URLSearchParams({ path })}`);
+      if (view.url) return [head, h("iframe", { class: "art-pdf", src: view.url, title: raw(path), referrerpolicy: "no-referrer" })];
+    } catch {}
+  }
   if (kind === "text" && size <= 2 * 1024 * 1024) {
     try {
       const response = await fetch(url, { credentials: "same-origin" });
       if (response.ok && /^text\/plain/.test(response.headers.get("content-type") || "")) {
-        const lines = (await response.text()).split("\n");
+        const text = await response.text();
+        if (/\.(csv|tsv)$/i.test(path)) {
+          const table = artifactTable(text, /\.tsv$/i.test(path) ? "\t" : "");
+          if (table) return [head, table];
+        }
+        const lines = text.split("\n");
         const shown = lines.slice(0, 3000);
         return [head, h("pre", { class: "art-code" }, h("code", {}, shown.map((line, index) => h("span", { class: "art-line" }, h("i", { "aria-hidden": "true" }, raw(String(index + 1))), raw(line || " "))))),
           lines.length > shown.length ? h("p", { class: "muted small" }, tr("Mostrate le prime {shown} righe di {total}: scarica il file per il resto.", { shown: shown.length, total: lines.length })) : null];
@@ -3928,6 +3941,39 @@ async function artifactPreview(url, path, size) {
     } catch {}
   }
   return [head, h("div", { class: "art-noview" }, icon("file"), h("p", {}, "Il pannello non mostra questo tipo di file: scaricalo."), download.cloneNode(true))];
+}
+
+/** A CSV or TSV as a table: the first 500 rows under a sticky header, the separator guessed from the first line. */
+function artifactTable(text, separator = "") {
+  const first = text.split("\n", 1)[0];
+  const sep = separator || [",", ";", "\t"].sort((a, b) => first.split(b).length - first.split(a).length)[0];
+  // Every record is counted, a quoted cell may span lines; only the first 501 are kept.
+  const rows = [];
+  let records = 0;
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  const end = () => { row.push(cell.replace(/\r$/, "")); if (row.length > 1 || row[0]) { records += 1; if (rows.length < 501) rows.push(row); } row = []; cell = ""; };
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (quoted) {
+      if (char === '"' && text[i + 1] === '"') { cell += '"'; i += 1; }
+      else if (char === '"') quoted = false;
+      else cell += char;
+    } else if (char === '"' && !cell) quoted = true;
+    else if (char === sep) { row.push(cell); cell = ""; }
+    else if (char === "\n") end();
+    else cell += char;
+  }
+  if (cell || row.length) end();
+  if (rows.length < 1 || rows.every((line) => line.length < 2)) return null;
+  const [header, ...body] = rows;
+  const total = records - 1;
+  return h("div", { class: "stack-sm" },
+    h("div", { class: "art-sheet" }, h("table", {},
+      h("thead", {}, h("tr", {}, header.map((name) => h("th", {}, raw(name))))),
+      h("tbody", {}, body.slice(0, 500).map((line) => h("tr", {}, line.map((value) => h("td", { class: /^-?[\d.,]+%?$/.test(value.trim()) ? "num" : "" }, raw(value)))))))),
+    h("p", { class: "muted small" }, raw(total > 500 ? tr("Le prime 500 righe di {total}: scarica il file per il resto.", { total }) : tr(total === 1 ? "1 riga" : "{count} righe", { count: total }))));
 }
 
 /** The folder a File tab is looking at, from the address: segments as typed, never ".." or empty. */
@@ -4008,6 +4054,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"]];
   const content = h("div", { class: "stack" });
   shell([
+    btn("Artefatti", { icon: "back", href: "#/artefatti", cls: "ghost sm back-link art-back" }),
     pageHead(raw(folder.title), h("span", { class: "art-head-meta" }, artifactPathLabel(folder.path),
       badge(folder.kind === "site" ? "Sito" : "File", "", folder.kind === "site" ? "globe" : "folder"),
       badge(folder.policy === "direct" ? "Pubblica subito" : "Con revisione", folder.policy === "direct" ? "warn" : "", folder.policy === "direct" ? "spark" : "check"))),
@@ -4038,7 +4085,8 @@ function artifactFiles(data, head, dir = "") {
   const { folder } = data;
   const all = head ? data.tree : [];
   const inside = dir ? `${dir}/` : "";
-  if (dir && !all.some((file) => file.path.startsWith(inside))) dir = "";
+  // A folder holds files or does not exist, as in git: one made here stays empty until something is uploaded into it.
+  const fresh = Boolean(dir) && !all.some((file) => file.path.startsWith(inside));
   const here = dir ? `${dir}/` : "";
   const dirs = new Map();
   const files = [];
@@ -4080,7 +4128,7 @@ function artifactFiles(data, head, dir = "") {
       return row;
     }),
   ].filter(Boolean);
-  const list = h("div", { class: "art-tree" }, rows.length ? rows : h("p", { class: "art-tree-empty" }, "Ancora nessun file qui."));
+  const list = h("div", { class: "art-tree" }, rows.length && !fresh ? rows : [...(fresh ? rows.slice(0, 1) : []), h("p", { class: "art-tree-empty" }, fresh ? "Cartella nuova: esiste quando ci carichi i primi file." : "Ancora nessun file qui.")]);
 
   // The upload: buttons for files and for a whole folder, and the page itself as a drop zone.
   const where = h("code", { class: "art-drop-where" }, raw(`${folder.path}/${here}`));
@@ -4115,8 +4163,23 @@ function artifactFiles(data, head, dir = "") {
       h("small", {}, tr("finiscono in"), " ", where, " ", status)),
     btn(verb, { icon: "upload", cls: "sm primary", onclick: () => pick.click() }),
     btn("Una cartella", { icon: "folder", cls: "sm ghost", onclick: () => pickDir.click() }),
+    btn("Nuova cartella", { icon: "plus", cls: "sm ghost", onclick: () => {
+      if (drop.querySelector(".art-newdir")) return drop.querySelector(".art-newdir input").focus();
+      const name = h("input", { type: "text", class: "mono", maxlength: 120, placeholder: tr("nome della cartella"), autocomplete: "off", spellcheck: "false", "aria-label": tr("Nome della nuova cartella") });
+      const form = h("form", { class: "art-newdir" }, h("span", { class: "mono faint" }, raw(`${folder.path}/${here}`)), name,
+        btn("Entra", { icon: "next", cls: "sm primary", type: "submit" }), btn("Annulla", { cls: "sm ghost", onclick: () => form.remove() }));
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const value = name.value.trim().replace(/^\/+|\/+$/g, "");
+        const parts = value.split("/").map((part) => part.trim());
+        if (!value || parts.some((part) => !part || part === "." || part === ".." || /[\\\u0000-\u001f]/.test(part))) return toast("Un nome di cartella: lettere, cifre, spazi, trattini; niente . o ..", true);
+        location.hash = artifactDirHref(folder.id, `${here}${parts.join("/")}`);
+      });
+      drop.append(form);
+      name.focus?.();
+    } }),
     pick, pickDir);
-  const zone = h("div", { class: "stack-sm art-zone" }, drop, head ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, crumbs, list), preview) : null);
+  const zone = h("div", { class: "stack-sm art-zone" }, drop, head || dir ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, crumbs, list), head ? preview : null) : null);
   let depth = 0;
   zone.addEventListener("dragenter", (event) => { if (![...(event.dataTransfer?.types || [])].includes("Files")) return; event.preventDefault(); depth += 1; zone.classList.add("over"); });
   zone.addEventListener("dragover", (event) => { if ([...(event.dataTransfer?.types || [])].includes("Files")) event.preventDefault(); });
@@ -4512,6 +4575,7 @@ async function renderArtifactCommit(folderId, commitId) {
   });
   const deleted = commit.changed.filter((change) => change.kind === "deleted").length;
   slot.replaceChildren(...[
+    commit.folder ? btn(raw(commit.folder.title || commit.folder.path), { icon: "back", href: `#/artefatti/${commit.folder.id}/commit`, cls: "ghost sm back-link art-back" }) : null,
     pageHead(raw(commit.message), h("span", { class: "art-head-meta" }, h("code", {}, raw(commit.short)), badge(label, cls),
       commit.folder ? h("a", { href: `#/artefatti/${commit.folder.id}` }, artifactPathLabel(commit.folder.path)) : null),
       commit.previewUrl ? [btn("Apri anteprima", { icon: "external", cls: "ghost", href: commit.previewUrl, target: "_blank" })] : null),
@@ -5174,6 +5238,46 @@ function setRows(...rows) {
  * Settings save as they change, one field at a time: the row says "salvato" for a
  * moment, a refusal comes back as a toast. There is no Save button anywhere in Settings.
  */
+/** How much room the artifacts may take: half the disk unless the owner sets a number. */
+function artifactSpacePanel() {
+  const gb = 1024 ** 3;
+  const first = S.data.artifacts.space;
+  const half = first.disk ? Math.floor(first.disk.total / 2) : 0;
+  const box = h("div", { class: "stack-sm space-box" });
+  const paint = () => {
+    const space = S.data.artifacts.space;
+    box.replaceChildren(
+      h("div", { class: "space-summary" },
+        h("div", {}, h("b", {}, raw(fmtBytes(space.used))), h("small", {}, raw(tr("occupati dagli artefatti, di {limit}", { limit: fmtBytes(space.limit) })))),
+        space.disk ? h("div", {}, h("b", {}, raw(fmtBytes(space.disk.free))), h("small", {}, raw(tr("liberi sul disco, di {total}", { total: fmtBytes(space.disk.total) })))) : null),
+      h("div", { class: "space-meter", role: "img", "aria-label": tr("{used} di {limit}", { used: fmtBytes(space.used), limit: fmtBytes(space.limit) }) },
+        h("i", { vars: { "--fill": `${Math.min(100, Math.max(space.used ? 0.6 : 0, (space.used / Math.max(1, space.limit)) * 100)).toFixed(2)}%` } })));
+  };
+  paint();
+  const amount = h("input", { type: "number", min: 1, step: 1, class: "mono", value: first.custom ? Math.round(first.limit / gb) : Math.max(1, Math.round(half / gb)), "aria-label": tr("Gigabyte") });
+  const custom = h("div", { class: "space-custom", hidden: !first.custom }, amount, h("span", { class: "mono" }, "GB"));
+  const choice = { value: first.custom ? "custom" : "half" };
+  const save = async (gbValue) => {
+    await saveSettings({ artifactQuotaGb: gbValue }, row);
+    try { S.data.artifacts.space = (await api("/api/artifacts")).quota; } catch {}
+    paint();
+    const line = document.querySelector('.rail-item[data-page="spazio"] .rail-name small');
+    const space = S.data.artifacts.space;
+    if (line) line.textContent = tr("{used} di {limit} per gli artefatti", { used: fmtBytes(space.used), limit: fmtBytes(space.limit) });
+  };
+  const modes = h("div", { class: "segmented", role: "radiogroup", "aria-label": tr("Tetto") },
+    [["half", half ? tr("Metà del disco · {size}", { size: fmtBytes(half) }) : tr("Metà del disco")], ["custom", tr("Un tetto mio")]].map(([key, label]) => h("button", { type: "button", role: "radio", class: key === choice.value ? "on" : "", "aria-checked": String(key === choice.value), onclick: (event) => {
+      choice.value = key;
+      for (const button of modes.children) { button.classList.toggle("on", button === event.currentTarget); button.setAttribute("aria-checked", String(button === event.currentTarget)); }
+      custom.hidden = key !== "custom";
+      if (key === "half") save(0);
+      else amount.focus?.();
+    } }, raw(label))));
+  amount.addEventListener("change", () => { const value = Math.round(Number(amount.value)); if (value >= 1) save(value); });
+  const row = setRow("Tetto per gli artefatti", "Quanto possono occupare i file caricati dagli agenti e dal pannello. Di base è metà del disco; in ogni caso un caricamento si ferma se lascerebbe meno di 5 GB liberi.", h("div", { class: "stack-sm" }, modes, custom), { stack: true });
+  return panel({ icon: "layers", title: "Spazio", hint: "Lo spazio che usano gli artefatti su questa macchina." }, box, setRows(row));
+}
+
 async function saveSettings(changes, row = null) {
   try {
     S.data.settings = await api("/api/settings", { method: "PUT", body: changes });
@@ -5551,6 +5655,7 @@ function renderSettings() {
   page("ssh", panel({ icon: "key", title: "Chiavi SSH", hint: "Chi entra nei desktop degli agenti via SSH, passando dalla macchina host." }, setRows(keysRow)));
 
   /* ---------- Generale ---------- */
+  if (S.data.artifacts?.space) page("spazio", artifactSpacePanel());
   page("controlli", docChecksPane());
   page("preferenze", languagePanel(), notificationsPanel());
 
@@ -5571,6 +5676,10 @@ function renderSettings() {
     { id: "permessi", group: "Persone", label: "Permessi", mark: "user", state: () => [null, people ? (people === 1 ? tr("1 persona oltre a te") : tr("{count} persone oltre a te", { count: people })) : tr("solo tu")] },
     { id: "accesso", group: "Persone", label: "Accesso", mark: "shield", state: () => [null, tr("chi entra nella tua Cora")] },
     { id: "ssh", group: "Persone", label: "Chiavi SSH", mark: "key", state: () => [null, keyCount ? (keyCount === 1 ? tr("1 chiave in più") : tr("{count} chiavi in più", { count: keyCount })) : tr("solo quelle dell'host")] },
+    ...(S.data.artifacts?.space ? [{ id: "spazio", group: "Generale", label: "Spazio", mark: "layers", state: () => {
+      const space = S.data.artifacts.space;
+      return [space.used > space.limit * 0.9 ? "warn" : null, tr("{used} di {limit} per gli artefatti", { used: fmtBytes(space.used), limit: fmtBytes(space.limit) })];
+    } }] : []),
     { id: "controlli", group: "Generale", label: "Controlli di doc", mark: "shield", state: () => [doc.installed ? "on" : "off", doc.installed ? tr("doc attivo") : tr("doc non installato")] },
     { id: "preferenze", group: "Generale", label: "Lingua e notifiche", mark: "globe", state: () => [null, LANGS[LANG]] },
   ];
