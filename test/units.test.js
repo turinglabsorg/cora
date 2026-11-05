@@ -473,3 +473,33 @@ test("Artefatti: the count of reviews waits beside its entry, proposals come fir
   assert.equal(rows[1].querySelector(".led").className, "led err");
   assert.equal(rows[2].querySelector(".led").className, "led on");
 });
+
+test("Segreti: names and who may use them, never a value; what agents asked to send waits for the owner on top", async () => {
+  const at = Date.parse("2026-11-05T09:00:00Z");
+  const listing = {
+    enabled: true, canManage: true,
+    secrets: [
+      { id: "vs_1", name: "ACME_STRIPE_KEY", description: "Stripe di Acme", agents: ["*"], size: 24, source: "panel", createdAt: at, updatedAt: at, uses: 3, lastUse: { agentId: "ag_x", name: "Nico", at } },
+      { id: "vs_2", name: "ROSSI_FTP", description: "", agents: ["ag_x"], size: 16, source: "request", createdAt: at, updatedAt: at, uses: 0, lastUse: null },
+    ],
+    requests: [{ id: "vr_1", name: "ACME_SHOPIFY", by: { name: "Vera" }, expiresAt: at + 86400000, status: "open" }],
+    sends: [{ id: "vx_1", name: "ACME_STRIPE_KEY", status: "proposed", by: { name: "Nico" }, note: "Giulia: webhook", expiresAt: at + 86400000 }],
+  };
+  const panel = panelHarness({ fetch: async (path) => ({ ok: true, status: 200, json: async () => (path === "/api/secrets" ? listing : {}) }) });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [{ id: "ag_x", name: "Nico", tools: true }], artifacts: { reviews: 0 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
+  panel.run(`location.hash = "#/artefatti/segreti"`);
+  panel.run("renderArtifacts()");
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  const tabs = panel.app.querySelector(".art-switch").querySelectorAll("button");
+  assert.deepEqual(tabs.map((tab) => [tab.textContent, tab.className]), [["Cartelle", ""], ["Segreti", "on"]]);
+  const asks = panel.app.querySelectorAll(".art-review");
+  assert.equal(asks.length, 1);
+  assert.match(asks[0].textContent, /ACME_STRIPE_KEY.*Nico · Giulia: webhook.*Rifiuta.*Approva/);
+  const rows = panel.app.querySelectorAll(".vault-row");
+  assert.deepEqual(rows.map((row) => row.querySelector(".vault-name").textContent), ["ACME_STRIPE_KEY", "ROSSI_FTP", "ACME_SHOPIFY"]);
+  assert.match(rows[0].textContent, /Tutti gli agenti.*usato 3 volte · l'ultima Nico/);
+  assert.match(rows[1].textContent, /Arrivato da un link.*Nico.*mai usato/);
+  assert.match(rows[2].textContent, /chiesto da Vera/);
+  assert.doesNotMatch(panel.app.textContent, /sk_|value/i, "nothing on the page could be a value");
+});
