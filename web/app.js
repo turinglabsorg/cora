@@ -3970,7 +3970,7 @@ function renderArtifacts() {
   const [, id, view, commitId] = route();
   if (id === "segreti") return renderSecrets();
   if (id && view === "c" && commitId) return renderArtifactCommit(id, commitId);
-  if (id) return renderArtifactFolder(id, view || "file", view === "file" ? artifactDir(route().slice(3)) : "");
+  if (id) return renderArtifactFolder(id, view || "file", view === "file" || !view ? artifactDir(route().slice(3)) : artifactDir(String(new URLSearchParams(location.hash.split("?")[1] || "").get("in") || "").split("/")));
   const body = h("div", { class: "stack" }, skeleton("rows", 4));
   let data = null;
   let creating = false;
@@ -4386,12 +4386,16 @@ async function renderArtifactFolder(id, tab, dir = "") {
   const pending = data.commits.filter((commit) => commit.status === "proposed" || commit.status === "conflict");
   const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"]];
   const content = h("div", { class: "stack" });
+  // Inside a subfolder the page is that subfolder's: its name, its path, the way up one level.
+  const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+  const levelHref = (key) => (key === "file" ? artifactDirHref(folder.id, dir) : `#/artefatti/${folder.id}/${key}${dir ? `?in=${encodeURIComponent(dir)}` : ""}`);
   shell([
-    btn("Artefatti", { icon: "back", href: "#/artefatti", cls: "ghost sm back-link art-back" }),
-    pageHead(raw(folder.title), h("span", { class: "art-head-meta" }, artifactPathLabel(folder.path),
-      badge(folder.kind === "site" ? "Sito" : "File", "", folder.kind === "site" ? "globe" : "folder"),
+    dir ? btn(raw(parent ? parent.split("/").at(-1) : folder.title), { icon: "back", href: tab === "file" ? artifactDirHref(folder.id, parent) : levelHref(tab).replace(/\?in=.*$/, parent ? `?in=${encodeURIComponent(parent)}` : ""), cls: "ghost sm back-link art-back" })
+      : btn("Artefatti", { icon: "back", href: "#/artefatti", cls: "ghost sm back-link art-back" }),
+    pageHead(raw(dir ? dir.split("/").at(-1) : folder.title), h("span", { class: "art-head-meta" }, artifactPathLabel(dir ? `${folder.path}/${dir}` : folder.path),
+      badge(folder.kind === "site" ? "Sito" : "Cartella", "", folder.kind === "site" ? "globe" : "folder"),
       badge(folder.policy === "direct" ? "Pubblica subito" : "Con revisione", folder.policy === "direct" ? "warn" : "", folder.policy === "direct" ? "spark" : "check"))),
-    folder.description ? h("p", { class: "lead art-lead" }, raw(folder.description)) : null,
+    folder.description && !dir ? h("p", { class: "lead art-lead" }, raw(folder.description)) : dir ? h("p", { class: "lead art-lead" }, raw(tr("Una sottocartella di {title}", { title: folder.title }))) : null,
     h("div", { class: `art-onair${head ? " on" : ""}` },
       h("span", { class: `art-lamp${head ? " on" : ""}` }, h("i"), h("span", {}, head ? tr("In onda") : tr("Spento"))),
       head ? h("span", { class: "grow art-onair-text" },
@@ -4401,12 +4405,12 @@ async function renderArtifactFolder(id, tab, dir = "") {
       pending.length ? btn(tr("Rivedi ({count})", { count: pending.length }), { icon: "check", cls: "primary sm", href: `#/artefatti/${folder.id}/c/${pending[0].id}` }) : null),
     h("nav", { class: "tabs" }, TABS.map(([key, label, name]) => {
       const count = key === "commit" ? data.commits.length : key === "file" ? data.tree.length : key === "condivisione" ? data.shares.filter((share) => share.status !== "revoked").length : null;
-      return h("a", { href: `#/artefatti/${folder.id}/${key}`, class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, raw(String(count))) : null);
+      return h("a", { href: levelHref(key), class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, raw(String(count))) : null);
     })),
     content,
   ], { title: folder.title, back: "#/artefatti" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
+  const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
   content.replaceChildren(...[shown].flat().filter(Boolean));
 }
 
@@ -4503,6 +4507,7 @@ function artifactFiles(data, head, dir = "") {
       h("small", {}, tr("finiscono in"), " ", where, " ", status)),
     btn(verb, { icon: "upload", cls: "sm primary", onclick: () => pick.click() }),
     btn("Una cartella", { icon: "folder", cls: "sm ghost", onclick: () => pickDir.click() }),
+    dir && data.canReview && data.shareHosting ? btn("Condividi questa cartella", { icon: "link", cls: "sm ghost", href: `#/artefatti/${folder.id}/condivisione?in=${encodeURIComponent(dir)}` }) : null,
     btn("Nuova cartella", { icon: "plus", cls: "sm ghost", onclick: () => {
       if (drop.querySelector(".art-newdir")) return drop.querySelector(".art-newdir input").focus();
       const name = h("input", { type: "text", class: "mono", maxlength: 120, placeholder: tr("nome della cartella"), autocomplete: "off", spellcheck: "false", "aria-label": tr("Nome della nuova cartella") });
@@ -4706,7 +4711,44 @@ function artifactLog(data) {
 }
 
 /** The folder's links, each a host of its own, and the form for a new one. */
-function artifactShares(data) {
+/**
+ * A subfolder of a folder, chosen a level at a time among those that exist: what a link serves.
+ * Empty is the whole folder.
+ */
+function folderLevelPicker(paths, start = "") {
+  const levels = start ? start.split("/") : [];
+  let open = null;
+  const root = h("div", { class: "path-picker" });
+  const dirsAt = (prefix) => {
+    const found = new Map();
+    for (const path of paths) {
+      if (!path.startsWith(prefix)) continue;
+      const rest = path.slice(prefix.length);
+      const slash = rest.indexOf("/");
+      if (slash > 0) found.set(rest.slice(0, slash), (found.get(rest.slice(0, slash)) || 0) + 1);
+    }
+    return [...found.entries()].sort(([a], [b]) => a.localeCompare(b));
+  };
+  const prefixAt = (level) => levels.slice(0, level).map((part) => `${part}/`).join("");
+  function draw() {
+    const crumbs = [h("button", { type: "button", class: `path-chip${levels.length ? "" : " open"}`, onclick: () => { levels.splice(0); open = null; draw(); } }, icon("archive"), h("span", {}, "Tutta la cartella"))];
+    levels.forEach((part, level) => crumbs.push(h("span", { class: "path-sep" }, "/"),
+      h("button", { type: "button", class: `path-chip${open === level ? " open" : ""}`, "aria-haspopup": "menu", onclick: () => { open = open === level ? null : level; draw(); } }, icon("folder"), h("span", {}, raw(part)), icon("next", "path-caret"))));
+    if (dirsAt(prefixAt(levels.length)).length) crumbs.push(h("span", { class: "path-sep" }, "/"),
+      h("button", { type: "button", class: `path-chip add${open === levels.length ? " open" : ""}`, "aria-haspopup": "menu", onclick: () => { open = open === levels.length ? null : levels.length; draw(); } }, icon("plus"), h("span", {}, tr("una sottocartella"))));
+    const menu = open === null ? null : h("div", { class: "path-menu", role: "menu" },
+      h("div", { class: "path-options" }, dirsAt(prefixAt(open)).map(([name, count]) => h("button", { type: "button", role: "menuitem", class: `path-option${levels[open] === name ? " on" : ""}`, onclick: () => { levels.splice(open, levels.length - open, name); open = null; draw(); } },
+        icon("folder"), h("span", { class: "grow" }, raw(name)), h("small", {}, raw(count === 1 ? tr("1 file") : tr("{count} file", { count })))))));
+    const chosen = levels.join("/");
+    const inside = paths.filter((path) => !chosen || path.startsWith(`${chosen}/`)).length;
+    root.replaceChildren(...[h("div", { class: "path-crumbs" }, crumbs), menu,
+      h("p", { class: "path-status" }, icon("check"), h("code", {}, raw(chosen ? `${chosen}/` : "/")), h("span", {}, raw(inside === 1 ? tr("1 file") : tr("{count} file", { count: inside }))))].filter(Boolean));
+  }
+  draw();
+  return { node: root, value: () => levels.join("/") };
+}
+
+function artifactShares(data, dir = "") {
   const { folder } = data;
   if (!data.shareHosting) {
     return panel({ icon: "link", title: "Condivisione" },
@@ -4738,7 +4780,7 @@ function artifactShares(data) {
     const item = h("li", { class: `share-row ${share.status}` },
       h("i", { class: `led${live ? " on" : share.status === "proposed" ? " busy" : ""}`, "aria-hidden": "true" }),
       h("div", { class: "grow share-text" },
-        h("div", { class: "row tight" }, live ? h("a", { class: "share-url", href: share.url, target: "_blank", rel: "noopener" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))) : h("span", { class: "share-url" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))), badge(label, cls), badge(share.view === "files" ? "File" : "Sito", "", share.view === "files" ? "folder" : "globe")),
+        h("div", { class: "row tight" }, live ? h("a", { class: "share-url", href: share.url, target: "_blank", rel: "noopener" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))) : h("span", { class: "share-url" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))), badge(label, cls), badge(share.view === "files" ? "File" : "Sito", "", share.view === "files" ? "folder" : "globe"), share.root ? badge(raw(`${share.root}/`), "", "folder") : null),
         shareAccessChips(share.access),
         shareStats(data.activity?.[share.id], share.id, folder.id),
         h("small", {}, raw([
@@ -4753,6 +4795,7 @@ function artifactShares(data) {
   let form = null;
   if (data.canReview) {
     const suffix = data.shareSuffix || "";
+    const what = folderLevelPicker(data.tree.map((file) => file.path), dir);
     const label = h("input", { type: "text", name: "label", class: "mono", required: true, minlength: 3, maxlength: 40, placeholder: "report-acme", autocomplete: "off", spellcheck: "false", "aria-label": tr("Nome del link") });
     label.addEventListener("input", () => { label.value = label.value.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-{2,}/g, "-"); });
     const view = { value: folder.kind };
@@ -4767,6 +4810,7 @@ function artifactShares(data) {
       h("div", { class: "grid2" },
         field("Nome del link", h("div", { class: "share-host" }, label, suffix ? h("span", { class: "mono" }, raw(suffix)) : null), "lettere minuscole, cifre e trattini"),
         field("Come si vede", views)),
+      field("Cosa condividi", what.node, "il link serve solo quello che c'è dentro: tutta la cartella o una sua sottocartella"),
       ...access.nodes,
       h("div", { class: "row" }, field("Scadenza", expiry), h("span", { class: "spacer" }), btn("Crea il link", { icon: "link", cls: "primary", type: "submit" })));
     form.addEventListener("submit", async (event) => {
@@ -4774,7 +4818,7 @@ function artifactShares(data) {
       const values = new FormData(form);
       const days = Number(values.get("expiry"));
       const created = await guard(api(`/api/artifacts/folders/${folder.id}/shares`, { method: "POST", body: {
-        label: values.get("label"), view: view.value, expiresAt: days ? Date.now() + days * 86400000 : 0,
+        label: values.get("label"), view: view.value, root: what.value(), expiresAt: days ? Date.now() + days * 86400000 : 0,
         access: access.value(),
       } }), "Link creato");
       if (created) reload();

@@ -91,7 +91,7 @@ What the agents make on their computers and has to be kept or shown (a report, a
   - The agent's receipt says PROPOSED or PUBLISHED. Cora posts a passive notice in the conversation the push came from, and the owner gets a push notification.
 - **Pull.** `artifact_pull` writes a folder's served version onto a desktop, in `/home/agent/work/artifacts/<path>`, so an agent can continue another's work and push it back.
 - **Sharing.** A folder can be opened to people outside the space through a link with an address of its own, `<label>--<space>.usecora.space`.
-  - **What it serves.** The served version, or a pinned one. It shows as a site (index pages, clean URLs, `404.html`; a folder without an `index.html` lists its files, and a click opens the page itself) or as a drive of files:
+  - **What it serves.** The served version, or a pinned one, and the whole folder or any subfolder of it (the link's root): a link for `landing/` serves only what is under it, as if it were the whole folder. It shows as a site (index pages, clean URLs, `404.html`; a folder without an `index.html` lists its files, and a click opens the page itself) or as a drive of files:
     - folders and files as cards (pictures as themselves, the first lines of a text) or as a list;
     - a search over the whole folder;
     - a page per file with its preview (pictures, video, audio, PDF, text with line numbers, CSV as a table; pages and scripts as their source, never running), the files beside it, and *Scarica*;

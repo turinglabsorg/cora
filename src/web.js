@@ -1170,7 +1170,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (match[2] === "shares" && method === "POST") {
         if (!artifacts.canReview(folder, user)) throw new HttpError(403, "condividono una cartella solo il proprietario e i suoi revisori");
         const body = await readJson(req, 32768);
-        const share = artifacts.createShare(folder.id, { label: body.label, view: body.view, access: body.access, commit: body.commit, expiresAt: body.expiresAt, createdBy: by });
+        const share = artifacts.createShare(folder.id, { label: body.label, view: body.view, access: body.access, commit: body.commit, expiresAt: body.expiresAt, root: body.root, createdBy: by });
         return send(res, 201, share);
       }
       if (match[2]) throw new HttpError(404, "not found");

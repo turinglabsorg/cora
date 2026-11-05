@@ -550,3 +550,29 @@ test("a site without an index shows its files, and a click serves the page itsel
   assert.equal(page.body, "<h1>Landing</h1>");
   assert.equal((await hit(port, HOST, "/nowhere/")).status, 404);
 });
+
+test("a link can share any level of a folder: only what is under it, as if it were the whole folder", async (t) => {
+  const { app, port, call, agent, put, owner } = await fixture(t);
+  put("design/design-system/README.md", "# Design system");
+  put("design/landing/index.html", "<h1>Landing</h1><script src=\"./vendor/react.js\"></script>");
+  put("design/landing/vendor/react.js", "/* react */");
+  const pushed = await app.artifacts.push({ agent, folder: "progetti/design", path: "/home/agent/work/design", message: "design", requester: { kind: "owner", id: "1", name: "Owner" }, create: { title: "design", description: "Design", kind: "files" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  const made = await call(`/api/artifacts/folders/${pushed.folder.id}/shares`, { method: "POST", body: { label: "solo-landing", view: "site", root: "/landing/", access: { mode: "public" } } });
+  assert.equal(made.status, 201);
+  assert.equal(made.data.root, "landing", "the root is kept clean");
+  assert.equal((await call(`/api/artifacts/folders/${pushed.folder.id}/shares`, { method: "POST", body: { label: "fuori", view: "site", root: "../x", access: { mode: "public" } } })).status, 400);
+  const HOST = "solo-landing--acme.usecora.test";
+  const home = await hit(port, HOST, "/");
+  assert.equal(home.body, "<h1>Landing</h1><script src=\"./vendor/react.js\"></script>", "the subfolder's index is the link's top");
+  assert.equal((await hit(port, HOST, "/vendor/react.js")).body, "/* react */", "and its own paths work as they are");
+  assert.equal((await hit(port, HOST, "/design-system/README.md")).status, 404, "nothing outside the subfolder is served");
+  assert.equal((await hit(port, HOST, "/landing/index.html")).status, 404);
+  const files = JSON.parse((await hit(port, HOST, "/_cora/files.json")).body);
+  assert.deepEqual(files.files.map((file) => file.path).sort(), ["index.html", "vendor/react.js"]);
+  const zip = await hit(port, HOST, "/_cora/zip");
+  assert.match(zip.headers["content-disposition"], /filename="landing\.zip"/);
+  const moved = await call(`/api/artifacts/shares/${made.data.id}`, { method: "PUT", body: { root: "" } });
+  assert.equal(moved.data.root, "");
+  assert.match((await hit(port, HOST, "/")).body, /<b>design-system<\/b>.*<b>landing<\/b>/s, "back to the whole folder, listed since it has no index");
+});

@@ -385,7 +385,9 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
     if (mode === "password" && !viewer(req, target)) return redirect(res, `/_cora/password?${new URLSearchParams({ next: safeNext(url.pathname + url.search) })}`);
     if (mode === "people" && !viewer(req, target)) return redirect(res, `${cloud.url}/share?${new URLSearchParams({ to: host, next: safeNext(url.pathname + url.search) })}`);
     if (!target.commit) return page(req, res, 404, words(req, "empty"));
-    const tree = artifacts.readTree(target.commit.tree);
+    // A link for a subfolder serves only what is under it, as if it were the whole folder.
+    const tree = artifacts.subtree(artifacts.readTree(target.commit.tree), target.root || "");
+    const title = target.root ? `${target.folder.title} · ${target.root.split("/").at(-1)}` : target.folder.title;
     if (url.pathname === "/_cora/files.json") {
       res.writeHead(200, headers({ "Content-Type": "application/json; charset=utf-8" }));
       return res.end(JSON.stringify({ folder: target.folder.path, title: target.folder.title, commit: target.commit.id.slice(3, 10), files: [...tree.entries()].map(([path, file]) => ({ path, size: file.size })) }));
@@ -402,7 +404,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       const dir = found.file.path.includes("/") ? found.file.path.slice(0, found.file.path.lastIndexOf("/") + 1) : "";
       const siblings = [...tree.keys()].filter((path) => path.startsWith(dir) && !path.slice(dir.length).includes("/")).sort((a, b) => a.localeCompare(b, lang));
       record(req, target, "view", { path: found.file.path });
-      return drivePage(viewPage({ lang, file: found.file, siblings, title: target.folder.title, read: (max) => artifacts.readObject(found.file.sha, max) }));
+      return drivePage(viewPage({ lang, file: found.file, siblings, title, read: (max) => artifacts.readObject(found.file.sha, max) }));
     }
     if (url.pathname === "/_cora/zip") {
       const dir = String(url.searchParams.get("dir") || "").replace(/^\/+|\/+$/g, "");
@@ -411,7 +413,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       if (!entries.length) return page(req, res, 404, words(req, "notFound"));
       const total = entries.reduce((sum, [, file]) => sum + file.size, 0);
       if (total > ZIP_LIMIT) return page(req, res, 413, words(req, "tooBig"));
-      const name = `${(dir || target.folder.path).split("/").at(-1)}.zip`;
+      const name = `${(dir || target.root || target.folder.path).split("/").at(-1)}.zip`;
       record(req, target, "download", { path: inside, detail: "zip" });
       res.writeHead(200, headers({ "Content-Type": "application/zip", "Content-Disposition": `attachment; filename="${name.replace(/[^\w.-]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name)}` }));
       if (req.method === "HEAD") return res.end();
@@ -427,7 +429,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       if (url.searchParams.get("q") || !found.listing) record(req, target, url.searchParams.get("q") ? "search" : "open", { detail: String(url.searchParams.get("q") || "").slice(0, 120) });
       return drivePage(browse({
         lang, tree, dir: found.listing.replace(/\/$/, ""), q: String(url.searchParams.get("q") || "").slice(0, 200), mode: url.searchParams.get("v") === "list" ? "list" : "grid",
-        title: target.folder.title, sharedBy: target.kind === "share" ? target.share.createdBy?.name || "" : "", updatedAt: target.commit.publishedAt || target.commit.createdAt, signedIn,
+        title, sharedBy: target.kind === "share" ? target.share.createdBy?.name || "" : "", updatedAt: target.commit.publishedAt || target.commit.createdAt, signedIn,
         read: (sha, max) => artifacts.readObject(sha, max), direct: target.view === "site",
       }));
     }

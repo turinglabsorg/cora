@@ -926,7 +926,13 @@ export class Artifacts {
   }
 
   /** A link that opens a folder on an address of its own: public, behind a password, or for the people it names. */
-  createShare(folderId, { label, view, access, commit = "", expiresAt = 0, status = "active", createdBy, requestedBy = null, reason = "" }) {
+  /** A subfolder a link serves instead of the whole folder: "" for all of it. */
+  cleanShareRoot(root) {
+    const value = String(root || "").trim().replace(/^\/+|\/+$/g, "");
+    return value ? cleanTreePath(value) : "";
+  }
+
+  createShare(folderId, { label, view, access, commit = "", expiresAt = 0, status = "active", createdBy, requestedBy = null, reason = "", root = "" }) {
     if (!this.shareSuffix) throw new ArtifactError("i link di condivisione esistono solo per gli spazi su usecora.space", 409);
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
@@ -939,7 +945,7 @@ export class Artifacts {
     const now = Date.now();
     const share = {
       id: `as_${randomBytes(6).toString("hex")}`, label: clean, folderId, view: view === "files" ? "files" : view === "site" ? "site" : folder.kind,
-      access: this.cleanAccess(access), commit: commit || "", expiresAt: Number(expiresAt) || 0, status, revision: 1,
+      access: this.cleanAccess(access), commit: commit || "", expiresAt: Number(expiresAt) || 0, status, revision: 1, root: this.cleanShareRoot(root),
       createdBy: createdBy || null, approvedBy: status === "active" ? createdBy || null : null, requestedBy, reason: String(reason || "").slice(0, 500), createdAt: now, updatedAt: now,
     };
     this.store.writeArtifactShare(share);
@@ -964,6 +970,7 @@ export class Artifacts {
     if (changes.access !== undefined) { next.access = this.cleanAccess(changes.access, share.access); next.revision += 1; }
     if (changes.view !== undefined) next.view = changes.view === "files" ? "files" : "site";
     if (changes.expiresAt !== undefined) { next.expiresAt = Number(changes.expiresAt) || 0; next.revision += 1; }
+    if (changes.root !== undefined) { next.root = this.cleanShareRoot(changes.root); next.revision += 1; }
     if (changes.commit !== undefined) {
       if (changes.commit) {
         const pinned = this.store.artifactCommit(changes.commit);
@@ -999,7 +1006,7 @@ export class Artifacts {
     const folder = this.store.artifactFolder(share.folderId);
     const commit = folder ? this.store.artifactCommit(share.commit || folder.head) : null;
     if (!folder) return null;
-    return { kind: "share", share, folder, commit, scope: share.id, revision: share.revision, view: share.view };
+    return { kind: "share", share, folder, commit, scope: share.id, revision: share.revision, view: share.view, root: share.root || "" };
   }
 
   /** Someone who comes in through the space itself: a person it already admits, or would. */
@@ -1032,6 +1039,13 @@ export class Artifacts {
     if (access.emails.includes(address)) return true;
     if (access.domains.includes(domain) && (via === "email" || (via === "google" && String(hd).toLowerCase() === domain))) return true;
     return Boolean(access.members && this.isMember(address));
+  }
+
+  /** The part of a tree under `root`, its paths made relative to it: what a link for a subfolder serves. */
+  subtree(tree, root) {
+    if (!root) return tree;
+    const prefix = `${root}/`;
+    return new Map([...tree].filter(([path]) => path.startsWith(prefix)).map(([path, file]) => [path.slice(prefix.length), file]));
   }
 
   /** The file a path asks for in a tree, as a site or a folder of files reads it. */

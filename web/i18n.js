@@ -1667,4 +1667,11 @@ export const EN = {
   "in un gruppo": "in a group",
   "Dove va": "Where it goes",
   "scegli un gruppo per livello, o creane uno; il nome della cartella viene dal titolo": "choose a group at each level, or make one; the folder's name comes from its title",
+  "Cartella": "Folder",
+  "Una sottocartella di {title}": "A subfolder of {title}",
+  "Tutta la cartella": "The whole folder",
+  "una sottocartella": "a subfolder",
+  "Cosa condividi": "What it shares",
+  "il link serve solo quello che c'è dentro: tutta la cartella o una sua sottocartella": "the link serves only what is inside: the whole folder or one of its subfolders",
+  "Condividi questa cartella": "Share this folder",
 };

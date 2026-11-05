@@ -703,7 +703,8 @@ test("Artefatti, File: a new subfolder to upload into, a way back, CSV as a tabl
   const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   await panel.navigate("#/artefatti/af_000000000001/file/crm");
   await settle();
-  assert.equal(panel.app.querySelector(".art-back").attributes.href, "#/artefatti", "a way back to the list, on the page itself");
+  assert.equal(panel.app.querySelector(".art-back").attributes.href, "#/artefatti/af_000000000001/file", "a way back up one level, on the page itself");
+  assert.equal(panel.app.querySelector(".art-back").textContent, "CRM");
   const create = panel.app.querySelector(".art-drop").querySelectorAll("button").find((button) => button.textContent === "Nuova cartella");
   create.click();
   const form = panel.app.querySelector(".art-newdir");
@@ -797,4 +798,44 @@ test("Nuova cartella: where it goes is chosen a level at a time, among the group
   panel.app.querySelectorAll(".path-chip")[1].click();
   panel.app.querySelector(".path-menu").querySelectorAll("button").find((button) => button.textContent === "Togli questo livello").click();
   assert.equal(panel.run("window.picker.value()"), "clienti/sito", "taking a level away takes those under it too");
+});
+
+test("Artefatti, a subfolder: its own name on top, the way up, and links that start from it", async () => {
+  const at = Date.parse("2026-11-05T09:00:00Z");
+  const head = { id: "ac_000000000009", short: "0000000", folderId: "af_000000000001", message: "design", author: { kind: "agent", id: "ag_x", name: "Sarax" }, status: "published", createdAt: at, publishedAt: at, files: 3, bytes: 30, changes: { added: 3, modified: 0, deleted: 0 } };
+  const data = {
+    folder: { id: "af_000000000001", path: "progetti/cora/design", title: "design", description: "Il design di Cora", kind: "files", policy: "direct", head: head.id, writers: ["*"], reviewers: [] },
+    canReview: true, canManage: true, shareHosting: true, shareSuffix: "--notseb.usecora.space", shares: [], commits: [head], activity: {},
+    tree: [{ path: "design-system/README.md", sha: "a".repeat(64), size: 10 }, { path: "landing/index.html", sha: "b".repeat(64), size: 10 }, { path: "landing/vendor/react.js", sha: "c".repeat(64), size: 10 }],
+  };
+  const posted = [];
+  const panel = panelHarness({ fetch: async (path, options = {}) => {
+    if (options.method === "POST") posted.push({ path, body: JSON.parse(options.body) });
+    return { ok: true, status: 200, json: async () => (path === "/api/artifacts/folders/af_000000000001" ? data : { id: "as_1", url: "https://landing--notseb.usecora.space/" }) };
+  } });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [], artifacts: { reviews: 0 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
+  const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  await panel.navigate("#/artefatti/af_000000000001/file/landing");
+  await settle();
+  assert.equal(panel.app.querySelector(".page-title").querySelector("h1").textContent, "landing", "inside a subfolder the page is that subfolder's");
+  assert.equal(panel.app.querySelector(".art-back").textContent, "design");
+  assert.match(panel.app.querySelector(".art-head-meta").textContent, /progetti\/cora\/design\/landing.*Cartella/);
+  const tabs = panel.app.querySelector(".tabs").querySelectorAll("a").map((tab) => tab.attributes.href);
+  assert.ok(tabs.includes("#/artefatti/af_000000000001/condivisione?in=landing"), "the level goes along to the other tabs");
+  const share = panel.app.querySelector(".art-drop").querySelectorAll("a").find((link) => link.textContent === "Condividi questa cartella");
+  assert.equal(share.attributes.href, "#/artefatti/af_000000000001/condivisione?in=landing");
+
+  panel.run(`location.hash = "#/artefatti/af_000000000001/condivisione?in=landing"`);
+  await panel.navigate("#/artefatti/af_000000000001/condivisione?in=landing");
+  await settle();
+  const picker = panel.app.querySelector(".share-new").querySelector(".path-picker");
+  assert.deepEqual(picker.querySelectorAll(".path-chip").map((chip) => chip.textContent), ["Tutta la cartella", "landing", "una sottocartella"], "the link starts from where you were");
+  assert.match(picker.querySelector(".path-status").textContent, /landing\/2 file/);
+  const form = panel.app.querySelector(".share-new");
+  form.querySelectorAll("input").find((input) => input.attributes.name === "label").value = "landing";
+  form.dispatch("submit");
+  await settle();
+  assert.equal(posted[0].path, "/api/artifacts/folders/af_000000000001/shares");
+  assert.equal(posted[0].body.root, "landing");
 });
