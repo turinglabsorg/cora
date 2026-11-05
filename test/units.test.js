@@ -765,3 +765,36 @@ test("Artefatti, a file's preview: CSV round trips through the editor, Markdown 
   assert.equal(result.commit.status, "published");
   assert.deepEqual(sent.at(-1), { path: "/api/artifacts/folders/af_000000000001/upload", body: { base: "ac_000000000009", files: [{ path: "crm/clienti.csv", sha: "c".repeat(64) }], message: "Modificato clienti.csv" } }, "a save is an upload over the version that was open");
 });
+
+test("Nuova cartella: where it goes is chosen a level at a time, among the groups that exist, and its name follows its title", () => {
+  const panel = panelHarness({ fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+  panel.run(`window.picker = folderPathPicker([{ path: "clienti/acme/sito" }, { path: "clienti/acme/report" }, { path: "clienti/rossi/crm" }, { path: "comunicati" }])`);
+  panel.run("app.replaceChildren(window.picker.node)");
+  const status = () => panel.app.querySelector(".path-status").textContent;
+  assert.match(status(), /…Dai un nome alla cartella/);
+  panel.run(`window.picker.fromTitle("Offerta Città 2027")`);
+  assert.equal(panel.run("window.picker.value()"), "offerta-citta-2027", "the name follows the title, accents and spaces made plain");
+  const chip = () => panel.app.querySelectorAll(".path-chip").at(-1);
+  chip().click();
+  assert.deepEqual(panel.app.querySelectorAll(".path-option").map((option) => option.textContent), ["clienti3 cartelle"], "only groups are offered: comunicati is a folder");
+  panel.app.querySelector(".path-option").click();
+  chip().click();
+  assert.deepEqual(panel.app.querySelectorAll(".path-option").map((option) => option.textContent), ["acme2 cartelle", "rossi1 cartella"]);
+  panel.app.querySelectorAll(".path-option")[0].click();
+  assert.equal(panel.run("window.picker.value()"), "clienti/acme/offerta-citta-2027");
+  assert.match(status(), /clienti\/acme\/offerta-citta-2027$/);
+  const leaf = panel.app.querySelector(".path-leaf");
+  leaf.value = "Sito";
+  leaf.dispatch("input");
+  assert.equal(panel.run("window.picker.problem()"), "C'è già una cartella clienti/acme/sito");
+  panel.run(`window.picker.fromTitle("Altro titolo")`);
+  assert.equal(panel.run("window.picker.value()"), "clienti/acme/sito", "once written by hand, the name stays");
+  chip().click();
+  const fresh = panel.app.querySelector(".path-new").querySelector("input");
+  fresh.value = "Preventivi 2027";
+  panel.app.querySelector(".path-new").querySelectorAll("button")[0].click();
+  assert.equal(panel.run("window.picker.value()"), "clienti/acme/preventivi-2027/sito", "a new group at any level");
+  panel.app.querySelectorAll(".path-chip")[1].click();
+  panel.app.querySelector(".path-menu").querySelectorAll("button").find((button) => button.textContent === "Togli questo livello").click();
+  assert.equal(panel.run("window.picker.value()"), "clienti/sito", "taking a level away takes those under it too");
+});

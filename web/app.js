@@ -3789,6 +3789,89 @@ function artifactPathLabel(path) {
   return h("span", { class: "art-path" }, parts.length > 1 ? h("span", { class: "art-path-dir" }, raw(`${parts.slice(0, -1).join("/")}/`)) : null, h("b", {}, raw(parts.at(-1))));
 }
 
+/** A name as a folder path takes it: lowercase words joined by dashes, accents dropped. */
+const pathSlug = (text) => String(text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+
+/**
+ * Where a new folder goes, chosen a level at a time: an existing group or a new one at
+ * each level, then the folder's own name. Folders hold files and never other folders,
+ * so a level offers only groups, and a name already used there is refused.
+ */
+function folderPathPicker(folders) {
+  const paths = folders.map((folder) => folder.path);
+  const groups = [];
+  let leaf = "";
+  let leafTouched = false;
+  let open = null;
+  const prefixAt = (level) => groups.slice(0, level).map((group) => `${group}/`).join("");
+  const groupsAt = (prefix) => {
+    const found = new Map();
+    for (const path of paths) {
+      if (!path.startsWith(prefix)) continue;
+      const rest = path.slice(prefix.length);
+      const slash = rest.indexOf("/");
+      if (slash > 0) found.set(rest.slice(0, slash), (found.get(rest.slice(0, slash)) || 0) + 1);
+    }
+    return [...found.entries()].sort(([a], [b]) => a.localeCompare(b));
+  };
+  const foldersAt = (prefix) => new Set(paths.filter((path) => path.startsWith(prefix) && !path.slice(prefix.length).includes("/")).map((path) => path.slice(prefix.length)));
+  const root = h("div", { class: "path-picker" });
+  const input = h("input", { type: "text", class: "mono path-leaf", placeholder: tr("nome-della-cartella"), autocomplete: "off", spellcheck: "false", "aria-label": tr("Nome della cartella") });
+  input.addEventListener("input", () => { leafTouched = true; input.value = input.value.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, ""); leaf = input.value; check(); });
+  const status = h("p", { class: "path-status" });
+  const problem = () => {
+    const prefix = prefixAt(groups.length);
+    if (!leaf) return tr("Dai un nome alla cartella");
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(leaf)) return tr("Il nome inizia con una lettera o una cifra");
+    if (foldersAt(prefix).has(leaf)) return tr("C'è già una cartella {path}", { path: `${prefix}${leaf}` });
+    if (groupsAt(prefix).some(([name]) => name === leaf)) return tr("{path} è un gruppo: scegli un altro nome, o entra nel gruppo", { path: `${prefix}${leaf}` });
+    if (`${prefix}${leaf}`.length > 120) return tr("Il percorso è troppo lungo");
+    return "";
+  };
+  const check = () => {
+    const wrong = problem();
+    status.className = `path-status${wrong ? " wrong" : ""}`;
+    status.replaceChildren(...[wrong ? icon("alert") : icon("check"), h("code", {}, raw(`${prefixAt(groups.length)}${leaf || "…"}`)), wrong ? h("span", {}, raw(wrong)) : null].filter(Boolean));
+  };
+  const choose = (level, name) => { groups.splice(level, groups.length - level, name); open = null; draw(); };
+  const menu = (level) => {
+    const prefix = prefixAt(level);
+    const existing = groupsAt(prefix);
+    const fresh = h("input", { type: "text", class: "mono", placeholder: tr("nuovo-gruppo"), autocomplete: "off", spellcheck: "false", "aria-label": tr("Nome del nuovo gruppo") });
+    fresh.addEventListener("input", () => { fresh.value = fresh.value.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, ""); });
+    const add = () => {
+      const name = pathSlug(fresh.value);
+      if (!name) return fresh.focus?.();
+      if (foldersAt(prefix).has(name)) return toast(tr("{path} è già una cartella: le cartelle non contengono cartelle", { path: `${prefix}${name}` }), true);
+      choose(level, name);
+    };
+    fresh.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); add(); } if (event.key === "Escape") { open = null; draw(); } });
+    return h("div", { class: "path-menu", role: "menu", "aria-label": tr("Gruppi in {path}", { path: prefix || "/" }) },
+      existing.length ? h("div", { class: "path-options" }, existing.map(([name, count]) => h("button", { type: "button", role: "menuitem", class: `path-option${groups[level] === name ? " on" : ""}`, onclick: () => choose(level, name) },
+        icon("folder"), h("span", { class: "grow" }, raw(name)), h("small", {}, raw(count === 1 ? tr("1 cartella") : tr("{count} cartelle", { count })))))) : h("p", { class: "path-empty" }, tr("Ancora nessun gruppo qui")),
+      h("div", { class: "path-new" }, fresh, btn("Nuovo gruppo", { icon: "plus", cls: "sm ghost", onclick: add })),
+      level < groups.length ? btn("Togli questo livello", { icon: "close", cls: "sm ghost", onclick: () => { groups.splice(level); open = null; draw(); } }) : null);
+  };
+  function draw() {
+    const crumbs = [h("span", { class: "path-root" }, icon("archive"), h("span", {}, "Artefatti"))];
+    groups.forEach((group, level) => crumbs.push(h("span", { class: "path-sep" }, "/"),
+      h("button", { type: "button", class: `path-chip${open === level ? " open" : ""}`, "aria-haspopup": "menu", "aria-expanded": String(open === level), onclick: () => { open = open === level ? null : level; draw(); } }, icon("folder"), h("span", {}, raw(group)), icon("next", "path-caret"))));
+    if (groups.length < 5) crumbs.push(h("span", { class: "path-sep" }, "/"),
+      h("button", { type: "button", class: `path-chip add${open === groups.length ? " open" : ""}`, "aria-haspopup": "menu", "aria-expanded": String(open === groups.length), onclick: () => { open = open === groups.length ? null : groups.length; draw(); } }, icon("plus"), h("span", {}, groups.length ? tr("dentro un gruppo") : tr("in un gruppo"))));
+    crumbs.push(h("span", { class: "path-sep" }, "/"), input);
+    root.replaceChildren(...[h("div", { class: "path-crumbs" }, crumbs), open !== null ? menu(open) : null, status].filter(Boolean));
+    check();
+  }
+  draw();
+  return {
+    node: root,
+    value: () => `${prefixAt(groups.length)}${leaf}`,
+    problem,
+    // The folder's name follows its title until someone writes one of their own.
+    fromTitle: (title) => { if (leafTouched) return; leaf = pathSlug(title); input.value = leaf; check(); },
+  };
+}
+
 function renderArtifacts() {
   const [, id, view, commitId] = route();
   if (id === "segreti") return renderSecrets();
@@ -3837,13 +3920,13 @@ function renderArtifacts() {
         kind.value = key;
         for (const button of kinds.children) { button.classList.toggle("on", button === event.currentTarget); button.setAttribute("aria-checked", String(button === event.currentTarget)); }
       } }, icon(name), label)));
-    const path = h("input", { type: "text", name: "path", class: "mono", placeholder: "clienti/acme/report", autocomplete: "off", spellcheck: "false", required: true, pattern: "[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*){0,5}", "aria-label": tr("Percorso") });
-    path.addEventListener("input", () => { path.value = path.value.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9/-]/g, ""); });
+    const where = folderPathPicker(data.folders);
+    const title = h("input", { type: "text", name: "title", placeholder: tr("Report trimestrali di Acme"), maxlength: 80, required: true });
+    title.addEventListener("input", () => where.fromTitle(title.value));
     const direct = data.canManage ? switchInput("direct", "Pubblica subito", false, "Senza revisione: ogni caricamento va in onda appena arriva.") : null;
     const form = h("form", { class: "art-new stack" },
-      h("div", { class: "grid2" },
-        field("Percorso", path, "parole minuscole e trattini, fino a sei livelli"),
-        field("Titolo", h("input", { type: "text", name: "title", placeholder: tr("Report trimestrali di Acme"), maxlength: 80 }))),
+      field("Titolo", title),
+      field("Dove va", where.node, "scegli un gruppo per livello, o creane uno; il nome della cartella viene dal titolo"),
       field("Cosa ci va", h("textarea", { name: "description", rows: 2, maxlength: 600, placeholder: tr("Gli agenti lo leggono per capire dove mettere le cose.") })),
       h("div", { class: "row" }, field("Contiene", kinds), direct, h("span", { class: "spacer" }),
         btn("Annulla", { cls: "ghost", onclick: () => { creating = false; draw(); } }),
@@ -3851,7 +3934,9 @@ function renderArtifacts() {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const values = new FormData(form);
-      const created = await guard(api("/api/artifacts/folders", { method: "POST", body: { path: values.get("path"), title: values.get("title"), description: values.get("description"), kind: kind.value, policy: values.get("direct") ? "direct" : "review" } }), "Cartella creata");
+      const wrong = where.problem();
+      if (wrong) return toast(wrong, true);
+      const created = await guard(api("/api/artifacts/folders", { method: "POST", body: { path: where.value(), title: values.get("title"), description: values.get("description"), kind: kind.value, policy: values.get("direct") ? "direct" : "review" } }), "Cartella creata");
       if (created) location.hash = `#/artefatti/${created.id}`;
     });
     return panel({ icon: "folder", title: "Nuova cartella", hint: "Gli agenti la trovano nel brain e con artifact_folders: scrivi bene cosa ci va." }, form);
