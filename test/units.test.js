@@ -909,3 +909,36 @@ test("Artefatti, a web page: shown as the site, its source a switch away; a file
   assert.deepEqual(posted[0], { path: "/api/artifacts/folders/af_000000000001/remove", body: { base: "ac_000000000009", paths: ["landing"] } });
   assert.equal(panel.run("location.hash"), "#/artefatti/af_000000000001/file", "and back to where what is left is");
 });
+
+test("Artefatti, a commit in conflict: ignore it, reject it or force it", async () => {
+  const at = Date.parse("2026-11-05T09:48:00Z");
+  const commit = {
+    id: "ac_000000000011", short: "0000000", folderId: "af_000000000001", message: "Bring the hero to life", author: { kind: "agent", id: "ag_x", name: "Sarax" },
+    status: "conflict", createdAt: at, files: 4, bytes: 40, changes: { added: 3, modified: 1, deleted: 0 }, canReview: true, previewUrl: "",
+    folder: { id: "af_000000000001", path: "progetti/cora/design", title: "design" }, mergeability: { state: "conflict", conflicts: ["DESIGN.md"] },
+    changed: [{ kind: "modified", path: "DESIGN.md", before: { sha: "a".repeat(64), size: 10 }, after: { sha: "b".repeat(64), size: 12 } }], tree: [{ path: "DESIGN.md", size: 12 }], comparedWith: "ac_000000000010",
+  };
+  const posted = [];
+  const panel = panelHarness({ fetch: async (path, options = {}) => {
+    if (options.method === "POST") {
+      posted.push({ path, body: JSON.parse(options.body) });
+      Object.assign(commit, { status: "ignored", review: { decision: "ignore", by: { name: "Ada" }, at } });
+      return { ok: true, status: 200, json: async () => ({ ignored: true, commit }) };
+    }
+    if (path === "/api/artifacts/commits/ac_000000000011") return { ok: true, status: 200, json: async () => commit };
+    if (path === "/api/artifacts") return { ok: true, status: 200, json: async () => ({ folders: [], reviews: [] }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [], artifacts: { reviews: 1 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
+  const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  await panel.navigate("#/artefatti/af_000000000001/c/ac_000000000011");
+  await settle();
+  const buttons = panel.app.querySelector(".art-decide").querySelectorAll("button").map((button) => button.textContent);
+  assert.deepEqual(buttons, ["Ignora", "Rifiuta", "Forza"]);
+  panel.app.querySelector(".art-decide").querySelectorAll("button")[0].click();
+  await settle();
+  assert.deepEqual(posted[0], { path: "/api/artifacts/commits/ac_000000000011/review", body: { decision: "ignore", note: "" } });
+  assert.match(panel.app.textContent, /Ignorato da Ada/);
+  assert.equal(panel.app.querySelector(".art-decide"), null, "nothing left to decide");
+});

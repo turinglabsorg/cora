@@ -3867,7 +3867,7 @@ async function renderBrainReview() {
 
 /* ---------- artifacts ---------- */
 const ARTIFACT_STATUS = {
-  proposed: ["Da rivedere", "warn"], conflict: ["In conflitto", "err"], published: ["Pubblicato", "on"], rejected: ["Rifiutato", "err"], superseded: ["Sostituito", ""],
+  proposed: ["Da rivedere", "warn"], conflict: ["In conflitto", "err"], published: ["Pubblicato", "on"], rejected: ["Rifiutato", "err"], superseded: ["Sostituito", ""], ignored: ["Ignorato", ""],
 };
 const ARTIFACT_IMAGE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
 const ARTIFACT_VIDEO = /\.(mp4|webm|mov)$/i;
@@ -5038,9 +5038,10 @@ async function renderArtifactCommit(folderId, commitId) {
     if (left) setArtifactReviews(left.reviews.length);
     renderArtifactCommit(folderId, commitId);
   };
-  const decideBar = waiting && commit.canReview ? panel({ icon: "check", title: "La tua decisione", hint: commit.status === "conflict" ? "Rifiutalo, o forzalo: per i file in conflitto vince questo commit." : "Approvato, va in onda subito. Rifiutato, resta nella storia con la tua nota." },
+  const decideBar = waiting && commit.canReview ? panel({ icon: "check", title: "La tua decisione", hint: commit.status === "conflict" ? "Rifiutalo, forzalo (per i file in conflitto vince questo commit) o ignoralo se non serve più." : "Approvato, va in onda subito. Rifiutato, resta nella storia con la tua nota. Ignorato, esce dalle revisioni senza dire niente a nessuno." },
     h("div", { class: "art-decide stack" }, note,
       h("div", { class: "row" }, h("span", { class: "spacer" }),
+        btn("Ignora", { icon: "eye", cls: "ghost", title: "Esce dalle revisioni e resta nella storia, senza avvisi", onclick: () => decide("ignore", "Commit ignorato") }),
         btn("Rifiuta", { icon: "close", cls: "ghost", onclick: () => decide("reject", "Commit rifiutato") }),
         commit.status === "conflict" ? armedButton("Forza", "Conferma: vince questo", { icon: "alert", onconfirm: () => decide("force", "In onda") }) : null,
         commit.status === "proposed" ? btn("Approva e metti in onda", { icon: "radio", cls: "primary", onclick: () => decide("approve", "In onda") }) : null))) : null;
@@ -5073,8 +5074,8 @@ async function renderArtifactCommit(folderId, commitId) {
       commit.requestedBy?.name ? h("small", {}, tr("chiesto da {name}", { name: commit.requestedBy.name })) : null,
       h("small", {}, raw(fmtTime(new Date(commit.createdAt).toISOString(), true))), artifactCounts(commit.changes),
       commit.supersedes ? h("small", {}, tr("sostituisce una proposta precedente")) : null),
-    commit.review ? h("p", { class: `notice${commit.status === "rejected" ? " warn" : ""}` }, icon(commit.status === "rejected" ? "close" : "check"),
-      h("span", {}, tr(commit.review.decision === "reject" ? "Rifiutato da {name}" : commit.review.decision === "force" ? "Forzato in onda da {name}" : "Approvato da {name}", { name: commit.review.by?.name || "?" }),
+    commit.review ? h("p", { class: `notice${commit.status === "rejected" ? " warn" : ""}` }, icon(commit.status === "rejected" ? "close" : commit.status === "ignored" ? "eye" : "check"),
+      h("span", {}, tr(commit.review.decision === "reject" ? "Rifiutato da {name}" : commit.review.decision === "force" ? "Forzato in onda da {name}" : commit.review.decision === "ignore" ? "Ignorato da {name}" : "Approvato da {name}", { name: commit.review.by?.name || "?" }),
         raw(` · ${fmtTime(new Date(commit.review.at).toISOString(), true)}`), commit.review.note ? h("q", { class: "art-review-note" }, raw(commit.review.note)) : null)) : null,
     mergeNotice,
     decideBar,

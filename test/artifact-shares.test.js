@@ -726,3 +726,30 @@ test("an agent sets who may push to a folder for the person asking; publishing w
   assert.deepEqual(made.folder.writers.sort(), [agent.id, vera.id].sort(), "the agent making it stays among who may push");
   assert.match(app.artifacts.pushReceipt(made), /^PUBLISHED.*\nnew folder clienti\/nobrainer\/altro: (Nico, Vera|Vera, Nico) may push to it; pushes are published at once\./);
 });
+
+test("a reviewer can ignore a proposal that is no longer needed: out of the reviews, kept in the history, nobody told", async (t) => {
+  const { app, call, agent, put, owner } = await fixture(t);
+  put("hero/index.html", "<h1>v1</h1>");
+  const boss = { kind: "owner", id: "1", name: "Owner" };
+  const first = await app.artifacts.push({ agent, folder: "progetti/hero", path: "/home/agent/work/hero", message: "v1", requester: boss, create: { description: "Hero" } });
+  await app.artifacts.review(first.commit.id, { decision: "approve", user: owner });
+  put("hero/index.html", "<h1>v2 superata</h1>");
+  const stale = await app.artifacts.push({ agent, folder: "progetti/hero", path: "/home/agent/work/hero", message: "v2", requester: boss, channelId: "chan-1" });
+  assert.equal(stale.commit.status, "proposed");
+  const notices = [];
+  app.artifacts.notice = (channelId, text) => notices.push(text);
+  assert.equal((await call("/api/artifacts")).data.reviews.length, 1);
+  const ignored = await call(`/api/artifacts/commits/${stale.commit.id}/review`, { method: "POST", body: { decision: "ignore" } });
+  assert.equal(ignored.status, 200);
+  assert.equal(ignored.data.commit.status, "ignored");
+  assert.equal(ignored.data.commit.review.decision, "ignore");
+  assert.equal((await call("/api/artifacts")).data.reviews.length, 0, "it leaves the reviews");
+  assert.equal((await call(`/api/artifacts/folders/${first.folder.id}`)).data.folder.head, first.commit.id, "nothing goes on air");
+  assert.ok((await call(`/api/artifacts/folders/${first.folder.id}`)).data.commits.some((commit) => commit.id === stale.commit.id && commit.status === "ignored"), "and it stays in the history");
+  assert.deepEqual(notices, [], "the agent is not told: there is nothing to redo");
+  assert.match(app.store.recentActivity(10).map((item) => item.text).join("\n"), /Owner ha ignorato [0-9a-f]{7} in progetti\/hero/);
+  const again = await call(`/api/artifacts/commits/${stale.commit.id}/review`, { method: "POST", body: { decision: "approve" } });
+  assert.equal(again.status, 409);
+  assert.match(again.data.error, /già ignorato/);
+  assert.equal((await call(`/api/artifacts/commits/${first.commit.id}/review`, { method: "POST", body: { decision: "nope" } })).status, 400);
+});

@@ -470,7 +470,7 @@ export class Artifacts {
     if (!commit) throw new ArtifactError("commit non trovato", 404);
     const folder = this.store.artifactFolder(commit.folderId);
     const tree = this.readTree(commit.tree);
-    const before = this.treeOf(commit.status === "published" || commit.status === "rejected" || commit.status === "superseded" ? commit.parent : folder?.head || "");
+    const before = this.treeOf(["published", "rejected", "superseded", "ignored"].includes(commit.status) ? commit.parent : folder?.head || "");
     const delta = treeDelta(before, tree);
     const entry = (path, from, to) => ({ path, before: from ? { sha: from.sha, size: from.size } : null, after: to ? { sha: to.sha, size: to.size } : null });
     return {
@@ -860,20 +860,26 @@ export class Artifacts {
     if (!found) throw new ArtifactError("commit non trovato", 404);
     const folder = this.store.artifactFolder(found.folderId);
     if (!this.canReview(folder, user)) throw new ArtifactError("decidono sui commit solo il proprietario e i revisori di questa cartella", 403);
-    if (!["approve", "reject", "force"].includes(decision)) throw new ArtifactError("la decisione è approve, reject o force");
+    if (!["approve", "reject", "force", "ignore"].includes(decision)) throw new ArtifactError("la decisione è approve, reject, force o ignore");
     const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
     const result = await this.withLock(folder.id, async () => {
       const commit = this.store.artifactCommit(commitId);
-      if (!["proposed", "conflict"].includes(commit.status)) throw new ArtifactError(`questo commit è già ${({ published: "pubblicato", rejected: "rifiutato", superseded: "sostituito" })[commit.status] || commit.status}`, 409);
+      if (!["proposed", "conflict"].includes(commit.status)) throw new ArtifactError(`questo commit è già ${({ published: "pubblicato", rejected: "rifiutato", superseded: "sostituito", ignored: "ignorato" })[commit.status] || commit.status}`, 409);
       const current = this.store.artifactFolder(folder.id);
       if (decision === "reject") {
         this.store.writeArtifactCommit({ ...commit, status: "rejected", review: { by, at: Date.now(), note: String(note || "").slice(0, 500), decision } });
         return { rejected: true };
       }
+      // Set aside: out of the reviews, kept in the history, and nobody told, since there is nothing to redo.
+      if (decision === "ignore") {
+        this.store.writeArtifactCommit({ ...commit, status: "ignored", review: { by, at: Date.now(), note: String(note || "").slice(0, 500), decision } });
+        return { ignored: true };
+      }
       return this.publishLocked(current, commit, { by, note, force: decision === "force" });
     });
     const commit = this.store.artifactCommit(commitId);
-    this.announceReview(folder, commit, { by, note, result });
+    if (result.ignored) this.log({ type: "artifact", text: `${by.name} ha ignorato ${short(commit.id)} in ${folder.path}` });
+    else this.announceReview(folder, commit, { by, note, result });
     return { ...result, commit: this.commitView(commitId) };
   }
 

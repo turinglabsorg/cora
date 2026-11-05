@@ -90,6 +90,7 @@ What the agents make on their computers and has to be kept or shown (a report, a
   - In a folder with review (every folder an agent creates, unless the owner asked otherwise), a commit stays *proposed* until the owner or one of the folder's reviewers approves it. Then it goes on air.
   - A proposal made on an older version is laid over the new one when the two touched different files. It is a *conflict* when both changed the same file, and the reviewer either rejects it or forces it.
   - A rejected commit stays in the history with the reviewer's note, and any published version can be restored.
+  - A proposal that is no longer needed (later work replaced it, or a conflict nobody wants to settle) can be *ignored*: it leaves the reviews and stays in the history as *Ignorato*, and nobody is told, since there is nothing to redo.
   - The agent's receipt says PROPOSED or PUBLISHED. Cora posts a passive notice in the conversation the push came from, and the owner gets a push notification.
 - **Pull.** `artifact_pull` writes a folder's served version onto a desktop, in `/home/agent/work/artifacts/<path>`, so an agent can continue another's work and push it back.
 - **Sharing.** A folder can be opened to people outside the space through a link with an address of its own, `<label>--<space>.usecora.space`.
