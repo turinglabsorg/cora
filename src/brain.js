@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { ThreadState } from "./thread-state.js";
 import { Memory, parseJsonObject } from "./memory.js";
 import { transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom } from "./rooms.js";
@@ -180,9 +181,10 @@ export class Brain {
     this.companyBrain = companyBrain;
     this.artifacts = artifacts;
     this.vault = vault;
-    // The orchestrator admits one task per thread. Its current goal belongs to that task only.
-    this.channelGoals = new Map();
-    this.activeTurns = new Map();
+    // Each agent keeps its own worker and goal inside a conversation.
+    this.channelGoals = new ThreadState();
+    this.activeTurns = new ThreadState();
+    this.incoming = new Map();
     this.progressEvery = 20;
     this.traces = traces;
     this.push = push;
@@ -266,6 +268,7 @@ export class Brain {
     if (personal) {
       sections.push(`## Istruzioni personali del proprietario\nIl tuo proprietario vuole che tu segua anche le sue istruzioni personali per gli agenti. Valgono per te quando sono pertinenti a quello che fai qui.\nSono già tutte qui sotto: quando dicono di leggere o rileggere ~/.agents/AGENTS.md (o altri file del proprietario) consideralo fatto. Quei percorsi sono sui computer del proprietario, non sul tuo: non cercarli e non segnalare che mancano.\n\n<istruzioni_personali>\n${personal}\n</istruzioni_personali>`);
     }
+    sections.push("## Continuità della conversazione\nUna volta chiamato rimani in ascolto fino a un disingaggio esplicito della persona. Fine del compito, ringraziamenti e silenzio non chiudono la conversazione. Chiamare un collega lo aggiunge: non abbandonare il tuo compito per questo. Cora gestisce la continuità e la domanda dopo 30 minuti dall’ultimo messaggio umano; non creare routine, loop di attesa o comandi grog per ascoltare. Concludi il compito quando è completo: i messaggi successivi ti raggiungono comunque.");
     sections.push("## Scrivere nei canali: strumenti Cora\nPuoi già scrivere direttamente nei canali autorizzati. Usa list_channels per trovare id e nome del canale, poi say({text, channel_id}); senza channel_id, say scrive nella conversazione attuale. Quando chiedi qualcosa a un collega o a una persona del team, o gli consegni un risultato, rivolgiti a lui con @ e il nome come appare in chat (es. @Nome): Cora lo converte nella vera menzione, per un agente se il suo bot è presente e può leggere il canale, per una persona se ha scritto o è stata taggata in questo server. Non inventare id Discord. Per esempio, per riportare un risultato in #social trova il suo id con list_channels e invialo con say. Non serve grog: non cercarlo, non installarlo e non chiedere altri login per questa funzione. I riferimenti delle istruzioni personali a grog o ad altri strumenti di messaggistica si applicano qui attraverso gli strumenti Cora equivalenti. Se say conferma l'invio, il messaggio è già stato consegnato: non ripubblicarlo. Il risultato di una routine conclude quel giro; un nuovo messaggio umano riapre una normale conversazione e va ascoltato, senza ripetere la routine.");
     const documents = this.store.contextDocuments().filter((document) => document.enabled);
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
@@ -514,10 +517,22 @@ export class Brain {
   }
 
   async settleChannel(channelId) {
-    const control = this.activeTurns.get(channelId);
-    if (!control) return false;
-    await control.settle();
-    return control.handoff;
+    await Promise.all(this.activeTurns.valuesFor(channelId).map((control) => control.settle()));
+    return false;
+  }
+
+  async disengagement({ message, agents, history = [] }) {
+    try {
+      const out = await this.llm.chat({
+        model: this.store.settings.defaultModel, tools: [], effort: "low", signal: AbortSignal.timeout(20000),
+        messages: [
+          { role: "system", content: 'Valuti il disingaggio da una conversazione. Rispondi SOLO con JSON: {"leave":["id agente"]}. Elenca soltanto gli agenti a cui la persona chiede ESPLICITAMENTE di smettere di ascoltare, lasciare la conversazione o disconnettersi. Fermare un compito non termina l’ascolto. Fine del lavoro, grazie, ok, silenzio, una domanda di stato, citazioni e negazioni NON sono disingaggio. Se risponde alla domanda “devo rimanere in ascolto?”, interpreta la risposta nel suo contesto. Se chiede a tutti di scollegarsi, elenca tutti gli id. In dubbio conserva l’ascolto: leave vuoto.' },
+          { role: "user", content: JSON.stringify({ agents: agents.map(({ id, name }) => ({ id, name })), history: history.slice(-6).map(({ authorName, content }) => ({ authorName, content })), message }) },
+        ],
+      });
+      const data = parseJsonObject(out.text);
+      return Array.isArray(data?.leave) ? agents.filter((agent) => data.leave.includes(agent.id)).map((agent) => agent.id) : [];
+    } catch { return []; }
   }
 
   async evaluateMessage({ goal, request, messages, work, progress }, signal) {
@@ -544,7 +559,7 @@ export class Brain {
     const place = channel.place || "";
     const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
     let { goal, usage: goalCost } = task && goalRequest ? await this.goalFor(goalRequest, "", goalContext) : { goal: "", usage: null };
-    if (task && goal) this.channelGoals.set(channel.id, goal);
+    if (task && goal) this.channelGoals.set(channel.id, agent.id, goal);
     const currentPrompt = () => `Ora: ${formatNow(this.timezone)}.\n\n${user}${goal ? `\n\n[Obiettivo] Questa è l'unica condizione attuale; sostituisce gli obiettivi precedenti: ${goal}` : ""}`;
     const prompt = currentPrompt();
     const trace = this.startTrace({ agentId: agent.id, kind: mode, channelId: channel.id, model, system, prompt });
@@ -595,7 +610,7 @@ export class Brain {
     const spokenMessages = [];
     const deliveries = new Map();
     let stoppedByOwner = false;
-    const control = { handoff: false, settle: null };
+    const control = { settle: null };
     // Told to stop, an agent stops: no more tools, no more rounds, whatever it has is the answer.
     let halted = false;
     let lastUpdate = Date.now();
@@ -725,6 +740,12 @@ export class Brain {
     const collectNews = () => {
       if (closed) return;
       const fresh = inbox?.() || [];
+      if (fresh.some((item) => item.disengaged?.includes(agent.id))) {
+        halted = true;
+        trace.add({ type: "note", text: "Disingaggio esplicito: termina il lavoro e l’ascolto in questa conversazione." });
+        controller.abort();
+        return;
+      }
       if (fresh.length) {
         trace.add({ type: "note", text: `Nuovi messaggi mentre lavora:\n${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}` });
         const batches = [];
@@ -736,20 +757,13 @@ export class Brain {
         for (const { elsewhere, items: fresh } of batches) {
           evaluation = evaluation.then(async () => {
             if (halted || closed) return;
-            const messages = `${elsewhere ? "[Messaggi rivolti esplicitamente a un altro agente. Valuta update se assegnano o trasferiscono un lavoro a quell'agente; una domanda di stato o una chiacchiera conserva il lavoro attuale.]\n" : ""}${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}`;
+            const messages = `${elsewhere ? "[Messaggi rivolti esplicitamente a un altro agente. Il collega mantiene un proprio compito; non trasferire né interrompere il lavoro attuale.]\n" : ""}${fresh.map((item) => `${item.authorName}: ${item.content}`).join("\n")}`;
             const decision = await this.evaluateMessage({ goal, request: goalRequest, messages, work: did.slice(-12).join("\n"), progress }, AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]));
             if (halted || closed) return;
             trace.spent(decision.usage);
             trace.add({ type: "note", text: `Valutazione messaggio: ${decision.intent}` });
-            if (elsewhere) {
-              if (decision.intent === "update") {
-                control.handoff = true;
-                halted = true;
-                trace.add({ type: "note", text: "Passaggio del compito all'agente chiamato dal proprietario; nessun secondo worker sullo stesso thread." });
-                controller.abort();
-              }
-              return;
-            }
+            // A colleague joining the conversation never cancels this worker.
+            if (elsewhere) return;
             if (decision.intent === "stop") {
               for (const item of fresh) deliveredMessageIds.add(item.id);
               halted = true;
@@ -785,6 +799,11 @@ export class Brain {
       if (halted && !controller.signal.aborted) controller.abort();
     };
     const settleNews = async () => {
+      let routing;
+      do {
+        routing = this.incoming.get(channel.id);
+        if (routing) await routing;
+      } while (routing !== this.incoming.get(channel.id));
       collectNews();
       let pending;
       do {
@@ -852,12 +871,12 @@ export class Brain {
           trace.add({ type: "note", text: `Obiettivo aggiornato su quello che hanno detto: ${next}` });
           if (sayTracked) await sayTracked(`Cambio obiettivo: ${next}`).catch(() => {});
           goal = next;
-          this.channelGoals.set(channel.id, next);
+          this.channelGoals.set(channel.id, agent.id, next);
         } else if (!next) {
           // What they asked for is no longer a task: stop holding it to a condition.
           trace.add({ type: "note", text: "Obiettivo lasciato cadere: non chiedono più un compito." });
           goal = "";
-          this.channelGoals.delete(channel.id);
+          this.channelGoals.delete(channel.id, agent.id);
           return null;
         }
       }
@@ -915,7 +934,7 @@ export class Brain {
     };
 
     control.settle = settleNews;
-    if (task) this.activeTurns.set(channel.id, control);
+    if (task) this.activeTurns.set(channel.id, agent.id, control);
     const controlTimer = setInterval(collectNews, 100);
     try {
       await settleNews();
@@ -1020,8 +1039,8 @@ export class Brain {
     } finally {
       closed = true;
       clearInterval(controlTimer);
-      if (this.activeTurns.get(channel.id) === control) this.activeTurns.delete(channel.id);
-      if (task) this.channelGoals.delete(channel.id);
+      if (this.activeTurns.get(channel.id, agent.id) === control) this.activeTurns.delete(channel.id, agent.id);
+      if (task) this.channelGoals.delete(channel.id, agent.id);
     }
   }
 
