@@ -75,7 +75,7 @@ Always-on Discord agents with personalities, layered memory, routines and their 
   - **Cloud.**
     - `spaceOf()` splits `<label>--<space>` and proxies to a space without `publicUrl`; anything else gets 404, never a redirect.
     - `/share` is the gate. Google uses `/auth/google?share=` with `x` in the state cookie: no account and no session, `hd` from userinfo.
-    - `POST /share/email` asks the space first, then sends through `cloud/src/mail.js` (ambox `POST /v1/send`, hush `CORA_CLOUD_AMBOX_API_KEY`), with the same answer either way and rate limits per address, IP, host and day.
+    - `POST /share/email` asks the space first, then sends through `cloud/src/mail.js`: Resend `POST /emails` from `CORA_CLOUD_MAIL_FROM` (default `Cora <cora@usecora.space>`, hush `CORA_CLOUD_RESEND_API_KEY`), or ambox `POST /v1/send` (hush `CORA_CLOUD_AMBOX_API_KEY`, mailbox `usecora@ambox.dev`) without it, with the same answer either way and rate limits per address, IP, host and day.
     - `share_links` stores only token hashes. The link's GET shows a button and its POST spends it, since mail scanners prefetch links.
   - **Relay.** The grog relay serves `*.usecora.space` through one wildcard claim (`tunnel_for()` in `relay.py`, `"*.usecora.space"` in `sites.json`).
   - **Tests.** `test/artifact-shares.test.js`, and the "shared folders" block of `test/cloud.test.js`.

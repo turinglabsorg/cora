@@ -89,7 +89,7 @@ What the agents make on their computers and has to be kept or shown (a report, a
 - **Sharing, never public.** A folder can be opened to people outside the space through a link with an address of its own, `<label>--<space>.usecora.space`.
   - **What it serves.** The served version, or a pinned one. It shows as a site (index pages, clean URLs, `404.html`) or as a list of files, where pages and scripts download instead of running.
   - **Who gets in.** Only the addresses and company domains the link names, or the people of the space.
-  - **How a visitor gets in.** They prove who they are at usecora.space, with Google or with a sign-in link sent by email through Cora's ambox mailbox, then the space checks its own list and sets a cookie for that host alone.
+  - **How a visitor gets in.** They prove who they are at usecora.space, with Google or with a sign-in link sent by email from usecora.space (Resend; Cora's ambox mailbox when Resend has no key), then the space checks its own list and sets a cookie for that host alone.
   - **What counts for a whole domain.** A domain grant counts with Google only for that domain's Workspace accounts. Otherwise the mailbox has to receive the link. Webmail domains cannot be granted whole.
   - **Changing access.** Narrowing a link's access, letting it expire or revoking it closes it for everyone already in.
   - **Requests from agents.** An agent can only ask for a link (`artifact_share_request`), and the owner or a folder reviewer turns it on.

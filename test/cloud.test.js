@@ -6,6 +6,7 @@ import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { createCloud } from "../cloud/src/app.js";
+import { createMailer } from "../cloud/src/mail.js";
 import { CloudStore, validSlug } from "../cloud/src/store.js";
 import { verifyPass } from "../src/pass.js";
 import { tempHome, waitFor } from "./helpers.js";
@@ -725,4 +726,32 @@ describe("shared folders: <label>--<space> hosts and their way in", () => {
     assert.equal((await call("/logout", { method: "POST", headers: { Origin: "http://report--acme.usecora.test" } })).status, 403);
     assert.equal((await call("/logout", { headers: { "sec-fetch-dest": "document" } })).status, 302);
   });
+});
+
+test("sign-in links go out through Resend from usecora.space when its key is there, through ambox otherwise", async () => {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      seen.push({ path: req.url, auth: req.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const resend = createMailer({ resendKey: "re_fixture", resendUrl: base, url: base, key: "ambox-fixture" });
+    assert.equal(resend.provider, "resend");
+    await resend.send({ to: "giulia@cliente.test", subject: "Il tuo link", text: "testo", html: "<p>testo</p>" });
+    assert.deepEqual(seen[0], { path: "/emails", auth: "Bearer re_fixture", body: { from: "Cora <cora@usecora.space>", to: ["giulia@cliente.test"], subject: "Il tuo link", text: "testo", html: "<p>testo</p>" } });
+    const ambox = createMailer({ url: base, key: "ambox-fixture" });
+    assert.equal(ambox.provider, "ambox");
+    await ambox.send({ to: "giulia@cliente.test", subject: "s", text: "t", html: "h" });
+    assert.deepEqual(seen[1], { path: "/v1/send", auth: "Bearer ambox-fixture", body: { to: ["giulia@cliente.test"], subject: "s", body_text: "t", body_html: "h" } });
+    assert.equal(await createMailer({}).send({ to: "x@y.test", subject: "s", text: "t", html: "h" }), false, "without a key nothing goes out");
+  } finally {
+    server.close();
+  }
 });
