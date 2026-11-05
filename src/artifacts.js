@@ -925,7 +925,16 @@ export class Artifacts {
     };
     this.store.writeArtifactShare(share);
     this.log({ type: "artifact", text: status === "proposed" ? `${createdBy?.name || "un agente"} chiede un link per ${folder.path}: ${clean}` : `nuovo link ${clean} per ${folder.path}` });
+    this.shareEvent(share, status === "proposed" ? "requested" : "created", createdBy);
     return this.shareView(share);
+  }
+
+  /** A change to a link, in the folder's log beside what visitors did with it. */
+  shareEvent(share, action, by) {
+    this.store.addArtifactEvent?.({
+      folderId: share.folderId, shareId: share.id, label: share.label, at: Date.now(), kind: "share", action,
+      mode: share.access?.mode || "people", by: by ? { kind: by.kind || "user", name: by.name || by.email || "" } : null,
+    });
   }
 
   /** Who may enter, what it shows, until when: any change of access closes the doors already open. */
@@ -946,6 +955,9 @@ export class Artifacts {
     if (changes.status === "revoked") { next.status = "revoked"; next.revision += 1; }
     if (changes.status === "active" && share.status === "proposed") { next.status = "active"; next.approvedBy = { id: user.id, name: user.name || user.email || "Owner" }; }
     this.store.writeArtifactShare(next);
+    const action = next.status === "revoked" && share.status !== "revoked" ? "revoked" : next.status === "active" && share.status === "proposed" ? "activated"
+      : changes.access !== undefined ? "access" : changes.expiresAt !== undefined ? "expiry" : changes.commit !== undefined ? "pinned" : "changed";
+    this.shareEvent(next, action, user);
     return this.shareView(next);
   }
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -341,4 +342,87 @@ test("files uploaded from the panel land where the person is: a reviewer publish
   const owners = await (await blob("<p>solo del proprietario</p>")).json();
   const lifted = await fetch(`${base}/api/artifacts/folders/${folderId}/upload`, { method: "POST", headers: { Cookie: member, "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ files: [{ path: "preso.html", sha: owners.sha }] }) });
   assert.equal(lifted.status, 409, "what another person uploaded and never placed stays theirs");
+});
+
+test("a folder of files opens like a drive: cards, search, a page per file, a zip of it all, and every visit in the folder's log", async (t) => {
+  const { app, port, call, agent, put, owner } = await fixture(t);
+  put("drive/docs/report.csv", "mese,vendite\ngennaio,120\n\"febbraio, corto\",98\n");
+  put("drive/docs/nota.md", "# Nota\n\nPrima riga <b>non HTML</b>\n");
+  put("drive/foto.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]));
+  put("drive/index.html", "<script>alert(1)</script><h1>Ciao</h1>");
+  put("drive/dati.bin", Buffer.from([0, 1, 2, 3, 4, 5]));
+  const pushed = await app.artifacts.push({ agent, folder: "condivisi/drive", path: "/home/agent/work/drive", message: "file", requester: { kind: "owner", id: "1", name: "Owner" }, create: { title: "Materiali", description: "File da condividere", kind: "files" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  const folderId = pushed.folder.id;
+  const made = await call(`/api/artifacts/folders/${folderId}/shares`, { method: "POST", body: { label: "materiali", view: "files", access: { mode: "public" } } });
+  assert.equal(made.status, 201);
+  const HOST = "materiali--acme.usecora.test";
+  const get = (path, headers = {}) => hit(port, HOST, path, { headers: { "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605 Chrome/131.0 Safari/537", ...headers } });
+
+  const home = await get("/", { "sec-fetch-dest": "document" });
+  assert.equal(home.status, 200);
+  assert.match(home.headers["content-security-policy"], /default-src 'none'/);
+  assert.doesNotMatch(home.headers["content-security-policy"], /script-src/, "the drive runs no script");
+  assert.match(home.body, /<h2>Cartelle<\/h2>.*href="\/docs\/".*<b>docs<\/b>.*2 file/s, "folders first, with what they hold");
+  assert.match(home.body, /<img loading="lazy" decoding="async" src="\/foto\.png"/, "pictures show as themselves");
+  assert.match(home.body, /href="\/_cora\/view\/index\.html"/, "a file opens on a page of its own");
+  assert.match(home.body, /href="\/dati\.bin\?download=1"/, "and downloads in one click");
+  assert.match(home.body, /href="\/_cora\/zip"/, "the whole folder downloads as one zip");
+  assert.match(home.body, /Condiviso da Owner · 5 file/);
+  assert.doesNotMatch(home.body, /<script>alert/);
+  const found = await get("/?q=NOTA");
+  assert.match(found.body, /Risultati per «NOTA»/);
+  assert.match(found.body, /<b title="nota\.md">nota\.md<\/b><small>[^<]* · docs<\/small>/, "a search runs over the whole folder, saying where each file is");
+  assert.doesNotMatch(found.body, /report\.csv/);
+  const list = await get("/docs/?v=list");
+  assert.match(list.body, /class="row head"/);
+  assert.match(list.body, /nota\.md.*report\.csv/s);
+
+  const sheet = await get("/_cora/view/docs/report.csv", { "sec-fetch-dest": "document" });
+  assert.equal(sheet.status, 200);
+  assert.match(sheet.body, /<th>mese<\/th><th>vendite<\/th>.*<td>febbraio, corto<\/td><td>98<\/td>/s, "a table reads as a table");
+  assert.match(sheet.body, /href="\/_cora\/view\/docs\/nota\.md"/, "the file before it is a click away");
+  assert.match(sheet.body, /href="\/docs\/"/, "and so is its folder");
+  const source = await get("/_cora/view/index.html");
+  assert.match(source.body, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/, "a page in a folder of files shows as its source, never running");
+  assert.match(source.headers["content-security-policy"], /default-src 'none'/);
+  const image = await get("/_cora/view/foto.png");
+  assert.match(image.body, /<img src="\/foto\.png"/);
+  assert.equal((await get("/foto.png", { "sec-fetch-dest": "image" })).headers["content-type"], "image/png", "the preview fetches the picture itself");
+  const saved = await get("/foto.png?download=1", { "sec-fetch-dest": "document" });
+  assert.match(saved.headers["content-disposition"], /^attachment; filename="foto\.png"/);
+  assert.equal((await get("/_cora/view/nowhere.txt")).status, 404);
+
+  const zip = await new Promise((resolve, reject) => {
+    http.get({ host: "127.0.0.1", port, path: "/_cora/zip?dir=docs", headers: { host: HOST } }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({ headers: response.headers, body: Buffer.concat(chunks) }));
+    }).on("error", reject);
+  });
+  assert.equal(zip.headers["content-type"], "application/zip");
+  assert.match(zip.headers["content-disposition"], /filename="docs\.zip"/);
+  const archive = join(tempHome(), "docs.zip");
+  writeFileSync(archive, zip.body);
+  const listed = spawnSync("python3", ["-c", "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None; print('|'.join(z.namelist())); print(z.read('report.csv').decode())", archive], { encoding: "utf8" });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /^nota\.md\|report\.csv\nmese,vendite/, "a zip any tool opens, with the files as they are");
+
+  await get("/_cora/view/docs/report.csv", { "sec-fetch-dest": "document" });
+  const log = await call(`/api/artifacts/folders/${folderId}/events`);
+  assert.equal(log.status, 200);
+  const lines = log.data.events.map((event) => [event.kind, event.path || event.action || event.detail]).reverse();
+  assert.deepEqual(lines, [
+    ["share", "created"], ["open", ""], ["search", "NOTA"], ["view", "docs/report.csv"], ["view", "index.html"], ["view", "foto.png"],
+    ["download", "foto.png"], ["download", "docs/"],
+  ], "opening, searching, viewing and downloading, once each within a minute; what a page embeds is not a view");
+  const viewing = log.data.events.find((event) => event.kind === "view");
+  assert.equal(viewing.who.via, "public");
+  assert.match(viewing.who.visitor, /^[a-z0-9_-]{6}$/);
+  assert.equal(viewing.who.device, "Chrome · macOS");
+  assert.equal(log.data.events.find((event) => event.kind === "share").by.name, "Owner");
+  const folder = await call(`/api/artifacts/folders/${folderId}`);
+  assert.deepEqual(folder.data.activity[made.data.id], { views: 3, downloads: 2, visits: 1, last: folder.data.activity[made.data.id].last });
+  await call(`/api/artifacts/shares/${made.data.id}`, { method: "PUT", body: { status: "revoked" } });
+  assert.equal((await call(`/api/artifacts/folders/${folderId}/events?share=${made.data.id}`)).data.events[0].action, "revoked");
 });

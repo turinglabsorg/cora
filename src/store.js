@@ -184,6 +184,8 @@ CREATE INDEX IF NOT EXISTS artifact_commits_folder ON artifact_commits(folder_id
 CREATE TABLE IF NOT EXISTS artifact_objects (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS artifact_uploads (folder_id TEXT NOT NULL, agent_id TEXT NOT NULL, sha TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (folder_id, agent_id, sha));
 CREATE TABLE IF NOT EXISTS artifact_shares (id TEXT PRIMARY KEY, label TEXT NOT NULL UNIQUE, folder_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS artifact_events (id INTEGER PRIMARY KEY AUTOINCREMENT, folder_id TEXT NOT NULL, share_id TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS artifact_events_folder ON artifact_events (folder_id, at);
 CREATE TABLE IF NOT EXISTS vault_secrets (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS vault_requests (token_hash TEXT PRIMARY KEY, status TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS vault_sends (token_hash TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT NOT NULL);
@@ -1354,6 +1356,7 @@ export class Store {
       this.stmt("DELETE FROM artifact_commits WHERE folder_id = ?").run(id);
       this.stmt("DELETE FROM artifact_uploads WHERE folder_id = ?").run(id);
       this.stmt("DELETE FROM artifact_shares WHERE folder_id = ?").run(id);
+      this.stmt("DELETE FROM artifact_events WHERE folder_id = ?").run(id);
       this.stmt("DELETE FROM artifact_folders WHERE id = ?").run(id);
     });
   }
@@ -1432,6 +1435,33 @@ export class Store {
 
   deleteArtifactShare(id) {
     this.stmt("DELETE FROM artifact_shares WHERE id = ?").run(id);
+  }
+
+  /** One thing that happened on a shared folder: who opened, viewed or downloaded what, and changes to its links. */
+  addArtifactEvent(event) {
+    this.stmt("INSERT INTO artifact_events (folder_id, share_id, at, kind, data) VALUES (?, ?, ?, ?, ?)")
+      .run(event.folderId, event.shareId || "", event.at, event.kind, JSON.stringify(event));
+    if (Math.random() < 0.01) this.stmt("DELETE FROM artifact_events WHERE at < ?").run(event.at - 180 * 86400000);
+  }
+
+  /** The folder's log, newest first; `before` pages back, `shareId` keeps one link. */
+  artifactEvents(folderId, { shareId = "", before = 0, limit = 200 } = {}) {
+    const rows = this.stmt(`SELECT id, data FROM artifact_events WHERE folder_id = ?${shareId ? " AND share_id = ?" : ""}${before ? " AND id < ?" : ""} ORDER BY id DESC LIMIT ?`)
+      .all(...[folderId, shareId || null, before || null].filter((value) => value !== null), Math.min(Number(limit) || 200, 1000));
+    return rows.map((row) => ({ id: row.id, ...JSON.parse(row.data) }));
+  }
+
+  /** Views and downloads per link of a folder, and when each was last opened. */
+  artifactEventCounts(folderId) {
+    const out = {};
+    for (const row of this.stmt("SELECT share_id, kind, COUNT(*) AS n, MAX(at) AS last FROM artifact_events WHERE folder_id = ? GROUP BY share_id, kind").all(folderId)) {
+      const entry = out[row.share_id] ||= { views: 0, downloads: 0, visits: 0, last: 0 };
+      if (row.kind === "view") entry.views += row.n;
+      else if (row.kind === "download") entry.downloads += row.n;
+      else if (row.kind === "open") entry.visits += row.n;
+      if (["view", "download", "open"].includes(row.kind)) entry.last = Math.max(entry.last, row.last);
+    }
+    return out;
   }
 
   /* ---------- vault ---------- */

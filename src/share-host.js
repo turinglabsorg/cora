@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { verifyPass } from "./pass.js";
+import { browse, viewer as viewPage, writeZip, ZIP_LIMIT } from "./share-drive.js";
 
 /**
  * The share hosts: <label>--<space>.<domain>, each a folder (or a commit, for
@@ -58,6 +59,7 @@ const COPY = {
     leave: "Esci",
     locked: ["Serve una password", "Chi ha condiviso questa pagina ti ha dato una password: scrivila qui."],
     wrong: "Password sbagliata.", tooMany: "Troppi tentativi: riprova tra qualche minuto.", password: "Password", enter: "Entra",
+    tooBig: ["Troppo grande per un solo zip", "Scarica le sottocartelle una alla volta, o i file uno per uno."],
   },
   en: {
     gone: ["This link is gone", "It was revoked or it expired. Ask whoever sent it to you."],
@@ -71,6 +73,7 @@ const COPY = {
     leave: "Sign out",
     locked: ["A password is needed", "Whoever shared this page gave you a password: type it here."],
     wrong: "Wrong password.", tooMany: "Too many attempts: try again in a few minutes.", password: "Password", enter: "Enter",
+    tooBig: ["Too large for one zip", "Download the subfolders one at a time, or the files one by one."],
   },
 };
 
@@ -165,11 +168,42 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
     return cookieLine(`${body}.${mac(`share.${body}`)}`, SESSION_DAYS * 86400);
   }
 
+  /** A browser and system in two words, for the log: never the whole user agent. */
+  const deviceOf = (agent) => {
+    const ua = String(agent || "");
+    const browser = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : /curl|wget|python|node|Go-http/i.test(ua) ? "script" : "";
+    const system = /iPhone|iPad/.test(ua) ? "iOS" : /Android/.test(ua) ? "Android" : /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "";
+    return [browser, system].filter(Boolean).join(" · ");
+  };
+  const recent = new Map();
+  /**
+   * One line in the folder's log: who (the address they proved, or a visitor tag
+   * from their network and browser, never the address itself), what, which file.
+   * The same thing by the same person within a minute (half an hour for opening
+   * the folder) is one line.
+   */
+  function record(req, target, kind, { path = "", identity = null, detail = "" } = {}) {
+    if (!store.addArtifactEvent) return;
+    const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+    const who = identity || viewer(req, target) || null;
+    const visitor = mac(`visitor.${ip}.${req.headers["user-agent"] || ""}`).slice(0, 6).toLowerCase();
+    const shareId = target.kind === "share" ? target.share.id : `preview:${target.commit?.id || ""}`;
+    const key = `${shareId}.${who?.email || visitor}.${kind}.${path}`;
+    const now = Date.now();
+    if ((recent.get(key) || 0) > now - (kind === "open" ? 30 * 60000 : 60000)) return;
+    recent.set(key, now);
+    if (recent.size > 5000) for (const [entry, at] of recent) if (at < now - 30 * 60000) recent.delete(entry);
+    store.addArtifactEvent({
+      folderId: target.folder.id, shareId, label: target.kind === "share" ? target.share.label : "", at: now, kind, path, detail,
+      who: { email: who?.email || "", via: who?.via || (target.kind === "share" && target.share.access.mode === "public" ? "public" : ""), visitor, device: deviceOf(req.headers["user-agent"]) },
+    });
+  }
+
   /** A stored file: its type for this kind of share, ETag, a single range, HEAD. */
-  function sendFile(req, res, file, { view, status = 200 }) {
+  function sendFile(req, res, file, { view, status = 200, attachment = false }) {
     const name = file.path.split("/").at(-1);
     const extension = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
-    const download = view === "files" && ACTIVE.has(extension);
+    const download = attachment || (view === "files" && ACTIVE.has(extension));
     const type = download ? "application/octet-stream" : TYPES[extension] || "application/octet-stream";
     const tag = etag(file.sha);
     const base = headers({
@@ -198,27 +232,6 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
     res.writeHead(status, { ...base, "Content-Length": file.size });
     if (req.method === "HEAD") return res.end();
     artifacts.stream(file.sha).on("error", () => res.destroy()).pipe(res);
-  }
-
-  /** A folder of files, as a list a person can read and click. */
-  function listing(req, res, target, tree, dir) {
-    const entries = new Map();
-    for (const [path, file] of tree) {
-      if (!path.startsWith(dir)) continue;
-      const rest = path.slice(dir.length);
-      const slash = rest.indexOf("/");
-      if (slash === -1) entries.set(rest, { name: rest, size: file.size });
-      else entries.set(`${rest.slice(0, slash)}/`, { name: `${rest.slice(0, slash)}/`, dir: true });
-    }
-    const rows = [...entries.values()].sort((a, b) => (Boolean(b.dir) - Boolean(a.dir)) || a.name.localeCompare(b.name));
-    const href = (name) => name.split("/").map(encodeURIComponent).join("/");
-    const items = [
-      dir ? `<li class="dir"><a href="../"><span>../</span><small>${esc(words(req, "up"))}</small></a></li>` : "",
-      ...rows.map((row) => `<li class="${row.dir ? "dir" : ""}"><a href="${esc(href(row.name))}"><span>${esc(row.name)}</span><small>${row.dir ? "" : esc(fmtBytes(row.size))}</small></a></li>`),
-    ].join("");
-    const files = [...tree.keys()].filter((path) => path.startsWith(dir)).length;
-    page(req, res, 200, [target.folder.title, words(req, "files", { count: files })],
-      `<p class="path">/${esc(dir)}</p><ul>${items}</ul><footer><a href="/_cora/logout">${esc(words(req, "leave"))}</a></footer>`);
   }
 
   async function handle(req, res, { host, label }) {
@@ -253,10 +266,12 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
       const password = new URLSearchParams(Buffer.concat(chunks).toString("utf8")).get("password") || "";
       if (!artifacts.passwordOpens(target.share, password)) {
         attempts.get(key).push(Date.now());
+        record(req, target, "refused", { detail: "password" });
         return page(req, res, 401, words(req, "locked"), form(words(req, "wrong")));
       }
       attempts.delete(key);
       activity({ type: "artifact", text: `il link ${label} è stato aperto con la password` });
+      record(req, target, "enter", { identity: { email: "", via: "password" } });
       return redirect(res, next, { "Set-Cookie": admit(target, { email: "", via: "password" }) });
     }
     if (passwordForm) return redirect(res, safeNext(url.searchParams.get("next")));
@@ -266,10 +281,12 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
       const identity = { email: String(fields.email).toLowerCase(), hd: String(fields.hd || ""), via: String(fields.via || "") };
       if (fields.emailVerified === false || !artifacts.allows(target, identity)) {
         activity({ type: "warning", text: `link ${label}: ${identity.email} non può entrare` });
+        record(req, target, "refused", { identity });
         return page(req, res, 403, words(req, "denied", { email: identity.email }),
           `<a class="btn" href="${esc(`${cloud.url}/share?${new URLSearchParams({ to: host, next: safeNext(url.searchParams.get("next")), other: "1" })}`)}">${esc(words(req, "another"))}</a>`);
       }
       activity({ type: "artifact", text: `${identity.email} ha aperto ${target.kind === "preview" ? `l'anteprima di ${target.folder.path}` : `il link ${label}`}` });
+      record(req, target, "enter", { identity });
       return redirect(res, safeNext(url.searchParams.get("next")), { "Set-Cookie": admit(target, identity) });
     }
     if (mode === "password" && !viewer(req, target)) return redirect(res, `/_cora/password?${new URLSearchParams({ next: safeNext(url.pathname + url.search) })}`);
@@ -280,10 +297,59 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
       res.writeHead(200, headers({ "Content-Type": "application/json; charset=utf-8" }));
       return res.end(JSON.stringify({ folder: target.folder.path, title: target.folder.title, commit: target.commit.id.slice(3, 10), files: [...tree.entries()].map(([path, file]) => ({ path, size: file.size })) }));
     }
+    const signedIn = Boolean(cookies(req.headers.cookie)[COOKIE]);
+    const lang = language(req);
+    const drivePage = (rendered) => {
+      res.writeHead(200, headers({ "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": rendered.csp }));
+      res.end(req.method === "HEAD" ? undefined : rendered.html);
+    };
+    if (target.view === "files" && url.pathname.startsWith("/_cora/view/")) {
+      const found = artifacts.resolvePath(tree, url.pathname.slice("/_cora/view".length), "files");
+      if (!found.file) return page(req, res, 404, words(req, "notFound"));
+      const dir = found.file.path.includes("/") ? found.file.path.slice(0, found.file.path.lastIndexOf("/") + 1) : "";
+      const siblings = [...tree.keys()].filter((path) => path.startsWith(dir) && !path.slice(dir.length).includes("/")).sort((a, b) => a.localeCompare(b, lang));
+      record(req, target, "view", { path: found.file.path });
+      return drivePage(viewPage({ lang, file: found.file, siblings, title: target.folder.title, read: (max) => artifacts.readObject(found.file.sha, max) }));
+    }
+    if (target.view === "files" && url.pathname === "/_cora/zip") {
+      const dir = String(url.searchParams.get("dir") || "").replace(/^\/+|\/+$/g, "");
+      const inside = dir ? `${dir}/` : "";
+      const entries = [...tree.entries()].filter(([path]) => path.startsWith(inside)).sort(([a], [b]) => a.localeCompare(b));
+      if (!entries.length) return page(req, res, 404, words(req, "notFound"));
+      const total = entries.reduce((sum, [, file]) => sum + file.size, 0);
+      if (total > ZIP_LIMIT) return page(req, res, 413, words(req, "tooBig"));
+      const name = `${(dir || target.folder.path).split("/").at(-1)}.zip`;
+      record(req, target, "download", { path: inside, detail: "zip" });
+      res.writeHead(200, headers({ "Content-Type": "application/zip", "Content-Disposition": `attachment; filename="${name.replace(/[^\w.-]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name)}` }));
+      if (req.method === "HEAD") return res.end();
+      try {
+        await writeZip(res, entries.map(([path, file]) => ({ name: path.slice(inside.length), size: file.size, open: () => artifacts.stream(file.sha) })), new Date(target.commit.publishedAt || target.commit.createdAt));
+        res.end();
+      } catch { res.destroy(); }
+      return;
+    }
     const found = artifacts.resolvePath(tree, url.pathname, target.view);
     if (found.redirect) return redirect(res, `${found.redirect}${url.search}`);
-    if (found.listing !== undefined) return listing(req, res, target, tree, found.listing);
-    if (found.file) return sendFile(req, res, found.file, { view: target.view });
+    if (found.listing !== undefined) {
+      if (url.searchParams.get("q") || !found.listing) record(req, target, url.searchParams.get("q") ? "search" : "open", { detail: String(url.searchParams.get("q") || "").slice(0, 120) });
+      return drivePage(browse({
+        lang, tree, dir: found.listing.replace(/\/$/, ""), q: String(url.searchParams.get("q") || "").slice(0, 200), mode: url.searchParams.get("v") === "list" ? "list" : "grid",
+        title: target.folder.title, sharedBy: target.kind === "share" ? target.share.createdBy?.name || "" : "", updatedAt: target.commit.publishedAt || target.commit.createdAt, signedIn,
+        read: (sha, max) => artifacts.readObject(sha, max),
+      }));
+    }
+    if (found.file) {
+      const attachment = url.searchParams.get("download") === "1";
+      const dest = String(req.headers["sec-fetch-dest"] || "");
+      const ranged = /^bytes=[1-9]/.test(String(req.headers.range || ""));
+      const html = /\.html?$/i.test(found.file.path);
+      if (!ranged && req.method === "GET") {
+        if (attachment || (!dest && target.view === "files")) record(req, target, "download", { path: found.file.path });
+        else if (dest === "document" && (target.view === "files" || html)) record(req, target, target.view === "site" && found.file.path.endsWith("index.html") && !url.pathname.endsWith(".html") && url.pathname === "/" ? "open" : "view", { path: found.file.path });
+        else if (!dest && html) record(req, target, "view", { path: found.file.path });
+      }
+      return sendFile(req, res, found.file, { view: target.view, attachment });
+    }
     const missing = target.view === "site" && tree.get("404.html");
     if (missing) return sendFile(req, res, { path: "404.html", ...missing }, { view: target.view, status: 404 });
     return page(req, res, found.status || 404, words(req, "notFound"));

@@ -4005,7 +4005,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   const { folder } = data;
   const head = data.commits.find((commit) => commit.id === folder.head) || null;
   const pending = data.commits.filter((commit) => commit.status === "proposed" || commit.status === "conflict");
-  const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ["permessi", "Permessi", "shield"]];
+  const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"]];
   const content = h("div", { class: "stack" });
   shell([
     pageHead(raw(folder.title), h("span", { class: "art-head-meta" }, artifactPathLabel(folder.path),
@@ -4026,7 +4026,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
     content,
   ], { title: folder.title, back: "#/artefatti" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data) : artifactFiles(data, head, dir);
+  const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
   content.replaceChildren(...[shown].flat().filter(Boolean));
 }
 
@@ -4211,6 +4211,95 @@ function shareAccessPicker(access = {}) {
   };
 }
 
+/** How much a link was used: visits, views, downloads, the last one; a click opens its log. */
+function shareStats(stats, shareId, folderId) {
+  if (!stats || !(stats.visits + stats.views + stats.downloads)) return h("small", { class: "share-stats" }, "Ancora nessuna visita");
+  return h("a", { class: "share-stats", href: `#/artefatti/${folderId}/registro?link=${shareId}` },
+    icon("eye"), raw([
+      tr(stats.visits === 1 ? "1 visita" : "{count} visite", { count: stats.visits }),
+      tr(stats.views === 1 ? "1 file visto" : "{count} file visti", { count: stats.views }),
+      tr(stats.downloads === 1 ? "1 download" : "{count} download", { count: stats.downloads }),
+    ].join(" · ")),
+    stats.last ? h("span", { class: "faint" }, raw(` · ${tr("ultima {when}", { when: fmtTime(new Date(stats.last).toISOString(), true) })}`)) : null);
+}
+
+const LOG_FILTERS = [["all", "Tutto"], ["visits", "Visite"], ["downloads", "Download"], ["access", "Accessi"], ["changes", "Modifiche"]];
+const LOG_GROUP = { open: "visits", view: "visits", search: "visits", download: "downloads", enter: "access", refused: "access", share: "changes", commit: "changes" };
+
+/** Who a line of the log is about: the address they proved, or a visitor told apart by network and browser. */
+function logWho(who = {}) {
+  if (who.email) return h("b", { class: "log-who" }, raw(who.email));
+  return h("b", { class: "log-who visitor" }, raw(tr(who.via === "password" ? "Visitatore {tag} con la password" : "Visitatore {tag}", { tag: who.visitor || "?" })));
+}
+
+/** One line of the log as a sentence: who did what to which file, through which link. */
+function logLine(event, shares) {
+  const label = event.label || shares.find((share) => share.id === event.shareId)?.label || "";
+  const file = (path) => h("code", { class: "log-path" }, raw(path || "/"));
+  const link = label ? h("span", { class: "log-link" }, raw(label)) : null;
+  const via = { google: "con Google", email: "con il link via email", password: "con la password" };
+  const ACTIONS = { created: "ha creato il link", requested: "ha chiesto il link", activated: "ha attivato il link", revoked: "ha revocato il link", deleted: "ha eliminato il link", access: "ha cambiato chi può aprire il link", expiry: "ha cambiato la scadenza del link", pinned: "ha fissato la versione del link", changed: "ha cambiato il link" };
+  switch (event.kind) {
+    case "open": return [logWho(event.who), " ", tr("ha aperto"), " ", link];
+    case "view": return [logWho(event.who), " ", tr("ha visto"), " ", file(event.path)];
+    case "search": return [logWho(event.who), " ", tr("ha cercato"), " ", h("q", {}, raw(event.detail || ""))];
+    case "download": return event.detail === "zip" ? [logWho(event.who), " ", tr("ha scaricato tutta la cartella"), " ", file(event.path)] : [logWho(event.who), " ", tr("ha scaricato"), " ", file(event.path)];
+    case "enter": return [logWho(event.who), " ", tr("è entrato"), " ", tr(via[event.who?.via] || ""), label ? [" · ", link] : null];
+    case "refused": return event.detail === "password" ? [logWho(event.who), " ", tr("ha sbagliato la password")] : [logWho(event.who), " ", tr("non è tra chi può entrare")];
+    case "share": return [h("b", { class: "log-who" }, raw(event.by?.name || tr("Qualcuno"))), " ", tr(ACTIONS[event.action] || ACTIONS.changed), " ", link,
+      event.action === "access" || event.action === "created" ? h("span", { class: "faint" }, raw(` · ${tr({ public: "pubblico", password: "con password", people: "persone precise" }[event.mode] || "")}`)) : null];
+    case "commit": return [h("b", { class: "log-who" }, raw(event.by)), " ", tr(event.verb), " ", h("q", {}, raw(event.message))];
+    default: return [logWho(event.who), " ", raw(event.kind)];
+  }
+}
+const LOG_ICON = { open: "link", view: "eye", search: "search", download: "download", enter: "check", refused: "alert", share: "link", commit: "commit" };
+
+/**
+ * The folder's log: every visit, view and download through its links, who got in
+ * and who was turned away, and every change to its links and its files.
+ */
+function artifactLog(data) {
+  const { folder } = data;
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const state = { filter: "all", link: params.get("link") || "", events: [], done: false };
+  const commits = data.commits.flatMap((commit) => [
+    { kind: "commit", at: commit.createdAt, by: commit.author?.name || "?", verb: commit.status === "published" && commit.review?.by?.name === commit.author?.name ? "ha caricato e pubblicato" : commit.author?.kind === "agent" ? "ha proposto" : "ha caricato", message: commit.message, shareId: "" },
+    ...(commit.review?.by && commit.review.by.name !== commit.author?.name ? [{ kind: "commit", at: commit.review.at, by: commit.review.by.name, verb: commit.review.decision === "reject" ? "ha rifiutato" : "ha pubblicato", message: commit.message, shareId: "" }] : []),
+  ]);
+  const list = h("ol", { class: "log-list" });
+  const more = btn("Carica le precedenti", { cls: "ghost sm", onclick: () => load() });
+  const chips = h("div", { class: "segmented log-filters", role: "radiogroup", "aria-label": tr("Mostra") }, LOG_FILTERS.map(([key, label]) => h("button", { type: "button", role: "radio", class: key === state.filter ? "on" : "", "aria-checked": String(key === state.filter), onclick: (event) => {
+    state.filter = key;
+    for (const button of chips.children) { button.classList.toggle("on", button === event.currentTarget); button.setAttribute("aria-checked", String(button === event.currentTarget)); }
+    draw();
+  } }, label)));
+  const links = h("select", { "aria-label": tr("Link"), onchange: () => { state.link = links.value; state.events = []; state.done = false; load(); } },
+    h("option", { value: "" }, "Tutti i link"), data.shares.map((share) => h("option", { value: share.id, selected: share.id === state.link }, raw(share.label))));
+  function draw() {
+    const rows = [...state.events, ...(state.link ? [] : commits)]
+      .filter((event) => state.filter === "all" || LOG_GROUP[event.kind] === state.filter)
+      .sort((a, b) => b.at - a.at);
+    list.replaceChildren(...(rows.length ? rows.map((event) => h("li", { class: `log-row log-${event.kind}` },
+      h("span", { class: "log-ico" }, icon(LOG_ICON[event.kind] || "info")),
+      h("span", { class: "grow log-text" }, h("span", {}, ...logLine(event, data.shares).flat().filter(Boolean)),
+        event.who?.device || event.who?.via === "public" ? h("small", {}, raw([event.who.device, event.label && event.kind !== "open" ? event.label : ""].filter(Boolean).join(" · "))) : null),
+      h("time", { class: "log-time" }, raw(fmtTime(new Date(event.at).toISOString(), true))))) : [empty("clock", "Ancora niente da registrare: qui compare chi apre, guarda e scarica i file dei link.")]));
+    more.style.display = state.done ? "none" : "";
+  }
+  async function load() {
+    const before = state.events.at(-1)?.id || 0;
+    try {
+      const { events } = await api(`/api/artifacts/folders/${folder.id}/events?${new URLSearchParams({ ...(state.link ? { share: state.link } : {}), ...(before ? { before } : {}) })}`);
+      state.events.push(...events);
+      state.done = events.length < 200;
+    } catch (error) { toast(error.message, true); state.done = true; }
+    draw();
+  }
+  load();
+  return panel({ icon: "clock", title: "Registro", hint: "Chi ha aperto i link, cosa ha visto e scaricato, chi è entrato e chi no, e ogni modifica ai link e ai file. Chi entra con un indirizzo è indicato con quello; chi apre un link pubblico, con un codice che distingue il suo browser." },
+    h("div", { class: "log-tools" }, chips, data.shares.length > 1 || state.link ? links : null), list, h("div", { class: "row" }, h("span", { class: "spacer" }), more));
+}
+
 /** The folder's links, each a host of its own, and the form for a new one. */
 function artifactShares(data) {
   const { folder } = data;
@@ -4246,6 +4335,7 @@ function artifactShares(data) {
       h("div", { class: "grow share-text" },
         h("div", { class: "row tight" }, live ? h("a", { class: "share-url", href: share.url, target: "_blank", rel: "noopener" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))) : h("span", { class: "share-url" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))), badge(label, cls), badge(share.view === "files" ? "File" : "Sito", "", share.view === "files" ? "folder" : "globe")),
         shareAccessChips(share.access),
+        shareStats(data.activity?.[share.id], share.id, folder.id),
         h("small", {}, raw([
           share.createdBy?.name ? tr(share.status === "proposed" ? "chiesto da {name}" : "creato da {name}", { name: share.createdBy.name }) : "",
           share.reason ? `«${share.reason}»` : "",

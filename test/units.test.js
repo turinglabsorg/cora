@@ -577,3 +577,55 @@ test("a new link's access starts with the team in; an edited link keeps what it 
   assert.equal(JSON.parse(panel.run(`JSON.stringify(shareAccessPicker({ mode: "people", emails: ["giulia@cliente.it"], domains: [], members: false }).value())`)).members, false);
   assert.equal(JSON.parse(panel.run(`JSON.stringify(shareAccessPicker({ mode: "people", emails: [], domains: ["cliente.it"], members: true }).value())`)).domains, "cliente.it");
 });
+
+test("Artefatti, Registro: who opened, viewed and downloaded what through the links, beside the changes, filtered by kind", async () => {
+  const at = Date.parse("2026-11-05T09:00:00Z");
+  const folder = { id: "af_000000000001", path: "condivisi/materiali", title: "Materiali", description: "", kind: "files", policy: "review", head: "ac_000000000009", writers: ["*"], reviewers: [] };
+  const commit = { id: "ac_000000000009", short: "0000000", folderId: folder.id, message: "Report di ottobre", author: { kind: "agent", id: "ag_x", name: "Nico" }, status: "published", createdAt: at - 60000, publishedAt: at - 30000, review: { by: { kind: "user", name: "Ada" }, at: at - 30000, decision: "approve" }, files: 1, bytes: 10, changes: { added: 1, modified: 0, deleted: 0 } };
+  const events = [
+    { id: 5, kind: "download", path: "docs/report.pdf", label: "materiali", shareId: "as_000000000001", at: at + 5000, who: { email: "giulia@cliente.it", via: "google", visitor: "abc123", device: "Chrome · macOS" } },
+    { id: 4, kind: "view", path: "docs/report.pdf", label: "materiali", shareId: "as_000000000001", at: at + 4000, who: { email: "", via: "public", visitor: "x1y2z3", device: "Safari · iOS" } },
+    { id: 3, kind: "download", path: "docs/", detail: "zip", label: "materiali", shareId: "as_000000000001", at: at + 3000, who: { email: "", via: "public", visitor: "x1y2z3", device: "Safari · iOS" } },
+    { id: 2, kind: "refused", detail: "password", label: "chiusa", shareId: "as_000000000002", at: at + 2000, who: { email: "", via: "", visitor: "p4ss00", device: "Firefox · Windows" } },
+    { id: 1, kind: "share", action: "created", mode: "public", by: { kind: "user", name: "Ada" }, label: "materiali", shareId: "as_000000000001", at },
+  ];
+  const data = { folder, canReview: true, canManage: true, shareHosting: true, shareSuffix: "--acme.usecora.space", commits: [commit], tree: [], activity: {},
+    shares: [{ id: "as_000000000001", label: "materiali", status: "active", view: "files", access: { mode: "public" } }, { id: "as_000000000002", label: "chiusa", status: "active", view: "files", access: { mode: "password" } }] };
+  const asked = [];
+  const reply = (body) => ({ ok: true, status: 200, json: async () => body });
+  const panel = panelHarness({ fetch: async (path) => {
+    asked.push(path);
+    if (path === `/api/artifacts/folders/${folder.id}`) return reply(data);
+    if (path.startsWith(`/api/artifacts/folders/${folder.id}/events`)) return reply({ events: path.includes("share=as_000000000002") ? events.filter((event) => event.shareId === "as_000000000002") : events });
+    return reply({});
+  } });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [], artifacts: { reviews: 0 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
+  const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  await panel.navigate(`#/artefatti/${folder.id}/registro`);
+  await settle();
+  assert.deepEqual(panel.app.querySelector(".tabs").querySelectorAll("a").map((tab) => tab.attributes.href.split("/").at(-1)), ["file", "commit", "condivisione", "registro", "permessi"]);
+  const lines = () => panel.app.querySelectorAll(".log-row").map((row) => row.querySelector(".log-text").children[0].textContent);
+  assert.deepEqual(lines(), [
+    "giulia@cliente.it ha scaricato docs/report.pdf",
+    "Visitatore x1y2z3 ha visto docs/report.pdf",
+    "Visitatore x1y2z3 ha scaricato tutta la cartella docs/",
+    "Visitatore p4ss00 ha sbagliato la password",
+    "Ada ha creato il link materiali · pubblico",
+    "Ada ha pubblicato Report di ottobre",
+    "Nico ha proposto Report di ottobre",
+  ], "newest first, the links' log and the folder's changes together");
+  assert.equal(panel.app.querySelectorAll(".log-row")[1].querySelector("small").textContent, "Safari · iOS · materiali", "the browser that did it, and through which link");
+  const filters = panel.app.querySelector(".log-filters").querySelectorAll("button");
+  const downloads = filters.find((button) => button.textContent === "Download");
+  downloads.dispatch("click", { currentTarget: downloads });
+  assert.deepEqual(lines(), ["giulia@cliente.it ha scaricato docs/report.pdf", "Visitatore x1y2z3 ha scaricato tutta la cartella docs/"]);
+  const links = panel.app.querySelector(".log-tools").querySelector("select");
+  links.value = "as_000000000002";
+  links.dispatch("change");
+  await settle();
+  assert.ok(asked.some((path) => path.includes("share=as_000000000002")), "one link's log is asked for that link");
+  const all = filters.find((button) => button.textContent === "Tutto");
+  all.dispatch("click", { currentTarget: all });
+  assert.deepEqual(lines(), ["Visitatore p4ss00 ha sbagliato la password"], "and the folder's own changes step aside");
+});

@@ -1138,7 +1138,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       });
       return send(res, 201, artifacts.folderView(folder));
     }
-    let match = /^\/api\/artifacts\/folders\/(af_[a-f0-9]{12})(?:\/(restore|shares|blobs|upload))?$/.exec(path);
+    let match = /^\/api\/artifacts\/folders\/(af_[a-f0-9]{12})(?:\/(restore|shares|blobs|upload|events))?$/.exec(path);
     if (match) {
       const folder = store.artifactFolder(match[1]);
       if (!folder) throw new HttpError(404, "cartella non trovata");
@@ -1146,6 +1146,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (match[2] === "blobs" && method === "POST") {
         const length = req.headers["content-length"] === undefined ? NaN : Number(req.headers["content-length"]);
         return send(res, 201, await artifacts.receive(folder.id, user, req, length));
+      }
+      // Who opened, viewed and downloaded what through the folder's links, and what changed on them.
+      if (match[2] === "events" && method === "GET") {
+        if (!artifacts.canReview(folder, user)) throw new HttpError(403, "il registro lo vedono il proprietario e i revisori della cartella");
+        return send(res, 200, { events: store.artifactEvents(folder.id, { shareId: url.searchParams.get("share") || "", before: Number(url.searchParams.get("before")) || 0, limit: 200 }) });
       }
       if (match[2] === "upload" && method === "POST") {
         const body = await readJson(req, 2 * 1024 * 1024);
@@ -1171,6 +1176,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           shareHosting: Boolean(artifacts.shareSuffix),
           shareSuffix: artifacts.shareSuffix,
           shares: store.artifactShares(folder.id).map((share) => artifacts.shareView(share)),
+          activity: artifacts.canReview(folder, user) ? store.artifactEventCounts(folder.id) : {},
           commits: store.artifactCommits(folder.id, { limit: 200 }).map((commit) => artifacts.commitSummary(commit)),
           tree: head ? [...artifacts.readTree(head.tree).entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([name, file]) => ({ path: name, sha: file.sha, size: file.size })) : [],
         });
@@ -1226,6 +1232,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (method === "PUT") return send(res, 200, artifacts.updateShare(share.id, await readJson(req, 32768), user));
       if (method === "DELETE") {
         store.deleteArtifactShare(share.id);
+        artifacts.shareEvent(share, "deleted", by);
         activity({ type: "artifact", text: `${by.name} ha eliminato il link ${share.label}` });
         return send(res, 200, { ok: true });
       }

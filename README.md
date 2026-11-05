@@ -90,7 +90,11 @@ What the agents make on their computers and has to be kept or shown (a report, a
   - The agent's receipt says PROPOSED or PUBLISHED. Cora posts a passive notice in the conversation the push came from, and the owner gets a push notification.
 - **Pull.** `artifact_pull` writes a folder's served version onto a desktop, in `/home/agent/work/artifacts/<path>`, so an agent can continue another's work and push it back.
 - **Sharing.** A folder can be opened to people outside the space through a link with an address of its own, `<label>--<space>.usecora.space`.
-  - **What it serves.** The served version, or a pinned one. It shows as a site (index pages, clean URLs, `404.html`) or as a list of files, where pages and scripts download instead of running.
+  - **What it serves.** The served version, or a pinned one. It shows as a site (index pages, clean URLs, `404.html`) or as a drive of files:
+    - folders and files as cards (pictures as themselves, the first lines of a text) or as a list;
+    - a search over the whole folder;
+    - a page per file with its preview (pictures, video, audio, PDF, text with line numbers, CSV as a table; pages and scripts as their source, never running), the files beside it, and *Scarica*;
+    - the whole folder, or one subfolder, as a zip.
   - **Who gets in.** Each link is one of three kinds:
     - **Public:** anyone with the link, signed in nowhere. It still stays out of search engines.
     - **With a password:** the link asks for it on its own address. Only a hash is kept. Ten wrong tries in ten minutes pause it, and a new password signs out whoever came in with the old one.
@@ -98,6 +102,7 @@ What the agents make on their computers and has to be kept or shown (a report, a
   - **How a named person gets in.** They prove who they are at usecora.space, with Google or with a sign-in link sent by email from usecora.space (Resend; Cora's ambox mailbox when Resend has no key), then the space checks its own list and sets a cookie for that host alone.
   - **What counts for a whole domain.** A domain grant counts with Google only for that domain's Workspace accounts. Otherwise the mailbox has to receive the link. Webmail domains cannot be granted whole.
   - **Changing access.** Narrowing a link's access, letting it expire or revoking it closes it for everyone already in.
+  - **The log.** A folder's *Registro* tab shows, for its owner and reviewers, who opened its links, what they searched, viewed and downloaded, who got in and who was turned away, beside every change to its links and files. Someone who signed in is named by their address. Someone on a public link is a short code made from their network and browser (the address itself is never kept), with their browser and system. Each link's row counts its visits, views and downloads.
   - **Requests from agents.** An agent can only ask for a link (`artifact_share_request`), and the owner or a folder reviewer turns it on.
   - **Commit previews.** A reviewer opens a proposed commit on an address of its own (`p-<commit>--<space>`), so a site is seen as it will be.
 - **The panel.** **Artefatti** shows:
