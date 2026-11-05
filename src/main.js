@@ -79,6 +79,7 @@ export function startCora(overrides = {}) {
   };
   const mailboxFor = (agent) => store.value(`agentMailbox:${agent.id}`, null);
   const boxes = new Boxes({ docker: cfg.docker, image: cfg.boxImage, timezone: cfg.timezone, access: (agent) => ({ sshPort: store.sshPort(agent.id), keys: sshKeys() }),
+    gitAttribution: { enabled: cfg.gitAttribution, email: cfg.gitCoauthorEmail },
     mailbox: { endpoint: cfg.mailEndpoint, domain: cfg.mailDomain, namespace: cfg.mailNamespace, token: cfg.mailRegistrationToken, identity: mailboxFor,
       changed: (agent, state) => { store.setValue(`agentMailbox:${agent.id}`, { ...mailboxFor(agent), ...state }); if (state.status === "blocked") activity({ type: "error", agentId: agent.id, text: state.error }); },
     },

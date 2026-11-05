@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 
 const OUTPUT_LIMIT = 24000;
 const MAILBOX_SCRIPT = readFileSync(new URL("./desktop-mailbox.mjs", import.meta.url), "utf8");
+const GIT_SCRIPT = readFileSync(new URL("./desktop-git.sh", import.meta.url), "utf8");
+const SSH_SCRIPT = readFileSync(new URL("./desktop-ssh.mjs", import.meta.url), "utf8");
+const GIT_SETUP_SCRIPT = readFileSync(new URL("./desktop-git-setup.mjs", import.meta.url), "utf8");
 
 /**
  * Lists a file or a folder under /home/agent/work for a push: one JSON line per
@@ -260,12 +263,14 @@ export function slug(name) {
 
 export class Boxes {
   /** `access(agent)` gives the box's SSH port on the host and the public keys allowed in. */
-  constructor({ docker, image, timezone, access = () => ({}), mailbox = null }) {
+  constructor({ docker, image, timezone, access = () => ({}), mailbox = null, gitAttribution = null }) {
     this.docker = docker;
     this.image = image;
     this.timezone = timezone;
     this.access = access;
     this.mailbox = mailbox;
+    this.gitAttribution = gitAttribution;
+    this.gitChecks = new Map();
     this.mailboxChecks = new Map();
     this.mailboxQueue = Promise.resolve();
     this.pending = new Map();
@@ -318,11 +323,26 @@ export class Boxes {
   ensure(agent, { upgrade = false } = {}) {
     if (this.pending.has(agent.id)) return this.pending.get(agent.id);
     const job = this.ensureNow(agent, { upgrade }).then(async (current) => {
+      await this.ensureGitAttribution(agent, current);
       await this.ensureMailbox(agent);
       return current;
     }).finally(() => this.pending.delete(agent.id));
     this.pending.set(agent.id, job);
     return job;
+  }
+
+  async ensureGitAttribution(agent, current) {
+    if (!this.gitAttribution || !agent.tools) return;
+    const { enabled, email } = this.gitAttribution;
+    const version = `${current.startedAt}:${enabled}:${email}`;
+    if (this.gitChecks.get(agent.id) === version) return;
+    const quoted = `'${String(email).replace(/'/g, "'\\''")}'`;
+    const git = GIT_SCRIPT.replace("__CORA_ENABLED__", enabled ? "1" : "0").replace("__CORA_EMAIL__", quoted);
+    const result = await runProcess(this.docker, this.execArgs(agent.id, ["node", "--input-type=module", "-e", GIT_SETUP_SCRIPT], { root: true }), {
+      input: JSON.stringify({ git, ssh: SSH_SCRIPT, enabled, email }), timeoutMs: 15000, maxBytes: 4096,
+    });
+    if (result.code !== 0) throw new Error(`Git attribution setup failed: ${result.stderr.trim().slice(0, 300)}`);
+    this.gitChecks.set(agent.id, version);
   }
 
   ensureMailbox(agent) {
@@ -488,8 +508,13 @@ export class Boxes {
   async gitCommit(agentId, directory, message, trailer = "") {
     if (!posix.isAbsolute(directory) || directory.includes("\0")) throw new Error("repository must be an absolute desktop path");
     if (!message.trim() || message.length > 64000 || message.includes("\0")) throw new Error("commit message must contain 1–64000 characters without NUL");
-    const argv = ["git", "-C", directory, ...(trailer ? ["-c", "trailer.ifExists=addIfDifferent"] : []), "commit", "--file=-", ...(trailer ? ["--trailer", trailer] : [])];
-    const result = await runProcess(this.docker, this.execArgs(agentId, argv), { input: message, timeoutMs: 120000, maxBytes: 1024 * 1024 });
+    const managed = this.gitAttribution && this.gitChecks.has(agentId);
+    const email = trailer ? /<([^<>]+)>$/.exec(trailer)?.[1] : "";
+    if (managed && trailer && !email) throw new Error("invalid Cora co-author trailer");
+    const explicit = trailer && !managed;
+    const argv = ["git", "-C", directory, ...(explicit ? ["-c", "trailer.ifExists=addIfDifferent"] : []), "commit", "--file=-", ...(explicit ? ["--trailer", trailer] : [])];
+    const command = managed ? ["env", ...(trailer ? ["CORA_GIT_ATTRIBUTION=1", `CORA_GIT_COAUTHOR_EMAIL=${email}`] : ["CORA_GIT_ATTRIBUTION=0"]), ...argv] : argv;
+    const result = await runProcess(this.docker, this.execArgs(agentId, command), { input: message, timeoutMs: 120000, maxBytes: 1024 * 1024 });
     return { code: result.code, timedOut: result.timedOut, output: clip(`${result.stdout.toString("utf8")}${result.stderr}`) };
   }
 
