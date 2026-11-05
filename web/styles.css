@@ -1661,3 +1661,10 @@ a.share-url:hover { color: var(--amber); }
   .vault-actions { width: 100%; justify-content: flex-start; padding-left: 46px; }
   .vault-value { flex-direction: column; align-items: stretch; }
 }
+.share-access .chip.public { border-color: var(--amber-line); color: var(--amber); }
+.share-modes { flex-wrap: wrap; }
+.share-new .row .field { margin: 0; min-width: 200px; }
+.share-row { flex-wrap: wrap; }
+.share-edit { flex-basis: 100%; margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--line); }
+.share-new > [hidden], .share-edit > [hidden] { display: none; }
+.share-modes { align-self: flex-start; }

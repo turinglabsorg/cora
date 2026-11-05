@@ -1137,10 +1137,19 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       });
       return send(res, 201, artifacts.folderView(folder));
     }
-    let match = /^\/api\/artifacts\/folders\/(af_[a-f0-9]{12})(?:\/(restore|shares))?$/.exec(path);
+    let match = /^\/api\/artifacts\/folders\/(af_[a-f0-9]{12})(?:\/(restore|shares|blobs|upload))?$/.exec(path);
     if (match) {
       const folder = store.artifactFolder(match[1]);
       if (!folder) throw new HttpError(404, "cartella non trovata");
+      // Uploads from the panel: each file on its own as raw bytes, then one commit that places them.
+      if (match[2] === "blobs" && method === "POST") {
+        const length = req.headers["content-length"] === undefined ? NaN : Number(req.headers["content-length"]);
+        return send(res, 201, await artifacts.receive(folder.id, user, req, length));
+      }
+      if (match[2] === "upload" && method === "POST") {
+        const body = await readJson(req, 2 * 1024 * 1024);
+        return send(res, 201, await artifacts.commitUpload(folder.id, { user, dir: body.dir, base: body.base, files: body.files, message: body.message }));
+      }
       if (match[2] === "restore" && method === "POST") {
         const body = await readJson(req, 4096);
         return send(res, 200, await artifacts.restore(folder.id, String(body.commit || ""), user));
@@ -1361,7 +1370,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (!fields?.email || !fields.host || !firstUse(fields)) throw new HttpError(403, "refused");
     const target = shares.match({ headers: { host: String(fields.host) } });
     const resolved = target ? artifacts.resolveHost(target.label) : null;
-    const allowed = Boolean(resolved && artifacts.allows(resolved, { email: fields.email, via: "email" }));
+    // Only a link for named people is opened by email; a public or password link never sends one.
+    const forPeople = resolved && (resolved.kind === "preview" || (resolved.share.access.mode || "people") === "people");
+    const allowed = Boolean(forPeople && artifacts.allows(resolved, { email: fields.email, via: "email" }));
     return send(res, 200, { allowed, title: allowed ? resolved.folder.title : "", language: store.settings.language || "it" });
   }
 

@@ -529,8 +529,8 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
   const [section, current] = route();
   const nav = [
     ["agenti", "Agenti", "users", ["agenti", "agent", "new"].includes(section)],
-    ["salotto", "Salotto", "chat", section === "salotto"],
-    ["banco", "Banco", "grid", section === "banco"],
+    // The salotto opens from the Banco: it is one of the desk's rooms, not a section of its own.
+    ["banco", "Banco", "grid", section === "banco" || section === "salotto"],
     ["contesto", "Contesto", "book", section === "contesto"],
     ["brain", "Brain", "bulb", section === "brain"],
     ["artefatti", "Artefatti", "archive", section === "artefatti", S.data?.artifacts?.reviews || 0],
@@ -2930,7 +2930,7 @@ function renderSalotto() {
     pageHead(h("span", {}, "Il ", h("em", {}, "salotto")), "Tutti gli agenti in onda: risponde chi chiami per nome."),
     requestsStrip(),
     slot,
-  ], { title: "Salotto", mode: "chat" });
+  ], { title: "Salotto", mode: "chat", back: "#/banco" });
   chatPanel(SALOTTO, { placeholder: "Scrivi a tutti…", isCurrent: () => slot.isConnected && route()[0] === "salotto" }).then((chat) => {
     if (slot.isConnected && chat) slot.replaceChildren(chat);
   });
@@ -4028,16 +4028,52 @@ const SHARE_STATE = { active: ["Attivo", "on"], proposed: ["Da attivare", "warn"
 
 /** Who may open a share, as chips: the addresses, the domains, the people of this space. */
 function shareAccessChips(access) {
+  if (access.mode === "public") return h("span", { class: "share-access" }, h("span", { class: "chip on public" }, icon("globe"), "Pubblico: chiunque abbia il link"));
+  if (access.mode === "password") return h("span", { class: "share-access" }, h("span", { class: "chip on" }, icon("key"), "Con una password"));
   return h("span", { class: "share-access" },
-    access.members ? h("span", { class: "chip on" }, icon("users"), "Chi entra in questo spazio") : null,
+    access.members ? h("span", { class: "chip on" }, icon("users"), "Il team di questo spazio") : null,
     access.domains.map((domain) => h("span", { class: "chip on" }, icon("globe"), raw(`@${domain}`))),
     access.emails.map((email) => h("span", { class: "chip" }, raw(email))));
 }
 
-/**
- * The folder's links, each a host of its own that opens only for the people it names,
- * and the form for a new one. Nothing is ever public.
- */
+/** Who may open a link: anyone with it, whoever knows its password, or the people it names. */
+function shareAccessPicker(access = {}) {
+  const current = access.mode || "people";
+  // Addresses and domains are compared lowercase everywhere: they are written that way too.
+  const emails = h("textarea", { name: "emails", rows: 2, placeholder: "giulia@cliente.it, mario@cliente.it", autocapitalize: "off", spellcheck: "false" }, (access.emails || []).join(", "));
+  const domains = h("input", { type: "text", name: "domains", class: "mono", placeholder: "cliente.it", autocapitalize: "off", spellcheck: "false", value: (access.domains || []).join(", ") });
+  for (const input of [emails, domains]) input.addEventListener("input", () => { const at = input.selectionStart; input.value = input.value.toLowerCase(); input.setSelectionRange?.(at, at); });
+  const kept = current === "password";
+  const password = h("input", { type: "password", name: "password", minlength: 6, autocomplete: "new-password", "aria-label": tr("Password"), placeholder: kept ? tr("lasciala vuota per tenere quella di ora") : "" });
+  const team = switchInput("members", "Anche il team", Boolean(access.members), "chi può già entrare in questo pannello, senza scriverli uno per uno");
+  const parts = {
+    public: h("p", { class: "notice warn" }, icon("globe"), h("span", {}, "Lo apre chiunque abbia il link, senza entrare da nessuna parte. Non finisce nei motori di ricerca, ma chi lo riceve può inoltrarlo.")),
+    people: h("div", { class: "stack-sm" },
+      field("Indirizzi", emails, "chi può aprirlo, separati da virgole o a capo: entra con Google o con un link che gli arriva per email"),
+      field("Domini aziendali", domains, "chiunque abbia un indirizzo di quel dominio (mai gmail.com e simili)"),
+      team),
+    password: field("Password", password, kept ? "cambiandola, chi è entrato con quella di prima esce" : "almeno 6 caratteri: dilla a chi deve aprirlo in un messaggio a parte, non insieme al link"),
+  };
+  const mode = { value: current };
+  const show = () => {
+    for (const [name, part] of Object.entries(parts)) part.hidden = name !== mode.value;
+    password.required = mode.value === "password" && !kept;
+  };
+  const modes = h("div", { class: "segmented share-modes", role: "radiogroup", "aria-label": tr("Chi può aprirlo") },
+    [["public", "Pubblico", "globe"], ["people", "Persone precise", "users"], ["password", "Con password", "key"]].map(([key, text, name]) => h("button", { type: "button", role: "radio", class: key === mode.value ? "on" : "", "aria-checked": String(key === mode.value), onclick: (event) => {
+      mode.value = key;
+      for (const button of modes.children) { button.classList.toggle("on", button === event.currentTarget); button.setAttribute("aria-checked", String(button === event.currentTarget)); }
+      show();
+    } }, icon(name), text)));
+  show();
+  return {
+    nodes: [field("Chi può aprirlo", modes), parts.public, parts.people, parts.password],
+    value: () => mode.value === "public" ? { mode: "public" } : mode.value === "password" ? { mode: "password", password: password.value }
+      : { mode: "people", emails: emails.value, domains: domains.value, members: Boolean(team.querySelector("input")?.checked) },
+  };
+}
+
+/** The folder's links, each a host of its own, and the form for a new one. */
 function artifactShares(data) {
   const { folder } = data;
   if (!data.shareHosting) {
@@ -4055,7 +4091,19 @@ function artifactShares(data) {
       : share.status === "active"
         ? armedButton("Revoca", "Conferma: chiudi il link", { cls: "sm", onconfirm: async () => { if (await guard(api(`/api/artifacts/shares/${share.id}`, { method: "PUT", body: { status: "revoked" } }), "Link revocato")) reload(); } })
         : armedButton("Elimina", "Conferma", { cls: "sm", onconfirm: async () => { if (await guard(api(`/api/artifacts/shares/${share.id}`, { method: "DELETE" }), "Link eliminato")) reload(); } });
-    return h("li", { class: `share-row ${share.status}` },
+    const edit = data.canReview && share.status !== "revoked" ? btn("Modifica", { icon: "edit", cls: "sm ghost", title: "Chi può aprirlo", onclick: () => {
+      const open = item.querySelector(".share-edit");
+      if (open) return open.remove();
+      const access = shareAccessPicker(share.access);
+      const editor = h("form", { class: "share-edit stack" }, ...access.nodes,
+        h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Annulla", { cls: "sm ghost", onclick: () => editor.remove() }), btn("Salva", { icon: "check", cls: "sm primary", type: "submit" })));
+      editor.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (await guard(api(`/api/artifacts/shares/${share.id}`, { method: "PUT", body: { access: access.value() } }), "Link aggiornato")) reload();
+      });
+      item.append(editor);
+    } }) : null;
+    const item = h("li", { class: `share-row ${share.status}` },
       h("i", { class: `led${live ? " on" : share.status === "proposed" ? " busy" : ""}`, "aria-hidden": "true" }),
       h("div", { class: "grow share-text" },
         h("div", { class: "row tight" }, live ? h("a", { class: "share-url", href: share.url, target: "_blank", rel: "noopener" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))) : h("span", { class: "share-url" }, raw(share.url.replace(/^https:\/\//, "").replace(/\/$/, ""))), badge(label, cls), badge(share.view === "files" ? "File" : "Sito", "", share.view === "files" ? "folder" : "globe")),
@@ -4066,7 +4114,8 @@ function artifactShares(data) {
           share.expiresAt ? tr("scade {when}", { when: fmtTime(new Date(share.expiresAt).toISOString(), true) }) : tr("non scade"),
           share.commit ? tr("fissato alla versione {id}", { id: share.commit.slice(3, 10) }) : tr("segue la versione in onda"),
         ].filter(Boolean).join(" · ")))),
-      h("div", { class: "row-actions" }, live ? copy : null, actions));
+      h("div", { class: "row-actions" }, live ? copy : null, edit, actions));
+    return item;
   });
   let form = null;
   if (data.canReview) {
@@ -4080,28 +4129,26 @@ function artifactShares(data) {
         for (const button of views.children) { button.classList.toggle("on", button === event.currentTarget); button.setAttribute("aria-checked", String(button === event.currentTarget)); }
       } }, icon(name), text)));
     const expiry = h("select", { name: "expiry", "aria-label": tr("Scadenza") }, [["0", "Non scade"], ["7", "Tra 7 giorni"], ["30", "Tra 30 giorni"], ["90", "Tra 90 giorni"]].map(([value, text]) => h("option", { value }, text)));
+    const access = shareAccessPicker();
     form = h("form", { class: "share-new stack" },
       h("div", { class: "grid2" },
         field("Nome del link", h("div", { class: "share-host" }, label, suffix ? h("span", { class: "mono" }, raw(suffix)) : null), "lettere minuscole, cifre e trattini"),
         field("Come si vede", views)),
-      field("Indirizzi", h("textarea", { name: "emails", rows: 2, placeholder: "giulia@cliente.it, mario@cliente.it" }), "chi può aprirlo, separati da virgole o a capo"),
-      h("div", { class: "grid2" },
-        field("Domini aziendali", h("input", { type: "text", name: "domains", class: "mono", placeholder: "cliente.it" }), "chiunque abbia un indirizzo di quel dominio (mai gmail.com e simili)"),
-        field("Scadenza", expiry)),
-      h("div", { class: "row" }, switchInput("members", "Anche chi entra in questo spazio", false), h("span", { class: "spacer" }), btn("Crea il link", { icon: "link", cls: "primary", type: "submit" })));
+      ...access.nodes,
+      h("div", { class: "row" }, field("Scadenza", expiry), h("span", { class: "spacer" }), btn("Crea il link", { icon: "link", cls: "primary", type: "submit" })));
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const values = new FormData(form);
       const days = Number(values.get("expiry"));
       const created = await guard(api(`/api/artifacts/folders/${folder.id}/shares`, { method: "POST", body: {
         label: values.get("label"), view: view.value, expiresAt: days ? Date.now() + days * 86400000 : 0,
-        access: { emails: String(values.get("emails") || ""), domains: String(values.get("domains") || ""), members: Boolean(values.get("members")) },
+        access: access.value(),
       } }), "Link creato");
       if (created) reload();
     });
   }
   return [
-    panel({ icon: "link", title: "Link di condivisione", hint: "Ogni link ha un indirizzo suo e si apre solo per chi nomina: con Google o con un link via email. Mai pubblico." },
+    panel({ icon: "link", title: "Link di condivisione", hint: "Ogni link ha un indirizzo suo: pubblico, con una password, o solo per persone precise, che entrano con Google o con un link via email." },
       rows.length ? h("ul", { class: "share-list" }, rows) : empty("link", "Ancora nessun link per questa cartella.")),
     form ? panel({ icon: "plus", title: "Nuovo link" }, form) : null,
   ];

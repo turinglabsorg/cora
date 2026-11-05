@@ -264,7 +264,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "artifact_share_request",
-    description: "Ask the owner for a link that opens an artifact folder to specific people (their emails, or a company domain): it is created switched off, and only the owner or a folder reviewer turns it on. Links are never public. Use it when someone asked you to share a folder, and tell them the owner has to approve it.",
+    description: "Ask the owner for a link that opens an artifact folder to specific people (their emails, or a company domain): it is created switched off, and only the owner or a folder reviewer turns it on. You can only ask for a link for named people: making a link public or putting a password on it is the owner's choice, in the panel. Use it when someone asked you to share a folder, and tell them the owner has to approve it.",
     parameters: {
       type: "object",
       properties: {

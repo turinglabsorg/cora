@@ -882,6 +882,12 @@ describe("panel auth", () => {
       await panel.navigate("#/salotto");
       await waitFor(() => panel.app.querySelector(".chat-input"));
       assert.ok(paths.includes("/api/rooms/web/messages"), "the dedicated lounge still opens its history");
+      for (const menu of [".side-nav", ".tabbar"]) {
+        const links = panel.app.querySelector(menu).querySelectorAll("a");
+        assert.equal(links.some((link) => link.attributes.href === "#/salotto"), false, `the salotto is not in the ${menu}`);
+        assert.equal(links.find((link) => link.attributes.href === "#/banco").className, "active", "it is a room of the Banco");
+      }
+      assert.equal(panel.app.querySelector(".appbar").querySelector("a").attributes.href, "#/banco", "on a phone its back arrow returns to the Banco");
       await panel.navigate("#/");
       assert.equal(panel.app.querySelector("h1").textContent, "Agents");
     } finally {

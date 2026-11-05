@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { SECRET_SHAPES } from "./company-brain.js";
@@ -20,6 +20,19 @@ const PREVIEW_LABEL = /^p-([a-f0-9]{12})$/;
 // Anyone can have an address there: a grant to the whole domain would be a grant to everyone.
 const WEBMAIL = new Set(["gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "hotmail.it", "live.com", "live.it", "msn.com", "yahoo.com", "yahoo.it", "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com", "pm.me", "gmx.com", "gmx.de", "gmx.net", "web.de", "libero.it", "virgilio.it", "tiscali.it", "alice.it", "tim.it", "tin.it", "fastwebnet.it", "yandex.ru", "yandex.com", "mail.ru", "qq.com", "163.com", "zoho.com", "hey.com", "fastmail.com", "tutanota.com", "ambox.dev"]);
 const EMAIL = /^[^\s@]+@([a-z0-9-]+\.)+[a-z]{2,}$/;
+export const SHARE_MODES = ["people", "public", "password"];
+
+/** An address as it is compared everywhere: trimmed, without mailto: or brackets, lowercase. */
+export function cleanEmail(value) {
+  return String(value ?? "").normalize("NFC").trim().replace(/^mailto:/i, "").replace(/^<|>$/g, "").trim().toLowerCase();
+}
+
+/** A domain as it is compared everywhere: without @, scheme, path or final dot, lowercase. */
+export function cleanDomain(value) {
+  return String(value ?? "").normalize("NFC").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^@/, "").replace(/\/.*$/, "").replace(/\.$/, "");
+}
+
+const hashPassword = (password, salt = randomBytes(16).toString("hex")) => ({ salt, hash: scryptSync(String(password), salt, 32).toString("hex") });
 const DOMAIN = /^([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
 
 export class ArtifactError extends Error {
@@ -552,6 +565,115 @@ export class Artifacts {
     });
   }
 
+  /** Room for this many more bytes: the quota, and the disk underneath. */
+  roomFor(incoming) {
+    if (this.store.artifactBytes() + incoming > this.quota) throw new ArtifactError(`gli artefatti supererebbero lo spazio di questo server (${Math.round(this.quota / 1024 / 1024 / 1024)} GB): libera spazio o alzalo nelle impostazioni`, 507);
+    try {
+      const disk = statfsSync(this.dir);
+      if (disk.bavail * disk.bsize - incoming < LIMITS.freeBytes) throw new ArtifactError("il server sta finendo lo spazio su disco", 507);
+    } catch (error) {
+      if (error instanceof ArtifactError) throw error;
+    }
+  }
+
+  /**
+   * One file a person uploads from the panel, as it arrives: hashed while it is
+   * written, kept under its hash, and remembered as theirs for this folder.
+   */
+  async receive(folderId, user, body, size) {
+    const folder = this.store.artifactFolder(folderId);
+    if (!folder) throw new ArtifactError("cartella non trovata", 404);
+    if (!Number.isSafeInteger(size) || size < 0) throw new ArtifactError("serve la dimensione del file (Content-Length)", 411);
+    if (size > LIMITS.fileBytes) throw new ArtifactError(`un file può essere al massimo di ${LIMITS.fileBytes / 1024 / 1024} MB`, 413);
+    this.roomFor(size);
+    const temporary = join(this.dir, "tmp", randomBytes(12).toString("hex"));
+    const fd = openSync(temporary, "wx", 0o600);
+    const hash = createHash("sha256");
+    let written = 0;
+    try {
+      for await (const chunk of body) {
+        written += chunk.length;
+        if (written > size) throw new ArtifactError("il file è più grande di quanto annunciato", 400);
+        hash.update(chunk);
+        writeSync(fd, chunk);
+      }
+      if (written !== size) throw new ArtifactError("il file è arrivato a metà: riprova", 400);
+      fsyncSync(fd);
+    } catch (error) {
+      closeSync(fd);
+      rmSync(temporary, { force: true });
+      throw error;
+    }
+    closeSync(fd);
+    const sha = hash.digest("hex");
+    const target = this.objectPath(sha);
+    if (existsSync(target)) rmSync(temporary, { force: true });
+    else {
+      mkdirSync(join(this.dir, "objects", sha.slice(0, 2)), { recursive: true, mode: 0o700 });
+      renameSync(temporary, target);
+    }
+    this.store.addArtifactObject(sha, size);
+    this.store.addArtifactUpload(folder.id, `user:${user.id}`, sha);
+    return { sha, size };
+  }
+
+  /**
+   * Files uploaded from the panel become a commit, laid at the path the person was
+   * looking at. A reviewer of the folder publishes it at once; anyone else proposes it.
+   */
+  async commitUpload(folderId, { user, dir = "", base, files, message = "" }) {
+    const folder = this.store.artifactFolder(folderId);
+    if (!folder) throw new ArtifactError("cartella non trovata", 404);
+    const prefix = String(dir || "").trim().replace(/^\/+|\/+$/g, "");
+    if (prefix) cleanTreePath(prefix);
+    if (!Array.isArray(files) || !files.length) throw new ArtifactError("nessun file da caricare");
+    if (files.length > LIMITS.files) throw new ArtifactError(`al massimo ${LIMITS.files} file alla volta`, 413);
+    const held = this.heldFor(folder.id, `user:${user.id}`);
+    const placed = files.map((file) => {
+      const target = cleanTreePath(prefix ? `${prefix}/${file.path}` : String(file.path || ""));
+      const sha = String(file.sha || "");
+      if (!/^[a-f0-9]{64}$/.test(sha) || !held.has(sha) || !this.hasObject(sha)) throw new ArtifactError(`${target} non è arrivato: caricalo di nuovo`, 409);
+      return { target, sha, size: statSync(this.objectPath(sha)).size };
+    });
+    if (new Set(placed.map((file) => file.target)).size !== placed.length) throw new ArtifactError("due file finirebbero sullo stesso percorso");
+    if (placed.reduce((sum, file) => sum + file.size, 0) > LIMITS.pushBytes) throw new ArtifactError(`al massimo ${LIMITS.pushBytes / 1024 / 1024} MB alla volta`, 413);
+    const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
+    const review = this.canReview(folder, user);
+    return this.withLock(folder.id, async () => {
+      const current = this.store.artifactFolder(folder.id);
+      const known = base === undefined || base === null ? current.head || "" : String(base);
+      if (known && this.store.artifactCommit(known)?.folderId !== folder.id) throw new ArtifactError("versione di partenza sconosciuta", 409);
+      const start = this.treeOf(known);
+      const tree = new Map(start);
+      for (const file of placed) tree.set(file.target, { sha: file.sha, size: file.size });
+      const delta = treeDelta(start, tree);
+      if (!delta.added.length && !delta.modified.length) throw new ArtifactError("questi file ci sono già, uguali", 409);
+      const secrets = this.scanSecrets(tree, [...delta.added, ...delta.modified]);
+      if (secrets.length) throw new ArtifactError(`${secrets.slice(0, 5).map((hit) => `${hit.path} (riga ${hit.line})`).join(", ")} contiene qualcosa che sembra un token o una chiave privata: i segreti vanno nella cassaforte, non in una cartella`, 422);
+      const now = Date.now();
+      const treeSha = this.writeTree(tree);
+      const count = delta.added.length + delta.modified.length;
+      const commit = {
+        id: `ac_${sha256(`${folder.id}\0${treeSha}\0${known}\0${now}\0${randomBytes(8).toString("hex")}`).slice(0, 12)}`,
+        folderId: folder.id, parent: known, base: known, tree: treeSha, to: prefix, mirror: false,
+        message: String(message || "").trim().slice(0, 300) || (count === 1 ? `Caricato ${placed[0].target}` : `Caricati ${count} file${prefix ? ` in ${prefix}` : ""}`),
+        author: by, requestedBy: null, channelId: "", traceId: "",
+        status: "proposed", changes: { added: brief(delta.added), modified: brief(delta.modified), deleted: brief(delta.deleted) },
+        files: tree.size, bytes: [...tree.values()].reduce((sum, file) => sum + file.size, 0),
+        sent: placed.reduce((sum, file) => sum + file.size, 0), skipped: 0, createdAt: now, uploaded: true,
+      };
+      this.store.writeArtifactCommit(commit);
+      const result = review ? this.publishLocked(current, commit, { by }) : null;
+      const final = this.store.artifactCommit(commit.id);
+      if (final.status === "published") this.log({ type: "artifact", text: `${by.name} ha caricato ${count} file in ${folder.path} (${short(final.id)})` });
+      else if (final.status === "proposed") {
+        this.log({ type: "artifact", text: `${by.name} propone ${count} file in ${folder.path} (${short(final.id)}): da rivedere` });
+        this.webPush?.notify({ title: `Artefatti · ${folder.path}`, body: `${by.name} propone: ${final.message}`, url: `/#/artefatti/${folder.id}/c/${final.id}`, tag: `artifact-${final.id}` }).catch?.(() => {});
+      }
+      return { ...(result || {}), commit: this.commitView(final.id) };
+    });
+  }
+
   /** Turns a push's result into what the agent reads: it must not mistake a proposal for a publication. */
   pushReceipt(result) {
     if (result.nothing) return result.text;
@@ -728,9 +850,25 @@ export class Artifacts {
     return this.shareSuffix && /^ac_[a-f0-9]{12}$/.test(commitId) ? `https://p-${commitId.slice(3)}${this.shareSuffix}/` : "";
   }
 
-  cleanAccess(access = {}) {
-    const emails = [...new Set((Array.isArray(access.emails) ? access.emails : String(access.emails || "").split(/[\s,;]+/)).map((item) => String(item).trim().toLowerCase()).filter(Boolean))];
-    const domains = [...new Set((Array.isArray(access.domains) ? access.domains : String(access.domains || "").split(/[\s,;]+/)).map((item) => String(item).trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
+  /**
+   * Who may open a share: anyone with the link (public), anyone with its password, or
+   * named people (addresses, company domains, the space's own people). A password is
+   * kept only as a scrypt hash; changing who may enter is done by updateShare.
+   */
+  cleanAccess(access = {}, previous = null) {
+    const mode = SHARE_MODES.includes(access.mode) ? access.mode : "people";
+    if (mode === "public") return { mode, emails: [], domains: [], members: false };
+    if (mode === "password") {
+      const given = String(access.password ?? "");
+      if (given) {
+        if (given.length < 6 || given.length > 200) throw new ArtifactError("la password di un link è lunga almeno 6 caratteri");
+        return { mode, emails: [], domains: [], members: false, password: hashPassword(given) };
+      }
+      if (previous?.mode === "password" && previous.password) return { mode, emails: [], domains: [], members: false, password: previous.password };
+      throw new ArtifactError("scegli la password del link");
+    }
+    const emails = [...new Set((Array.isArray(access.emails) ? access.emails : String(access.emails || "").split(/[\s,;]+/)).map(cleanEmail).filter(Boolean))];
+    const domains = [...new Set((Array.isArray(access.domains) ? access.domains : String(access.domains || "").split(/[\s,;]+/)).map(cleanDomain).filter(Boolean))];
     const bad = emails.find((email) => !EMAIL.test(email));
     if (bad) throw new ArtifactError(`${bad} non è un indirizzo email`);
     const badDomain = domains.find((domain) => !DOMAIN.test(domain));
@@ -739,8 +877,17 @@ export class Artifacts {
     if (webmail) throw new ArtifactError(`${webmail} è di tutti: autorizza gli indirizzi uno per uno`);
     if (emails.length > 200 || domains.length > 50) throw new ArtifactError("troppi indirizzi per un solo link");
     const members = access.members === true;
-    if (!emails.length && !domains.length && !members) throw new ArtifactError("un link si apre solo per qualcuno: aggiungi un indirizzo, un dominio o chi entra in questo spazio");
-    return { emails, domains, members };
+    if (!emails.length && !domains.length && !members) throw new ArtifactError("aggiungi almeno un indirizzo, un dominio o il team di questo spazio, oppure rendi il link pubblico o con password");
+    return { mode, emails, domains, members };
+  }
+
+  /** Whether a password opens a password share. */
+  passwordOpens(share, password) {
+    const stored = share?.access?.mode === "password" ? share.access.password : null;
+    if (!stored) return false;
+    const given = Buffer.from(hashPassword(password, stored.salt).hash, "hex");
+    const expected = Buffer.from(stored.hash, "hex");
+    return given.length === expected.length && timingSafeEqual(given, expected);
   }
 
   validLabel(label) {
@@ -755,10 +902,11 @@ export class Artifacts {
 
   shareView(share) {
     const folder = this.store.artifactFolder(share.folderId);
-    return { ...share, url: this.shareUrl(share.label), folderPath: folder?.path || "", expired: Boolean(share.expiresAt && share.expiresAt < Date.now()) };
+    const { password, ...access } = share.access || {};
+    return { ...share, access: { mode: "people", ...access }, url: this.shareUrl(share.label), folderPath: folder?.path || "", expired: Boolean(share.expiresAt && share.expiresAt < Date.now()) };
   }
 
-  /** A link for people to open a folder: always behind who may enter, never public. */
+  /** A link that opens a folder on an address of its own: public, behind a password, or for the people it names. */
   createShare(folderId, { label, view, access, commit = "", expiresAt = 0, status = "active", createdBy, requestedBy = null, reason = "" }) {
     if (!this.shareSuffix) throw new ArtifactError("i link di condivisione esistono solo per gli spazi su usecora.space", 409);
     const folder = this.store.artifactFolder(folderId);
@@ -785,7 +933,7 @@ export class Artifacts {
     const share = this.store.artifactShare(id);
     if (!share) throw new ArtifactError("link non trovato", 404);
     const next = { ...share, updatedAt: Date.now() };
-    if (changes.access !== undefined) { next.access = this.cleanAccess(changes.access); next.revision += 1; }
+    if (changes.access !== undefined) { next.access = this.cleanAccess(changes.access, share.access); next.revision += 1; }
     if (changes.view !== undefined) next.view = changes.view === "files" ? "files" : "site";
     if (changes.expiresAt !== undefined) { next.expiresAt = Number(changes.expiresAt) || 0; next.revision += 1; }
     if (changes.commit !== undefined) {
@@ -819,9 +967,9 @@ export class Artifacts {
 
   /** Someone who comes in through the space itself: a person it already admits, or would. */
   isMember(email) {
-    const address = String(email || "").toLowerCase();
+    const address = cleanEmail(email);
     if (!EMAIL.test(address)) return false;
-    if (this.store.panelUsers().some((user) => !user.blocked && user.email.toLowerCase() === address)) return true;
+    if (this.store.panelUsers().some((user) => !user.blocked && cleanEmail(user.email) === address)) return true;
     return this.store.allowsPanelUser({ id: `share:${address}`, email: address, emailVerified: true, role: "member" });
   }
 
@@ -832,12 +980,14 @@ export class Artifacts {
    * address outlives the job.
    */
   allows(target, { email, hd = "", via = "" }) {
-    const address = String(email || "").toLowerCase();
+    if (target.kind === "share" && target.share.access.mode === "public") return true;
+    if (target.kind === "share" && target.share.access.mode === "password") return via === "password";
+    const address = cleanEmail(email);
     if (!EMAIL.test(address) || !["google", "email"].includes(via)) return false;
     if (target.kind === "preview") {
-      return this.store.panelUsers().some((user) => !user.blocked && user.email.toLowerCase() === address && this.canReview(target.folder, user));
+      return this.store.panelUsers().some((user) => !user.blocked && cleanEmail(user.email) === address && this.canReview(target.folder, user));
     }
-    const { access } = target.share;
+    const access = { emails: [], domains: [], ...target.share.access };
     const domain = address.split("@")[1];
     if (access.emails.includes(address)) return true;
     if (access.domains.includes(domain) && (via === "email" || (via === "google" && String(hd).toLowerCase() === domain))) return true;

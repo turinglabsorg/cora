@@ -4,9 +4,10 @@ import { verifyPass } from "./pass.js";
 /**
  * The share hosts: <label>--<space>.<domain>, each a folder (or a commit, for
  * its reviewers) served on an address of its own. Nothing of the panel answers
- * there — no API, no panel cookie — and nothing is public: a visitor proves an
- * address through usecora.space (Google or a link by email), the folder's
- * access says whether it may enter, and a cookie of that host alone keeps it in.
+ * there — no API, no panel cookie. A share is public, behind a password, or for
+ * people: those prove an address through usecora.space (Google or a link by
+ * email) and the share's access says whether they may enter. A cookie of that
+ * host alone keeps a visitor in, until the access changes.
  */
 const TYPES = {
   html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8", css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8",
@@ -55,6 +56,8 @@ const COPY = {
     files: "{count} file",
     up: "Cartella superiore",
     leave: "Esci",
+    locked: ["Serve una password", "Chi ha condiviso questa pagina ti ha dato una password: scrivila qui."],
+    wrong: "Password sbagliata.", tooMany: "Troppi tentativi: riprova tra qualche minuto.", password: "Password", enter: "Entra",
   },
   en: {
     gone: ["This link is gone", "It was revoked or it expired. Ask whoever sent it to you."],
@@ -66,13 +69,16 @@ const COPY = {
     files: "{count} files",
     up: "Up one folder",
     leave: "Sign out",
+    locked: ["A password is needed", "Whoever shared this page gave you a password: type it here."],
+    wrong: "Wrong password.", tooMany: "Too many attempts: try again in a few minutes.", password: "Password", enter: "Enter",
   },
 };
 
 const STYLE = `:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#050505;color:#f5f5f3;font:15px/1.55 "Manrope","Helvetica Neue",Arial,sans-serif;display:flex;flex-direction:column;align-items:center;padding:56px 16px}
 main{width:100%;max-width:760px}h1{font:600 30px/1.15 "Outfit","Helvetica Neue",Arial,sans-serif;letter-spacing:-.03em;margin:0 0 8px}p{color:#8f8f8a;margin:0 0 18px}
 .mark{display:block;width:44px;height:44px;margin-bottom:22px;color:#f2a93b}a{color:#f2a93b}.btn{display:inline-flex;align-items:center;height:40px;padding:0 16px;border-radius:10px;border:1px solid #353535;background:#171717;color:#f5f5f3;text-decoration:none;font:600 12px/1 "DM Mono",monospace;letter-spacing:.1em;text-transform:uppercase}
-.path{font:400 13px/1.4 "DM Mono",monospace;color:#5c5c58;margin:0 0 6px}ul{list-style:none;margin:18px 0 0;padding:0;border:1px solid #232323;border-radius:16px;background:#0f0f0f;overflow:hidden}
+.path{font:400 13px/1.4 "DM Mono",monospace;color:#5c5c58;margin:0 0 6px}
+form{display:grid;gap:12px;max-width:420px}label{font:500 11px/1 "DM Mono",monospace;letter-spacing:.12em;text-transform:uppercase;color:#8f8f8a}input{height:46px;padding:0 14px;border:1px solid #353535;border-radius:10px;background:#000;color:#f5f5f3;font:400 16px/1.5 "Manrope",Arial,sans-serif;outline:none}input:focus{border-color:#f2a93b;box-shadow:0 0 0 3px rgba(242,169,59,.35)}button{height:46px;border:0;border-radius:10px;background:#f2a93b;color:#1d1b18;font:600 12px/1 "DM Mono",monospace;letter-spacing:.12em;text-transform:uppercase;cursor:pointer}.alert{color:#ff9c8b}ul{list-style:none;margin:18px 0 0;padding:0;border:1px solid #232323;border-radius:16px;background:#0f0f0f;overflow:hidden}
 li{border-top:1px solid #232323}li:first-child{border-top:0}li a{display:flex;gap:12px;align-items:center;padding:12px 16px;color:#f5f5f3;text-decoration:none;font:400 14px/1.4 "DM Mono",monospace}li a:hover{background:rgba(242,169,59,.08)}
 li a span{flex:1;min-width:0;overflow-wrap:anywhere}li small{color:#5c5c58;font:400 12px/1 "DM Mono",monospace}li.dir a span{color:#f2a93b}footer{margin-top:28px;font:400 11px/1.4 "DM Mono",monospace;color:#5c5c58;letter-spacing:.08em;text-transform:uppercase}footer a{color:#8f8f8a}`;
 const MARK = `<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="3"><circle cx="32" cy="32" r="18.5"/><g transform="rotate(-24 32 32)"><ellipse cx="32" cy="32" rx="18.5" ry="5.6" stroke-opacity="0.38"/><path d="M13.5 32A18.5 5.6 0 0 0 50.5 32"/></g></g></svg>`;
@@ -86,6 +92,14 @@ function fmtBytes(value) {
 }
 
 export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionKey, activity = () => {} }) {
+  // Wrong passwords per link and visitor: ten in ten minutes, then a pause.
+  const attempts = new Map();
+  const tooMany = (key) => {
+    const now = Date.now();
+    const recent = (attempts.get(key) || []).filter((at) => now - at < 10 * 60000);
+    attempts.set(key, recent);
+    return recent.length >= 10;
+  };
   const secure = !config.insecureCookies;
   const COOKIE = secure ? "__Host-cora_share" : "cora_share";
   const suffix = artifacts?.shareSuffix || "";
@@ -118,7 +132,7 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
   function page(req, res, status, [title, text], extra = "", setCookie = null) {
     res.writeHead(status, headers({
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
       ...(setCookie ? { "Set-Cookie": setCookie } : {}),
     }));
     res.end(`<!doctype html><html lang="${language(req)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title><style>${STYLE}</style></head><body><main>${MARK}<h1>${esc(title)}</h1><p>${text}</p>${extra}</main></body></html>`);
@@ -210,13 +224,42 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
   async function handle(req, res, { host, label }) {
     // The path as sent: "//x/" stays a path here, never an authority.
     const url = new URL(`https://${host}${String(req.url).startsWith("/") ? "" : "/"}${req.url}`);
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    const passwordForm = url.pathname === "/_cora/password";
+    if (req.method !== "GET" && req.method !== "HEAD" && !(passwordForm && req.method === "POST")) {
       res.writeHead(405, headers({ Allow: "GET, HEAD" }));
       return res.end();
     }
     const target = artifacts.resolveHost(label);
     if (!target) return page(req, res, 404, words(req, "gone"));
     if (url.pathname === "/_cora/logout") return page(req, res, 200, words(req, "out"), "", cookieLine("", 0));
+    const mode = target.kind === "share" ? target.share.access.mode || "people" : "people";
+    if (passwordForm && mode === "password") {
+      const next = safeNext(url.searchParams.get("next"));
+      const form = (alert = "") => `${alert ? `<p class="alert">${esc(alert)}</p>` : ""}<form method="post" action="/_cora/password?${esc(new URLSearchParams({ next }).toString())}"><label for="password">${esc(words(req, "password"))}</label><input id="password" name="password" type="password" required autocomplete="current-password" autofocus><button type="submit">${esc(words(req, "enter"))}</button></form>`;
+      if (req.method !== "POST") return page(req, res, 200, words(req, "locked"), form());
+      const site = req.headers["sec-fetch-site"];
+      const origin = req.headers.origin;
+      if ((site && site !== "same-origin") || (origin && origin !== "null" && origin !== `https://${host}` && origin !== `http://${req.headers.host}`)) return page(req, res, 403, words(req, "locked"), form());
+      const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+      const key = `${target.share.id}:${ip}`;
+      if (tooMany(key)) return page(req, res, 429, words(req, "locked"), form(words(req, "tooMany")));
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of req) {
+        size += chunk.length;
+        if (size > 4096) return page(req, res, 413, words(req, "locked"), form());
+        chunks.push(chunk);
+      }
+      const password = new URLSearchParams(Buffer.concat(chunks).toString("utf8")).get("password") || "";
+      if (!artifacts.passwordOpens(target.share, password)) {
+        attempts.get(key).push(Date.now());
+        return page(req, res, 401, words(req, "locked"), form(words(req, "wrong")));
+      }
+      attempts.delete(key);
+      activity({ type: "artifact", text: `il link ${label} è stato aperto con la password` });
+      return redirect(res, next, { "Set-Cookie": admit(target, { email: "", via: "password" }) });
+    }
+    if (passwordForm) return redirect(res, safeNext(url.searchParams.get("next")));
     if (url.pathname === "/_cora/auth") {
       const fields = verifyPass(cloud.key, url.searchParams.get("pass"), { audience: `share:${host}` });
       if (!fields?.email || !firstUse(fields)) return redirect(res, `${cloud.url}/share?${new URLSearchParams({ to: host, next: safeNext(url.searchParams.get("next")) })}`);
@@ -229,7 +272,8 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
       activity({ type: "artifact", text: `${identity.email} ha aperto ${target.kind === "preview" ? `l'anteprima di ${target.folder.path}` : `il link ${label}`}` });
       return redirect(res, safeNext(url.searchParams.get("next")), { "Set-Cookie": admit(target, identity) });
     }
-    if (!viewer(req, target)) return redirect(res, `${cloud.url}/share?${new URLSearchParams({ to: host, next: safeNext(url.pathname + url.search) })}`);
+    if (mode === "password" && !viewer(req, target)) return redirect(res, `/_cora/password?${new URLSearchParams({ next: safeNext(url.pathname + url.search) })}`);
+    if (mode === "people" && !viewer(req, target)) return redirect(res, `${cloud.url}/share?${new URLSearchParams({ to: host, next: safeNext(url.pathname + url.search) })}`);
     if (!target.commit) return page(req, res, 404, words(req, "empty"));
     const tree = artifacts.readTree(target.commit.tree);
     if (url.pathname === "/_cora/files.json") {

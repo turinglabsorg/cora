@@ -65,11 +65,14 @@ Always-on Discord agents with personalities, layered memory, routines and their 
 - **Share hosts:** serving lives in `src/share-host.js` (`shareHosts()`), and its `match()` runs first in `createWeb`'s request and upgrade handlers.
   - **Hosts.** A share's host is `<label>--<space>.<cloud domain>`; `artifacts.shareSuffix` is set in `main.js` only for a space routed by the cloud (no `publicHost`).
   - **What a host shows.** `Artifacts.resolveHost(label)` gives the share, or a commit preview (`p-<12 hex>`, the owner and that folder's reviewers only, matched by panel user email). Served paths come from `resolvePath()` (the site and files views).
-  - **What a host allows.** GET/HEAD only. `/_cora/auth` takes a cloud pass with audience `share:<host>`, single use, checked by `allows()`: exact emails; domains only `via: "email"` or `via: "google"` with `hd == domain`; members through the access allowlist.
+  - **What a host allows.** GET/HEAD only, plus the POST of `/_cora/password`. The share's `access.mode` decides who enters:
+    - `public`: everyone, no cookie.
+    - `password`: `/_cora/password` on the host itself (same-origin POST, 4 KB, ten wrong tries per share and IP in ten minutes, then 429). `passwordOpens()` checks a scrypt hash in constant time, and the cookie carries `via: "password"`.
+    - `people`: `/_cora/auth` takes a cloud pass with audience `share:<host>`, single use, checked by `allows()`. Exact emails; domains only `via: "email"` or `via: "google"` with `hd == domain`; members through the access allowlist. Emails and domains go through `cleanEmail()` / `cleanDomain()` (lowercase) when saved and when compared.
   - **The cookie.** `cora_share` / `__Host-cora_share` is `v1.<scope>.<identity>.<exp>.<revision>.<mac>`. Any access change, expiry or revocation bumps `revision`, and the cookie is rechecked on every request.
   - **Headers.** The ETag is an HMAC, never the sha; single ranges are honoured; `noindex`, `nosniff` and `frame-ancestors 'self'` are always set.
-  - **The cloud's access question.** `POST /api/cloud/share-access` answers it (pass audience `share-access:<space host>` with `host` and `email`).
-  - **Share records.** `artifact_shares` holds `{label, view, access {emails, domains, members}, commit, expiresAt, status active|proposed|revoked, revision}`. `cleanAccess()` refuses webmail domains and an empty access.
+  - **The cloud's access question.** `POST /api/cloud/share-access` answers it (pass audience `share-access:<space host>` with `host` and `email`). It answers *no* for public and password links, so the cloud mails no sign-in link for them.
+  - **Share records.** `artifact_shares` holds `{label, view, access {mode public|password|people, emails, domains, members, password {salt, hash}}, commit, expiresAt, status active|proposed|revoked, revision}`. `cleanAccess()` refuses webmail domains, an empty people access, and a password under 6 characters; an edit without a new password keeps the old hash. `shareView()` never returns the password.
   - **Panel routes.** `POST /api/artifacts/folders/:id/shares` and `PUT|DELETE /api/artifacts/shares/:id`, for reviewers only.
   - **Agent tool.** `artifact_share_request` creates a `proposed` share.
   - **Cloud.**

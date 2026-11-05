@@ -13,7 +13,7 @@ const OWNER = { sub: "ac_owner", role: "owner", name: "Owner", email: "owner@exa
 const SHARE = "report--acme.usecora.test";
 
 /** A request to the instance as if it came through the cloud for another host: Host is what decides. */
-function hit(port, host, path, { method = "GET", headers = {} } = {}) {
+function hit(port, host, path, { method = "GET", headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const request = http.request({ host: "127.0.0.1", port, path, method, headers: { host, ...headers } }, (response) => {
       const chunks = [];
@@ -21,7 +21,7 @@ function hit(port, host, path, { method = "GET", headers = {} } = {}) {
       response.on("end", () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks).toString("utf8") }));
     });
     request.on("error", reject);
-    request.end();
+    request.end(body);
   });
 }
 
@@ -73,7 +73,7 @@ test("a share serves a folder's served version on its own host, only to the addr
   const folderId = pushed.folder.id;
 
   for (const [body, error] of [
-    [{ label: "report", access: {} }, /un link si apre solo per qualcuno/],
+    [{ label: "report", access: {} }, /aggiungi almeno un indirizzo.*pubblico o con password/],
     [{ label: "report", access: { domains: ["gmail.com"] } }, /gmail\.com è di tutti/],
     [{ label: "p-0123456789ab", access: { emails: ["a@b.test"] } }, /almeno tre lettere/],
     [{ label: "a--b", access: { emails: ["a@b.test"] } }, /almeno tre lettere/],
@@ -205,4 +205,140 @@ test("a commit's preview host opens only for its folder's reviewers, and the clo
   assert.equal((await ask("giulia@cliente.test", "nothere--acme.usecora.test")).data.allowed, false);
   const replay = await fetch(`${base}/api/cloud/share-access`, { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" }, body: JSON.stringify({ pass: yes.pass }) });
   assert.equal(replay.status, 403);
+});
+
+test("a share can be public, or open with a password; addresses are lowercase however they are written", async (t) => {
+  const { app, port, base, call, agent, put, owner } = await fixture(t);
+  put("open/index.html", "<h1>Open</h1>");
+  const pushed = await app.artifacts.push({ agent, folder: "aperta", path: "/home/agent/work/open", message: "pagina", requester: { kind: "owner", id: "1", name: "Owner" }, create: { description: "Pagine aperte", kind: "site" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  const folderId = pushed.folder.id;
+  const shares = (body) => call(`/api/artifacts/folders/${folderId}/shares`, { method: "POST", body });
+
+  const open = await shares({ label: "Vetrina", access: { mode: "public" } });
+  assert.equal(open.status, 201);
+  assert.equal(open.data.label, "vetrina");
+  assert.equal(open.data.access.mode, "public");
+  const shown = await hit(port, "vetrina--acme.usecora.test", "/");
+  assert.equal(shown.status, 200, "a public share opens for anyone with the link, signed in nowhere");
+  assert.equal(shown.body, "<h1>Open</h1>");
+  assert.equal(shown.headers["x-robots-tag"], "noindex, nofollow", "and still stays out of search engines");
+  assert.equal(shown.headers["set-cookie"], undefined);
+  assert.equal((await hit(port, "VETRINA--acme.usecora.test", "/")).status, 200, "a host is the same host in capitals");
+
+  assert.match((await shares({ label: "chiusa", access: { mode: "password", password: "corta" } })).data.error, /almeno 6/);
+  const locked = await shares({ label: "chiusa", access: { mode: "password", password: "fixture-door-1" } });
+  assert.equal(locked.status, 201);
+  assert.equal(locked.data.access.mode, "password");
+  assert.equal(locked.data.access.password, undefined, "the panel never gets the password, or its hash, back");
+  assert.equal(JSON.stringify(app.store.artifactShares(folderId)).includes("fixture-door-1"), false, "only a hash of it is kept");
+  const HOST = "chiusa--acme.usecora.test";
+  const outside = await hit(port, HOST, "/about?x=1");
+  assert.equal(outside.status, 302);
+  assert.equal(outside.headers.location, `/_cora/password?${new URLSearchParams({ next: "/about?x=1" })}`, "the password is asked on the share's own host, not at usecora.space");
+  const form = await hit(port, HOST, outside.headers.location);
+  assert.equal(form.status, 200);
+  assert.match(form.body, /<input id="password" name="password" type="password"/);
+  assert.match(form.headers["content-security-policy"], /form-action 'self'/);
+  const post = (password, headers = { "sec-fetch-site": "same-origin" }) => hit(port, HOST, "/_cora/password?next=%2Fabout", {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams({ password }).toString() });
+  assert.equal((await post("fixture-door-1", { "sec-fetch-site": "cross-site" })).status, 403, "another site cannot post the form");
+  assert.equal((await post("fixture-door-1", { origin: "https://evil.test" })).status, 403);
+  const wrong = await post("not-the-door");
+  assert.equal(wrong.status, 401);
+  assert.match(wrong.body, /Password sbagliata/);
+  const right = await post("fixture-door-1");
+  assert.equal(right.status, 302);
+  assert.equal(right.headers.location, "/about");
+  const cookie = right.headers["set-cookie"][0].split(";")[0];
+  assert.equal((await hit(port, HOST, "/", { headers: { cookie } })).body, "<h1>Open</h1>");
+  const email = await enter(port, HOST, { email: "giulia@cliente.test", via: "email" });
+  assert.equal(email.response.status, 403, "a password share is not opened by an address");
+  const asked = await fetch(`${base}/api/cloud/share-access`, { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" },
+    body: JSON.stringify({ pass: signPass(keys.privateKey, { aud: "share-access:acme.usecora.test", host: HOST, email: "owner@example.test" }) }) });
+  assert.equal((await asked.json()).allowed, false, "and the cloud mails no link for it");
+
+  for (let i = 0; i < 10; i += 1) await post(`wrong-${i}`);
+  const blocked = await post("fixture-door-1");
+  assert.equal(blocked.status, 429, "ten wrong passwords in ten minutes, then a pause even for the right one");
+  assert.match(blocked.body, /Troppi tentativi/);
+
+  const unset = await call(`/api/artifacts/shares/${open.data.id}`, { method: "PUT", body: { access: { mode: "password" } } });
+  assert.equal(unset.status, 400, "a share turns to a password only with one");
+  assert.match(unset.data.error, /scegli la password/);
+  const kept = await call(`/api/artifacts/shares/${locked.data.id}`, { method: "PUT", body: { access: { mode: "password" } } });
+  assert.equal(kept.status, 200, "an edit without a new password keeps the one it had");
+  assert.equal(app.artifacts.passwordOpens(app.store.artifactShare(locked.data.id), "fixture-door-1"), true);
+  const renewed = await call(`/api/artifacts/shares/${locked.data.id}`, { method: "PUT", body: { access: { mode: "password", password: "fixture-door-2" } } });
+  assert.equal(renewed.status, 200);
+  assert.equal((await hit(port, HOST, "/", { headers: { cookie } })).status, 302, "a new password sends out who came in with the old one");
+  assert.equal(app.artifacts.passwordOpens(app.store.artifactShare(locked.data.id), "fixture-door-2"), true);
+  assert.equal(app.artifacts.passwordOpens(app.store.artifactShare(locked.data.id), "fixture-door-1"), false);
+
+  const people = await shares({ label: "persone", access: { emails: " Giulia@Cliente.TEST, MARIO@cliente.test ", domains: ["Studio.TEST"] } });
+  assert.equal(people.status, 201);
+  assert.deepEqual([people.data.access.mode, people.data.access.emails, people.data.access.domains], ["people", ["giulia@cliente.test", "mario@cliente.test"], ["studio.test"]]);
+  const giulia = await enter(port, "persone--acme.usecora.test", { email: "GIULIA@cliente.test", via: "google" });
+  assert.equal(giulia.response.status, 302, "an address is the same address in capitals");
+});
+
+test("files uploaded from the panel land where the person is: a reviewer publishes them, anyone else proposes", async (t) => {
+  const { app, base, cookie, call, agent, put, owner } = await fixture(t);
+  put("site/index.html", "<h1>Home</h1>");
+  const pushed = await app.artifacts.push({ agent, folder: "caricati", path: "/home/agent/work/site", message: "sito", requester: { kind: "owner", id: "1", name: "Owner" }, create: { description: "Caricati dal pannello", kind: "site" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  const folderId = pushed.folder.id;
+  const blob = (content, headers = {}, who = cookie) => fetch(`${base}/api/artifacts/folders/${folderId}/blobs`, { method: "POST", headers: { Cookie: who, "X-Cora": "1", "Content-Type": "application/octet-stream", ...headers }, body: content });
+  const sent = await blob("<h1>Chi siamo</h1>");
+  assert.equal(sent.status, 201);
+  const about = await sent.json();
+  assert.equal(about.size, 18);
+  assert.equal((await blob("x", { "X-Cora": "" })).status, 403, "a page elsewhere cannot upload");
+  const logo = await (await blob(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]))).json();
+
+  const placed = await call(`/api/artifacts/folders/${folderId}/upload`, { method: "POST", body: { dir: "chi-siamo", base: pushed.commit.id, files: [{ path: "index.html", sha: about.sha }, { path: "img/logo.png", sha: logo.sha }] } });
+  assert.equal(placed.status, 201);
+  assert.equal(placed.data.commit.status, "published", "the owner reviews this folder, so an upload goes on air at once");
+  assert.equal(placed.data.commit.message, "Caricati 2 file in chi-siamo");
+  const folder = await call(`/api/artifacts/folders/${folderId}`);
+  assert.deepEqual(folder.data.tree.map((file) => file.path), ["chi-siamo/img/logo.png", "chi-siamo/index.html", "index.html"], "they sit under the folder the person was in, beside what was there");
+  assert.equal(folder.data.folder.head, placed.data.commit.id);
+
+  const again = await call(`/api/artifacts/folders/${folderId}/upload`, { method: "POST", body: { files: [{ path: "index.html", sha: about.sha }] } });
+  assert.equal(again.status, 201, "at the root by default, over the file that was there");
+  assert.deepEqual(again.data.commit.changed.map((change) => [change.kind, change.path]), [["modified", "index.html"]]);
+  const stale = await call(`/api/artifacts/folders/${folderId}/upload`, { method: "POST", body: { base: placed.data.commit.id, files: [{ path: "nuovo.txt", sha: logo.sha }] } });
+  assert.equal(stale.status, 201, "made on an older version, it is laid over the new one");
+  assert.ok((await call(`/api/artifacts/folders/${folderId}`)).data.tree.some((file) => file.path === "index.html" && file.sha === about.sha));
+
+  const foreign = await call(`/api/artifacts/folders/${folderId}/upload`, { method: "POST", body: { files: [{ path: "copia.html", sha: pushed.files.find((file) => file.path === "index.html").sha256 }] } });
+  assert.equal(foreign.status, 201, "a file of this folder's own history counts as held");
+  assert.equal((await call(`/api/artifacts/folders/${folderId}/upload`, { method: "POST", body: { files: [{ path: "x.txt", sha: "a".repeat(64) }] } })).status, 409, "holding a hash is not having the file");
+  for (const path of ["../fuori.txt", "/assoluto.txt", "a//b.txt", "_cora/x"]) {
+    assert.equal((await call(`/api/artifacts/folders/${folderId}/upload`, { method: "POST", body: { files: [{ path, sha: about.sha }] } })).status, 400, path);
+  }
+  assert.equal((await call(`/api/artifacts/folders/${folderId}/upload`, { method: "POST", body: { dir: "../su", files: [{ path: "a.txt", sha: about.sha }] } })).status, 400);
+  const token = await (await blob(`STRIPE=${"sk_live_"}${"0123456789abcdefghijklmn"}\n`)).json();
+  const refused = await call(`/api/artifacts/folders/${folderId}/upload`, { method: "POST", body: { files: [{ path: "conf.txt", sha: token.sha }] } });
+  assert.equal(refused.status, 422);
+  assert.match(refused.data.error, /conf\.txt \(riga 1\).*cassaforte/);
+  const huge = await new Promise((resolve, reject) => {
+    const request = http.request(`${base}/api/artifacts/folders/${folderId}/blobs`, { method: "POST", headers: { Cookie: cookie, "X-Cora": "1", "Content-Length": String(200 * 1024 * 1024) } }, (response) => { response.resume(); resolve(response.statusCode); });
+    request.on("error", reject);
+    request.write("abc");
+  });
+  assert.equal(huge, 413, "a file over the limit is refused before it arrives");
+
+  await call("/api/access", { method: "PUT", body: { domains: ["company.test"] } });
+  const entered = await fetch(`${base}/auth/cloud?${new URLSearchParams({ pass: signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_member", role: "member", name: "Sara", email: "sara@company.test", emailVerified: true }) })}`, { redirect: "manual" });
+  const member = entered.headers.get("set-cookie").split(";")[0];
+  assert.equal((await blob("<p>bozza</p>", {}, member)).status, 201);
+  const draft = await (await blob("<p>bozza di Sara</p>", {}, member)).json();
+  const theirs = await fetch(`${base}/api/artifacts/folders/${folderId}/upload`, { method: "POST", headers: { Cookie: member, "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ files: [{ path: "bozza.html", sha: draft.sha }] }) });
+  const proposal = await theirs.json();
+  assert.equal(theirs.status, 201);
+  assert.equal(proposal.commit.status, "proposed", "someone who does not review the folder proposes, like an agent");
+  const owners = await (await blob("<p>solo del proprietario</p>")).json();
+  const lifted = await fetch(`${base}/api/artifacts/folders/${folderId}/upload`, { method: "POST", headers: { Cookie: member, "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ files: [{ path: "preso.html", sha: owners.sha }] }) });
+  assert.equal(lifted.status, 409, "what another person uploaded and never placed stays theirs");
 });
