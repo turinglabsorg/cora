@@ -449,6 +449,14 @@ export class Boxes {
     return { code: result.code, timedOut: result.timedOut, output: clip(output) };
   }
 
+  async gitCommit(agentId, directory, message, trailer = "") {
+    if (!posix.isAbsolute(directory) || directory.includes("\0")) throw new Error("repository must be an absolute desktop path");
+    if (!message.trim() || message.length > 64000 || message.includes("\0")) throw new Error("commit message must contain 1–64000 characters without NUL");
+    const argv = ["git", "-C", directory, ...(trailer ? ["-c", "trailer.ifExists=addIfDifferent"] : []), "commit", "--file=-", ...(trailer ? ["--trailer", trailer] : [])];
+    const result = await runProcess(this.docker, this.execArgs(agentId, argv), { input: message, timeoutMs: 120000, maxBytes: 1024 * 1024 });
+    return { code: result.code, timedOut: result.timedOut, output: clip(`${result.stdout.toString("utf8")}${result.stderr}`) };
+  }
+
   async run(agentId, argv, { timeoutMs = 30000 } = {}) {
     const result = await runProcess(this.docker, this.execArgs(agentId, argv), { timeoutMs });
     return { code: result.code, output: clip(`${result.stdout.toString("utf8")}${result.stderr}`, 4000) };

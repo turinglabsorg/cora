@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { bm25 } from "./memory.js";
 import { SHARED } from "./store.js";
+import { coauthorTrailer } from "./git-attribution.js";
 
 const XDOTOOL_BUTTON = { click: "1", double_click: "1", right_click: "3", middle_click: "2" };
 
@@ -16,6 +17,18 @@ export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget
 export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history", "artifact_folders", "artifact_log", "secret_list", "secret_request"]);
 
 export const TOOL_DEFS = [
+  {
+    name: "git_commit",
+    description: "Commit the staged changes in a Git repository on your desktop, adding Cora's configured Co-authored-by trailer. Preserves the repository's author, existing co-authors, hooks and signing settings. Stage and review the intended changes first; use this tool instead of shell git commit. Does not push, amend, stage files or change Git configuration. Respect repository and owner attribution policies.",
+    parameters: {
+      type: "object",
+      properties: {
+        directory: { type: "string", description: "Absolute path of the repository on your desktop" },
+        message: { type: "string", description: "Commit subject and optional body, with real newlines" },
+      },
+      required: ["directory", "message"],
+    },
+  },
   {
     name: "shell",
     description: "Run a bash command on your own Linux computer (Debian, user 'agent' with passwordless sudo, home /home/agent, DISPLAY=:1 so GUI apps open on your desktop). This Cora MCP tool runs on your separate desktop: it can write files and call authorized remote connectors even when the local Codex CLI host is read-only. Respect the current task's authorization and actual connector permissions. Use it to browse with curl, write and run scripts (node, python3), manage files, install packages. Long-running GUI apps must be started in the background (nohup ... &).",
@@ -334,6 +347,7 @@ function num(value, fallback = 0) {
 }
 
 export function summarizeArgs(name, args) {
+  if (name === "git_commit") return `${String(args.directory || "")} ${String(args.message || "").split("\n")[0]}`.slice(0, 300);
   if (name === "shell") return String(args.command || "").slice(0, 300);
   if (name === "computer") return [args.action, args.x, args.y, args.text ? JSON.stringify(String(args.text).slice(0, 60)) : "", args.keys || ""].filter((part) => part !== undefined && part !== "").join(" ");
   if (name === "open_url") return String(args.url || "").slice(0, 300);
@@ -366,6 +380,17 @@ export async function executeTool(call, ctx) {
   const args = call.args || {};
   try {
     switch (call.name) {
+      case "git_commit": {
+        const trailer = coauthorTrailer(ctx.gitAttribution);
+        const directory = String(args.directory || "");
+        const message = String(args.message || "");
+        if (!directory.startsWith("/") || directory.includes("\0")) return { text: "error: repository must be an absolute desktop path" };
+        if (!message.trim() || message.length > 64000 || message.includes("\0")) return { text: "error: invalid commit message" };
+        await boxes.ensure(agent);
+        const result = await boxes.gitCommit(agent.id, directory, message, trailer);
+        const failed = result.timedOut || result.code !== 0;
+        return { text: `${failed ? "error: git commit did not complete successfully " : ""}[${result.timedOut ? "timed out" : `exit ${result.code}`}]\n${result.output || "(no output)"}` };
+      }
       case "shell": {
         if (!String(args.command || "").trim()) return { text: "error: empty command" };
         await boxes.ensure(agent);

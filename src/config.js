@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
+import { CORA_GIT_COAUTHOR_EMAIL } from "./git-attribution.js";
 
 const env = process.env;
 
@@ -30,6 +31,8 @@ export const config = {
   slackApi: setting("SLACK_API") || "https://slack.com/api",
   docker: setting("DOCKER") || firstExisting(["/usr/local/bin/docker", "/usr/bin/docker", "docker"]),
   boxImage: setting("BOX_IMAGE") || "cora-box:latest",
+  gitAttribution: setting("GIT_ATTRIBUTION") !== "0",
+  gitCoauthorEmail: setting("GIT_COAUTHOR_EMAIL") || CORA_GIT_COAUTHOR_EMAIL,
   ollamaUrl: (env.OLLAMA_URL || "https://ollama.com").replace(/\/$/, ""),
   ollamaKey: env.OLLAMA_API_KEY || "",
   orcaUrl: (setting("ORCAROUTER_URL") || "https://api.orcarouter.ai/v1").replace(/\/$/, ""),
