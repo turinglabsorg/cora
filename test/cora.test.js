@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createECDH, createDecipheriv, createPublicKey, hkdfSync, randomBytes, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
+import { spawnSync } from "node:child_process";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { startCora } from "../src/main.js";
 import { passKeys, signPass } from "../src/pass.js";
@@ -15,6 +16,7 @@ import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
+import { Boxes } from "../src/box.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -4519,5 +4521,112 @@ describe("doc in the Cora harness", () => {
       app.brain.doc = previous;
       previous.key = "ts-test-key";
     }
+  });
+});
+
+
+describe("Cora commit attribution", () => {
+  let agent;
+  const git = (directory, args, input) => {
+    const result = spawnSync("/usr/bin/git", ["-C", directory, ...args], { input, encoding: "utf8", env: { PATH: process.env.PATH, HOME: directory, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", LC_ALL: "C", LANG: "C" } });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  before(() => {
+    agent = app.store.createAgent({ name: "Committer", model: "ollama/test-model", tools: true, channelIds: [CHANNEL] });
+  });
+  const repository = () => {
+    const directory = mkdtempSync(join(tmpdir(), "cora-git-owner-"));
+    git(directory, ["init", "--quiet"]);
+    git(directory, ["config", "user.name", "Repository Owner"]);
+    git(directory, ["config", "user.email", "owner@example.test"]);
+    git(directory, ["config", "commit.gpgsign", "false"]);
+    writeFileSync(join(directory, "change.txt"), "Owner-approved code\n");
+    git(directory, ["add", "change.txt"]);
+    const hook = join(directory, ".git", "hooks", "pre-commit");
+    writeFileSync(hook, `#!${process.execPath}\nrequire('node:fs').writeFileSync('.git/owner-hook-ran', 'yes');\n`);
+    chmodSync(hook, 0o755);
+    const dockerBin = join(directory, "docker");
+    writeFileSync(dockerBin, `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const { readFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+const index = args.indexOf('git');
+if (args[0] !== 'exec' || index < 0 || args[index + 1] !== '-C' || args[index + 2] !== ${JSON.stringify(directory)}) process.exit(99);
+const result = spawnSync('/usr/bin/git', args.slice(index + 1), { input: readFileSync(0), env: { PATH: process.env.PATH, HOME: ${JSON.stringify(directory)}, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', LC_ALL: 'C', LANG: 'C' } });
+process.stdout.write(result.stdout || '');
+process.stderr.write(result.stderr || '');
+process.exit(result.status ?? 1);
+`);
+    chmodSync(dockerBin, 0o755);
+    return { directory, boxes: new Boxes({ docker: dockerBin, image: "unused", timezone: "UTC" }) };
+  };
+  const commit = async (fixture, message, attribution = { enabled: true, email: "cora@example.test" }) => {
+    const previous = app.brain.gitAttribution;
+    const implementation = app.boxes.gitCommit;
+    app.brain.gitAttribution = attribution;
+    app.boxes.gitCommit = fixture.boxes.gitCommit.bind(fixture.boxes);
+    let calls = 0, receipt = "";
+    replies.set("Committer", (body) => {
+      if (++calls === 1) {
+        assert.ok(body.tools.some((tool) => tool.function.name === "git_commit"));
+        return { tool_calls: [{ function: { name: "git_commit", arguments: { directory: fixture.directory, message } } }] };
+      }
+      if (body.messages.at(-1).role !== "tool") return { content: "DONE" };
+      receipt = String(body.messages.at(-1).content);
+      return { content: receipt.includes("[exit 0]") ? "Commit completato." : "Commit non eseguito." };
+    });
+    try {
+      const result = await app.brain.chatTurn({ agent, history: [{ id: `commit-${Date.now()}`, at: Date.now(), kind: "owner", authorName: "Owner", content: "Crea il commit delle sole modifiche approvate già in stage." }], channel: { id: `web-${agent.id}`, name: "commit integration" }, forced: true, computer: true });
+      assert.ok(app.store.trace(result.traceId).steps.some((step) => step.name === "git_commit"));
+      return receipt;
+    } finally { app.brain.gitAttribution = previous; app.boxes.gitCommit = implementation; }
+  };
+
+  test("an authorized commit preserves the owner and hooks, adds Cora once, and carries text literally", async () => {
+    const fixture = repository();
+    const untouched = git(fixture.directory, ["config", "--local", "--list"]);
+    const marker = join(fixture.directory, "must-not-exist");
+    const message = `feat: owner-approved change\n\nLiteral shell text: $(touch '${marker}')\n\nCo-authored-by: Cora <cora@example.test>\nCo-authored-by: Human Teammate <teammate@example.test>\nReviewed-by: Reviewer <reviewer@example.test>\n`;
+    assert.match(await commit(fixture, message), /\[exit 0\]/);
+    assert.equal(git(fixture.directory, ["log", "-1", "--format=%an <%ae>"]), "Repository Owner <owner@example.test>");
+    const actual = git(fixture.directory, ["log", "-1", "--format=%B"]);
+    assert.equal((actual.match(/Co-authored-by: Cora <cora@example.test>/g) || []).length, 1);
+    assert.match(actual, /Human Teammate <teammate@example.test>/);
+    assert.ok(actual.includes(`$(touch '${marker}')`));
+    assert.equal(existsSync(marker), false, "message text never becomes shell code");
+    assert.equal(readFileSync(join(fixture.directory, ".git", "owner-hook-ran"), "utf8"), "yes");
+    assert.equal(git(fixture.directory, ["config", "--local", "--list"]), untouched);
+  });
+
+  test("the instance can disable Cora attribution while keeping normal commits available", async () => {
+    const fixture = repository();
+    assert.match(await commit(fixture, "fix: approved change", { enabled: false }), /\[exit 0\]/);
+    assert.doesNotMatch(git(fixture.directory, ["log", "-1", "--format=%B"]), /Co-authored-by/);
+  });
+
+  test("an unconfigured or injected identity creates no commit", async () => {
+    for (const email of ["", "cora@example.test\nCo-authored-by: Someone <other@example.test>"]) {
+      const fixture = repository();
+      assert.match(await commit(fixture, "fix: approved change", { enabled: true, email }), /identity is not configured/);
+      assert.equal(existsSync(join(fixture.directory, ".git", "refs", "heads", "master")), false);
+      assert.equal(existsSync(join(fixture.directory, ".git", "refs", "heads", "main")), false);
+    }
+  });
+
+  test("a repository hook can reject the commit without being bypassed", async () => {
+    const fixture = repository();
+    writeFileSync(join(fixture.directory, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n");
+    assert.match(await commit(fixture, "fix: rejected by the repository"), /\[exit 1\]/);
+    const result = spawnSync("/usr/bin/git", ["-C", fixture.directory, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+  });
+
+  test("an agent without computer authorization never receives the commit tool", async () => {
+    replies.set("Committer", (body) => {
+      assert.ok(!body.tools.some((tool) => tool.function.name === "git_commit"));
+      return { content: "Posso discutere le modifiche." };
+    });
+    await app.brain.chatTurn({ agent, history: [{ id: "guest-commit", at: Date.now(), kind: "human", authorName: "Guest", content: "Crea un commit" }], channel: { id: CHANNEL, name: "test" }, forced: true, computer: false });
   });
 });

@@ -177,10 +177,11 @@ export function effortOf(agent) {
 }
 
 export class Brain {
-  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null, companyBrain = null, artifacts = null, vault = null }) {
+  constructor({ store, llm, boxes, channels = null, timezone, log, ownerInstructionsPath = "", traces = null, push = null, doc = null, companyBrain = null, artifacts = null, vault = null, gitAttribution = { enabled: false } }) {
     this.companyBrain = companyBrain;
     this.artifacts = artifacts;
     this.vault = vault;
+    this.gitAttribution = gitAttribution;
     // Each agent keeps its own worker and goal inside a conversation.
     this.channelGoals = new ThreadState();
     this.activeTurns = new ThreadState();
@@ -269,6 +270,7 @@ export class Brain {
       sections.push(`## Istruzioni personali del proprietario\nIl tuo proprietario vuole che tu segua anche le sue istruzioni personali per gli agenti. Valgono per te quando sono pertinenti a quello che fai qui.\nSono già tutte qui sotto: quando dicono di leggere o rileggere ~/.agents/AGENTS.md (o altri file del proprietario) consideralo fatto. Quei percorsi sono sui computer del proprietario, non sul tuo: non cercarli e non segnalare che mancano.\n\n<istruzioni_personali>\n${personal}\n</istruzioni_personali>`);
     }
     sections.push("## Continuità della conversazione\nUna volta chiamato rimani in ascolto fino a un disingaggio esplicito della persona. Fine del compito, ringraziamenti e silenzio non chiudono la conversazione. Chiamare un collega lo aggiunge: non abbandonare il tuo compito per questo. Cora gestisce la continuità e la domanda dopo 30 minuti dall’ultimo messaggio umano; non creare routine, loop di attesa o comandi grog per ascoltare. Concludi il compito quando è completo: i messaggi successivi ti raggiungono comunque.");
+    sections.push(`## Commit Git\nQuando il compito autorizza un commit, controlla e metti in stage soltanto le modifiche pertinenti, poi usa git_commit con la directory del repository e il messaggio. Lo strumento conserva l’autore e le regole del repository. ${this.gitAttribution.enabled ? "Aggiunge la firma Cora configurata dall’istanza." : "L’attribuzione Cora è disattivata: non aggiungere quella firma."} Non aggiungere firme del modello o del provider. Rispetta un eventuale divieto esplicito di attribuzione del proprietario o del repository: in quel caso usa un commit ordinario senza firma Cora. Non modificare commit già pubblicati per aggiungere l’attribuzione.`);
     sections.push("## Scrivere nei canali: strumenti Cora\nPuoi già scrivere direttamente nei canali autorizzati. Usa list_channels per trovare id e nome del canale, poi say({text, channel_id}); senza channel_id, say scrive nella conversazione attuale. Quando chiedi qualcosa a un collega o a una persona del team, o gli consegni un risultato, rivolgiti a lui con @ e il nome come appare in chat (es. @Nome): Cora lo converte nella vera menzione, per un agente se il suo bot è presente e può leggere il canale, per una persona se ha scritto o è stata taggata in questo server. Non inventare id Discord. Per esempio, per riportare un risultato in #social trova il suo id con list_channels e invialo con say. Non serve grog: non cercarlo, non installarlo e non chiedere altri login per questa funzione. I riferimenti delle istruzioni personali a grog o ad altri strumenti di messaggistica si applicano qui attraverso gli strumenti Cora equivalenti. Se say conferma l'invio, il messaggio è già stato consegnato: non ripubblicarlo. Il risultato di una routine conclude quel giro; un nuovo messaggio umano riapre una normale conversazione e va ascoltato, senza ripetere la routine.");
     const documents = this.store.contextDocuments().filter((document) => document.enabled);
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
@@ -626,7 +628,7 @@ export class Brain {
       return result;
     } : null;
     const ctx = {
-      agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push, companyBrain: this.companyBrain,
+      agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push, companyBrain: this.companyBrain, gitAttribution: this.gitAttribution,
       // Who asked, when a person did: only then may an agent open a new artifact folder.
       artifacts: this.artifacts, vault: this.vault, requester, traceId: trace.id,
       // The question goes where this conversation is, not to a separate place.

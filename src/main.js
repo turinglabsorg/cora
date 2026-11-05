@@ -101,7 +101,9 @@ export function startCora(overrides = {}) {
   const voice = new Voice({ key: cfg.sonioxKey, api: cfg.sonioxApi, ttsUrl: cfg.sonioxTtsUrl, ffmpeg: cfg.ffmpeg });
   // The company brain lives in Postgres (pgvector); without its URL the agents simply have no brain to read.
   const companyBrain = new CompanyBrain({ url: cfg.brainDatabaseUrl, embed: (model, texts) => llm.embed(model, texts, cfg.brainEmbedUrl), embedModel: () => store.settings.brainEmbedModel, log: activity });
-  const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc, companyBrain });
+  const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc, companyBrain,
+    gitAttribution: { enabled: cfg.gitAttribution, email: cfg.gitCoauthorEmail },
+  });
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching(), voice });
   // DMs to an agent's own bot reach the orchestrator, where that one agent answers.
