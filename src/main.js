@@ -122,6 +122,8 @@ export function startCora(overrides = {}) {
   skBots.onGuild = (event, agentId) => orchestrator.onSlackMessage(event, agentId).catch((error) => activity({ type: "error", agentId, text: `slack: ${error.message}` }));
   skBots.onDirect = (agentId, event) => orchestrator.onSlackDirect(agentId, event).catch((error) => activity({ type: "error", agentId, text: `slack dm: ${error.message}` }));
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
+  // A private word to the owner from Cora: where a secret's link goes when they ask an agent for it.
+  brain.messageOwner = (text) => orchestrator.messageOwner(text);
   // Where the owner reviews the brain: the address people reach this Cora on.
   const instanceUrl = cfg.publicHost ? `https://${cfg.publicHost}` : cfg.cloudUrl && cfg.cloudSpace ? `https://${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
   orchestrator.instanceUrl = instanceUrl;

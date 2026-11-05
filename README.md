@@ -129,7 +129,7 @@ Keys, passwords and tokens live in Cora's **vault**, the secrets half of Artefat
 - **Using.** `secret_import` puts a secret into the hush on the agent's own computer. It is sealed to that hush's box key and opened straight into its vault, so the agent then runs `hush run --name NAME --env VAR --redact -- command` without ever seeing it. Each secret says which agents may use it, and each use is recorded.
 - **Sending.** A send link opens a set number of times and expires. The value is encrypted under a key that lives only in the link's fragment, so the server alone cannot open it.
   - **Who opens it.** It is made with the same form as a folder's link: public, with a password, or for named people. For named people it has an address of its own on usecora.space, and they sign in with Google or an email link as for a folder.
-  - **Who makes it.** The owner creates sends. An agent's `secret_send` waits for the owner, who approves it in that same form, and the link goes to the owner, never to the agent.
+  - **Who makes it.** The owner creates sends in the panel, or asks an agent in chat: then the agent's `secret_send` makes the link at once (the number of opens and days asked, or for named people) and Cora sends it to the owner in a private message, never into the conversation and never to the agent. Anyone else's request to an agent waits for the owner, who approves it in that same form, and the link goes to the owner.
 - **The log.** The vault's *Registro* shows who opened each send link and when (their address, or a code for their browser), wrong passwords and refused addresses, who delivered a requested secret, which agent put which secret into its hush, and every change. Values never appear.
 
 ## Memory

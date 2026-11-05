@@ -77,6 +77,21 @@ test("the agents ask for a secret by link, use it by name and never see it; send
   assert.match(send.text, /^REQUESTED, NOT SENT/);
   const proposed = vault.sends().find((item) => item.status === "proposed");
   assert.equal(proposed.data, undefined, "a proposed send holds nothing it could give away");
+
+  // The owner asking: the link goes to them at once, privately from Cora, and the agent never sees it.
+  const told = [];
+  const owners = { ...ctx, requester: { kind: "owner", id: "1", name: "Seb" }, messageOwner: async (text) => { told.push(text); return true; } };
+  const direct = await executeTool({ name: "secret_send", args: { name: "ROSSI_FTP_PASSWORD", to: "Seb", reason: "me lo ha chiesto lui", views: 10 } }, owners);
+  assert.match(direct.text, /^SENT: Cora sent the owner the link to ROSSI_FTP_PASSWORD in a private message; it opens 10 time\(s\)/);
+  assert.doesNotMatch(direct.text, /https?:\/\//, "the agent never gets the link");
+  assert.match(told[0], /^🔐 Nico ti manda \*\*ROSSI_FTP_PASSWORD\*\* \(per Seb\): https:\/\/\S+#\S+\nSi apre 10 volte, fino al \d{4}-\d{2}-\d{2}\.$/);
+  const sent = vault.sends().find((item) => item.status === "active" && item.by?.name === "Nico");
+  assert.equal(sent.views, 10);
+  const nowhere = await executeTool({ name: "secret_send", args: { name: "ROSSI_FTP_PASSWORD", to: "Seb", reason: "x" } }, { ...owners, messageOwner: async () => false });
+  assert.match(nowhere.text, /^NOT SENT: Cora could not write to the owner privately/);
+  assert.equal(vault.sends().filter((item) => item.status === "active").length, 1, "a link nobody received does not stay open");
+  const someoneElse = await executeTool({ name: "secret_send", args: { name: "ROSSI_FTP_PASSWORD", to: "Sara", reason: "x" } }, { ...owners, requester: { kind: "authorized", id: "2", name: "Sara" } });
+  assert.match(someoneElse.text, /^REQUESTED, NOT SENT/, "anyone else's request still waits for the owner");
 });
 
 test("request and send pages: only their own page posts, a send opens its set number of times, and only the link's key opens it", async (t) => {

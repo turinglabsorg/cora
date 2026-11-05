@@ -140,7 +140,7 @@ code { font: 400 12px/1 var(--mono); color: var(--amber); background: var(--well
 .panel-head + .panel-body { border-top: 1px solid var(--line); }
 .panel-ico { flex: none; width: 36px; height: 36px; display: grid; place-items: center; border-radius: var(--r-md); background: var(--well); border: 1px solid var(--line); color: var(--amber); }
 .panel-title { flex: 1; min-width: 0; }
-.panel-title h2 { margin: 0; font: 600 19px/1.15 var(--display); letter-spacing: -0.02em; }
+.panel-title h2 { margin: 0; font: 600 19px/1.15 var(--display); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .panel-title p { margin: 3px 0 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
 .panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .panel-body { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }

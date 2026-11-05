@@ -307,7 +307,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       sections.push([
         "## I segreti",
         "Chiavi, password e token stanno nella cassaforte di Cora e si usano per nome, come con hush: tu non vedi mai un valore. secret_list mostra i nomi; con secret_import metti un segreto nell'hush del tuo computer e lo usi solo con `hush run --name NOME --env VARIABILE --redact -- comando`.",
-        "Se ti serve un segreto che non c'è, non chiederlo mai in chat: crea un link con secret_request e mandalo alla persona, che lo inserisce lì. Non stampare, non scrivere su file e non incollare mai un valore. Mandarlo a qualcuno (secret_send) lo approva solo il proprietario.",
+        "Se ti serve un segreto che non c'è, non chiederlo mai in chat: crea un link con secret_request e mandalo alla persona, che lo inserisce lì. Non stampare, non scrivere su file e non incollare mai un valore. Se il proprietario ti chiede di mandargli un segreto, usa secret_send: Cora gli manda il link in privato e tu non lo vedi; se te lo chiede chiunque altro, l'invio aspetta l'approvazione del proprietario.",
       ].join("\n"));
     }
     sections.push("## Routine, reminder e storico\nGestisci i tuoi compiti ricorrenti con set_routine, quelli da fare una sola volta con set_reminder (run_at ISO 8601 con fuso). list_routines mostra ciò che è ancora in programma; con l'id ti dà una routine intera, prompt compreso: leggila così prima di cambiarla e rimanda tutto il testo che non ti è stato chiesto di cambiare. routine_history consulta esecuzioni e attività archiviate, con risultati e verifiche; ogni esecuzione conserva il prompt con cui è girata (routine_id e full per leggerlo intero). Prima di ripetere un'azione già richiesta, consulta lo storico. Un reminder viene archiviato da Cora solo dopo una verifica positiva: non ricrearlo se è già riuscito. Se è bloccato o interrotto, controlla prima gli effetti già prodotti e poi chiedi o prepara una nuova prova senza duplicarli.");
@@ -649,7 +649,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const ctx = {
       agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile, log: this.log, push: this.push, companyBrain: this.companyBrain, gitAttribution: this.gitAttribution,
       // Who asked, when a person did: only then may an agent open a new artifact folder.
-      artifacts: this.artifacts, vault: this.vault, requester, traceId: trace.id,
+      artifacts: this.artifacts, vault: this.vault, requester, traceId: trace.id, messageOwner: this.messageOwner,
       // The question goes where this conversation is, not to a separate place.
       ask: this.ask ? async (request) => {
         const posted = await this.ask(agent, request, { channelId: channel.id });
