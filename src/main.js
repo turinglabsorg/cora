@@ -77,7 +77,12 @@ export function startCora(overrides = {}) {
     try { host = plainKeys(readFileSync(cfg.sshAuthorizedKeys, "utf8")); } catch {}
     return [...new Set([...host, ...store.settings.sshKeys])];
   };
-  const boxes = new Boxes({ docker: cfg.docker, image: cfg.boxImage, timezone: cfg.timezone, access: (agent) => ({ sshPort: store.sshPort(agent.id), keys: sshKeys() }) });
+  const mailboxFor = (agent) => store.value(`agentMailbox:${agent.id}`, null);
+  const boxes = new Boxes({ docker: cfg.docker, image: cfg.boxImage, timezone: cfg.timezone, access: (agent) => ({ sshPort: store.sshPort(agent.id), keys: sshKeys() }),
+    mailbox: { endpoint: cfg.mailEndpoint, domain: cfg.mailDomain, namespace: cfg.mailNamespace, token: cfg.mailRegistrationToken, identity: mailboxFor,
+      changed: (agent, state) => { store.setValue(`agentMailbox:${agent.id}`, { ...mailboxFor(agent), ...state }); if (state.status === "blocked") activity({ type: "error", agentId: agent.id, text: state.error }); },
+    },
+  });
   const live = (event) => web?.broadcast(event);
   const traces = new Traces({ store, emit: live });
   const push = new Push({ store, secret: cfg.vapidKey, subject: cfg.publicUrl, log: activity });
@@ -103,6 +108,7 @@ export function startCora(overrides = {}) {
   const companyBrain = new CompanyBrain({ url: cfg.brainDatabaseUrl, embed: (model, texts) => llm.embed(model, texts, cfg.brainEmbedUrl), embedModel: () => store.settings.brainEmbedModel, log: activity });
   const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc, companyBrain,
     gitAttribution: { enabled: cfg.gitAttribution, email: cfg.gitCoauthorEmail },
+    mailboxFor,
   });
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching(), voice });
@@ -217,6 +223,9 @@ export function startCora(overrides = {}) {
       tgBots.sync();
       skBots.sync();
       pickListener();
+      if (cfg.mailDomain && cfg.mailRegistrationToken) {
+        for (const agent of store.agents()) if (agent.enabled && agent.tools && mailboxFor(agent)?.status !== "ready") boxes.ensure(agent).catch((error) => activity({ type: "error", agentId: agent.id, text: `desktop: ${error.message}` }));
+      }
     }, 60000);
     scheduler.start();
     if (cfg.startBoxes !== false) {
