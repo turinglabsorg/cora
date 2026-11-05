@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
+import { createDecipheriv } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -479,4 +480,50 @@ test("the panel frames a PDF from an address apart from itself, signed for one f
   assert.equal((await call(`/api/artifacts/commits/${pushed.commit.id}/view?path=nowhere.pdf`)).status, 404);
   const label = await call(`/api/artifacts/folders/${pushed.folder.id}/shares`, { method: "POST", body: { label: "r-0123456789ab", access: { mode: "public" } } });
   assert.equal(label.status, 400, "no link can take a preview address's name");
+});
+
+test("a secret sent to named people lives on its own host: they sign in like to a folder, and the log names them", async (t) => {
+  const { app, port, base, call } = await fixture(t);
+  await call("/api/secrets", { method: "POST", body: { name: "ACME_TOKEN", value: "token-fixture-value", agents: ["*"] } });
+  const made = await call("/api/secrets/ACME_TOKEN/sends", { method: "POST", body: { views: 1, days: 1, access: { mode: "people", emails: ["Giulia@Cliente.test"] } } });
+  assert.equal(made.status, 201);
+  const link = new URL(made.data.url);
+  const HOST = `v-${made.data.id.slice(3)}--acme.usecora.test`;
+  assert.equal(link.host, HOST, "a send has an address of its own, like a shared folder");
+  const key = link.hash.slice(1);
+  assert.match(key, /^[A-Za-z0-9_-]{43}$/);
+  const outside = await hit(port, HOST, "/");
+  assert.equal(outside.status, 200, "the page loads, so it can keep the key while its visitor signs in");
+  assert.match(outside.body, new RegExp(`href="https://usecora\\.test/share\\?to=${HOST.replace(/\./g, "\\.")}&amp;next=%2F"`));
+  assert.match(outside.headers["content-security-policy"], /script-src 'self'/);
+  assert.equal((await hit(port, HOST, "/_cora/send.js")).headers["content-type"], "text/javascript; charset=utf-8");
+  const openWith = (cookie = "") => hit(port, HOST, "/_cora/open", { method: "POST", headers: { "x-cora": "1", "sec-fetch-site": "same-origin", "content-type": "application/json", ...(cookie ? { cookie } : {}) }, body: "{}" });
+  assert.equal((await openWith()).status, 403, "nobody gets the bytes before signing in");
+
+  const asked = async (email) => {
+    const response = await fetch(`${base}/api/cloud/share-access`, { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" },
+      body: JSON.stringify({ pass: signPass(keys.privateKey, { aud: "share-access:acme.usecora.test", host: HOST, email }) }) });
+    return response.json();
+  };
+  assert.deepEqual(await asked("giulia@cliente.test"), { allowed: true, title: "un segreto mandato con Cora", language: "it" }, "the mail never names the secret");
+  assert.equal((await asked("mario@other.test")).allowed, false);
+  const stranger = await enter(port, HOST, { email: "mario@other.test", via: "google" });
+  assert.equal(stranger.response.status, 403);
+  const giulia = await enter(port, HOST, { email: "giulia@cliente.test", via: "email" });
+  assert.equal(giulia.response.status, 302);
+  const signed = await hit(port, HOST, "/", { headers: { cookie: giulia.cookie } });
+  assert.match(signed.body, /<button id="open" type="button">/, "signed in, the page offers to show it");
+  const sealed = await openWith(giulia.cookie);
+  assert.equal(sealed.status, 200);
+  const body = JSON.parse(sealed.body);
+  const raw = Buffer.from(body.data, "base64");
+  const decipher = createDecipheriv("aes-256-gcm", Buffer.from(key, "base64url"), Buffer.from(body.iv, "base64"));
+  decipher.setAuthTag(raw.subarray(raw.length - 16));
+  assert.equal(Buffer.concat([decipher.update(raw.subarray(0, raw.length - 16)), decipher.final()]).toString("utf8"), "token-fixture-value");
+  assert.equal((await openWith(giulia.cookie)).status, 404, "spent, the address is gone");
+
+  const log = await call("/api/secrets/events");
+  const kinds = log.data.events.map((event) => [event.kind, event.who?.email || ""]).reverse();
+  assert.deepEqual(kinds, [["secret-created", ""], ["send-created", ""], ["send-page", ""], ["send-refused", "mario@other.test"], ["send-enter", "giulia@cliente.test"], ["send-page", "giulia@cliente.test"], ["send-opened", "giulia@cliente.test"]]);
+  assert.ok(app.vault);
 });

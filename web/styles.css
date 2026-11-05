@@ -1741,3 +1741,7 @@ a.share-stats:hover { color: var(--amber); }
 .art-sheet td.num { text-align: right; color: var(--text); }
 .art-sheet tr:hover td { background: var(--amber-wash); }
 .art-pdf { width: 100%; height: 70vh; min-height: 420px; border: 1px solid var(--line); border-radius: var(--r-md); background: #fff; }
+.art-preview:fullscreen, .art-preview.full { position: fixed; inset: 0; z-index: 60; overflow: auto; padding: 18px; background: var(--bg); align-content: start; }
+.art-preview:fullscreen .art-pdf, .art-preview.full .art-pdf, .art-preview:fullscreen .art-sheet, .art-preview.full .art-sheet { height: calc(100vh - 110px); max-height: none; }
+.art-preview:fullscreen .art-media img, .art-preview.full .art-media img, .art-preview:fullscreen .art-media video, .art-preview.full .art-media video { max-height: calc(100vh - 110px); }
+.art-preview:fullscreen .art-code, .art-preview.full .art-code { max-height: calc(100vh - 110px); }

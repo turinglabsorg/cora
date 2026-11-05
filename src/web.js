@@ -190,12 +190,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   } : null;
   const firstUse = passLedger();
   // A share's own address: answered before anything of the panel, which never runs there.
-  const shares = shareHosts({ config, store, artifacts, cloud, firstUse, sessionKey, activity });
+  const shares = shareHosts({ config, store, artifacts, vault, cloud, firstUse, sessionKey, activity });
   // The panel frames a PDF from the space's own preview host, never from its own origin.
   const shareDomain = artifacts?.shareSuffix ? artifacts.shareSuffix.split(".").slice(1).join(".") : "";
   const panelCsp = shareDomain ? CSP.replace("frame-src 'self'", `frame-src 'self' https://*.${shareDomain}`) : CSP;
   // The vault's pages for people outside the panel: a request to fill, a send to open.
-  const vaultPages = sendPages({ vault, store, timezone: config.timezone });
+  const vaultPages = sendPages({ vault, store, timezone: config.timezone, whoOf: (req) => shares.whoOf(req) });
 
   /**
    * Who may put the agents to work besides the owner: the people who wrote in the chats
@@ -1263,7 +1263,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const owner = user.role === "owner";
     if (path === "/api/secrets" && method === "GET") {
       return send(res, 200, {
-        enabled: vault.enabled, canManage: owner, secrets: vault.list(),
+        enabled: vault.enabled, canManage: owner, secrets: vault.list(), peopleSends: Boolean(vault.shareSuffix && vault.access),
         requests: owner ? vault.requests().filter((request) => request.status === "open" && !request.expired) : [],
         sends: owner ? vault.sends().filter((item) => item.status === "proposed" || (item.status === "active" && !item.expired)) : [],
       });
@@ -1277,29 +1277,36 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const body = await readJson(req, 8192);
       return send(res, 201, vault.requestLink({ name: body.name, description: body.description, agents: body.agents, hours: body.hours, by }));
     }
+    // The vault's log: who opened what was sent, who filled a request, which agent used what, every change.
+    if (path === "/api/secrets/events" && method === "GET") {
+      return send(res, 200, { events: vault.events({ name: url.searchParams.get("name") || "", before: Number(url.searchParams.get("before")) || 0 }) });
+    }
     let match = /^\/api\/secrets\/requests\/(vr_[a-f0-9]{12})$/.exec(path);
     if (match && method === "DELETE") {
-      vault.cancelRequest(match[1]);
+      vault.cancelRequest(match[1], by);
       return send(res, 200, { ok: true });
     }
     match = /^\/api\/secrets\/sends\/(vx_[a-f0-9]{12})(?:\/(approve))?$/.exec(path);
-    if (match && match[2] === "approve" && method === "POST") return send(res, 200, vault.approveSend(match[1], by));
+    if (match && match[2] === "approve" && method === "POST") {
+      const body = await readJson(req, 32768);
+      return send(res, 200, vault.approveSend(match[1], by, { access: body.access, views: body.views, days: body.days, note: body.note }));
+    }
     if (match && !match[2] && method === "DELETE") {
-      vault.revokeSend(match[1]);
+      vault.revokeSend(match[1], by);
       return send(res, 200, { ok: true });
     }
     match = /^\/api\/secrets\/([A-Z][A-Z0-9_]{1,63})(?:\/(sends))?$/.exec(path);
     if (match && match[2] === "sends" && method === "POST") {
       const body = await readJson(req, 8192);
-      return send(res, 201, vault.createSend({ name: match[1], views: body.views, days: body.days, note: body.note, by }));
+      return send(res, 201, vault.createSend({ name: match[1], views: body.views, days: body.days, note: body.note, access: body.access, by }));
     }
     if (match && !match[2] && method === "PUT") {
       const body = await readJson(req, 96 * 1024);
       if (body.value !== undefined) return send(res, 200, vault.put({ name: match[1], value: body.value, description: body.description, agents: body.agents, by }));
-      return send(res, 200, vault.update(match[1], body));
+      return send(res, 200, vault.update(match[1], body, by));
     }
     if (match && !match[2] && method === "DELETE") {
-      vault.remove(match[1]);
+      vault.remove(match[1], by);
       return send(res, 200, { ok: true });
     }
     throw new HttpError(404, "not found");
@@ -1388,11 +1395,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const fields = verifyPass(cloud.key, body.pass, { audience: `share-access:${cloud.audience}` });
     if (!fields?.email || !fields.host || !firstUse(fields)) throw new HttpError(403, "refused");
     const target = shares.match({ headers: { host: String(fields.host) } });
-    const resolved = target ? artifacts.resolveHost(target.label) : null;
+    const resolved = target ? artifacts.resolveHost(target.label) || vault?.resolveHost?.(target.label) || null : null;
     // Only a link for named people is opened by email; a public or password link never sends one.
     const forPeople = resolved && (resolved.kind === "preview" || (resolved.share.access.mode || "people") === "people");
     const allowed = Boolean(forPeople && artifacts.allows(resolved, { email: fields.email, via: "email" }));
-    return send(res, 200, { allowed, title: allowed ? resolved.folder.title : "", language: store.settings.language || "it" });
+    // A secret's name stays in the vault: the mail says only that a secret waits.
+    const title = !allowed ? "" : resolved.kind === "send" ? (store.settings.language === "en" ? "a secret sent through Cora" : "un segreto mandato con Cora") : resolved.folder.title;
+    return send(res, 200, { allowed, title, language: store.settings.language || "it" });
   }
 
   async function cloudAccess(req, res) {

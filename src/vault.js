@@ -21,6 +21,9 @@ export class VaultError extends Error {
 }
 
 const tokenHash = (token) => createHash("sha256").update(String(token)).digest("hex");
+// A send on an address of its own, like a shared folder: v-<12 hex of its id>--<space>.<domain>.
+const SEND_LABEL = /^v-([a-f0-9]{12})$/;
+const PUBLIC = { mode: "public", emails: [], domains: [], members: false };
 const b64url = (buffer) => Buffer.from(buffer).toString("base64url");
 
 /** AES-256-GCM: iv, tag and ciphertext together; the additional data binds a value to its record. */
@@ -41,8 +44,12 @@ function unseal(key, sealed, aad) {
 }
 
 export class Vault {
-  constructor({ store, key, boxes = null, log = () => {}, notice = null, push = null, instanceUrl = "" }) {
+  constructor({ store, key, boxes = null, log = () => {}, notice = null, push = null, instanceUrl = "", access = null, shareSuffix = "" }) {
     this.store = store;
+    // Who may open a send follows the same rules as a shared folder's link (Artifacts' cleanAccess, passwordOpens, allows).
+    this.access = access;
+    this.shareSuffix = shareSuffix;
+    this.recent = new Map();
     this.boxes = boxes;
     this.log = log;
     this.notice = notice;
@@ -54,6 +61,26 @@ export class Vault {
 
   get enabled() {
     return Boolean(this.key);
+  }
+
+  /**
+   * One line in the vault's log. `who` is a visitor (their proven address, or a code from
+   * their network and browser), `by` someone of the space or an agent. A page opened again
+   * by the same visitor within a minute is not a new line.
+   */
+  event(kind, fields = {}) {
+    const now = Date.now();
+    if (fields.who && /-page$/.test(kind)) {
+      const key = `${kind}.${fields.sendId || fields.requestId || fields.name}.${fields.who.email || fields.who.visitor}`;
+      if ((this.recent.get(key) || 0) > now - 60000) return;
+      this.recent.set(key, now);
+      if (this.recent.size > 2000) for (const [entry, at] of this.recent) if (at < now - 60000) this.recent.delete(entry);
+    }
+    this.store.addVaultEvent?.({ at: now, kind, ...fields });
+  }
+
+  events(options) {
+    return this.store.vaultEvents(options);
   }
 
   need() {
@@ -114,24 +141,27 @@ export class Vault {
     secret.sealed = seal(this.key, text, `${secret.id}.${clean}`);
     this.store.writeVaultSecret(secret);
     this.log({ type: "secret", text: `${old ? "sostituito" : "nuovo"} segreto ${clean}${by?.name ? ` (${by.name})` : ""}` });
+    if (source !== "request") this.event(old ? "secret-replaced" : "secret-created", { name: clean, by: by ? { kind: by.kind || "user", name: by.name || "" } : null });
     return this.view(secret);
   }
 
-  update(name, { description, agents }) {
+  update(name, { description, agents }, by = null) {
     const secret = this.store.vaultSecret(this.cleanName(name));
     if (!secret) throw new VaultError("segreto non trovato", 404);
     if (description !== undefined) secret.description = String(description || "").trim().slice(0, 300);
     if (agents !== undefined) secret.agents = this.cleanAgents(agents);
     secret.updatedAt = Date.now();
     this.store.writeVaultSecret(secret);
+    this.event(agents !== undefined ? "secret-agents" : "secret-changed", { name: secret.name, agents: agents !== undefined ? secret.agents : undefined, by: by ? { kind: by.kind || "user", name: by.name || "" } : null });
     return this.view(secret);
   }
 
-  remove(name) {
+  remove(name, by = null) {
     const clean = this.cleanName(name);
     if (!this.store.vaultSecret(clean)) throw new VaultError("segreto non trovato", 404);
     this.store.deleteVaultSecret(clean);
     this.log({ type: "secret", text: `eliminato il segreto ${clean}` });
+    this.event("secret-deleted", { name: clean, by: by ? { kind: by.kind || "user", name: by.name || "" } : null });
   }
 
   value(secret) {
@@ -155,6 +185,7 @@ export class Vault {
     secret.useCount = (secret.useCount || 0) + 1;
     this.store.writeVaultSecret(secret);
     this.log({ type: "secret", agentId: agent.id, text: `${agent.name} ha messo ${clean} nel suo hush` });
+    this.event("secret-imported", { name: clean, as: target !== clean ? target : undefined, by: { kind: "agent", id: agent.id, name: agent.name } });
     return target;
   }
 
@@ -175,6 +206,7 @@ export class Vault {
     };
     this.store.writeVaultRequest(tokenHash(token), request);
     this.log({ type: "secret", text: `link per ricevere ${clean}${by?.name ? ` (chiesto da ${by.name})` : ""}` });
+    this.event("request-created", { name: clean, requestId: request.id, by: by ? { kind: by.kind || "user", name: by.name || "" } : null });
     return { ...request, url: this.link(`/send/r/${token}`) };
   }
 
@@ -188,15 +220,16 @@ export class Vault {
     return request && request.status === "open" && request.expiresAt > Date.now() ? request : null;
   }
 
-  cancelRequest(id) {
+  cancelRequest(id, by = null) {
     const found = this.store.vaultRequests().find((request) => request.id === id);
     if (!found) throw new VaultError("richiesta non trovata", 404);
     const hash = this.store.stmt("SELECT token_hash FROM vault_requests WHERE json_extract(data, '$.id') = ?").get(id)?.token_hash;
     if (hash) this.store.closeVaultRequest(hash, { ...found, status: "cancelled" });
+    this.event("request-cancelled", { name: found.name, requestId: id, by: by ? { kind: by.kind || "user", name: by.name || "" } : null });
   }
 
   /** The value arrives: stored under the requested name, the link closed, the asker told. */
-  fillRequest(token, value) {
+  fillRequest(token, value, who = null) {
     this.need();
     const hash = tokenHash(token);
     const request = this.openRequest(token);
@@ -204,6 +237,7 @@ export class Vault {
     const text = this.cleanValue(value);
     if (!this.store.closeVaultRequest(hash, { ...request, status: "filled", filledAt: Date.now() })) throw new VaultError("questo link non è più valido", 410);
     const secret = this.put({ name: request.name, value: text, description: request.description || undefined, agents: request.agents.length ? request.agents : undefined, by: request.by, source: "request" });
+    this.event("request-filled", { name: request.name, requestId: request.id, who });
     const asker = request.by?.name ? ` (chiesto da ${request.by.name})` : "";
     this.webPush?.notify({ title: "Cassaforte", body: `È arrivato ${request.name}${asker}`, url: "/#/artefatti/segreti", tag: `secret-${request.id}` }).catch?.(() => {});
     if (request.channelId && this.notice) Promise.resolve(this.notice(request.channelId, `🔐 È arrivato **${request.name}** nella cassaforte${asker}: si usa per nome, con secret_import.`)).catch(() => {});
@@ -215,7 +249,15 @@ export class Vault {
    * fragment, opened a given number of times before it is gone. An agent's send
    * waits for the owner, and only then gets its key.
    */
-  createSend({ name, views = 1, days = 7, note = "", by, status = "active", channelId = "" }) {
+  /** Who may open a send: anyone with the link, whoever knows its password, or the people it names. */
+  cleanSendAccess(access, previous = null) {
+    if (!access || !this.access) return previous || { ...PUBLIC };
+    const clean = this.access.cleanAccess(access, previous);
+    if (clean.mode === "people" && !this.shareSuffix) throw new VaultError("un segreto per persone precise ha bisogno di uno spazio su usecora.space: qui usa un link pubblico o con password");
+    return clean;
+  }
+
+  createSend({ name, views = 1, days = 7, note = "", by, status = "active", channelId = "", access = null }) {
     this.need();
     const clean = this.cleanName(name);
     const secret = this.store.vaultSecret(clean);
@@ -224,15 +266,20 @@ export class Vault {
     const send = {
       id: `vx_${randomBytes(6).toString("hex")}`, name: clean, views: Math.min(Math.max(Math.round(Number(views) || 1), 1), 20),
       days: Math.min(Math.max(Number(days) || 7, 1), 30), note: String(note || "").trim().slice(0, 300), by: by || null, channelId,
-      status, createdAt: now, expiresAt: now + Math.min(Math.max(Number(days) || 7, 1), 30) * 86400000, opened: 0,
+      status, createdAt: now, expiresAt: now + Math.min(Math.max(Number(days) || 7, 1), 30) * 86400000, opened: 0, revision: 1,
+      access: this.cleanSendAccess(access),
     };
+    const actor = by ? { kind: by.kind || "user", id: by.id, name: by.name || "" } : null;
     if (status === "proposed") {
       this.store.writeVaultSend(`proposed:${send.id}`, send);
       this.webPush?.notify({ title: "Cassaforte", body: `${by?.name || "Un agente"} chiede di mandare ${clean}`, url: "/#/artefatti/segreti", tag: `send-${send.id}` }).catch?.(() => {});
       this.log({ type: "secret", text: `${by?.name || "un agente"} chiede di mandare ${clean}: aspetta il proprietario` });
-      return { ...send };
+      this.event("send-proposed", { name: clean, sendId: send.id, note: send.note, by: actor });
+      return this.sendView(send);
     }
-    return this.arm(send, secret);
+    const armed = this.arm(send, secret);
+    this.event("send-created", { name: clean, sendId: send.id, mode: send.access.mode, views: send.views, note: send.note, by: actor });
+    return armed;
   }
 
   arm(send, secret) {
@@ -244,31 +291,53 @@ export class Vault {
     const armed = { ...send, status: "active", iv: iv.toString("base64"), data: data.toString("base64") };
     this.store.writeVaultSend(tokenHash(token), armed);
     this.log({ type: "secret", text: `link per mandare ${send.name} (${send.views} ${send.views === 1 ? "apertura" : "aperture"})` });
-    return { ...this.sendView(armed), url: this.link(`/send/s/${token}#${b64url(key)}`) };
+    // On a space routed by usecora.space a send has an address of its own, so people can sign in to it like to a folder.
+    const url = this.shareSuffix ? `https://v-${send.id.slice(3)}${this.shareSuffix}/#${b64url(key)}` : this.link(`/send/s/${token}#${b64url(key)}`);
+    return { ...this.sendView(armed), url };
   }
 
   /** The owner lets an agent's send go: only now does it get its key, and its link goes to the owner. */
-  approveSend(id, by) {
+  /** The owner lets an agent's send go, with the access, views and expiry chosen in the same form as any send. */
+  approveSend(id, by, { access, views, days, note } = {}) {
     const found = this.store.vaultSendById(id);
     if (!found || found.send.status !== "proposed") throw new VaultError("invio non trovato", 404);
     const secret = this.store.vaultSecret(found.send.name);
     if (!secret) throw new VaultError("segreto non trovato", 404);
+    const chosen = {
+      access: access ? this.cleanSendAccess(access) : found.send.access || { ...PUBLIC },
+      views: views !== undefined ? Math.min(Math.max(Math.round(Number(views) || 1), 1), 20) : found.send.views,
+      days: days !== undefined ? Math.min(Math.max(Number(days) || 7, 1), 30) : found.send.days,
+      note: note !== undefined ? String(note || "").trim().slice(0, 300) : found.send.note,
+    };
     this.store.stmt("DELETE FROM vault_sends WHERE token_hash = ?").run(found.hash);
     const now = Date.now();
-    const armed = this.arm({ ...found.send, approvedBy: by || null, createdAt: now, expiresAt: now + found.send.days * 86400000 }, secret);
+    const armed = this.arm({ ...found.send, ...chosen, approvedBy: by || null, createdAt: now, expiresAt: now + chosen.days * 86400000 }, secret);
+    this.event("send-approved", { name: found.send.name, sendId: id, mode: chosen.access.mode, views: chosen.views, by: by ? { kind: by.kind || "user", name: by.name || "" } : null, for: found.send.by?.name || "" });
     if (found.send.channelId && this.notice) Promise.resolve(this.notice(found.send.channelId, `🔐 Il proprietario ha approvato l'invio di **${found.send.name}**: il link lo manda lui.`)).catch(() => {});
     return armed;
   }
 
-  revokeSend(id) {
+  revokeSend(id, by = null) {
     const found = this.store.vaultSendById(id);
     if (!found) throw new VaultError("invio non trovato", 404);
-    this.store.writeVaultSend(found.hash, { ...found.send, status: "revoked", iv: undefined, data: undefined });
+    this.store.writeVaultSend(found.hash, { ...found.send, status: "revoked", revision: (found.send.revision || 1) + 1, iv: undefined, data: undefined });
+    this.event(found.send.status === "proposed" ? "send-rejected" : "send-revoked", { name: found.send.name, sendId: id, by: by ? { kind: by.kind || "user", name: by.name || "" } : null });
   }
 
   sendView(send) {
     const { iv, data, ...rest } = send;
-    return { ...rest, left: Math.max(0, send.views - send.opened), expired: send.expiresAt < Date.now() };
+    const { password, ...access } = send.access || PUBLIC;
+    return { ...rest, access: { ...PUBLIC, ...access }, left: Math.max(0, send.views - send.opened), expired: send.expiresAt < Date.now() };
+  }
+
+  /** A send's own address, v-<12 hex>: the send behind it while it still opens, for the share hosts. */
+  resolveHost(label) {
+    const match = SEND_LABEL.exec(String(label || ""));
+    if (!match) return null;
+    const found = this.store.vaultSendById(`vx_${match[1]}`);
+    const send = found?.send;
+    if (!send || send.status !== "active" || send.expiresAt < Date.now() || send.opened >= send.views || !send.data) return null;
+    return { kind: "send", send, hash: found.hash, share: { access: send.access || { ...PUBLIC } }, folder: null, scope: `send:${send.id}`, revision: send.revision || 1, view: "send" };
   }
 
   sends() {
@@ -276,20 +345,24 @@ export class Vault {
   }
 
   /** One opening of a send: its sealed bytes, which only the link's fragment can open, or null when it is gone. */
-  openSend(token) {
-    const hash = tokenHash(token);
+  openSend(token, who = null) {
+    return this.openSendHash(tokenHash(token), who);
+  }
+
+  openSendHash(hash, who = null) {
     const send = this.store.vaultSend(hash);
     if (!send || send.status !== "active" || send.expiresAt < Date.now() || send.opened >= send.views || !send.data) return null;
     const opened = send.opened + 1;
     const spent = opened >= send.views;
     this.store.writeVaultSend(hash, { ...send, opened, lastOpenedAt: Date.now(), ...(spent ? { status: "spent", iv: undefined, data: undefined } : {}) });
     this.log({ type: "secret", text: `aperto il link di ${send.name} (${opened}/${send.views})` });
+    this.event("send-opened", { name: send.name, sendId: send.id, opened, views: send.views, who });
     return { name: send.name, iv: send.iv, data: send.data, left: send.views - opened };
   }
 
-  /** Whether a send link still opens, for the page around it. */
+  /** The send behind a link on the instance's own /send/s/ path, while it still opens. */
   sendAlive(token) {
     const send = this.store.vaultSend(tokenHash(token));
-    return Boolean(send && send.status === "active" && send.expiresAt > Date.now() && send.opened < send.views);
+    return send && send.status === "active" && send.expiresAt > Date.now() && send.opened < send.views ? send : null;
   }
 }

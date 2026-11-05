@@ -83,7 +83,8 @@ test("request and send pages: only their own page posts, a send opens its set nu
   const docker = fakeDocker();
   const app = startCora({ home: tempHome(), host: "127.0.0.1", port: 0, insecureCookies: true,
     adminPassword: "fixture-password", sessionKey: "fixture-session-vault", useResidentSubscriptions: false,
-    cloudUrl: "https://usecora.test", cloudKey: keys.publicKey, cloudSpace: "acme", publicHost: "",
+    // A space on its own domain has no share hosts: its sends stay on the instance's /send/s/ path.
+    cloudUrl: "https://usecora.test", cloudKey: keys.publicKey, cloudSpace: "acme", publicHost: "acme.usecora.test",
     discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
     botTokenFor: () => "", docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
   });
@@ -150,4 +151,55 @@ test("request and send pages: only their own page posts, a send opens its set nu
   assert.deepEqual(seen.data.requests, []);
   assert.equal((await call("/api/secrets", { method: "POST", cookie: member, body: { name: "X_Y", value: "v" } })).status, 403, "only the owner fills the vault");
   assert.equal((await call("/api/secrets/ACME_FTP/sends", { method: "POST", cookie: member, body: {} })).status, 403, "and only the owner sends");
+});
+
+test("a send with a password asks for it before the bytes leave, and the vault's log says who did what", async (t) => {
+  const docker = fakeDocker();
+  const app = startCora({ home: tempHome(), host: "127.0.0.1", port: 0, insecureCookies: true,
+    adminPassword: "fixture-password", sessionKey: "fixture-session-vault-log", useResidentSubscriptions: false,
+    cloudUrl: "https://usecora.test", cloudKey: keys.publicKey, cloudSpace: "acme", publicHost: "acme.usecora.test",
+    discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
+    botTokenFor: () => "", docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
+  });
+  await app.ready;
+  t.after(() => app.stop());
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const entered = await fetch(`${base}/auth/cloud?${new URLSearchParams({ pass: signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_owner", role: "owner", name: "Owner", email: "owner@example.test", emailVerified: true }) })}`, { redirect: "manual" });
+  const owner = entered.headers.get("set-cookie").split(";")[0];
+  const call = async (path, { method = "GET", body } = {}) => {
+    const response = await fetch(`${base}${path}`, { method, headers: { Cookie: owner, "X-Cora": "1", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, data: await response.json() };
+  };
+  await call("/api/secrets", { method: "POST", body: { name: "ACME_FTP", value: "ftp-fixture-value", agents: ["*"] } });
+  const people = await call("/api/secrets/ACME_FTP/sends", { method: "POST", body: { views: 1, access: { mode: "people", emails: ["giulia@cliente.test"] } } });
+  assert.equal(people.status, 400, "a space on its own domain has no address for named people");
+  assert.match(people.data.error, /pubblico o con password/);
+  const made = await call("/api/secrets/ACME_FTP/sends", { method: "POST", body: { views: 2, days: 1, note: "per Giulia", access: { mode: "password", password: "fixture-door" } } });
+  assert.equal(made.status, 201);
+  assert.equal(made.data.access.mode, "password");
+  assert.equal(made.data.access.password, undefined, "the panel never gets the password back");
+  const link = new URL(made.data.url);
+  assert.equal(link.origin, "https://acme.usecora.test", "without share hosts a send stays on the instance's own path");
+  const page = await fetch(`${base}${link.pathname}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Version/18.0 Mobile Safari/604.1" } });
+  assert.match(await page.text(), /<input id="password" type="password"/);
+  const open = (password) => fetch(`${base}${link.pathname}`, { method: "POST", headers: { "X-Cora": "1", Origin: base, "Content-Type": "application/json", "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Version/18.0 Mobile Safari/604.1" }, body: JSON.stringify(password === undefined ? {} : { password }) });
+  assert.equal((await open()).status, 401, "no password, no bytes");
+  assert.equal((await open("wrong-door")).status, 401);
+  const sealed = await open("fixture-door");
+  assert.equal(sealed.status, 200);
+  assert.equal((await sealed.json()).name, "ACME_FTP");
+
+  const log = await call("/api/secrets/events");
+  const lines = log.data.events.map((event) => event.kind).reverse();
+  assert.deepEqual(lines, ["secret-created", "send-created", "send-page", "send-refused", "send-refused", "send-opened"]);
+  const opened = log.data.events[0];
+  assert.deepEqual([opened.opened, opened.views, opened.who.device], [1, 2, "Safari · iOS"]);
+  assert.match(opened.who.visitor, /^[a-z0-9_-]{6}$/);
+  assert.equal(log.data.events.find((event) => event.kind === "send-created").by.name, "Owner");
+  assert.equal(log.data.events.find((event) => event.kind === "send-created").mode, "password");
+  await call(`/api/secrets/sends/${made.data.id}`, { method: "DELETE" });
+  await call("/api/secrets/ACME_FTP", { method: "PUT", body: { agents: [] } });
+  await call("/api/secrets/ACME_FTP", { method: "DELETE" });
+  assert.deepEqual((await call("/api/secrets/events")).data.events.slice(0, 3).map((event) => event.kind), ["secret-deleted", "secret-agents", "send-revoked"]);
+  assert.equal((await call("/api/secrets/events?name=ACME_FTP")).data.events.length, 9, "one secret's log");
 });

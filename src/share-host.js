@@ -1,5 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { verifyPass } from "./pass.js";
+import { readText, sendPage } from "./send-pages.js";
 import { browse, viewer as viewPage, writeZip, ZIP_LIMIT } from "./share-drive.js";
 
 /**
@@ -95,7 +97,10 @@ function fmtBytes(value) {
   return `${size.toFixed(size < 10 && unit ? 1 : 0)} ${units[unit]}`;
 }
 
-export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionKey, activity = () => {} }) {
+// The script that opens a send in the browser, the same one the instance serves at /assets/send.js.
+const SEND_SCRIPT = readFileSync(new URL("../web/send.js", import.meta.url));
+
+export function shareHosts({ config, store, artifacts, vault = null, cloud, firstUse, sessionKey, activity = () => {} }) {
   // Wrong passwords per link and visitor: ten in ten minutes, then a pause.
   const attempts = new Map();
   const tooMany = (key) => {
@@ -183,7 +188,18 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
    * The same thing by the same person within a minute (half an hour for opening
    * the folder) is one line.
    */
+  /** Who a request comes from, for a log: a proven address if there is one, always a visitor code and a device. */
+  function whoOf(req, identity = null) {
+    const ip = String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").split(",")[0].trim();
+    return { email: identity?.email || "", via: identity?.via || "", visitor: mac(`visitor.${ip}.${req.headers["user-agent"] || ""}`).slice(0, 6).toLowerCase(), device: deviceOf(req.headers["user-agent"]) };
+  }
+
   function record(req, target, kind, { path = "", identity = null, detail = "" } = {}) {
+    if (target.kind === "send") {
+      const who = whoOf(req, identity || viewer(req, target));
+      if (!who.via && target.share.access.mode === "public") who.via = "public";
+      return vault?.event(kind === "open" ? "send-page" : `send-${kind}`, { name: target.send.name, sendId: target.send.id, who, detail });
+    }
     if (!store.addArtifactEvent) return;
     const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
     const who = identity || viewer(req, target) || null;
@@ -259,11 +275,56 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
     return sendFile(req, res, { path, sha: file.sha, size: file.size }, { view: "files", frameAncestors: panel });
   }
 
+  /**
+   * A secret's send on its own host: the page, the script, and the one request that
+   * hands over the sealed bytes, after the password or the sign-in its access asks for.
+   */
+  async function sendHost(req, res, target, url, host, mode) {
+    const json = (status, body) => {
+      res.writeHead(status, headers({ "Content-Type": "application/json", "Cache-Control": "no-store" }));
+      res.end(JSON.stringify(body));
+    };
+    if (url.pathname === "/_cora/send.js") {
+      res.writeHead(200, headers({ "Content-Type": "text/javascript; charset=utf-8" }));
+      return res.end(req.method === "HEAD" ? undefined : SEND_SCRIPT);
+    }
+    const signedIn = viewer(req, target);
+    if (url.pathname === "/_cora/open" && req.method === "POST") {
+      const site = req.headers["sec-fetch-site"];
+      const origin = req.headers.origin;
+      if (req.headers["x-cora"] !== "1" || (site && site !== "same-origin") || (origin && origin !== `https://${host}` && origin !== `http://${req.headers.host}`)) return json(403, { error: "forbidden" });
+      if (mode === "people" && !signedIn) return json(403, { error: "sign in first" });
+      if (mode === "password") {
+        const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+        const key = `${target.send.id}:${ip}`;
+        if (tooMany(key)) return json(429, { error: "too many" });
+        let given = "";
+        try { given = String(JSON.parse((await readText(req, 4096)) || "{}").password || ""); } catch { given = ""; }
+        if (!artifacts.passwordOpens({ access: target.share.access }, given)) {
+          attempts.get(key).push(Date.now());
+          record(req, target, "refused", { detail: "password" });
+          return json(401, { error: "wrong password" });
+        }
+        attempts.delete(key);
+      }
+      const who = whoOf(req, signedIn || (mode === "password" ? { email: "", via: "password" } : null));
+      if (!who.via && mode === "public") who.via = "public";
+      const opened = vault.openSendHash(target.hash, who);
+      return opened ? json(200, opened) : json(410, { error: "gone" });
+    }
+    if (url.pathname !== "/") return page(req, res, 404, words(req, "notFound"));
+    record(req, target, "open");
+    const signIn = mode === "people" && !signedIn ? `${cloud.url}/share?${new URLSearchParams({ to: host, next: "/" })}` : "";
+    const shown = sendPage({ lang: language(req), mode, signIn, openUrl: "/_cora/open", script: "/_cora/send.js" });
+    res.writeHead(200, headers({ "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": shown.csp, "Cache-Control": "no-store", "X-Frame-Options": "DENY" }));
+    return res.end(req.method === "HEAD" ? undefined : shown.html);
+  }
+
   async function handle(req, res, { host, label }) {
     // The path as sent: "//x/" stays a path here, never an authority.
     const url = new URL(`https://${host}${String(req.url).startsWith("/") ? "" : "/"}${req.url}`);
     const passwordForm = url.pathname === "/_cora/password";
-    if (req.method !== "GET" && req.method !== "HEAD" && !(passwordForm && req.method === "POST")) {
+    if (req.method !== "GET" && req.method !== "HEAD" && !((passwordForm || url.pathname === "/_cora/open") && req.method === "POST")) {
       res.writeHead(405, headers({ Allow: "GET, HEAD" }));
       return res.end();
     }
@@ -272,12 +333,12 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
       res.writeHead(200, headers({ "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400", "Content-Security-Policy": "default-src 'none'" }));
       return res.end(req.method === "HEAD" ? undefined : ICON);
     }
-    const target = artifacts.resolveHost(label);
+    const target = artifacts.resolveHost(label) || vault?.resolveHost?.(label) || null;
     if (!target) return page(req, res, 404, words(req, "gone"));
     if (target.kind === "raw") return rawFile(req, res, target, url, host);
     if (url.pathname === "/_cora/logout") return page(req, res, 200, words(req, "out"), "", cookieLine("", 0));
-    const mode = target.kind === "share" ? target.share.access.mode || "people" : "people";
-    if (passwordForm && mode === "password") {
+    const mode = target.kind === "share" ? target.share.access.mode || "people" : target.kind === "send" ? target.share.access.mode || "public" : "people";
+    if (passwordForm && mode === "password" && target.kind !== "send") {
       const next = safeNext(url.searchParams.get("next"));
       const form = (alert = "") => `${alert ? `<p class="alert">${esc(alert)}</p>` : ""}<form method="post" action="/_cora/password?${esc(new URLSearchParams({ next }).toString())}"><label for="password">${esc(words(req, "password"))}</label><input id="password" name="password" type="password" required autocomplete="current-password" autofocus><button type="submit">${esc(words(req, "enter"))}</button></form>`;
       if (req.method !== "POST") return page(req, res, 200, words(req, "locked"), form());
@@ -316,10 +377,11 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
         return page(req, res, 403, words(req, "denied", { email: identity.email }),
           `<a class="btn" href="${esc(`${cloud.url}/share?${new URLSearchParams({ to: host, next: safeNext(url.searchParams.get("next")), other: "1" })}`)}">${esc(words(req, "another"))}</a>`);
       }
-      activity({ type: "artifact", text: `${identity.email} ha aperto ${target.kind === "preview" ? `l'anteprima di ${target.folder.path}` : `il link ${label}`}` });
+      activity({ type: target.kind === "send" ? "secret" : "artifact", text: `${identity.email} ha aperto ${target.kind === "preview" ? `l'anteprima di ${target.folder.path}` : target.kind === "send" ? `il link di ${target.send.name}` : `il link ${label}`}` });
       record(req, target, "enter", { identity });
       return redirect(res, safeNext(url.searchParams.get("next")), { "Set-Cookie": admit(target, identity) });
     }
+    if (target.kind === "send") return sendHost(req, res, target, url, host, mode);
     if (mode === "password" && !viewer(req, target)) return redirect(res, `/_cora/password?${new URLSearchParams({ next: safeNext(url.pathname + url.search) })}`);
     if (mode === "people" && !viewer(req, target)) return redirect(res, `${cloud.url}/share?${new URLSearchParams({ to: host, next: safeNext(url.pathname + url.search) })}`);
     if (!target.commit) return page(req, res, 404, words(req, "empty"));
@@ -386,5 +448,5 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
     return page(req, res, found.status || 404, words(req, "notFound"));
   }
 
-  return { match, handle, rawUrl };
+  return { match, handle, rawUrl, whoOf };
 }

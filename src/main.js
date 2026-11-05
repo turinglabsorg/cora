@@ -135,7 +135,7 @@ export function startCora(overrides = {}) {
   brain.artifacts = artifacts;
   // Secrets by name: encrypted here, put into an agent's hush, never shown back.
   const vault = new Vault({
-    store, key: cfg.vaultKey || cfg.sessionKey, boxes, log: activity, instanceUrl,
+    store, key: cfg.vaultKey || cfg.sessionKey, boxes, log: activity, instanceUrl, access: artifacts, shareSuffix,
     push: { notify: (notice) => (push.enabled ? push.notify(notice) : Promise.resolve()) },
     notice: (channelId, text) => orchestrator.notice(channelId, text),
   });

@@ -911,7 +911,7 @@ export class Artifacts {
 
   validLabel(label) {
     const value = String(label || "").trim().toLowerCase();
-    if (!SHARE_LABEL.test(value) || value.length < 3 || value.includes("--") || value.startsWith("xn") || PREVIEW_LABEL.test(value) || RAW_LABEL.test(value)) {
+    if (!SHARE_LABEL.test(value) || value.length < 3 || value.includes("--") || value.startsWith("xn") || /^[prv]-[a-f0-9]{12}$/.test(value)) {
       throw new ArtifactError("il nome del link è fatto di almeno tre lettere, cifre o trattini singoli");
     }
     const space = this.shareSuffix.replace(/^--/, "").split(".")[0];
@@ -1017,14 +1017,17 @@ export class Artifacts {
    * address outlives the job.
    */
   allows(target, { email, hd = "", via = "" }) {
-    if (target.kind === "share" && target.share.access.mode === "public") return true;
-    if (target.kind === "share" && target.share.access.mode === "password") return via === "password";
+    // A folder's link and a secret's send carry the same access.
+    const given = target.kind === "share" || target.kind === "send" ? target.share.access : null;
+    if (given?.mode === "public") return true;
+    if (given?.mode === "password") return via === "password";
     const address = cleanEmail(email);
     if (!EMAIL.test(address) || !["google", "email"].includes(via)) return false;
     if (target.kind === "preview") {
       return this.store.panelUsers().some((user) => !user.blocked && cleanEmail(user.email) === address && this.canReview(target.folder, user));
     }
-    const access = { emails: [], domains: [], ...target.share.access };
+    if (!given) return false;
+    const access = { emails: [], domains: [], ...given };
     const domain = address.split("@")[1];
     if (access.emails.includes(address)) return true;
     if (access.domains.includes(domain) && (via === "email" || (via === "google" && String(hd).toLowerCase() === domain))) return true;

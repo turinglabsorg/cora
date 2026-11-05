@@ -485,7 +485,18 @@ test("Segreti: names and who may use them, never a value; what agents asked to s
     requests: [{ id: "vr_1", name: "ACME_SHOPIFY", by: { name: "Vera" }, expiresAt: at + 86400000, status: "open" }],
     sends: [{ id: "vx_1", name: "ACME_STRIPE_KEY", status: "proposed", by: { name: "Nico" }, note: "Giulia: webhook", expiresAt: at + 86400000 }],
   };
-  const panel = panelHarness({ fetch: async (path) => ({ ok: true, status: 200, json: async () => (path === "/api/secrets" ? listing : {}) }) });
+  const posted = [];
+  const events = [
+    { id: 3, at: at + 3000, kind: "send-opened", name: "ACME_STRIPE_KEY", sendId: "vx_1", opened: 1, views: 2, who: { email: "giulia@cliente.it", via: "google", visitor: "abc123", device: "Chrome · macOS" } },
+    { id: 2, at: at + 2000, kind: "secret-imported", name: "ACME_STRIPE_KEY", by: { kind: "agent", name: "Nico" } },
+    { id: 1, at: at + 1000, kind: "send-created", name: "ACME_STRIPE_KEY", mode: "people", by: { kind: "user", name: "Ada" } },
+  ];
+  const panel = panelHarness({ fetch: async (path, options = {}) => {
+    if (options.method === "POST") posted.push({ path, body: JSON.parse(options.body) });
+    const body = path === "/api/secrets" ? { ...listing, peopleSends: true } : path.startsWith("/api/secrets/events") ? { events }
+      : path.endsWith("/approve") ? { id: "vx_1", name: "ACME_STRIPE_KEY", url: "https://v-000000000001--acme.usecora.space/#key" } : {};
+    return { ok: true, status: 200, json: async () => body };
+  } });
   panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
   panel.run(`S.data = { agents: [{ id: "ag_x", name: "Nico", tools: true }], artifacts: { reviews: 0 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
   panel.run(`location.hash = "#/artefatti/segreti"`);
@@ -495,13 +506,28 @@ test("Segreti: names and who may use them, never a value; what agents asked to s
   assert.deepEqual(tabs.map((tab) => [tab.textContent, tab.className]), [["Cartelle", ""], ["Segreti", "on"]]);
   const asks = panel.app.querySelectorAll(".art-review");
   assert.equal(asks.length, 1);
-  assert.match(asks[0].textContent, /ACME_STRIPE_KEY.*Nico · Giulia: webhook.*Rifiuta.*Approva/);
+  assert.match(asks[0].textContent, /ACME_STRIPE_KEY.*Nico · Giulia: webhook.*Rifiuta.*Rivedi e approva/);
   const rows = panel.app.querySelectorAll(".vault-row");
   assert.deepEqual(rows.map((row) => row.querySelector(".vault-name").textContent), ["ACME_STRIPE_KEY", "ROSSI_FTP", "ACME_SHOPIFY"]);
   assert.match(rows[0].textContent, /Tutti gli agenti.*usato 3 volte · l'ultima Nico/);
   assert.match(rows[1].textContent, /Arrivato da un link.*Nico.*mai usato/);
   assert.match(rows[2].textContent, /chiesto da Vera/);
   assert.doesNotMatch(panel.app.textContent, /sk_|value/i, "nothing on the page could be a value");
+
+  const log = panel.app.querySelectorAll(".log-row").map((row) => row.querySelector(".log-text").children[0].textContent);
+  assert.deepEqual(log, ["giulia@cliente.it ha visto ACME_STRIPE_KEY · 1 di 2", "Nico ha messo ACME_STRIPE_KEY nel suo hush", "Ada ha creato un link per ACME_STRIPE_KEY · persone precise"], "the vault's log, newest first");
+
+  asks[0].querySelectorAll("button").find((button) => button.textContent === "Rivedi e approva").click();
+  const form = panel.app.querySelector(".share-new");
+  assert.ok(form, "approving opens the same form as any link");
+  assert.match(panel.app.textContent, /Approva l'invio di ACME_STRIPE_KEY/);
+  assert.deepEqual(form.querySelector(".share-modes").querySelectorAll("button").map((button) => button.textContent), ["Pubblico", "Persone precise", "Con password"]);
+  form.querySelector("textarea").value = "Giulia@Cliente.it";
+  form.dispatch("submit");
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(posted[0].path, "/api/secrets/sends/vx_1/approve");
+  assert.deepEqual(posted[0].body.access, { mode: "people", emails: "Giulia@Cliente.it", domains: "", members: false }, "a secret goes to named people by default, without the team");
+  assert.equal(posted[0].body.note, "Giulia: webhook", "the agent's note is kept");
 });
 
 test("Artefatti, File: folders to walk into from the address, and files uploaded where you stand", async () => {

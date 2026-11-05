@@ -121,7 +121,10 @@ Keys, passwords and tokens live in Cora's **vault**, the secrets half of Artefat
 - **Storage.** Values are encrypted on the server: AES-256-GCM, with a key derived from `CORA_SESSION_KEY`, or `CORA_VAULT_KEY` when set. Nobody reads one back from the panel.
 - **Receiving.** The owner, or an agent through `secret_request`, makes a one-time link for a name. Whoever holds the secret types it into that page, and it never passes through a chat. This is Bitwarden Send's receiving side, inside Cora.
 - **Using.** `secret_import` puts a secret into the hush on the agent's own computer. It is sealed to that hush's box key and opened straight into its vault, so the agent then runs `hush run --name NAME --env VAR --redact -- command` without ever seeing it. Each secret says which agents may use it, and each use is recorded.
-- **Sending.** A send link opens a set number of times and expires. The value is encrypted under a key that lives only in the link's fragment, so the server alone cannot open it. The owner creates sends; an agent's `secret_send` waits for the owner's approval, and the link goes to the owner, never to the agent.
+- **Sending.** A send link opens a set number of times and expires. The value is encrypted under a key that lives only in the link's fragment, so the server alone cannot open it.
+  - **Who opens it.** It is made with the same form as a folder's link: public, with a password, or for named people. For named people it has an address of its own on usecora.space, and they sign in with Google or an email link as for a folder.
+  - **Who makes it.** The owner creates sends. An agent's `secret_send` waits for the owner, who approves it in that same form, and the link goes to the owner, never to the agent.
+- **The log.** The vault's *Registro* shows who opened each send link and when (their address, or a code for their browser), wrong passwords and refused addresses, who delivered a requested secret, which agent put which secret into its hush, and every change. Values never appear.
 
 ## Memory
 

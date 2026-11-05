@@ -191,6 +191,7 @@ CREATE INDEX IF NOT EXISTS artifact_events_folder ON artifact_events (folder_id,
 CREATE TABLE IF NOT EXISTS vault_secrets (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS vault_requests (token_hash TEXT PRIMARY KEY, status TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS vault_sends (token_hash TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS vault_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL);
 `;
 const TRACES_KEPT_PER_AGENT = 300;
 
@@ -1468,6 +1469,19 @@ export class Store {
   }
 
   /* ---------- vault ---------- */
+  /** One thing that happened in the vault: a secret stored, asked for, used by an agent, sent, opened. */
+  addVaultEvent(event) {
+    this.stmt("INSERT INTO vault_events (at, kind, name, data) VALUES (?, ?, ?, ?)").run(event.at, event.kind, event.name || "", JSON.stringify(event));
+    if (Math.random() < 0.01) this.stmt("DELETE FROM vault_events WHERE at < ?").run(event.at - 365 * 86400000);
+  }
+
+  /** The vault's log, newest first; `name` keeps one secret, `before` pages back. */
+  vaultEvents({ name = "", before = 0, limit = 200 } = {}) {
+    const rows = this.stmt(`SELECT id, data FROM vault_events WHERE 1 = 1${name ? " AND name = ?" : ""}${before ? " AND id < ?" : ""} ORDER BY id DESC LIMIT ?`)
+      .all(...[name || null, before || null].filter((value) => value !== null), Math.min(Number(limit) || 200, 1000));
+    return rows.map((row) => ({ id: row.id, ...JSON.parse(row.data) }));
+  }
+
   vaultSecrets() {
     return this.stmt("SELECT data FROM vault_secrets ORDER BY name").all().map((row) => JSON.parse(row.data));
   }
