@@ -17,6 +17,7 @@ import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
 import { Boxes } from "../src/box.js";
+import { gitLauncherFixture, gitSetupFixture } from "./git-launcher-fixtures.js";
 import { executeTool } from "../src/tools.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -4953,4 +4954,158 @@ describe("immediate company brain consolidation", () => {
     assert.equal((await instance.companyBrain.notes()).length, 1);
     assert.equal(instance.librarian.requestRun(), false);
   });
+});
+
+describe("automatic attribution for ordinary Git and SSH", () => {
+  test("plain Git preserves author, custom hooks, other coauthors and pathspecs", () => {
+    const fixture = gitLauncherFixture();
+    const hooks = join(fixture.directory, "owner hooks"); mkdirSync(hooks);
+    fixture.raw(["config", "core.hooksPath", hooks]);
+    writeFileSync(join(hooks, "pre-commit"), "#!/bin/sh\nprintf yes > .git/owner-pre-commit\n", { mode: 0o755 });
+    writeFileSync(join(hooks, "commit-msg"), "#!/bin/sh\ngrep -q 'Co-authored-by: Cora' \"$1\" || exit 31\nprintf yes > .git/owner-commit-msg\n", { mode: 0o755 });
+    writeFileSync(join(fixture.directory, "other.txt"), "Not part of this commit\n"); fixture.raw(["add", "other.txt"]);
+    const result = fixture.git(["-c", "trailer.ifExists=replace", "commit", "-m", "Approved change\n\nCo-authored-by: Teammate <teammate@example.test>", "--", "change.txt"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fixture.raw(["log", "-1", "--format=%an <%ae>"]), "Repository Owner <owner@example.test>");
+    assert.match(fixture.raw(["log", "-1", "--format=%B"]), /Co-authored-by: Teammate <teammate@example.test>/);
+    assert.equal(fixture.raw(["log", "-1", "--format=%B"]).split("Co-authored-by: Cora <git@usecora.space>").length - 1, 1);
+    assert.equal(readFileSync(join(fixture.directory, ".git", "owner-pre-commit"), "utf8"), "yes");
+    assert.equal(readFileSync(join(fixture.directory, ".git", "owner-commit-msg"), "utf8"), "yes");
+    assert.match(fixture.raw(["status", "--porcelain"]), /A  other.txt/);
+    assert.equal(fixture.raw(["config", "core.hooksPath"]), hooks);
+  });
+
+  test("repeated trailers are deduplicated and commit messages remain literal", () => {
+    const fixture = gitLauncherFixture();
+    const message = "Approved $(touch unexpected) `touch unexpected-too`\n\nCo-authored-by: Cora <git@usecora.space>";
+    const result = fixture.git(["-c", "trailer.ifExists=addIfDifferent", "commit", "--file=-", "--trailer", "Co-authored-by: Cora <git@usecora.space>"], { input: message });
+    assert.equal(result.status, 0, result.stderr);
+    const saved = fixture.raw(["log", "-1", "--format=%B"]);
+    assert.match(saved, /\$\(touch unexpected\)/);
+    assert.equal(saved.split("Co-authored-by: Cora <git@usecora.space>").length - 1, 1);
+    assert.equal(existsSync(join(fixture.directory, "unexpected")), false);
+  });
+
+  test("instance, command and repository opt-outs produce ordinary commits", () => {
+    for (const choice of ["instance", "command", "repository"]) {
+      const fixture = gitLauncherFixture({ enabled: choice !== "instance" });
+      if (choice === "repository") fixture.raw(["config", "cora.attribution", "false"]);
+      const result = fixture.git(["commit", "-m", "Owner opted out"], { extraEnv: choice === "command" ? { CORA_GIT_ATTRIBUTION: "0" } : {} });
+      assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(fixture.raw(["log", "-1", "--format=%B"]), /Co-authored-by/);
+    }
+  });
+
+  test("hook rejection and signing failures are preserved, and dry-run creates no commit", () => {
+    const fixture = gitLauncherFixture();
+    assert.equal(fixture.git(["commit", "--dry-run"]).status, 0);
+    assert.equal(existsSync(join(fixture.directory, ".git", "HEAD")), true);
+    assert.equal(fixture.run("/usr/bin/git", ["-C", fixture.directory, "rev-parse", "--verify", "HEAD"]).status, 128);
+    const hook = join(fixture.directory, ".git", "hooks", "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\nexit 42\n", { mode: 0o755 });
+    assert.notEqual(fixture.git(["commit", "-m", "Rejected by hook"]).status, 0);
+    rmSync(hook);
+    const signer = join(fixture.directory, "owner signer");
+    writeFileSync(signer, "#!/bin/sh\nprintf yes > .git/owner-signer\nexit 19\n", { mode: 0o755 });
+    fixture.raw(["config", "gpg.program", signer]); fixture.raw(["config", "commit.gpgsign", "true"]);
+    assert.notEqual(fixture.git(["commit", "-m", "Must be signed"]).status, 0);
+    assert.equal(readFileSync(join(fixture.directory, ".git", "owner-signer"), "utf8"), "yes");
+    assert.equal(fixture.raw(["config", "commit.gpgsign"]), "true");
+  });
+
+  test("SSH commits receive attribution with options, quotes, stdin and login shells intact", () => {
+    for (const login of [false, true]) {
+      const fixture = gitLauncherFixture();
+      const environment = join(fixture.directory, "owner bash env");
+      writeFileSync(environment, "export CORA_TEST_MARK=preserved\n");
+      const command = `test \"$CORA_TEST_MARK\" = preserved && git -C ${fixture.quote(fixture.directory)} commit -m ${fixture.quote("Remote owner's approved change")}`;
+      const result = fixture.ssh(["-vv", "-o", "BatchMode=yes", "-p2222", "owner@host", login ? "bash" : "bash", login ? "-lc" : "-s", ...(login ? [fixture.quote(command)] : [])], { input: login ? undefined : command, extraEnv: { BASH_ENV: environment } });
+      assert.equal(result.status, 0, result.stderr);
+      const args = JSON.parse(readFileSync(join(fixture.directory, "ssh-args.json"), "utf8"));
+      assert.deepEqual(args.slice(0, 5), ["-vv", "-o", "BatchMode=yes", "-p2222", "owner@host"]);
+      assert.ok(args[5].startsWith("sh -c "));
+      assert.match(fixture.raw(["log", "-1", "--format=%B"]), /Co-authored-by: Cora <git@usecora.space>/);
+      assert.equal(fixture.raw(["log", "-1", "--format=%an <%ae>"]), "Repository Owner <owner@example.test>");
+      assert.deepEqual(readdirSync(fixture.remoteTmp), [], "only its own temporary launcher was removed");
+    }
+  });
+
+  test("SSH transport, subsystem and control commands pass through unchanged", () => {
+    const fixture = gitLauncherFixture();
+    for (const args of [["-G", "host"], ["-O", "check", "host"], ["-s", "host", "sftp"], ["host", "git-upload-pack '/repo'"], ["host", "git-receive-pack '/repo'"], ["host", "/usr/bin/git-upload-pack '/repo'"], ["host", "scp -t /target"], ["host", "rsync --server /target"]]) {
+      assert.equal(fixture.ssh(args).status, 0);
+      assert.deepEqual(JSON.parse(readFileSync(join(fixture.directory, "ssh-args.json"), "utf8")), args);
+    }
+    assert.equal(fixture.ssh(["host", "exit 23"]).status, 23);
+    assert.deepEqual(readdirSync(fixture.remoteTmp), []);
+  });
+
+  test("SSH respects command disable and remote repository opt-out", () => {
+    for (const choice of ["command", "repository"]) {
+      const fixture = gitLauncherFixture();
+      if (choice === "repository") fixture.raw(["config", "cora.attribution", "false"]);
+      const command = `git -C ${fixture.quote(fixture.directory)} commit -m 'Remote opt-out'`;
+      const result = fixture.ssh(["host", command], { extraEnv: choice === "command" ? { CORA_GIT_ATTRIBUTION: "0" } : {} });
+      assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(fixture.raw(["log", "-1", "--format=%B"]), /Co-authored-by/);
+    }
+  });
+});
+
+describe("desktop Git attribution provisioning", () => {
+  test("existing desktops receive idempotent launchers as root without an image build", async () => {
+    const fixture = gitSetupFixture();
+    const boxes = new Boxes({ docker: fixture.docker, timezone: "UTC", gitAttribution: { enabled: true, email: "cora@example.test" } });
+    const agent = { id: "provisioned", tools: true };
+    await boxes.ensureGitAttribution(agent, { startedAt: "first-start" });
+    await boxes.ensureGitAttribution(agent, { startedAt: "first-start" });
+    assert.equal(readFileSync(fixture.calls, "utf8").trim().split("\n").length, 1);
+    const installed = spawnSync(join(fixture.bin, "git"), ["--version"], { encoding: "utf8" });
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.match(installed.stdout, /git version/);
+    assert.equal(JSON.parse(readFileSync(join(fixture.root, "policy.json"), "utf8")).email, "cora@example.test");
+    await boxes.ensureGitAttribution(agent, { startedAt: "second-start" });
+    assert.equal(readFileSync(fixture.calls, "utf8").trim().split("\n").length, 2);
+    assert.equal(readFileSync(fixture.calls, "utf8").includes('"build"'), false);
+  });
+
+  test("a conflicting owner launcher is refused without replacement", async () => {
+    const fixture = gitSetupFixture();
+    const owner = "#!/bin/sh\nexit 37\n";
+    writeFileSync(join(fixture.bin, "git"), owner, { mode: 0o755 });
+    const boxes = new Boxes({ docker: fixture.docker, timezone: "UTC", gitAttribution: { enabled: true, email: "cora@example.test" } });
+    await assert.rejects(boxes.ensureGitAttribution({ id: "conflict", tools: true }, { startedAt: "first-start" }), /refusing to replace an existing git launcher/);
+    assert.equal(readFileSync(join(fixture.bin, "git"), "utf8"), owner);
+    assert.equal(existsSync(fixture.root), false);
+  });
+
+  test("instance policy can be disabled on an already provisioned desktop", async () => {
+    const fixture = gitSetupFixture();
+    const boxes = new Boxes({ docker: fixture.docker, timezone: "UTC", gitAttribution: { enabled: true, email: "cora@example.test" } });
+    await boxes.ensureGitAttribution({ id: "policy", tools: true }, { startedAt: "same-start" });
+    boxes.gitAttribution = { enabled: false, email: "cora@example.test" };
+    await boxes.ensureGitAttribution({ id: "policy", tools: true }, { startedAt: "same-start" });
+    assert.equal(JSON.parse(readFileSync(join(fixture.root, "policy.json"), "utf8")).enabled, false);
+    assert.match(readFileSync(join(fixture.root, "git"), "utf8"), /default_enabled=0/);
+  });
+});
+
+test("git_commit uses the managed launcher and honors its repository and task policy", async () => {
+  for (const choice of ["enabled", "repository", "task"]) {
+    const fixture = gitLauncherFixture();
+    if (choice === "repository") fixture.raw(["config", "cora.attribution", "false"]);
+    const dockerBin = join(fixture.directory, "tool-docker");
+    writeFileSync(dockerBin, `#!${process.execPath}
+const {spawnSync}=require('node:child_process');const {readFileSync}=require('node:fs');const args=process.argv.slice(2);const at=args.indexOf('git');if(at<0)process.exit(99);
+const extra={};const envAt=args.indexOf('env');if(envAt>=0)for(const item of args.slice(envAt+1,at)){const at=item.indexOf('=');extra[item.slice(0,at)]=item.slice(at+1)};
+const result=spawnSync(${JSON.stringify(join(fixture.bin, "git"))},args.slice(at+1),{input:readFileSync(0),env:{PATH:process.env.PATH,HOME:${JSON.stringify(fixture.directory)},GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',...extra}});process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');process.exit(result.status??1);
+`, { mode: 0o755 });
+    const boxes = new Boxes({ docker: dockerBin, timezone: "UTC", gitAttribution: { enabled: true, email: "git@usecora.space" } });
+    boxes.gitChecks.set("managed", "ready");
+    const result = await boxes.gitCommit("managed", fixture.directory, "Managed tool policy", choice === "task" ? "" : "Co-authored-by: Cora <custom@example.test>");
+    assert.equal(result.code, 0, result.output);
+    const message = fixture.raw(["log", "-1", "--format=%B"]);
+    if (choice === "enabled") assert.match(message, /Co-authored-by: Cora <custom@example.test>/);
+    else assert.doesNotMatch(message, /Co-authored-by/);
+  }
 });
