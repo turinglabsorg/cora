@@ -13,8 +13,8 @@ const INDEX_PAGES = 200;
 const SYSTEM = "Sei il bibliotecario del brain aziendale. Rispondi solo con JSON valido.";
 
 /**
- * The company brain's librarian: at night it reads what was said since its last
- * run (every channel, the agents' notes, the shared memories once), asks the
+ * The company brain's librarian: new notes queue a run, and the nightly pass
+ * reads what was said since its last run (every channel, shared memories once), asks the
  * brain's model what the company now knows, and writes those pages with their
  * sources. Every change is live at once and waits for the owner's morning look,
  * which never holds anything up. In the morning it tells the owner what changed.
@@ -32,6 +32,38 @@ export class Librarian {
     this.messageOwner = messageOwner;
     this.reviewUrl = reviewUrl;
     this.running = false;
+    this.pending = false;
+    this.timer = null;
+    this.stopped = false;
+    this.idle = Promise.resolve();
+  }
+
+  requestRun({ reason = "memoria" } = {}) {
+    if (this.stopped || !this.brain?.enabled) return false;
+    this.pending = true;
+    this.pendingReason = reason;
+    this.queueRun();
+    return true;
+  }
+
+  queueRun() {
+    if (this.stopped || this.running || this.timer || !this.pending) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.stopped || this.running || !this.pending) return;
+      const reason = this.pendingReason;
+      this.pending = false;
+      this.run({ reason }).catch((error) => { if (!this.stopped) this.log({ type: "error", text: `bibliotecario: ${error.message}` }); });
+    }, 0);
+    this.timer.unref?.();
+  }
+
+  stop() {
+    this.stopped = true;
+    this.pending = false;
+    clearTimeout(this.timer);
+    this.timer = null;
+    return this.idle;
   }
 
   get model() {
@@ -54,11 +86,17 @@ export class Librarian {
     }
   }
 
-  /** One night's work. `force` runs even when nothing new arrived (the panel's "Aggiorna adesso"). */
+  /** Consolidate notes and chats since the last successful batch. */
   async run({ reason = "notte" } = {}) {
+    if (this.stopped) return { status: "stopped" };
     if (!this.brain?.enabled) return { status: "disabled" };
     if (this.running) return { status: "busy" };
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.pending = false;
     this.running = true;
+    let finish;
+    this.idle = new Promise((resolve) => { finish = resolve; });
     const started = Date.now();
     try {
       const last = await this.brain.state("lastRun", null);
@@ -97,6 +135,8 @@ export class Librarian {
       return { status: totals.errors.length ? "partial" : "done", ...record };
     } finally {
       this.running = false;
+      finish();
+      this.queueRun();
     }
   }
 

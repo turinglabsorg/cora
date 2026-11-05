@@ -526,6 +526,11 @@ function agentDot(agent) {
 }
 
 function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
+  const viewKey = route().join("/");
+  const previous = app.querySelector(".content");
+  const scroll = S.viewKey === viewKey && previous ? S.scrollTarget || { top: previous.scrollTop, left: previous.scrollLeft } : null;
+  S.restoreScroll?.();
+  S.viewKey = viewKey;
   clearTimers();
   const [section, current] = route();
   const nav = [
@@ -558,6 +563,34 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     h("main", { class: "content" }, h("div", { class: "wrap" }, content)),
     h("nav", { class: "tabbar" }, nav.map(([key, label, name, active, count]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "nav-count", "aria-label": tr("{count} da rivedere", { count }) }, raw(String(count))) : null)))));
   updateLamp();
+  if (scroll?.top || scroll?.left) restoreScroll(scroll);
+}
+
+function restoreScroll(position) {
+  const content = app.querySelector(".content");
+  let observer;
+  let timer;
+  const cancel = () => {
+    observer?.disconnect();
+    clearTimeout(timer);
+    for (const event of ["wheel", "touchstart", "pointerdown", "keydown"]) content.removeEventListener(event, cancel);
+    S.restoreScroll = null;
+    S.scrollTarget = null;
+  };
+  const apply = () => {
+    content.scrollTop = position.top;
+    content.scrollLeft = position.left;
+    if (Math.abs(content.scrollTop - position.top) < 2) cancel();
+  };
+  S.scrollTarget = position;
+  S.restoreScroll = cancel;
+  for (const event of ["wheel", "touchstart", "pointerdown", "keydown"]) content.addEventListener(event, cancel, { passive: true });
+  if (typeof MutationObserver !== "undefined") {
+    observer = new MutationObserver(apply);
+    observer.observe(content, { childList: true, subtree: true });
+  }
+  timer = setTimeout(cancel, 10000);
+  apply();
 }
 
 /* ---------- your account ---------- */
@@ -3550,6 +3583,7 @@ function brainMap(graph) {
 
 function renderBrain() {
   const [, view, slug] = route();
+  if (view === "nuova") return renderBrainCreate(slug);
   if (view === "p" && slug) return renderBrainPage(slug);
   if (view === "revisione") return renderBrainReview();
   const mapView = view === "mappa";
@@ -3561,6 +3595,8 @@ function renderBrain() {
   const search = h("input", { type: "search", placeholder: tr("Cerca nel brain…"), "aria-label": tr("Cerca nel brain"), autocomplete: "off" });
   const list = h("div", { class: "brain-list" });
   const reviewButton = btn("Rivedi", { icon: "check", cls: "primary", href: "#/brain/revisione" });
+  const addButton = btn("Aggiungi pagina", { icon: "plus", cls: "primary", href: "#/brain/nuova" });
+  addButton.hidden = true;
   const runButton = btn("Aggiorna adesso", { icon: "refresh", cls: "ghost", onclick: async () => {
     runButton.disabled = true;
     if (await guard(api("/api/brain/run", { method: "POST" }), "Il bibliotecario è al lavoro")) setTimeout(load, 4000);
@@ -3572,7 +3608,7 @@ function renderBrain() {
       if (map) { map.filter({ kind, query }); return; }
       try {
         const graph = await api("/api/brain/graph");
-        if (!graph.nodes.length) { mapBox.replaceChildren(empty("bulb", "Ancora nessuna pagina: il bibliotecario le scrive di notte dalle chat.")); return; }
+        if (!graph.nodes.length) { mapBox.replaceChildren(empty("bulb", "Ancora nessuna pagina. Aggiungine una o lascia una nota al bibliotecario.")); return; }
         map = brainMap(graph);
         mapBox.replaceChildren(map.element);
         map.filter({ kind, query: search.value.trim() });
@@ -3585,7 +3621,7 @@ function renderBrain() {
       list.replaceChildren(...(data.pages.length ? data.pages.map((page) => h("a", { class: "brain-row", href: `#/brain/p/${page.slug}` },
         h("div", { class: "grow" }, h("b", {}, raw(page.title)), page.summary ? h("small", {}, raw(page.summary)) : null),
         h("div", { class: "brain-row-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.pending ? badge("Da rivedere", "warn") : null))) :
-        [empty("bulb", query ? "Niente nel brain su questo." : "Ancora nessuna pagina: il bibliotecario le scrive di notte dalle chat.")]));
+        [empty("bulb", query ? "Niente nel brain su questo." : "Ancora nessuna pagina. Aggiungine una o lascia una nota al bibliotecario.")]));
     } catch (error) { list.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
   }
   let timer = null;
@@ -3610,7 +3646,7 @@ function renderBrain() {
       select.addEventListener("change", () => saveSettings({ [key]: Number(select.value) }, row));
       return row;
     };
-    return panel({ icon: "sliders", title: "Il bibliotecario", hint: "Ogni notte legge le chat e aggiorna il brain; la mattina ti dice cosa è cambiato. Le modifiche valgono subito, anche se non le rivedi." },
+    return panel({ icon: "sliders", title: "Il bibliotecario", hint: "Consolida subito le nuove memorie. Ogni notte rilegge le chat; la mattina ti dice cosa è cambiato. Le modifiche valgono subito, anche se non le rivedi." },
       setRows(modelRow, embedRow,
         hourRow("librarianHour", "Ora del bibliotecario", "Prima fa il backup, poi aggiorna il brain."),
         hourRow("reviewHour", "Ora della revisione", "Ti arriva il riepilogo: sul telefono e in privato.")));
@@ -3622,6 +3658,10 @@ function renderBrain() {
       return;
     }
     const { stats, lastRun } = state;
+    addButton.hidden = !state.canManage;
+    runButton.hidden = !state.canManage;
+    addButton.href = `#/brain/nuova${kind ? `/${kind}` : ""}`;
+    addButton.querySelector("span").textContent = tr(BRAIN_ADD_LABEL[kind] || "Aggiungi pagina");
     reviewButton.querySelector("span").textContent = stats.pending + stats.flagged ? tr("Rivedi ({count})", { count: stats.pending + stats.flagged }) : tr("Rivedi");
     reviewButton.className = `btn${stats.pending + stats.flagged ? " primary" : " ghost"}`;
     const chips = h("div", { class: "chips", role: "group", "aria-label": tr("Tipo di pagina") },
@@ -3644,8 +3684,36 @@ function renderBrain() {
       if (state.enabled) pages();
     } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
   }
-  shell([pageHead("Brain", "Quello che sa l'azienda: clienti, progetti, persone, decisioni e procedure, con le fonti.", [reviewButton, runButton]), body], { title: "Brain" });
+  shell([pageHead("Brain", "Quello che sa l'azienda: clienti, progetti, persone, decisioni e procedure, con le fonti.", [reviewButton, runButton, addButton]), body], { title: "Brain" });
   load();
+}
+
+const BRAIN_ADD_LABEL = { client: "Aggiungi cliente", project: "Aggiungi progetto", person: "Aggiungi persona", decision: "Aggiungi decisione", procedure: "Aggiungi procedura", topic: "Aggiungi tema" };
+
+async function renderBrainCreate(kind = "topic") {
+  const draftForm = app.querySelector(".brain-create-form");
+  const draft = S.viewKey === route().join("/") && draftForm ? Object.fromEntries(new FormData(draftForm)) : {};
+  const body = h("div", { class: "stack" }, skeleton("rows", 2));
+  shell([body], { title: BRAIN_ADD_LABEL[kind] || "Aggiungi pagina", back: "#/brain" });
+  const state = await guard(api("/api/brain"));
+  if (!body.isConnected || !state) return;
+  if (!state.enabled || !state.canManage) { body.replaceChildren(empty("bulb", "Solo l'owner aggiunge pagine al brain.", btn("Torna al brain", { href: "#/brain", icon: "back" }))); return; }
+  const selected = draft.kind || (BRAIN_KINDS_LABEL[kind] ? kind : "topic");
+  const submit = btn("Aggiungi pagina", { icon: "plus", type: "submit", cls: "primary" });
+  const form = h("form", { class: "stack brain-create-form" },
+    h("div", { class: "grid2" }, field("Titolo", h("input", { name: "title", type: "text", required: true, maxlength: 120, value: draft.title || "", autocomplete: "off" })),
+      field("Tipo", h("select", { name: "kind" }, Object.entries(BRAIN_KINDS_LABEL).map(([key, label]) => h("option", { value: key, selected: selected === key }, label))))),
+    field("Riassunto", h("input", { name: "summary", type: "text", maxlength: 400, value: draft.summary || "" }), "una o due frasi: è ciò che gli agenti vedono a ogni turno"),
+    field("Testo", h("textarea", { name: "body", class: "tall mono", maxlength: 8000 }, raw(draft.body || "")), "righe che cominciano con - diventano elenchi; [[slug]] collega un'altra pagina"),
+    h("div", { class: "row" }, btn("Annulla", { cls: "ghost", href: "#/brain" }), h("span", { class: "spacer" }), submit));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    const saved = await guard(api("/api/brain/pages", { method: "POST", body: Object.fromEntries(new FormData(form)) }), "Pagina aggiunta");
+    submit.disabled = false;
+    if (saved) location.hash = `#/brain/p/${saved.slug}`;
+  });
+  body.replaceChildren(pageHead(BRAIN_ADD_LABEL[selected], "Quello che aggiungi è subito disponibile agli agenti. Il bibliotecario consolida le memorie in attesa."), panel({ icon: "edit", title: "Nuova pagina" }, form));
 }
 
 async function renderBrainPage(slug) {
@@ -3655,6 +3723,8 @@ async function renderBrainPage(slug) {
   let state;
   try { [page, state] = await Promise.all([api(`/api/brain/pages/${encodeURIComponent(slug)}`), api("/api/brain")]); }
   catch (error) { body.replaceChildren(empty("bulb", error.message, btn("Torna al brain", { icon: "back", href: "#/brain" }))); return; }
+  if (!body.isConnected) return;
+  app.querySelector(".appbar h1")?.replaceChildren(raw(page.title));
   const editing = { on: false };
   const draw = () => {
     const actions = state.canManage ? [
@@ -3697,33 +3767,57 @@ async function renderBrainPage(slug) {
 
 async function renderBrainReview() {
   const body = h("div", { class: "stack" }, skeleton("rows", 3));
+  const expanded = S.brainExpanded ||= new Set();
+  const expandAll = btn("Apri tutte", { icon: "list", cls: "ghost", onclick: () => {
+    const cards = [...body.querySelectorAll(".brain-change")];
+    const open = cards.some((card) => card.querySelector(".brain-change-toggle").getAttribute("aria-expanded") !== "true");
+    for (const card of cards) toggle(card, open);
+  } });
   const approveAll = btn("Approva tutto", { icon: "check", cls: "primary", onclick: () => decide({ all: true, decision: "approve" }, "Tutto approvato") });
-  shell([pageHead("Revisione del brain", "Cosa ha cambiato il bibliotecario. Vale già: approva quello che va bene, annulla quello che no.", [approveAll]), body], { title: "Revisione", back: "#/brain" });
+  shell([pageHead("Revisione del brain", "Cosa ha cambiato il bibliotecario. Vale già: approva quello che va bene, annulla quello che no.", [expandAll, approveAll]), body], { title: "Revisione", back: "#/brain" });
   let state;
+  function toggle(card, open) {
+    card.querySelector(".brain-change-toggle").setAttribute("aria-expanded", String(open));
+    card.querySelector(".brain-change-body").hidden = !open;
+    if (open) expanded.add(card.id); else expanded.delete(card.id);
+    const allOpen = [...body.querySelectorAll(".brain-change")].every((item) => expanded.has(item.id));
+    expandAll.querySelector("span").textContent = tr(allOpen ? "Chiudi tutte" : "Apri tutte");
+  }
   async function decide(choice, done) {
     for (const button of body.querySelectorAll("button")) button.disabled = true;
     approveAll.disabled = true;
+    expandAll.disabled = true;
     if (await guard(api("/api/brain/review", { method: "POST", body: choice }), done)) await load();
+    for (const button of body.querySelectorAll("button")) button.disabled = false;
     approveAll.disabled = false;
+    expandAll.disabled = false;
   }
   async function load() {
     try {
       const [{ queue }, brain] = await Promise.all([api("/api/brain/review"), state ? Promise.resolve(state) : api("/api/brain")]);
       state = brain;
+      const current = new Set(queue.map((revision) => `change-${revision.id}`));
+      for (const id of expanded) if (!current.has(id)) expanded.delete(id);
       approveAll.hidden = !queue.length || !state.canManage;
+      expandAll.hidden = !queue.length;
       if (!queue.length) { body.replaceChildren(empty("check", "Niente da rivedere: il brain è come l'hai lasciato.", btn("Torna al brain", { icon: "back", href: "#/brain" }))); return; }
-      body.replaceChildren(...queue.map((revision) => h("article", { class: `brain-change${revision.review === "flagged" ? " flagged" : ""}` },
+      body.replaceChildren(...queue.map((revision) => h("article", { id: `change-${revision.id}`, class: `brain-change${revision.review === "flagged" ? " flagged" : ""}` },
         h("header", { class: "row" },
-          h("a", { href: `#/brain/p/${revision.slug}`, class: "grow" }, h("b", {}, raw(revision.title))),
-          badge(BRAIN_ACTIONS[revision.action] || raw(revision.action), revision.action === "create" ? "on" : ""), revision.review === "flagged" ? badge("Da verificare", "warn", "alert") : null),
+          h("button", { type: "button", class: "brain-change-toggle grow", "aria-expanded": String(expanded.has(`change-${revision.id}`)), "aria-controls": `change-body-${revision.id}`, onclick: (event) => {
+            const card = event.currentTarget.closest(".brain-change");
+            toggle(card, event.currentTarget.getAttribute("aria-expanded") !== "true");
+          } }, icon("next", "chev"), h("b", {}, raw(revision.title))),
+          h("div", { class: "brain-change-meta" }, badge(BRAIN_ACTIONS[revision.action] || raw(revision.action), revision.action === "create" ? "on" : ""), revision.review === "flagged" ? badge("Da verificare", "warn", "alert") : null),
+          state.canManage ? btn("Approva", { icon: "check", cls: "primary", onclick: () => decide({ ids: [revision.id], decision: "approve" }, "Approvata") }) : null),
+        h("div", { id: `change-body-${revision.id}`, class: "brain-change-body", hidden: !expanded.has(`change-${revision.id}`) },
         h("small", {}, brainAuthor(revision.author), raw(` · ${fmtTime(revision.createdAt, true)}${revision.note ? ` · ${revision.note}` : ""}`)),
         revision.conflict ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(revision.conflict))) : null,
         revision.previous && revision.previous.summary !== revision.summary ? brainDiff(revision.previous.summary, revision.summary) : null,
         revision.previous ? brainDiff(revision.previous.body, revision.body) : brainText(revision.body),
         brainSources(revision.sources),
-        state.canManage ? h("div", { class: "row brain-change-actions" }, h("span", { class: "spacer" }),
-          btn("Annulla", { icon: "close", cls: "ghost", onclick: () => decide({ ids: [revision.id], decision: "revert" }, "Modifica annullata") }),
-          btn("Approva", { icon: "check", cls: "primary", onclick: () => decide({ ids: [revision.id], decision: "approve" }, "Approvata") })) : null)));
+        h("div", { class: "row brain-change-actions" }, btn("Apri la pagina", { icon: "book", cls: "ghost", href: `#/brain/p/${revision.slug}` }), h("span", { class: "spacer" }),
+          state.canManage ? btn("Annulla", { icon: "close", cls: "ghost", onclick: () => decide({ ids: [revision.id], decision: "revert" }, "Modifica annullata") }) : null)))));
+      expandAll.querySelector("span").textContent = tr(queue.every((revision) => expanded.has(`change-${revision.id}`)) ? "Chiudi tutte" : "Apri tutte");
     } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
   }
   load();

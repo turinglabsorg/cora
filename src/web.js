@@ -396,7 +396,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const manage = () => { if (!canManage) throw new HttpError(403, "solo l'owner cambia il brain"); };
       const author = `owner:${user.name || user.email || "Owner"}`;
       if (path === "/api/brain" && method === "GET") {
-        return send(res, 200, { enabled: true, canManage, kinds: BRAIN_KINDS, stats: await companyBrain.stats(), lastRun: await companyBrain.state("lastRun"), running: Boolean(librarian?.running) });
+        return send(res, 200, { enabled: true, canManage, kinds: BRAIN_KINDS, stats: await companyBrain.stats(), lastRun: await companyBrain.state("lastRun"), running: Boolean(librarian?.running || librarian?.pending) });
       }
       if (path === "/api/brain/graph" && method === "GET") return send(res, 200, await companyBrain.graph());
       if (path === "/api/brain/pages" && method === "GET") {
@@ -409,6 +409,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         const body = await readJson(req, 65536);
         if (await companyBrain.page(body.slug || body.title || "")) throw new HttpError(409, "una pagina con questo nome c'è già");
         const written = await companyBrain.write({ ...body, author, review: "approved", note: String(body.note || "scritta dal proprietario") });
+        librarian?.requestRun({ reason: "pagina aggiunta" });
         return send(res, 201, written.page);
       }
       const brainPage = /^\/api\/brain\/pages\/([a-z0-9-]{2,60})$/.exec(path);
@@ -420,6 +421,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (method === "PUT") {
           const body = await readJson(req, 65536);
           const written = await companyBrain.write({ slug: page.slug, kind: body.kind ?? page.kind, title: body.title ?? page.title, summary: body.summary ?? page.summary, body: body.body ?? page.body, author, review: "approved", note: String(body.note || "corretta dal proprietario") });
+          librarian?.requestRun({ reason: "pagina aggiornata" });
           return send(res, 200, written.page);
         }
         if (method === "DELETE") return send(res, 200, await companyBrain.archive(page.slug, { author, note: "archiviata dal proprietario", review: "approved" }));
@@ -428,7 +430,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (path === "/api/brain/review" && method === "POST") {
         manage();
         const body = await readJson(req, 65536);
-        return send(res, 200, await companyBrain.review({ ids: Array.isArray(body.ids) ? body.ids.map(String) : [], all: body.all === true, decision: body.decision, by: author }));
+        const result = await companyBrain.review({ ids: Array.isArray(body.ids) ? body.ids.map(String) : [], all: body.all === true, decision: body.decision, by: author });
+        librarian?.requestRun({ reason: "revisione" });
+        return send(res, 200, result);
       }
       if (path === "/api/brain/run" && method === "POST") {
         manage();

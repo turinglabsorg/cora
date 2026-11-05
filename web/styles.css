@@ -1363,8 +1363,15 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .brain-change { display: grid; gap: 12px; padding: 18px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); box-shadow: var(--shadow); }
 .brain-change.flagged { border-color: var(--amber-line); }
 .brain-change header b { font: 600 19px/1.2 var(--display); letter-spacing: -0.02em; }
-.brain-change header a { color: inherit; text-decoration: none; min-width: 0; overflow-wrap: anywhere; }
-.brain-change > small { color: var(--muted); font: 400 11px/1.5 var(--mono); }
+.brain-change header { flex-wrap: wrap; }
+.brain-change-toggle { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 44px; padding: 0; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; }
+.brain-change-toggle b { overflow-wrap: anywhere; }
+.brain-change-toggle .chev { flex: none; transition: transform .15s ease; }
+.brain-change-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.brain-change-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.brain-change-body { display: grid; gap: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.brain-change-body[hidden], .btn[hidden] { display: none; }
+.brain-change-body > small { color: var(--muted); font: 400 11px/1.5 var(--mono); }
 .brain-change-actions .btn { min-height: 44px; }
 .brain-diff { display: grid; padding: 8px 0; border-radius: var(--r-sm); background: var(--well); font: 400 12.5px/1.55 var(--mono); overflow-wrap: anywhere; }
 .brain-diff > div { display: grid; grid-template-columns: 18px minmax(0, 1fr); padding: 2px 12px 2px 6px; }
@@ -1378,6 +1385,8 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .brain-row { align-items: flex-start; flex-wrap: wrap; }
   .brain-row-meta { justify-content: flex-start; }
   .brain-change { padding: 14px; }
+  .brain-change-toggle { flex-basis: calc(100% - 110px); }
+  .brain-change-meta { order: 3; flex-basis: 100%; padding-left: 26px; }
 }
 
 /* ---------- goals in the Reasoning tab ---------- */

@@ -149,6 +149,7 @@ export function startCora(overrides = {}) {
     reviewUrl: () => (instanceUrl ? `${instanceUrl}/#/brain/revisione` : ""),
   });
   const scheduler = new Scheduler({ store, orchestrator, brain, librarian, companyBrain, artifacts, backups: join(cfg.home, "backups"), timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
+  companyBrain.onNote = () => librarian.requestRun({ reason: "memoria" });
   // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
   const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
   web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault });
@@ -221,6 +222,9 @@ export function startCora(overrides = {}) {
     console.log(`> cora on http://${cfg.host}:${web.server.address().port}`);
     if (!cfg.adminPassword) console.error("! CORA_ADMIN_PASSWORD is not set: the panel refuses every login");
     channels.apply();
+    if (companyBrain.enabled) companyBrain.notes().then((notes) => {
+      if (!stopping && notes.length) librarian.requestRun({ reason: "memorie in attesa" });
+    }).catch(() => { if (!stopping) activity({ type: "error", text: "bibliotecario: il brain non risponde" }); });
     botTimer = setInterval(() => {
       orchestrator.checkEngagements().catch((error) => activity({ type: "error", text: `ascolto: ${error.message}` }));
       bots.sync();
@@ -246,6 +250,7 @@ export function startCora(overrides = {}) {
     clearTimeout(resumeFallback);
     clearInterval(botTimer);
     scheduler.stop();
+    await librarian.stop();
     await subscriptions.close();
     discord.stop();
     bots.stop();
