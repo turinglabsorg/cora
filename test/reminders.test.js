@@ -232,7 +232,7 @@ test("a stop written while offline prevents scheduler recovery of an interrupted
   const run = seed.beginRoutineRun(reminder);
   const trace = new Traces({ store: seed }).start({ agentId: agent.id, kind: "reminder", channelId: reminder.channelId, prompt: `[Attività programmata: ${reminder.id}]` });
   seed.attachRoutineTrace(run.id, trace.id);
-  seed.appendArchive(reminder.channelId, { id: "offline-stop", at: Date.now() + 10, authorName: "Owner", kind: "owner", content: "Ripresa, fermati" });
+  seed.appendArchive(reminder.channelId, { id: "offline-stop", at: Date.now() + 10, authorName: "Owner", kind: "owner", content: "@Ripresa, fermati" });
   seed.close();
   let calls = 0;
   const f = await fixture(t, { home, reply: () => { calls++; return { content: "Should never run." }; } });

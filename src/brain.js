@@ -250,6 +250,13 @@ export class Brain {
       `## Chi sei\n${agent.personality.trim() || `Non hai ancora una personalità definita: ${self.plain}.`}`,
       `## La tua scheda (sempre a mente)\n${agent.core.trim() || "(vuota: riempila con update_core quando sai abbastanza)"}`,
     ];
+    // An agent of a person of the space answers to that person, not to the owner of the space.
+    const belongs = this.store.agentOwner?.(agent);
+    if (belongs && belongs.role !== "owner") {
+      const chats = this.store.agentOwnerChats(agent).map((id) => id.split(":")[0]).filter((value, index, all) => all.indexOf(value) === index);
+      sections.push(`## A chi appartieni
+Appartieni a ${belongs.name || belongs.email}${chats.length ? ` (la riconosci in chat: ${chats.join(", ")})` : ""}. Le sue richieste valgono come quelle del proprietario dello spazio, ed è a questa persona che chiedi permessi e decisioni (ask_owner chiama lei e non il proprietario dello spazio). Per quello che ti chiede non serve il via libera di nessun altro.`);
+    }
     if (others) sections.push(`## Gli altri agenti dell'istanza\nQuesto elenco non indica chi è presente nella conversazione attuale: non coinvolgere un collega soltanto perché è elencato qui. Rispondi come ${agent.name}, senza parlare a nome degli altri.\n${others}`);
     sections.push([
       "## La tua memoria",
@@ -285,7 +292,9 @@ export class Brain {
         "## Gli artefatti",
         "Quello che produci sul tuo computer e va conservato o fatto vedere (file, report, un sito, qualunque cosa) va nelle cartelle degli artefatti del server Cora, che funzionano come git: ogni caricamento è un commit con un messaggio, e ogni cartella ha i suoi permessi.",
         "Prima di caricare guarda dove va: artifact_folders, e il brain se c'è. Se nessuna cartella va bene, non sceglierne una da solo: chiedi a chi te l'ha chiesto quale usare, proponendo un percorso (es. clienti/acme/sito) e cosa ci va. Creala (artifact_push con create) solo dopo la sua conferma, e se ti dice una regola («i report di Acme vanno in clienti/acme») annotala con brain_note.",
+        "Una cartella nuova è aperta a tutti gli agenti e ogni caricamento aspetta una revisione. Chi può caricarci (tutti gli agenti o solo alcuni), il titolo e cosa ci va li decidi tu quando te lo chiedono: con create alla creazione, poi con artifact_folder_update. La pubblicazione senza revisione la sceglie solo il proprietario: se te la chiede lui, mettila (policy direct); se te la chiede un altro, digli che spetta al proprietario.",
         "Nella maggior parte delle cartelle un commit è PROPOSTO finché il proprietario o un revisore non lo approva: finché la ricevuta non dice PUBLISHED non dire che è pubblicato o online. Per continuare il lavoro di un altro scarica la cartella con artifact_pull e ricaricala da lì. La storia di una cartella, con le note di chi ha rifiutato un commit, è in artifact_log.",
+        "Se qualcuno ti chiede di condividere una cartella, o una sua sottocartella, il link lo fai tu con artifact_share: per le persone che ti indica, con una password, o pubblico solo se ti ha chiesto proprio un link che chiunque apre. Mandagli il link, e la password solo a lui.",
       ].join("\n"));
     }
     if (this.vault?.enabled) {
@@ -318,7 +327,7 @@ export class Brain {
       "- È una chat di gruppo: messaggi brevi e naturali (1-4 frasi), niente preamboli, niente elenchi lunghi se non richiesti.",
       "- Non scrivere il tuo nome all'inizio e non scrivere l'orario.",
       "- Rispondi nella lingua di chi ti scrive.",
-      "- Puoi rivolgerti agli altri agenti per nome; è normale discutere, essere in disaccordo, scherzare.",
+      "- Per chiamare un collega scrivi @Nome (per esempio @Nico): solo il tag lo chiama, il nome senza @ lo nomina soltanto. È normale discutere, essere in disaccordo, scherzare.",
       "- Se il messaggio non ti riguarda o non hai niente di utile o divertente da aggiungere, rispondi esattamente PASS. Mai quando ti nominano o ti scrivono in privato: lì rispondi sempre.",
       "- Se per rispondere devi lavorare (strumenti, ricerche, più passaggi), prima scrivi subito due parole con say (es. «Ci guardo») e poi lavora; alla fine scrivi il risultato.",
       "- La tua risposta finale viene pubblicata in questa conversazione: per rispondere qui scrivila e basta, senza say. Se con say hai già detto tutto, rispondi solo PASS, senza note come «messaggio inviato».",
@@ -367,7 +376,7 @@ export class Brain {
     return `Le tue ultime conversazioni in altri posti. È la stessa conversazione con le stesse persone, solo su un'altra superficie: quello che vi siete detti lì vale anche qui.\n${blocks.join("\n")}`;
   }
 
-  async chatTurn({ agent, history, channel, forced, computer, authorized = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
+  async chatTurn({ agent, history, channel, forced, computer, authorized = false, belongsTo = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
     const transcript = formatTranscript(history, agent, this.timezone);
     const last = replyTo || history[history.length - 1];
     const query = history.slice(-6).map((item) => item.content).join(" ");
@@ -381,7 +390,8 @@ export class Brain {
       `Ultimi messaggi ${channel.where || `in #${channel.name}`}${channel.note ? ` (${channel.note})` : ""}:\n<chat>\n${transcript}\n</chat>`,
       instruction,
       replyTo ? `Messaggio umano a cui rispondere adesso: ${replyTo.authorName}: ${replyTo.content}\nGli eventuali risultati di routine successivi sono solo contesto, non una nuova richiesta di eseguirle.` : "",
-      authorized && replyTo ? `Il proprietario ha autorizzato ${replyTo.authorName} a farti lavorare sul tuo computer: per le sue richieste agisci come per il proprietario, senza chiedergli il via libera.` : "",
+      belongsTo && replyTo ? `${replyTo.authorName} è la persona a cui appartieni: le sue richieste valgono come quelle del proprietario. Agisci senza chiedere il via libera a nessun altro, e quando ti serve un permesso o una decisione chiedila a questa persona (ask_owner chiama lei).`
+        : authorized && replyTo ? `Il proprietario ha autorizzato ${replyTo.authorName} a farti lavorare sul tuo computer: per le sue richieste agisci come per il proprietario, senza chiedergli il via libera.` : "",
       replyTo?.voice ? `${replyTo.authorName} ti ha mandato un messaggio vocale: la tua risposta finale gli arriva scritta e anche a voce, letta con la tua voce. Scrivila come la diresti: frasi brevi, niente tabelle né elenchi lunghi; link e codice restano solo nello scritto.` : "",
     ].filter(Boolean).join("\n\n");
     const request = replyTo || history.filter((item) => item.kind === "owner" || item.kind === "human").at(-1);
@@ -399,7 +409,7 @@ export class Brain {
     // A question to the owner is already an answer: it is in the chat.
     if (result.text || !forced || result.asked || result.spoken || result.stopped) return result;
     // Called by name and still passing: ask once more, plainly.
-    return turn(`${user}\n\nHai risposto PASS, ma ${last?.authorName || "qualcuno"} ti ha chiamato per nome: scrivi una risposta vera, anche breve. Se ti chiede qualcosa che non puoi fare da solo, diglielo, oppure chiedi il via libera al proprietario con ask_owner.`);
+    return turn(`${user}\n\nHai risposto PASS, ma ${last?.authorName || "qualcuno"} ti ha chiamato con il tag: scrivi una risposta vera, anche breve. Se ti chiede qualcosa che non puoi fare da solo, diglielo, oppure chiedi il via libera al proprietario con ask_owner.`);
   }
 
   async routineTurn({ agent, routine, history, channel, postFile, say, inbox, onTrace, onMessageHandled }) {

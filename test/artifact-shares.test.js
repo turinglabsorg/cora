@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startCora } from "../src/main.js";
+import { executeTool } from "../src/tools.js";
 import { passKeys, signPass } from "../src/pass.js";
 import { fakeDocker, tempHome } from "./helpers.js";
 
@@ -575,4 +576,153 @@ test("a link can share any level of a folder: only what is under it, as if it we
   const moved = await call(`/api/artifacts/shares/${made.data.id}`, { method: "PUT", body: { root: "" } });
   assert.equal(moved.data.root, "");
   assert.match((await hit(port, HOST, "/")).body, /<b>design-system<\/b>.*<b>landing<\/b>/s, "back to the whole folder, listed since it has no index");
+});
+
+test("the panel shows a web page as the site it belongs to, framed apart from itself, its links working", async (t) => {
+  const { app, port, base, call, agent, put, owner } = await fixture(t);
+  put("design/landing/index.html", "<link rel=\"stylesheet\" href=\"style.css\"><script src=\"/abs.js\"></script><h1>Landing</h1>");
+  put("design/landing/style.css", "h1{color:red}");
+  put("design/abs.js", "/* absolute */");
+  put("design/docs/report.pdf", "%PDF-1.4\n");
+  const pushed = await app.artifacts.push({ agent, folder: "progetti/design", path: "/home/agent/work/design", message: "design", requester: { kind: "owner", id: "1", name: "Owner" }, create: { title: "design", description: "Design", kind: "files" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  const view = await call(`/api/artifacts/commits/${pushed.commit.id}/view?${new URLSearchParams({ path: "landing/index.html" })}`);
+  const url = new URL(view.data.url);
+  assert.equal(url.host, `r-${pushed.commit.id.slice(3)}--acme.usecora.test`);
+  const token = /^\/_t\/([^/]+)\/landing\/index\.html$/.exec(url.pathname)?.[1];
+  assert.ok(token, "the token is in the path, so the page's relative links keep it");
+  const page = await hit(port, url.host, url.pathname);
+  assert.equal(page.status, 200);
+  assert.equal(page.headers["content-type"], "text/html; charset=utf-8", "rendered as a page, not as text");
+  assert.equal(page.headers["content-security-policy"], "frame-ancestors https://acme.usecora.test", "only the panel of this space may frame it");
+  const cookie = page.headers["set-cookie"]?.[0]?.split(";")[0] || "";
+  assert.match(cookie, /^cora_raw=/);
+  assert.match(page.headers["set-cookie"][0], /HttpOnly; SameSite=Lax; Max-Age=\d+/);
+  const style = await hit(port, url.host, `/_t/${token}/landing/style.css`);
+  assert.equal(style.status, 200);
+  assert.equal(style.headers["content-type"], "text/css; charset=utf-8");
+  assert.equal((await hit(port, url.host, "/abs.js", { headers: { cookie } })).body, "/* absolute */", "an absolute link works through this host's own cookie");
+  assert.equal((await hit(port, url.host, "/abs.js")).status, 403, "and nothing opens without either");
+  const folderPath = await hit(port, url.host, `/_t/${token}/landing`);
+  assert.equal(folderPath.status, 302);
+  assert.equal(folderPath.headers.location, `/_t/${token}/landing/`);
+  const [expires, signature] = token.split(".");
+  assert.equal((await hit(port, url.host, `/_t/${Number(expires) + 600000}.${signature}/landing/index.html`)).status, 403, "not for longer than it was given");
+  const other = await app.artifacts.push({ agent, folder: "altro", path: "/home/agent/work/design/landing", message: "altro", requester: { kind: "owner", id: "1", name: "Owner" }, create: { title: "altro", description: "Altro", kind: "site" } });
+  assert.equal((await hit(port, `r-${other.commit.id.slice(3)}--acme.usecora.test`, `/_t/${token}/index.html`)).status, 403, "a token opens only its own commit");
+  const pdf = new URL((await call(`/api/artifacts/commits/${pushed.commit.id}/view?${new URLSearchParams({ path: "docs/report.pdf" })}`)).data.url);
+  assert.equal(pdf.pathname, "/docs/report.pdf", "a PDF is still signed for itself alone");
+
+  await call("/api/access", { method: "PUT", body: { domains: ["company.test"] } });
+  const entered = await fetch(`${base}/auth/cloud?${new URLSearchParams({ pass: signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_member", role: "member", name: "Sara", email: "sara@company.test", emailVerified: true }) })}`, { redirect: "manual" });
+  const member = entered.headers.get("set-cookie").split(";")[0];
+  const asMember = async (commitId) => (await (await fetch(`${base}/api/artifacts/commits/${commitId}/view?${new URLSearchParams({ path: "index.html" })}`, { headers: { Cookie: member, "X-Cora": "1" } })).json()).url;
+  assert.match(await asMember(other.commit.id), /^$/, "a page nobody approved yet runs only for who reviews it");
+  assert.match((await call(`/api/artifacts/commits/${other.commit.id}/view?${new URLSearchParams({ path: "index.html" })}`)).data.url, /\/_t\//, "the reviewer sees it running");
+  await app.artifacts.review(other.commit.id, { decision: "approve", user: owner });
+  assert.match(await asMember(other.commit.id), /\/_t\//, "once on air anyone in the panel sees it running");
+});
+
+test("an agent shares a folder itself when a person asks it, at any level and with any access; a routine only asks", async (t) => {
+  const { app, port, agent, put, owner } = await fixture(t);
+  put("design/landing/index.html", "<h1>Landing</h1>");
+  put("design/notes.md", "# notes");
+  const pushed = await app.artifacts.push({ agent, folder: "progetti/design", path: "/home/agent/work/design", message: "design", requester: { kind: "owner", id: "1", name: "Owner" }, create: { title: "design", description: "Design", kind: "files" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  const notices = [];
+  app.artifacts.notice = (channelId, text) => notices.push({ channelId, text });
+  const ctx = { agent, store: app.store, artifacts: app.artifacts, channelId: "chan-1", requester: { kind: "authorized", id: "42", name: "Sncl" } };
+  const made = await executeTool({ name: "artifact_share", args: { folder: "progetti/design", subfolder: "landing", label: "landing-pubblica", access: "public", reason: "Sncl vuole il link" } }, ctx);
+  assert.match(made.text, /^ACTIVE: https:\/\/landing-pubblica--acme\.usecora\.test\/ opens progetti\/design\/landing as a website to anyone with the link/);
+  assert.equal((await hit(port, "landing-pubblica--acme.usecora.test", "/")).body, "<h1>Landing</h1>", "it works at once, from the subfolder");
+  assert.match(notices[0].text, /Nico ha aperto un link pubblico per \*\*progetti\/design\/landing\*\*: https:\/\/landing-pubblica--acme\.usecora\.test/);
+  const share = app.store.artifactShareByLabel("landing-pubblica");
+  assert.equal(share.status, "active");
+  assert.equal(share.createdBy.name, "Nico");
+  assert.equal(share.requestedBy.name, "Sncl");
+  assert.ok(app.store.artifactEvents(pushed.folder.id).some((event) => event.kind === "share" && event.action === "created" && event.by?.name === "Nico"), "the folder's log says who opened it");
+
+  const locked = await executeTool({ name: "artifact_share", args: { folder: "progetti/design", label: "con-password", access: "password", days: 7, reason: "per il cliente" } }, ctx);
+  const password = /the password (\S+) \(give it only to Sncl\)/.exec(locked.text)?.[1];
+  assert.ok(password && password.length >= 6, locked.text);
+  assert.match(locked.text, /, until \d{4}-\d{2}-\d{2}\./);
+  assert.ok(app.artifacts.passwordOpens(app.store.artifactShareByLabel("con-password"), password));
+  const people = await executeTool({ name: "artifact_share", args: { folder: "progetti/design", label: "per-acme", access: "people", emails: ["Ada@Acme.com"], domains: ["acme.com"], reason: "per Acme" } }, ctx);
+  assert.match(people.text, /opens progetti\/design's files to only ada@acme\.com, anyone at acme\.com, after signing in/, "without an index it is a page of files");
+
+  assert.match((await executeTool({ name: "artifact_share", args: { folder: "progetti/design", subfolder: "nowhere", label: "nowhere", access: "public", reason: "x" } }, ctx)).text, /^error: progetti\/design has no subfolder nowhere/);
+  assert.match((await executeTool({ name: "artifact_share", args: { folder: "progetti/design/landing", label: "sbagliata", access: "public", reason: "x" } }, ctx)).text, /a subfolder goes in subfolder/);
+  const stranger = app.store.createAgent({ name: "Ugo", model: "ollama/test-model", tools: true });
+  app.artifacts.updateFolder(pushed.folder.id, { writers: [agent.id] }, owner);
+  assert.match((await executeTool({ name: "artifact_share", args: { folder: "progetti/design", label: "di-ugo", access: "public", reason: "x" } }, { ...ctx, agent: stranger })).text, /^error: you may not share progetti\/design/);
+
+  const routine = await executeTool({ name: "artifact_share", args: { folder: "progetti/design", label: "da-routine", access: "public", reason: "routine" } }, { ...ctx, requester: null });
+  assert.match(routine.text, /^REQUESTED, NOT ACTIVE/);
+  assert.equal(app.store.artifactShareByLabel("da-routine").status, "proposed");
+  assert.equal((await hit(port, "da-routine--acme.usecora.test", "/")).status, 404, "a link only asked for opens nothing");
+  assert.match(notices.at(-1).text, /Richiesta di un link per \*\*progetti\/design\*\* \(da-routine\) da Nico/);
+});
+
+test("from the panel a file or a whole subfolder comes out as a commit: a reviewer's goes on air, anyone else's is proposed", async (t) => {
+  const { app, base, call, agent, put, owner } = await fixture(t);
+  put("site/index.html", "<h1>Home</h1>");
+  put("site/landing/index.html", "<h1>Landing</h1>");
+  put("site/landing/img/logo.png", "png");
+  put("site/old.txt", "old");
+  const pushed = await app.artifacts.push({ agent, folder: "pulizie", path: "/home/agent/work/site", message: "sito", requester: { kind: "owner", id: "1", name: "Owner" }, create: { description: "Da pulire", kind: "site" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  const folderId = pushed.folder.id;
+  const one = await call(`/api/artifacts/folders/${folderId}/remove`, { method: "POST", body: { base: pushed.commit.id, paths: ["old.txt"] } });
+  assert.equal(one.status, 201);
+  assert.equal(one.data.commit.status, "published");
+  assert.equal(one.data.commit.message, "Eliminato old.txt");
+  assert.deepEqual(one.data.commit.changed.map((change) => [change.kind, change.path]), [["deleted", "old.txt"]]);
+  const dir = await call(`/api/artifacts/folders/${folderId}/remove`, { method: "POST", body: { base: one.data.commit.id, paths: ["/landing/"] } });
+  assert.equal(dir.data.commit.message, "Eliminata la cartella landing");
+  assert.deepEqual((await call(`/api/artifacts/folders/${folderId}`)).data.tree.map((file) => file.path), ["index.html"], "everything under the subfolder went with it");
+  assert.equal((await call(`/api/artifacts/folders/${folderId}/remove`, { method: "POST", body: { paths: ["landing"] } })).status, 404, "what is not there cannot go");
+  assert.equal((await call(`/api/artifacts/folders/${folderId}/remove`, { method: "POST", body: { paths: ["../fuori"] } })).status, 400);
+  assert.equal((await call(`/api/artifacts/folders/${folderId}/remove`, { method: "POST", body: { paths: [] } })).status, 400);
+  assert.match(app.store.recentActivity(20).map((item) => item.text).join("\n"), /Owner ha eliminato 2 file da pulizie/);
+
+  await call("/api/access", { method: "PUT", body: { domains: ["company.test"] } });
+  const entered = await fetch(`${base}/auth/cloud?${new URLSearchParams({ pass: signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_member", role: "member", name: "Sara", email: "sara@company.test", emailVerified: true }) })}`, { redirect: "manual" });
+  const member = entered.headers.get("set-cookie").split(";")[0];
+  const theirs = await fetch(`${base}/api/artifacts/folders/${folderId}/remove`, { method: "POST", headers: { Cookie: member, "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ paths: ["index.html"] }) });
+  const proposal = await theirs.json();
+  assert.equal(theirs.status, 201);
+  assert.equal(proposal.commit.status, "proposed", "someone who does not review the folder only proposes it");
+  assert.deepEqual((await call(`/api/artifacts/folders/${folderId}`)).data.tree.map((file) => file.path), ["index.html"], "and nothing goes until it is approved");
+});
+
+test("an agent sets who may push to a folder for the person asking; publishing without review only on the owner's word", async (t) => {
+  const { app, agent, put } = await fixture(t);
+  put("guida/guida.pdf", "%PDF-1.4\n");
+  const vera = app.store.createAgent({ name: "Vera", model: "ollama/test-model", tools: true });
+  const sncl = { kind: "authorized", id: "42", name: "Sncl" };
+  const boss = { kind: "owner", id: "1", name: "Owner" };
+  const pushed = await app.artifacts.push({ agent, folder: "clienti/nobrainer/docs", path: "/home/agent/work/guida", message: "guida", requester: boss, create: { title: "Docs", description: "I documenti di No Brainer" } });
+  const receipt = app.artifacts.pushReceipt(pushed);
+  assert.match(receipt, /^PROPOSED.*\nnew folder clienti\/nobrainer\/docs: every agent may push to it; each push waits for a reviewer\. Who may push changes with artifact_folder_update\./, "the agent knows who may push from the first receipt");
+  const listed = JSON.parse((await executeTool({ name: "artifact_folders", args: {} }, { agent, store: app.store, artifacts: app.artifacts })).text).folders[0];
+  assert.equal(listed.who_can_push, "all agents");
+
+  const ctx = { agent, store: app.store, artifacts: app.artifacts, requester: sncl };
+  const only = await executeTool({ name: "artifact_folder_update", args: { folder: "clienti/nobrainer/docs", writers: ["@vera", "Nico"] } }, ctx);
+  assert.equal(only.text, "clienti/nobrainer/docs updated. Who may push: Nico, Vera. Publishing: each push waits for a reviewer. Title: Docs.");
+  assert.deepEqual(app.store.artifactFolder(pushed.folder.id).writers.sort(), [agent.id, vera.id].sort());
+  assert.match((await executeTool({ name: "artifact_folder_update", args: { folder: "clienti/nobrainer/docs", writers: ["Zorro"] } }, ctx)).text, /^error: no agent called Zorro: the agents are Nico, Vera/);
+  assert.match((await executeTool({ name: "artifact_folder_update", args: { folder: "clienti/nobrainer/docs", policy: "direct" } }, ctx)).text, /^error: only the owner of the space decides/, "someone else asking cannot skip the review");
+  assert.match((await executeTool({ name: "artifact_folder_update", args: { folder: "clienti/nobrainer/docs", writers: ["all"] } }, { ...ctx, requester: null })).text, /^error: a folder's settings change only while a person is asking you directly/);
+  const direct = await executeTool({ name: "artifact_folder_update", args: { folder: "clienti/nobrainer/docs", writers: ["all"], policy: "direct" } }, { ...ctx, requester: boss });
+  assert.equal(direct.text, "clienti/nobrainer/docs updated. Who may push: all agents. Publishing: published at once. Title: Docs.");
+  assert.equal(app.store.artifactFolder(pushed.folder.id).policy, "direct");
+  assert.match(app.store.recentActivity(20).map((item) => item.text).join("\n"), /Nico ha cambiato clienti\/nobrainer\/docs per Owner: possono caricare tutti gli agenti; si pubblica subito/);
+
+  put("altro/a.txt", "a");
+  await assert.rejects(app.artifacts.push({ agent, folder: "clienti/nobrainer/altro", path: "/home/agent/work/altro", message: "a", requester: sncl, create: { description: "Altro", policy: "direct" } }), /only the owner of the space decides/);
+  const made = await app.artifacts.push({ agent, folder: "clienti/nobrainer/altro", path: "/home/agent/work/altro", message: "a", requester: boss, create: { description: "Altro", writers: ["Vera"], policy: "direct" } });
+  assert.equal(made.commit.status, "published", "the owner asked for a folder that publishes at once");
+  assert.deepEqual(made.folder.writers.sort(), [agent.id, vera.id].sort(), "the agent making it stays among who may push");
+  assert.match(app.artifacts.pushReceipt(made), /^PUBLISHED.*\nnew folder clienti\/nobrainer\/altro: (Nico, Vera|Vera, Nico) may push to it; pushes are published at once\./);
 });

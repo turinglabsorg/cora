@@ -212,7 +212,7 @@ test("on Discord a voice message is heard as words and answered out loud: a voic
   // Written to, it writes back: no voice.
   const before = discord.state.botPosts.length;
   replies.set("Ada", () => ({ content: "Te lo scrivo e basta." }));
-  discord.say({ content: "Ada, e per iscritto?" });
+  discord.say({ content: "@Ada, e per iscritto?" });
   await waitFor(() => discord.state.botPosts.some((post) => post.content === "Te lo scrivo e basta."), { what: "Ada's written answer" });
   await quiet();
   await sleep(300);
@@ -221,7 +221,7 @@ test("on Discord a voice message is heard as words and answered out loud: a voic
   // Without Soniox a voice message is an attachment again, and the answer is written.
   app.voice.setKey("");
   replies.set("Ada", () => ({ content: "Non posso ascoltarlo." }));
-  discord.say({ content: "Ada?", flags: 1 << 13, attachments: [discord.attachment("voice-message-2.ogg", RECORDING, "audio/ogg")] });
+  discord.say({ content: "@Ada?", flags: 1 << 13, attachments: [discord.attachment("voice-message-2.ogg", RECORDING, "audio/ogg")] });
   await waitFor(() => discord.state.botPosts.some((post) => post.content === "Non posso ascoltarlo."), { what: "Ada's answer without Soniox" });
   await quiet();
   assert.match(prompts.filter((item) => item.name === "Ada").at(-1).text, /\[allegato: voice-message-2\.ogg http:\/\/127\.0\.0\.1:\d+\/attachments\/voice-message-2\.ogg\]/);
@@ -250,7 +250,7 @@ test("say with voice sends a voice message even when nobody spoke, and its recei
   await call("/api/agents", { method: "POST", body: { name: "Cleo", model: "ollama/test-model", chattiness: 0, tools: false, voice: "Marco" } });
   let step = 0;
   replies.set("Cleo", () => (++step === 1 ? { tool_calls: [{ function: { name: "say", arguments: { text: "Ecco il vocale che mi hai chiesto.", voice: true } } }] } : { content: "PASS" }));
-  discord.say({ content: "Cleo, mandami un vocale" });
+  discord.say({ content: "@Cleo, mandami un vocale" });
   const clip = await waitFor(() => discord.state.webhookPosts.find((post) => post.username === "Cleo" && post.file), { what: "Cleo's voice" });
   assert.equal(clip.fileType, "audio/mpeg");
   assert.deepEqual([soniox.state.speech.at(-1).voice, soniox.state.speech.at(-1).text], ["Marco", "Ecco il vocale che mi hai chiesto."]);

@@ -96,7 +96,7 @@ test("the librarian turns the chats into the company brain, the agents read it, 
     if (step === 2) return { tool_calls: [{ function: { name: "brain_note", arguments: { text: "Giulia Ferri di Acme è in ferie tutto agosto." } } }] };
     return { content: "Acme paga a 60 giorni; la referente è Giulia Ferri." };
   };
-  discord.say({ content: "Ada, quanto ci mette Acme a pagare?" });
+  discord.say({ content: "@Ada, quanto ci mette Acme a pagare?" });
   await waitFor(() => discord.state.webhookPosts.some((post) => post.username === "Ada" && /60 giorni/.test(post.content)), { what: "Ada's answer" });
   const first = agentTurns[0];
   assert.match(first.user, /Dal brain aziendale \(con brain_page leggi una pagina intera\):\n- \[acme\] Acme \(cliente\): Cliente: paga a 60 giorni\. — da rivedere/);

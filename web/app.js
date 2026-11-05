@@ -171,6 +171,7 @@ const ICONS = {
   maximize: '<path d="M8 3.5H3.5V8M16 3.5h4.5V8M8 20.5H3.5V16M16 20.5h4.5V16"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-4.5-4.5"/>',
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  code: '<path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5V5a1.5 1.5 0 0 0-1.5-1.5H5A1.5 1.5 0 0 0 3.5 5v9A1.5 1.5 0 0 0 5 15.5h3.5"/>',
   terminal: '<rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="m7 9 3 3-3 3M12.5 15H17"/>',
@@ -1860,6 +1861,45 @@ function avatarPicker(agent, colorInput) {
 }
 
 /**
+ * Who an agent answers to: a person of the panel (by default the one whose account it runs on),
+ * and who that person is in the chats, so the agent asks them and takes their word as the owner's.
+ */
+function agentOwnerPanel(agent) {
+  const owner = agent.owner;
+  const select = h("select", { name: "ownerId", "aria-label": tr("Proprietario dell'agente") },
+    h("option", { value: "", selected: !agent.ownerId }, owner && !owner.set ? tr("Automatico: {name}, dal suo account", { name: owner.name }) : tr("Automatico: il proprietario dello spazio")));
+  const chats = h("div", { class: "chips owner-chats", role: "group", "aria-label": tr("Chi è in chat") });
+  const hint = h("small", { class: "faint" });
+  let people = [];
+  let users = [];
+  const chosen = () => select.value || (owner && !owner.set ? owner.id : "");
+  const drawChats = () => {
+    const user = users.find((entry) => entry.id === chosen());
+    if (!user || user.role === "owner") {
+      chats.replaceChildren(h("span", { class: "faint" }, tr("Il proprietario dello spazio: lo riconosce già in tutte le chat.")));
+      return;
+    }
+    const linked = S.data.settings.chatLinks?.[user.id] || [];
+    chats.replaceChildren(...(people.length ? people.map((person) => h("button", { type: "button", class: `chip${linked.includes(person.id) ? " on" : ""}`, "aria-pressed": String(linked.includes(person.id)), onclick: async () => {
+      const next = linked.includes(person.id) ? linked.filter((id) => id !== person.id) : [...linked, person.id];
+      await saveSettings({ chatLinks: { ...(S.data.settings.chatLinks || {}), [user.id]: next } });
+      drawChats();
+    } }, icon(TRANSPORTS[person.transport]?.icon || "user"), raw(person.name))) : [h("span", { class: "faint" }, tr("Ancora nessuno ha scritto nei canali."))]));
+    hint.textContent = tr("Chi è {name} nelle chat: le richieste dell'agente vanno a questa persona, e le sue valgono come quelle del proprietario.", { name: user.name || user.email });
+  };
+  select.addEventListener("change", drawChats);
+  Promise.all([api("/api/access"), api("/api/permissions")]).then(([access, permissions]) => {
+    users = access.users.filter((user) => !user.blocked);
+    people = permissions.people;
+    for (const user of users) select.append(h("option", { value: user.id, selected: agent.ownerId === user.id }, raw(`${user.name || user.email}${user.role === "owner" ? ` · ${tr("proprietario")}` : ""}`)));
+    drawChats();
+  }).catch(() => chats.replaceChildren(h("span", { class: "faint" }, tr("Non riesco a leggere le persone del pannello."))));
+  return panel({ icon: "user", title: "Proprietario", hint: "A chi risponde: chiede a questa persona i permessi, e le sue richieste valgono come le tue." },
+    setRows(setRow("Proprietario dell'agente", "Di base è la persona dell'account su cui gira.", select),
+      setRow("Chi è in chat", "", h("div", { class: "stack-sm" }, chats, hint), { stack: true })));
+}
+
+/**
  * Who the agent is. The brain lives in its own tab once the agent exists; while it
  * is being created there is no tab yet, so the simple pair harness + model rides here.
  */
@@ -1915,6 +1955,7 @@ function agentForm(agent, { only = "" } = {}) {
       setRows(
         setRow(tr("Canali {transport}", { transport: TRANSPORTS[S.data.transport].label }), "Nessuno selezionato = li ascolta tutti.", channelChips(agent.channelIds || []), { stack: true }),
         setRow("In onda", "Spento non ascolta e non parla, da nessuna parte.", switchInput("enabled", "", agent.enabled ?? true)))),
+    !isNew && S.data.currentUser?.role === "owner" ? agentOwnerPanel(agent) : null,
     voicePanel(agent, genderInput),
     h("div", { class: "savebar" },
       isNew ? null : armedButton("Elimina", "Conferma", { onconfirm: async () => {
@@ -1935,6 +1976,7 @@ function agentForm(agent, { only = "" } = {}) {
       color: data.get("color"),
       gender: data.get("gender"),
       channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
+      ...(form.elements.ownerId ? { ownerId: form.elements.ownerId.value } : {}),
       enabled: form.elements.enabled.checked,
       personality: data.get("personality"),
       // A voice select left disabled (no Soniox yet) keeps what the agent had.
@@ -2961,7 +3003,7 @@ function renderSalotto() {
   S.live = null;
   const slot = h("div", { class: "chat-slot" }, skeleton("chat"));
   shell([
-    pageHead(h("span", {}, "Il ", h("em", {}, "salotto")), "Tutti gli agenti in onda: risponde chi chiami per nome."),
+    pageHead(h("span", {}, "Il ", h("em", {}, "salotto")), "Tutti gli agenti in onda: risponde chi chiami con la chiocciola, @Nome."),
     requestsStrip(),
     slot,
   ], { title: "Salotto", mode: "chat", back: "#/banco" });
@@ -4123,7 +4165,10 @@ async function artifactPreview(url, path, size, edit = null) {
     box.replaceChildren(h("header", { class: "art-preview-head" }, h("span", { class: "grow" }, h("b", {}, raw(path.split("/").at(-1))), h("small", {}, raw(tr("Modifica · {path}", { path })))), full), editor);
     box.querySelector("textarea")?.focus?.();
   } }) : null;
-  const head = h("header", { class: "art-preview-head" }, h("span", { class: "grow" }, h("b", {}, raw(path.split("/").at(-1))), h("small", {}, raw(`${path} · ${fmtBytes(size)}`))), change, full, download);
+  // Taking a file out is a commit too: a reviewer's goes on air, anyone else's waits for a review.
+  const drop = edit?.onRemove ? armedButton(edit.canReview ? "Elimina" : "Proponi di eliminare", edit.canReview ? "Elimina davvero" : "Proponi davvero", { cls: "sm ghost", onconfirm: () => edit.onRemove(path) }) : null;
+  const title = h("span", { class: "grow" }, h("b", {}, raw(path.split("/").at(-1))), h("small", {}, raw(`${path} · ${fmtBytes(size)}`)));
+  const head = h("header", { class: "art-preview-head" }, title, change, full, download, drop);
   if (kind === "image") return [head, h("div", { class: "art-media checker" }, h("img", { src: url, alt: raw(path) }))];
   if (kind === "video") return [head, h("div", { class: "art-media" }, h("video", { src: url, controls: true, preload: "metadata" }))];
   if (kind === "audio") return [head, h("div", { class: "art-media" }, h("audio", { src: url, controls: true, preload: "metadata" }))];
@@ -4135,25 +4180,64 @@ async function artifactPreview(url, path, size, edit = null) {
       if (view.url) return [head, h("iframe", { class: "art-pdf", src: view.url, title: raw(path), referrerpolicy: "no-referrer" })];
     } catch {}
   }
-  if (kind === "text" && size <= 2 * 1024 * 1024) {
-    try {
-      const response = await fetch(url, { credentials: "same-origin" });
-      if (response.ok && /^text\/plain/.test(response.headers.get("content-type") || "")) {
-        const text = await response.text();
-        source = text;
-        if (/\.(csv|tsv)$/i.test(path)) {
-          const table = artifactTable(text, /\.tsv$/i.test(path) ? "\t" : "");
-          if (table) return [head, table];
+  // A web page is shown as the site it belongs to, framed apart from the panel; its source is one switch away.
+  if (/\.html?$/i.test(path) && commitId) {
+    let view = null;
+    try { view = await api(`/api/artifacts/commits/${commitId}/view?${new URLSearchParams({ path })}`); } catch {}
+    if (view?.url) {
+      const frame = h("iframe", { class: "art-pdf art-site", src: view.url, title: raw(path), referrerpolicy: "no-referrer", sandbox: "allow-scripts allow-same-origin allow-forms allow-popups allow-modals" });
+      const body = h("div", { class: "art-site-body" }, frame);
+      let code = null;
+      const show = async (which) => {
+        for (const [mode, button] of buttons) {
+          button.classList.toggle("on", mode === which);
+          button.setAttribute("aria-selected", String(mode === which));
         }
-        if (/\.(md|markdown)$/i.test(path)) return [head, h("div", { class: "md art-md" }, markdown(text))];
-        const lines = text.split("\n");
-        const shown = lines.slice(0, 3000);
-        return [head, h("pre", { class: "art-code" }, h("code", {}, shown.map((line, index) => h("span", { class: "art-line" }, h("i", { "aria-hidden": "true" }, raw(String(index + 1))), raw(line || " "))))),
-          lines.length > shown.length ? h("p", { class: "muted small" }, tr("Mostrate le prime {shown} righe di {total}: scarica il file per il resto.", { shown: shown.length, total: lines.length })) : null];
+        if (which === "page") return body.replaceChildren(frame);
+        if (!code) {
+          const text = await artifactText(url);
+          if (text === null) return toast("Non riesco a leggere il codice di questa pagina", true);
+          source = text;
+          code = codeLines(text);
+        }
+        body.replaceChildren(...code);
+      };
+      const buttons = [["page", "Anteprima", "eye"], ["code", "Codice sorgente", "code"]].map(([mode, label, name]) => [mode,
+        h("button", { type: "button", role: "tab", class: mode === "page" ? "on" : "", "aria-selected": String(mode === "page"), onclick: () => show(mode) }, icon(name), label)]);
+      const modes = h("div", { class: "segmented art-modes", role: "tablist", "aria-label": tr("Come vedere la pagina") }, buttons.map(([, button]) => button));
+      return [h("header", { class: "art-preview-head" }, title, modes, change, full, download, drop), body];
+    }
+  }
+  if (kind === "text" && size <= 2 * 1024 * 1024) {
+    const text = await artifactText(url);
+    if (text !== null) {
+      source = text;
+      if (/\.(csv|tsv)$/i.test(path)) {
+        const table = artifactTable(text, /\.tsv$/i.test(path) ? "\t" : "");
+        if (table) return [head, table];
       }
-    } catch {}
+      if (/\.(md|markdown)$/i.test(path)) return [head, h("div", { class: "md art-md" }, markdown(text))];
+      return [head, ...codeLines(text)];
+    }
   }
   return [head, h("div", { class: "art-noview" }, icon("file"), h("p", {}, "Il pannello non mostra questo tipo di file: scaricalo."), download.cloneNode(true))];
+}
+
+/** A stored file read as text, as the panel serves it (plain text only), or null. */
+async function artifactText(url) {
+  try {
+    const response = await fetch(url, { credentials: "same-origin" });
+    if (response.ok && /^text\/plain/.test(response.headers.get("content-type") || "")) return await response.text();
+  } catch {}
+  return null;
+}
+
+/** A text with its line numbers, the first 3000 lines of it. */
+function codeLines(text) {
+  const lines = text.split("\n");
+  const shown = lines.slice(0, 3000);
+  return [h("pre", { class: "art-code" }, h("code", {}, shown.map((line, index) => h("span", { class: "art-line" }, h("i", { "aria-hidden": "true" }, raw(String(index + 1))), raw(line || " "))))),
+    lines.length > shown.length ? h("p", { class: "muted small" }, tr("Mostrate le prime {shown} righe di {total}: scarica il file per il resto.", { shown: shown.length, total: lines.length })) : null].filter(Boolean);
 }
 
 /** A CSV or TSV read whole: its separator (guessed from the first line), its records, how many. */
@@ -4453,6 +4537,7 @@ function artifactFiles(data, head, dir = "") {
         S.reopenFile = file.path;
         renderArtifactFolder(folder.id, "file", dir);
       },
+      onRemove: (path) => removeArtifactPaths(folder, head, [path], dir),
     });
     if (chosen === file.path) preview.replaceChildren(...shown.flat().filter(Boolean));
     if (scroll && matchMedia("(max-width: 899px)").matches) preview.scrollIntoView({ block: "start", behavior: "smooth" });
@@ -4508,6 +4593,9 @@ function artifactFiles(data, head, dir = "") {
     btn(verb, { icon: "upload", cls: "sm primary", onclick: () => pick.click() }),
     btn("Una cartella", { icon: "folder", cls: "sm ghost", onclick: () => pickDir.click() }),
     dir && data.canReview && data.shareHosting ? btn("Condividi questa cartella", { icon: "link", cls: "sm ghost", href: `#/artefatti/${folder.id}/condivisione?in=${encodeURIComponent(dir)}` }) : null,
+    dir && head && !fresh ? armedButton(data.canReview ? "Elimina questa cartella" : "Proponi di eliminarla", data.canReview ? "Elimina tutto quello che contiene" : "Proponi davvero", {
+      cls: "sm ghost", onconfirm: () => removeArtifactPaths(folder, head, [dir], parts.slice(0, -1).join("/")),
+    }) : null,
     btn("Nuova cartella", { icon: "plus", cls: "sm ghost", onclick: () => {
       if (drop.querySelector(".art-newdir")) return drop.querySelector(".art-newdir input").focus();
       const name = h("input", { type: "text", class: "mono", maxlength: 120, placeholder: tr("nome della cartella"), autocomplete: "off", spellcheck: "false", "aria-label": tr("Nome della nuova cartella") });
@@ -4545,6 +4633,22 @@ function artifactFiles(data, head, dir = "") {
   const first = again || files.find((file) => /^index\.html?$/i.test(file.name)) || files.find((file) => /^readme/i.test(file.name)) || (dir ? null : files[0]);
   if (first) setTimeout(() => { const row = [...list.querySelectorAll("button.art-file")][files.indexOf(first)]; if (row) open(first, row, { scroll: false }); });
   return panel({ icon: "file", title: tr("File in onda"), hint: raw(tr("{count} file · {size} · commit {id}", { count: data.tree.length, size: fmtBytes(total), id: head.short })) }, zone);
+}
+
+/** Files or a subfolder taken out from the version on air; then back to where what is left is. */
+async function removeArtifactPaths(folder, head, paths, after) {
+  try {
+    const done = await api(`/api/artifacts/folders/${folder.id}/remove`, { method: "POST", body: { base: head.id, paths } });
+    const commit = done.commit;
+    if (commit.status !== "published") {
+      toast(commit.status === "conflict" ? "In conflitto con la versione in onda: decidi tu nella revisione" : "Proposto: aspetta una revisione");
+      location.hash = `#/artefatti/${folder.id}/c/${commit.id}`;
+      return;
+    }
+    toast(tr("Fatto: {message}", { message: commit.message }));
+    if (artifactDirHref(folder.id, after) === location.hash) renderArtifactFolder(folder.id, "file", after);
+    else location.hash = artifactDirHref(folder.id, after);
+  } catch (error) { toast(error.message, true); }
 }
 
 /** The folder's history as takes on a tape: the one on air lit, proposals waiting, the rest as they went. */

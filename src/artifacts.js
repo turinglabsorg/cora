@@ -333,6 +333,43 @@ export class Artifacts {
     return [...new Set(list.filter((id) => known.has(id)))];
   }
 
+  /** Writers named the way an agent names them: "all", or agents by name. */
+  writersFrom(names) {
+    const list = (Array.isArray(names) ? names : String(names || "").split(/[,;]+/)).map((name) => String(name).trim()).filter(Boolean);
+    if (!list.length) throw new ArtifactError("name the agents who may push, or \"all\"");
+    if (list.some((name) => ["*", "all", "tutti", "everyone"].includes(name.toLowerCase()))) return ["*"];
+    const agents = this.store.agents();
+    const unknown = list.filter((name) => !agents.some((agent) => agent.id === name || agent.name.toLowerCase() === name.replace(/^@/, "").toLowerCase()));
+    if (unknown.length) throw new ArtifactError(`no agent called ${unknown.join(", ")}: the agents are ${agents.map((agent) => agent.name).join(", ")}`);
+    return agents.filter((agent) => list.some((name) => agent.id === name || agent.name.toLowerCase() === name.replace(/^@/, "").toLowerCase())).map((agent) => agent.id);
+  }
+
+  /** Who may push to a folder, in words. */
+  writersText(folder) {
+    return folder.writers.includes("*") ? "all agents" : folder.writers.map((id) => this.store.agent(id)?.name).filter(Boolean).join(", ") || "no agent";
+  }
+
+  /**
+   * A folder's settings changed by an agent for the person talking to it: who may push, its
+   * title and what goes there; publishing without review only on the owner's own word.
+   */
+  configureFolder(folderRef, { agent, requester, title, description, writers, policy }) {
+    const folder = this.findFolder(folderRef);
+    if (!folder) throw new ArtifactError("no such folder: list them with artifact_folders", 404);
+    if (!requester) throw new ArtifactError("a folder's settings change only while a person is asking you directly", 403);
+    if (policy !== undefined && policy !== null && requester.kind !== "owner") throw new ArtifactError("only the owner of the space decides whether a folder publishes without review: they switch it in the panel, in the folder's Permessi", 403);
+    const changes = {};
+    if (title) changes.title = title;
+    if (description) changes.description = description;
+    if (writers !== undefined && writers !== null) changes.writers = this.writersFrom(writers);
+    if (policy !== undefined && policy !== null) changes.policy = policy === "direct" ? "direct" : "review";
+    if (!Object.keys(changes).length) throw new ArtifactError("nothing to change: give writers, title, description or policy");
+    const next = this.updateFolder(folder.id, changes, { role: requester.kind === "owner" ? "owner" : "member", name: requester.name });
+    const said = [changes.writers ? `possono caricare ${next.writers.includes("*") ? "tutti gli agenti" : this.writersText(next)}` : "", changes.policy ? (next.policy === "direct" ? "si pubblica subito" : "ogni caricamento aspetta una revisione") : "", changes.title || changes.description ? "titolo e descrizione" : ""].filter(Boolean).join("; ");
+    this.log({ type: "artifact", agentId: agent.id, text: `${agent.name} ha cambiato ${folder.path} per ${requester.name || "chi l'ha chiesto"}: ${said}` });
+    return `${folder.path} updated. Who may push: ${this.writersText(next)}. Publishing: ${next.policy === "direct" ? "published at once" : "each push waits for a reviewer"}. Title: ${next.title}.`;
+  }
+
   cleanReviewers(reviewers) {
     const list = Array.isArray(reviewers) ? reviewers.map(String) : [];
     return [...new Set(list.filter((id) => this.store.panelUser(id)))].slice(0, 50);
@@ -402,7 +439,7 @@ export class Artifacts {
         publishing: folder.policy === "direct" ? "published at once" : "each push waits for a reviewer",
         served: folder.headCommit ? `${short(folder.head)} «${folder.headCommit.message}» (${folder.files} files)` : "nothing published yet",
         waiting_review: folder.pending, conflicts: folder.conflicts, active_share_links: folder.shares,
-        you_can_push: this.canWrite(this.store.artifactFolder(folder.id), agent),
+        you_can_push: this.canWrite(this.store.artifactFolder(folder.id), agent), who_can_push: this.writersText(folder),
       }));
   }
 
@@ -478,6 +515,7 @@ export class Artifacts {
     const wanted = String(folderRef || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
     if (!validFolderPath(wanted)) throw new ArtifactError("folder must be a path like clienti/acme/report-q3: lowercase words and dashes, up to six levels");
     let folder = this.store.artifactFolderByPath(wanted);
+    let created = false;
     const prefix = String(to || "").trim().replace(/^\/+|\/+$/g, "");
     if (prefix) cleanTreePath(prefix);
     if (!folder && !create) {
@@ -486,10 +524,16 @@ export class Artifacts {
     if (!folder) {
       if (!requester) throw new ArtifactError("a new folder can be created only while a person is asking you directly: ask them which folder to use, and push when they confirm", 403);
       if (!String(create.description || "").trim()) throw new ArtifactError("create needs a description of what goes in the folder, in the words of the person who confirmed it");
+      if (create.policy === "direct" && requester.kind !== "owner") throw new ArtifactError("only the owner of the space decides whether a folder publishes without review: create it without policy, and tell them it is in the panel", 403);
       folder = this.createFolder({
         path: wanted, title: create.title, description: create.description, kind: create.kind,
+        // Whoever makes the folder may always push its first files into it.
+        writers: create.writers === undefined ? ["*"] : [...new Set([...this.writersFrom(create.writers), agent.id])],
         createdBy: { kind: "agent", id: agent.id, name: agent.name }, requestedBy: requester,
       });
+      // Publishing at once is the owner's word only: an agent's folder otherwise starts under review.
+      if (create.policy === "direct") folder = this.updateFolder(folder.id, { policy: "direct" }, { role: "owner" });
+      created = true;
     }
     if (!this.canWrite(folder, agent)) throw new ArtifactError(`you may not push to ${folder.path}: ask the owner to add you in the folder's permissions`, 403);
 
@@ -580,7 +624,7 @@ export class Artifacts {
       if (folder.policy === "direct") published = this.publishLocked(folder, commit, { by: { kind: "agent", id: agent.id, name: agent.name } });
       const final = this.store.artifactCommit(commit.id);
       this.announce(folder, final, { agent, channelId, published: final.status === "published" });
-      return { folder, commit: final, published, manifest, send, files };
+      return { folder, commit: final, published, manifest, send, files, created };
     });
   }
 
@@ -656,6 +700,48 @@ export class Artifacts {
     });
     if (new Set(placed.map((file) => file.target)).size !== placed.length) throw new ArtifactError("due file finirebbero sullo stesso percorso");
     if (placed.reduce((sum, file) => sum + file.size, 0) > LIMITS.pushBytes) throw new ArtifactError(`al massimo ${LIMITS.pushBytes / 1024 / 1024} MB alla volta`, 413);
+    return this.panelCommit(folder, user, {
+      base, to: prefix, sent: placed.reduce((sum, file) => sum + file.size, 0), uploaded: true,
+      change: (tree) => { for (const file of placed) tree.set(file.target, { sha: file.sha, size: file.size }); },
+      unchanged: "questi file ci sono già, uguali",
+      message: (delta) => {
+        const count = delta.added.length + delta.modified.length;
+        return String(message || "").trim().slice(0, 300) || (count === 1 ? `Caricato ${placed[0].target}` : `Caricati ${count} file${prefix ? ` in ${prefix}` : ""}`);
+      },
+      said: (delta, by, published) => `${by.name} ${published ? "ha caricato" : "propone"} ${delta.added.length + delta.modified.length} file in ${folder.path}`,
+    });
+  }
+
+  /**
+   * Files or whole subfolders taken out from the panel: a commit without them, laid on the
+   * version the person was looking at. A reviewer publishes it at once; anyone else proposes it.
+   */
+  async removeFiles(folderId, { user, base, paths, message = "" }) {
+    const folder = this.store.artifactFolder(folderId);
+    if (!folder) throw new ArtifactError("cartella non trovata", 404);
+    if (!Array.isArray(paths) || !paths.length || paths.length > LIMITS.files) throw new ArtifactError("scegli cosa eliminare");
+    const wanted = [...new Set(paths.map((path) => cleanTreePath(String(path || "").trim().replace(/^\/+|\/+$/g, ""))))];
+    let dirs = 0;
+    return this.panelCommit(folder, user, {
+      base,
+      change: (tree) => {
+        for (const path of wanted) {
+          if (tree.delete(path)) continue;
+          const inside = [...tree.keys()].filter((key) => key.startsWith(`${path}/`));
+          if (!inside.length) throw new ArtifactError(`${path} non c'è nella versione da cui parti`, 404);
+          dirs += 1;
+          for (const key of inside) tree.delete(key);
+        }
+      },
+      unchanged: "niente da eliminare",
+      message: (delta) => String(message || "").trim().slice(0, 300)
+        || (wanted.length === 1 ? (dirs ? `Eliminata la cartella ${wanted[0]}` : `Eliminato ${wanted[0]}`) : `Eliminati ${delta.deleted.length} file`),
+      said: (delta, by, published) => `${by.name} ${published ? "ha eliminato" : "propone di eliminare"} ${delta.deleted.length} file da ${folder.path}`,
+    });
+  }
+
+  /** A change made from the panel, as a commit on the version it started from: published at once by a reviewer, proposed otherwise. */
+  panelCommit(folder, user, { base, to = "", sent = 0, uploaded = false, change, unchanged, message, said }) {
     const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
     const review = this.canReview(folder, user);
     return this.withLock(folder.id, async () => {
@@ -664,29 +750,27 @@ export class Artifacts {
       if (known && this.store.artifactCommit(known)?.folderId !== folder.id) throw new ArtifactError("versione di partenza sconosciuta", 409);
       const start = this.treeOf(known);
       const tree = new Map(start);
-      for (const file of placed) tree.set(file.target, { sha: file.sha, size: file.size });
+      change(tree);
       const delta = treeDelta(start, tree);
-      if (!delta.added.length && !delta.modified.length) throw new ArtifactError("questi file ci sono già, uguali", 409);
+      if (!delta.added.length && !delta.modified.length && !delta.deleted.length) throw new ArtifactError(unchanged, 409);
       const secrets = this.scanSecrets(tree, [...delta.added, ...delta.modified]);
       if (secrets.length) throw new ArtifactError(`${secrets.slice(0, 5).map((hit) => `${hit.path} (riga ${hit.line})`).join(", ")} contiene qualcosa che sembra un token o una chiave privata: i segreti vanno nella cassaforte, non in una cartella`, 422);
       const now = Date.now();
       const treeSha = this.writeTree(tree);
-      const count = delta.added.length + delta.modified.length;
       const commit = {
         id: `ac_${sha256(`${folder.id}\0${treeSha}\0${known}\0${now}\0${randomBytes(8).toString("hex")}`).slice(0, 12)}`,
-        folderId: folder.id, parent: known, base: known, tree: treeSha, to: prefix, mirror: false,
-        message: String(message || "").trim().slice(0, 300) || (count === 1 ? `Caricato ${placed[0].target}` : `Caricati ${count} file${prefix ? ` in ${prefix}` : ""}`),
-        author: by, requestedBy: null, channelId: "", traceId: "",
+        folderId: folder.id, parent: known, base: known, tree: treeSha, to, mirror: false,
+        message: message(delta), author: by, requestedBy: null, channelId: "", traceId: "",
         status: "proposed", changes: { added: brief(delta.added), modified: brief(delta.modified), deleted: brief(delta.deleted) },
         files: tree.size, bytes: [...tree.values()].reduce((sum, file) => sum + file.size, 0),
-        sent: placed.reduce((sum, file) => sum + file.size, 0), skipped: 0, createdAt: now, uploaded: true,
+        sent, skipped: 0, createdAt: now, uploaded,
       };
       this.store.writeArtifactCommit(commit);
       const result = review ? this.publishLocked(current, commit, { by }) : null;
       const final = this.store.artifactCommit(commit.id);
-      if (final.status === "published") this.log({ type: "artifact", text: `${by.name} ha caricato ${count} file in ${folder.path} (${short(final.id)})` });
+      if (final.status === "published") this.log({ type: "artifact", text: `${said(delta, by, true)} (${short(final.id)})` });
       else if (final.status === "proposed") {
-        this.log({ type: "artifact", text: `${by.name} propone ${count} file in ${folder.path} (${short(final.id)}): da rivedere` });
+        this.log({ type: "artifact", text: `${said(delta, by, false)} (${short(final.id)}): da rivedere` });
         this.webPush?.notify({ title: `Artefatti · ${folder.path}`, body: `${by.name} propone: ${final.message}`, url: `/#/artefatti/${folder.id}/c/${final.id}`, tag: `artifact-${final.id}` }).catch?.(() => {});
       }
       return { ...(result || {}), commit: this.commitView(final.id) };
@@ -696,7 +780,7 @@ export class Artifacts {
   /** Turns a push's result into what the agent reads: it must not mistake a proposal for a publication. */
   pushReceipt(result) {
     if (result.nothing) return result.text;
-    const { folder, commit, manifest, send } = result;
+    const { folder, commit, manifest, send, created } = result;
     const counts = `${commit.changes.added.count} added, ${commit.changes.modified.count} changed, ${commit.changes.deleted.count} deleted; ${commit.files} files in the folder`;
     const status = commit.status === "published"
       ? `PUBLISHED: ${folder.path} now serves commit ${short(commit.id)}.`
@@ -705,6 +789,7 @@ export class Artifacts {
         : `PROPOSED, waiting for review by ${this.reviewerNames(folder)}: it is NOT served yet. Do not say it is published.`;
     const lines = [
       status,
+      created ? `new folder ${folder.path}: ${folder.writers.includes("*") ? "every agent may push to it" : `${this.writersText(folder)} may push to it`}; ${folder.policy === "direct" ? "pushes are published at once" : "each push waits for a reviewer"}. Who may push changes with artifact_folder_update.` : "",
       `commit ${short(commit.id)} «${commit.message}» — ${counts}.`,
       `sent ${send.length} file(s), ${Math.round(commit.sent / 1024)} KB; the rest the server already had.`,
       manifest.skipped.length ? `skipped: ${manifest.skipped.slice(0, 8).map((item) => `${item.path} (${item.why})`).join(", ")}${manifest.skipped.length > 8 ? "…" : ""}` : "",
@@ -949,7 +1034,7 @@ export class Artifacts {
       createdBy: createdBy || null, approvedBy: status === "active" ? createdBy || null : null, requestedBy, reason: String(reason || "").slice(0, 500), createdAt: now, updatedAt: now,
     };
     this.store.writeArtifactShare(share);
-    this.log({ type: "artifact", text: status === "proposed" ? `${createdBy?.name || "un agente"} chiede un link per ${folder.path}: ${clean}` : `nuovo link ${clean} per ${folder.path}` });
+    this.log({ type: "artifact", text: status === "proposed" ? `${createdBy?.name || "un agente"} chiede un link per ${folder.path}: ${clean}` : createdBy?.kind === "agent" ? `${createdBy.name} ha aperto il link ${clean} per ${folder.path}` : `nuovo link ${clean} per ${folder.path}` });
     this.shareEvent(share, status === "proposed" ? "requested" : "created", createdBy);
     return this.shareView(share);
   }
@@ -1096,8 +1181,13 @@ export class Artifacts {
 
   /** An agent asked for a link: the owner hears about it, the conversation sees it is not on yet. */
   announceShare(folder, share, { agent, channelId }) {
-    this.webPush?.notify({ title: `Artefatti · ${folder.path}`, body: `${agent.name} chiede un link: ${share.label}`, url: `/#/artefatti/${folder.id}/condivisione`, tag: `share-${share.id}` }).catch?.(() => {});
-    if (channelId && this.notice) Promise.resolve(this.notice(channelId, `🔗 Richiesta di un link per **${folder.path}** (${share.label}) da ${agent.name}: si apre quando il proprietario lo attiva.`)).catch(() => {});
+    const what = share.root ? `${folder.path}/${share.root}` : folder.path;
+    const active = share.status === "active";
+    const access = share.access.mode === "public" ? "pubblico" : share.access.mode === "password" ? "con password" : "per le persone indicate";
+    this.webPush?.notify({ title: `Artefatti · ${what}`, body: active ? `${agent.name} ha aperto un link ${access}: ${share.label}` : `${agent.name} chiede un link: ${share.label}`, url: `/#/artefatti/${folder.id}/condivisione`, tag: `share-${share.id}` }).catch?.(() => {});
+    const text = active ? `🔗 ${agent.name} ha aperto un link ${access} per **${what}**: ${share.url}`
+      : `🔗 Richiesta di un link per **${what}** (${share.label}) da ${agent.name}: si apre quando il proprietario lo attiva.`;
+    if (channelId && this.notice) Promise.resolve(this.notice(channelId, text)).catch(() => {});
   }
 
   announceReview(folder, commit, { by, note, result }) {

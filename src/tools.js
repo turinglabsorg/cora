@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import { bm25 } from "./memory.js";
 import { SHARED } from "./store.js";
@@ -216,7 +217,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "ask_owner",
-    description: "Ask the owner something that needs their answer or decision: permission, a choice, missing information. The question is posted in this conversation, addressed to the owner (it reaches their phone), and their answer comes back to you here later: do not wait for it and do not repeat the question, just stop. Write the question so it makes sense on its own, and offer up to 4 short choices when they fit.",
+    description: "Ask your owner something that needs their answer or decision: permission, a choice, missing information. Your owner is the person you belong to when you have one, otherwise the owner of the space. The question is posted in this conversation, addressed to them (it reaches the owner's phone), and their answer comes back to you here later: do not wait for it and do not repeat the question, just stop. Write the question so it makes sense on its own, and offer up to 4 short choices when they fit.",
     parameters: {
       type: "object",
       properties: {
@@ -258,8 +259,12 @@ export const TOOL_DEFS = [
         mirror: { type: "boolean", description: "also delete the files under `to` that are not in what you push (default false: add and overwrite only)" },
         create: {
           type: "object",
-          description: "only when the person confirmed a new folder: its title, what goes in it, and kind (files or site)",
-          properties: { title: { type: "string" }, description: { type: "string" }, kind: { type: "string", enum: ["files", "site"] } },
+          description: "only when the person confirmed a new folder: its title, what goes in it, kind (files or site); writers: who may push (default all agents, or the agents the person named); policy direct only when the owner of the space asked that pushes go on air without review",
+          properties: {
+            title: { type: "string" }, description: { type: "string" }, kind: { type: "string", enum: ["files", "site"] },
+            writers: { type: "array", items: { type: "string" }, description: "[\"all\"] or agent names" },
+            policy: { type: "string", enum: ["review", "direct"] },
+          },
           required: ["description"],
         },
       },
@@ -276,18 +281,38 @@ export const TOOL_DEFS = [
     },
   },
   {
-    name: "artifact_share_request",
-    description: "Ask the owner for a link that opens an artifact folder to specific people (their emails, or a company domain): it is created switched off, and only the owner or a folder reviewer turns it on. You can only ask for a link for named people: making a link public or putting a password on it is the owner's choice, in the panel. Use it when someone asked you to share a folder, and tell them the owner has to approve it.",
+    name: "artifact_folder_update",
+    description: "Change an artifact folder's settings when the person talking to you asks: which agents may push to it (all agents, or some by name), its title and what goes in it, and whether pushes are published at once instead of waiting for a review (only when the owner of the space asks). Reviewers stay in the panel.",
     parameters: {
       type: "object",
       properties: {
-        folder: { type: "string" },
+        folder: { type: "string", description: "the folder's path or id" },
+        writers: { type: "array", items: { type: "string" }, description: "[\"all\"] for every agent, or agent names" },
+        title: { type: "string" },
+        description: { type: "string", description: "what goes in the folder" },
+        policy: { type: "string", enum: ["review", "direct"], description: "direct: published at once; only on the owner's word" },
+      },
+      required: ["folder"],
+    },
+  },
+  {
+    name: "artifact_share",
+    description: "Make a link that opens an artifact folder, or one subfolder of it, on an address of its own, when a person asks you to share it. Access: \"people\" (only the emails or company domains you list, after signing in), \"password\" (anyone with the password; one is made up for you unless the person chose it), or \"public\" (anyone with the link: only when the person asked for that). It works at once when the person asking is talking to you now; otherwise it waits for the owner to turn it on. Give the person the link the tool returns, and the password only to them.",
+    parameters: {
+      type: "object",
+      properties: {
+        folder: { type: "string", description: "the folder's path or id" },
+        subfolder: { type: "string", description: "optional: a subfolder inside it to share instead of all of it, e.g. landing" },
         label: { type: "string", description: "the link's name: lowercase letters, digits and dashes, e.g. report-acme" },
+        access: { type: "string", enum: ["people", "password", "public"] },
+        view: { type: "string", enum: ["site", "files"], description: "site: served as a website from its index.html; files: a page of files to browse and download. Default: site when what you share has an index.html" },
         emails: { type: "array", items: { type: "string" } },
         domains: { type: "array", items: { type: "string" }, description: "company domains, e.g. acme.com (never gmail.com and the like)" },
+        password: { type: "string", description: "only when the person chose it: at least 6 characters" },
+        days: { type: "number", description: "optional: the link closes after this many days" },
         reason: { type: "string", description: "who asked for it and why, in one line" },
       },
-      required: ["folder", "label", "reason"],
+      required: ["folder", "label", "access", "reason"],
     },
   },
   {
@@ -360,7 +385,8 @@ export function summarizeArgs(name, args) {
   if (name === "artifact_push") return `${String(args.path || "")} → ${String(args.folder || "")}${args.create ? " (nuova)" : ""}`;
   if (name === "artifact_pull" || name === "artifact_log") return String(args.folder || "");
   if (name === "artifact_folders") return String(args.query || "");
-  if (name === "artifact_share_request") return `${String(args.folder || "")} → ${String(args.label || "")}`;
+  if (name === "artifact_folder_update") return String(args.folder || "");
+  if (name === "artifact_share") return `${[args.folder, args.subfolder].filter(Boolean).map(String).join("/")} → ${String(args.label || "")} (${String(args.access || "people")})`;
   if (name === "secret_import" || name === "secret_request" || name === "secret_send") return String(args.name || "");
   if (name === "notify") return String(args.message || "").slice(0, 200);
   if (name === "say") return String(args.text || "").slice(0, 200);
@@ -636,16 +662,33 @@ export async function executeTool(call, ctx) {
         await boxes.ensure(agent);
         return { text: await ctx.artifacts.pull({ agent, folder: args.folder, commit: args.commit, overwrite: args.overwrite === true }) };
       }
-      case "artifact_share_request": {
+      case "artifact_folder_update": {
+        if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
+        return { text: ctx.artifacts.configureFolder(args.folder, { agent, requester: ctx.requester || null, title: args.title, description: args.description, writers: args.writers, policy: args.policy }) };
+      }
+      case "artifact_share": {
         if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
         const folder = ctx.artifacts.findFolder(args.folder);
-        if (!folder) return { text: "error: no such folder: list them with artifact_folders" };
+        if (!folder) return { text: "error: no such folder: list them with artifact_folders (a subfolder goes in subfolder, not in folder)" };
+        if (!ctx.artifacts.canWrite(folder, agent)) return { text: `error: you may not share ${folder.path}: only the agents that may push to it can share it` };
+        const root = ctx.artifacts.cleanShareRoot(args.subfolder);
+        const paths = [...ctx.artifacts.treeOf(folder.head).keys()];
+        if (root && !paths.some((path) => path.startsWith(`${root}/`))) return { text: `error: ${folder.path} has no subfolder ${root} in the version it serves` };
+        const view = args.view === "site" || args.view === "files" ? args.view : paths.includes(root ? `${root}/index.html` : "index.html") ? "site" : "files";
+        const mode = ["people", "password", "public"].includes(args.access) ? args.access : "people";
+        const password = mode === "password" ? String(args.password || "") || randomBytes(9).toString("base64url") : "";
+        // Live at once only for a person talking to the agent now: a routine or another bot only asks.
+        const direct = Boolean(ctx.requester);
         const share = ctx.artifacts.createShare(folder.id, {
-          label: args.label, access: { emails: args.emails || [], domains: args.domains || [] }, status: "proposed",
+          label: args.label, root, view, access: { mode, emails: args.emails || [], domains: args.domains || [], password },
+          expiresAt: Number(args.days) > 0 ? Date.now() + Math.min(Number(args.days), 365) * 86400000 : 0, status: direct ? "active" : "proposed",
           createdBy: { kind: "agent", id: agent.id, name: agent.name }, requestedBy: ctx.requester || null, reason: args.reason,
         });
         ctx.artifacts.announceShare?.(folder, share, { agent, channelId });
-        return { text: `REQUESTED, NOT ACTIVE: the link ${share.url || share.label} opens only after the owner or a reviewer of ${folder.path} turns it on in the panel. Say so; do not send the link as if it worked.` };
+        const what = root ? `${folder.path}/${root}` : folder.path;
+        if (!direct) return { text: `REQUESTED, NOT ACTIVE: the link ${share.url || share.label} opens only after the owner or a reviewer of ${folder.path} turns it on in the panel. Say so; do not send the link as if it worked.` };
+        const who = mode === "public" ? "anyone with the link" : mode === "password" ? `anyone with the password ${password} (give it only to ${ctx.requester.name || "the person who asked"})` : `only ${[...share.access.emails, ...share.access.domains.map((domain) => `anyone at ${domain}`)].join(", ")}, after signing in`;
+        return { text: `ACTIVE: ${share.url} opens ${what}${view === "site" ? " as a website" : "'s files"} to ${who}${share.expiresAt ? `, until ${new Date(share.expiresAt).toISOString().slice(0, 10)}` : ""}. The owner sees it in the panel and can change or close it.` };
       }
       case "secret_list": {
         if (!ctx.vault?.enabled) return { text: "error: this Cora has no vault" };

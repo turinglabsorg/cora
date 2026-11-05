@@ -52,13 +52,22 @@ export function mentions(text, name) {
 }
 
 /**
- * Whether a text calls this name directly: "@Name" (a real tag reads that way here), or the name said to
- * someone, followed by a comma, colon, "!" or "?" ("Marta, salutami", "ci sei, Nico?"). Naming someone in
- * passing ("the stop meant for Nico and his reply") calls nobody.
+ * Whether a text tags this name: "@Name", which is how a real mention reads here. Only a tag calls an
+ * agent; writing its name, even to someone ("Sarax, …", "Sarax is not listening"), calls nobody.
  */
-export function addresses(text, name) {
+export function tagged(text, name) {
   const escaped = normalize(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}([^\\p{L}\\p{N}]|$)|(^|[^\\p{L}\\p{N}_@])${escaped}\\s*[,:!?]`, "u").test(normalize(text));
+  return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(normalize(text));
+}
+
+/**
+ * A voice message cannot carry an "@": there the name said to someone is the call ("Ada, …", "ci sei,
+ * Ada?"), within the words heard, not a name said in passing.
+ */
+export function spokenTo(text, name) {
+  const heard = /\[messaggio vocale: «([\s\S]*)»\]/.exec(String(text || ""))?.[1] || "";
+  const escaped = normalize(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return Boolean(heard) && new RegExp(`(^|[^\\p{L}\\p{N}_@])${escaped}\\s*[,:!?]|^\\s*${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(normalize(heard));
 }
 
 function describeMessage(raw, nameFor = () => null) {
@@ -207,7 +216,15 @@ export class Orchestrator {
     const transport = transportOf(state.id);
     if (transport === "web") return false;
     const id = `${transport}:${item.authorId}`;
+    // The person an agent belongs to answers for it: their word counts as the owner's for their own agents.
+    if (this.ownsAgent(item, agent, state)) return true;
     return this.store.settings.permissions.some((grant) => grant.id === id && (grant.agents.includes("*") || grant.agents.includes(agent.id)));
+  }
+
+  /** Whether this message comes from the person the agent belongs to (not the owner of the space). */
+  ownsAgent(item, agent, state) {
+    if (!item?.authorId || !agent) return false;
+    return this.store.agentOwnerChats(agent).includes(`${transportOf(state.id)}:${item.authorId}`);
   }
 
   nameForUser(userId) {
@@ -460,7 +477,7 @@ export class Orchestrator {
     const last = state.history[state.history.length - 1];
     if (!last || !missed.includes(last) || Date.now() - last.at > CATCH_UP_MS) return;
     const human = ["owner", "human"].includes(last.kind);
-    const botCall = last.kind === "bot" && this.agentsFor(state.id).some((agent) => mentions(last.content, agent.name));
+    const botCall = last.kind === "bot" && this.agentsFor(state.id).some((agent) => tagged(last.content, agent.name));
     if (!human && !botCall) return;
     this.log({ type: "message", channelId: state.id, author: last.authorName, kind: last.kind, text: `(arrivato mentre ero spenta) ${last.content.slice(0, 280)}` });
     if (human) {
@@ -482,9 +499,12 @@ export class Orchestrator {
     if (!state.focus) state.focus = this.engagements[state.id] || null;
     if (state.focus) state.focus = { ...state.focus, ids: state.focus.ids.filter((id) => available.some((agent) => agent.id === id)) };
     const previous = state.focus?.ids || [];
-    const named = available.filter((agent) => mentions(item.content, agent.name)).map((agent) => agent.id);
+    const calls = (agent) => tagged(item.content, agent.name) || (item.voice && spokenTo(item.content, agent.name));
+    const named = available.filter(calls).map((agent) => agent.id);
     const leaving = previous.length ? await this.brain.disengagement({ message: item.content, agents: available.filter((agent) => previous.includes(agent.id)), history: state.history.filter((entry) => entry.id !== item.id) }) : [];
-    const asked = item.kind === "owner" && state.request && !item.others?.length ? state.request : null;
+    // The answer to an agent's question comes from whoever it asked: the owner, or the person the agent belongs to.
+    const askedBy = state.request ? this.store.agent(state.request.agentId) : null;
+    const asked = state.request && !item.others?.length && (item.kind === "owner" || this.ownsAgent(item, askedBy, state)) ? state.request : null;
     if (asked) state.request = null;
     const direct = roomAgentId(state.id) || this.dmAgentId(state.id);
     const recipients = named.length ? named : asked ? [asked.agentId] : previous.length ? previous : direct ? [direct] : [];
@@ -495,7 +515,7 @@ export class Orchestrator {
     this.store.setValue("conversationEngagements", this.engagements);
     item.addressed = recipients.filter((id) => available.some((agent) => agent.id === id));
     // Called by name where they do not listen, or while switched off: they cannot answer, so Cora says why.
-    item.deaf = direct ? [] : this.store.agents().filter((agent) => !available.some((candidate) => candidate.id === agent.id) && addresses(item.content, agent.name)).map((agent) => agent.id);
+    item.deaf = direct ? [] : this.store.agents().filter((agent) => !available.some((candidate) => candidate.id === agent.id) && calls(agent)).map((agent) => agent.id);
     item.handledBy = [...leaving];
     item.toOthers = !named.length && Boolean(item.others?.length);
     item.disengaged = leaving;
@@ -559,7 +579,7 @@ export class Orchestrator {
         state.ownerOrigin = item.kind === "owner";
         this.schedule(state, HUMAN_DEBOUNCE_MS);
       } else if (item.kind === "bot") {
-        const called = this.agentsFor(state.id).some((agent) => addresses(item.content, agent.name));
+        const called = this.agentsFor(state.id).some((agent) => tagged(item.content, agent.name));
         if (called) state.ownerOrigin = false;
         if (called) this.schedule(state, HUMAN_DEBOUNCE_MS);
       }
@@ -852,8 +872,7 @@ export class Orchestrator {
     // the conversation that person is having with it), called directly by another agent or bot. Nobody called,
     // nobody answers; agents calling each other stop when the turn budget is spent.
     if (last.kind === "agent" && state.budget <= 0) return { forced: [], optional: [] };
-    const calls = (agent) => (fromHuman ? mentions : addresses)(last.content, agent.name);
-    return { forced: pool.filter((agent) => (fromHuman ? last.addressed?.includes(agent.id) : calls(agent))), optional: [] };
+    return { forced: pool.filter((agent) => (fromHuman ? last.addressed?.includes(agent.id) : tagged(last.content, agent.name))), optional: [] };
   }
 
   async round(state) {
@@ -934,7 +953,7 @@ export class Orchestrator {
       let result;
       try {
         result = await this.brain.chatTurn({
-          agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer,
+          agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, belongsTo: this.ownsAgent(queued, agent, state),
           replyTo: queued,
           postFile: (file, caption) => this.postAs(agent, state, caption, file),
           say,
@@ -1292,11 +1311,10 @@ export class Orchestrator {
       if (!id) continue;
       const name = other.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const tagged = new RegExp(`(^|[^\\p{L}\\p{N}_@.])@${name}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`, "giu");
-      const addressed = new RegExp(`(^|\\n)${name}(?=[:,]\\s)`, "giu");
-      if (!parts.some((part, index) => index % 2 === 0 && (tagged.test(part) || addressed.test(part)))) continue;
+      if (!parts.some((part, index) => index % 2 === 0 && tagged.test(part))) continue;
       if (!await this.bots.canRead(other, state.id)) continue;
       for (let index = 0; index < parts.length; index += 2) {
-        parts[index] = parts[index].replace(tagged, `$1<@${id}>`).replace(addressed, `$1<@${id}>`);
+        parts[index] = parts[index].replace(tagged, `$1<@${id}>`);
       }
     }
     if (parts.some((part, index) => index % 2 === 0 && part.includes("@"))) tagPeople(parts, this.peopleFor(state));
@@ -1419,7 +1437,7 @@ export class Orchestrator {
 
   queueColleagues(state, item, authorized = false) {
     if (state.budget <= 0 || !state.focus?.ids.includes(item.agentId)) return;
-    const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId && addresses(item.content, agent.name));
+    const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId && tagged(item.content, agent.name));
     if (!called.length) return;
     item.addressed = called.map((agent) => agent.id);
     item.delegated = authorized;
@@ -1437,9 +1455,8 @@ export class Orchestrator {
       if (!id || !(await this.skBots.inChannel(other.id, info.channelId))) continue;
       const name = other.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const tagged = new RegExp(`(^|[^\\p{L}\\p{N}_@.])@${name}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`, "giu");
-      const addressed = new RegExp(`(^|\\n)${name}(?=[:,]\\s)`, "giu");
       for (let index = 0; index < parts.length; index += 2) {
-        parts[index] = parts[index].replace(tagged, `$1<@${id}>`).replace(addressed, `$1<@${id}>`);
+        parts[index] = parts[index].replace(tagged, `$1<@${id}>`);
       }
     }
     if (parts.some((part, index) => index % 2 === 0 && part.includes("@"))) tagPeople(parts, this.peopleFor(state));
@@ -1542,7 +1559,10 @@ export class Orchestrator {
       }
     } else {
       const slack = slackIds(state.id);
-      const owner = slack ? this.store.settings.slackOwnerIds[0] : !telegramChatId(state.id) && this.store.settings.ownerIds[0];
+      // An agent asks the person it belongs to when they are in this chat, the owner otherwise.
+      const transport = transportOf(state.id);
+      const own = this.store.agentOwnerChats(agent).find((id) => id.startsWith(`${transport}:`))?.slice(transport.length + 1);
+      const owner = own || (slack ? this.store.settings.slackOwnerIds[0] : !telegramChatId(state.id) && this.store.settings.ownerIds[0]);
       const body = clean.length ? `${text}\n${english ? "Answers" : "Risposte"}: ${clean.join(" · ")}` : text;
       await this.postAs(agent, state, body, undefined, undefined, { ping: owner ? `<@${owner}>` : "", request });
       item = state.history.findLast((entry) => entry.agentId === agent.id && entry.request === request);

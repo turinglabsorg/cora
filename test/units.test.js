@@ -5,7 +5,7 @@ import { DIRECT_MESSAGE_INTENTS, Discord, LISTENING_INTENTS, splitMessage } from
 import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
 import { appManifest } from "../src/slack-bots.js";
-import { mentions } from "../src/orchestrator.js";
+import { mentions, spokenTo, tagged } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { drawAvatar } from "../src/avatar.js";
 import { encodePng, pngSize } from "../src/png.js";
@@ -147,6 +147,20 @@ describe("text helpers", () => {
     assert.ok(mentions("@marta ci sei", "Marta"));
     assert.ok(mentions("Niccolò dove sei", "Niccolo"));
     assert.ok(!mentions("beato te", "Bea"));
+  });
+
+  test("only a tag calls an agent; in a voice message the name said to it does", () => {
+    assert.ok(tagged("@Sarax ci sei?", "Sarax"));
+    assert.ok(tagged("ok @sarax!", "Sarax"), "case aside");
+    assert.ok(!tagged("Sarax, ci sei?", "Sarax"), "a name said to someone is not a tag");
+    assert.ok(!tagged("**Sarax** non è in ascolto qui", "Sarax"));
+    assert.ok(!tagged("scrivi a mail@Sarax.it", "Sarax"), "an address is not a tag");
+    assert.ok(!tagged("@Saraxine", "Sarax"));
+    const heard = (words) => `[messaggio vocale: «${words}»]`;
+    assert.ok(spokenTo(heard("Ada, domani c'è la riunione?"), "Ada"));
+    assert.ok(spokenTo(heard("ci sei, Ada?"), "Ada"));
+    assert.ok(!spokenTo(heard("ho visto Ada ieri"), "Ada"), "named in passing, not called");
+    assert.ok(!spokenTo("Ada, ciao", "Ada"), "a written message still needs the tag");
   });
 
   test("replies are cleaned and PASS means silence", () => {
@@ -838,4 +852,60 @@ test("Artefatti, a subfolder: its own name on top, the way up, and links that st
   await settle();
   assert.equal(posted[0].path, "/api/artifacts/folders/af_000000000001/shares");
   assert.equal(posted[0].body.root, "landing");
+});
+
+test("Artefatti, a web page: shown as the site, its source a switch away; a file and a subfolder can be deleted", async () => {
+  const at = Date.parse("2026-11-05T09:00:00Z");
+  const head = { id: "ac_000000000009", short: "0000000", folderId: "af_000000000001", message: "design", author: { kind: "agent", id: "ag_x", name: "Sarax" }, status: "published", createdAt: at, publishedAt: at, files: 2, bytes: 20, changes: { added: 2, modified: 0, deleted: 0 } };
+  const data = {
+    folder: { id: "af_000000000001", path: "progetti/design", title: "design", description: "", kind: "files", policy: "review", head: head.id, writers: ["*"], reviewers: [] },
+    canReview: true, canManage: true, shareHosting: true, shareSuffix: "--acme.usecora.space", shares: [], commits: [head], activity: {},
+    tree: [{ path: "landing/index.html", sha: "a".repeat(64), size: 10 }, { path: "landing/style.css", sha: "b".repeat(64), size: 10 }],
+  };
+  const posted = [];
+  const panel = panelHarness({ fetch: async (path, options = {}) => {
+    if (options.method === "POST") {
+      posted.push({ path, body: JSON.parse(options.body) });
+      return { ok: true, status: 201, json: async () => ({ commit: { id: "ac_00000000000c", status: "published", message: "Eliminata la cartella landing" } }) };
+    }
+    if (path === "/api/artifacts/folders/af_000000000001") return { ok: true, status: 200, json: async () => data };
+    if (path.startsWith("/api/artifacts/commits/ac_000000000009/view?")) return { ok: true, status: 200, json: async () => ({ url: "https://r-000000000009--acme.usecora.space/_t/1.x/landing/index.html" }) };
+    if (path.includes("/files/landing/index.html")) return { ok: true, status: 200, headers: { get: () => "text/plain; charset=utf-8" }, text: async () => "<h1>Landing</h1>\n<p>ciao</p>" };
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
+  panel.run(`S.data = { agents: [], artifacts: { reviews: 0 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
+  const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  panel.run(`window.removed = []`);
+  const shown = await panel.run(`artifactPreview("/api/artifacts/commits/ac_000000000009/files/landing/index.html", "landing/index.html", 30, { folder: { id: "af_000000000001" }, head: { id: "ac_000000000009" }, canReview: true, onSaved() {}, onRemove: (path) => window.removed.push(path) })`);
+  const [top, body] = shown;
+  const frame = body.querySelector("iframe");
+  assert.equal(frame.attributes.src, "https://r-000000000009--acme.usecora.space/_t/1.x/landing/index.html", "the page runs on the preview host, apart from the panel");
+  assert.equal(frame.attributes.sandbox, "allow-scripts allow-same-origin allow-forms allow-popups allow-modals", "and it cannot steer the panel's tab");
+  const modes = top.querySelector(".art-modes").querySelectorAll("button");
+  assert.deepEqual(modes.map((button) => button.textContent), ["Anteprima", "Codice sorgente"]);
+  modes[1].click();
+  await settle();
+  assert.equal(body.querySelector("iframe"), null);
+  assert.deepEqual(body.querySelectorAll(".art-line").map((line) => line.textContent), ["1<h1>Landing</h1>", "2<p>ciao</p>"], "the source with its line numbers");
+  assert.equal(modes[1].attributes["aria-selected"], "true");
+  modes[0].click();
+  await settle();
+  assert.equal(body.querySelector("iframe"), frame, "back to the same page, not reloaded");
+
+  const remove = top.querySelectorAll("button").find((button) => button.textContent === "Elimina");
+  remove.click();
+  assert.equal(remove.textContent, "Elimina davvero", "a first click only arms it");
+  remove.click();
+  await settle();
+  assert.deepEqual(JSON.parse(panel.run("JSON.stringify(window.removed)")), ["landing/index.html"]);
+
+  await panel.navigate("#/artefatti/af_000000000001/file/landing");
+  await settle();
+  const folderButton = panel.app.querySelector(".art-drop").querySelectorAll("button").find((button) => button.textContent === "Elimina questa cartella");
+  folderButton.click();
+  folderButton.click();
+  await settle();
+  assert.deepEqual(posted[0], { path: "/api/artifacts/folders/af_000000000001/remove", body: { base: "ac_000000000009", paths: ["landing"] } });
+  assert.equal(panel.run("location.hash"), "#/artefatti/af_000000000001/file", "and back to where what is left is");
 });

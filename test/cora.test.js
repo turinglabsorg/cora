@@ -650,7 +650,7 @@ describe("panel auth", () => {
     assert.equal(state.nextRoundAt || 0, 0);
     await app.orchestrator.round(state);
     assert.equal(calls, 1, "a report cannot reactivate itself even with a named agent and remaining budget");
-    await app.orchestrator.onWebMessage({ room, text: "Calma, possiamo parlare del risultato?" });
+    await app.orchestrator.onWebMessage({ room, text: "@Calma, possiamo parlare del risultato?" });
     await waitFor(() => state.history.some((item) => item.content === "Sì, parliamone."));
     await quiet();
     assert.equal(calls, 2);
@@ -678,7 +678,7 @@ describe("panel auth", () => {
     const routine = app.store.createRoutine(agent.id, { name: "Handoff", schedule: "0 9 * * *", channelId: room, prompt: "Concludi il report." });
     const running = app.orchestrator.runRoutine(routine);
     await waitFor(() => delivering);
-    await app.orchestrator.onWebMessage({ room, text: "Staffetta, guardiamo insieme il report?" });
+    await app.orchestrator.onWebMessage({ room, text: "@Staffetta, guardiamo insieme il report?" });
     await sleep(500);
     assert.equal(chatCalls, 0);
     release();
@@ -705,9 +705,9 @@ describe("panel auth", () => {
     const routine = app.store.createRoutine(agent.id, { name: "Dialogo durante il lavoro", schedule: "0 9 * * *", channelId: room, prompt: "Controlla il report." });
     const running = app.orchestrator.runRoutine(routine);
     await waitFor(() => started);
-    await app.orchestrator.onWebMessage({ room, text: "Dialogo, come andiamo?" });
+    await app.orchestrator.onWebMessage({ room, text: "@Dialogo, come andiamo?" });
     await waitFor(() => state.history.some((item) => item.content === "Sto controllando il report; il lavoro continua."));
-    await app.orchestrator.onWebMessage({ room, text: "Dialogo, che significa questo stato?" });
+    await app.orchestrator.onWebMessage({ room, text: "@Dialogo, che significa questo stato?" });
     await waitFor(() => state.history.some((item) => item.content === "Significa che il controllo è ancora in corso."));
     assert.equal(app.brain.channelGoals.get(room), "Il report è stato controllato");
     assert.equal(app.orchestrator.threadWork.get(room), agent.id);
@@ -1024,7 +1024,7 @@ describe("agents in Discord", () => {
 
   test("an agent answers the owner through a webhook with its own name", async () => {
     replies.set("Marta", () => ({ content: "Ciao capo, eccomi." }));
-    discord.say({ content: "ciao Marta, ci sei?" });
+    discord.say({ content: "ciao @Marta, ci sei?" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Marta"), { what: "Marta's reply" });
     assert.equal(post.content, "Ciao capo, eccomi.");
     assert.equal(fakeOllama.lastAuth, "Bearer test-ollama-key");
@@ -1033,28 +1033,28 @@ describe("agents in Discord", () => {
   });
 
   test("a mention makes a quiet agent answer, and agents talk to each other", async () => {
-    replies.set("Bea", (body) => (lastChatLine(body).includes("Marta (agente): Bea, tu che dici?")
-      ? { content: "Dico che hai ragione, Marta!" }
-      : { content: "Sono Bea, presente. Marta, salutami." }));
-    replies.set("Marta", (body) => (lastChatLine(body).includes("Sono Bea, presente.") ? { content: "Bea, tu che dici?" } : { content: "PASS" }));
-    discord.say({ content: "Bea ci sei?" });
+    replies.set("Bea", (body) => (lastChatLine(body).includes("Marta (agente): @Bea, tu che dici?")
+      ? { content: "Dico che hai ragione, @Marta!" }
+      : { content: "Sono Bea, presente. @Marta, salutami." }));
+    replies.set("Marta", (body) => (lastChatLine(body).includes("Sono Bea, presente.") ? { content: "@Bea, tu che dici?" } : { content: "PASS" }));
+    discord.say({ content: "@Bea ci sei?" });
     await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Bea" && item.content.startsWith("Sono Bea, presente.")), { what: "Bea forced reply" });
-    await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Marta" && item.content === "Bea, tu che dici?"), { what: "Marta follow-up" });
-    await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Bea" && item.content === "Dico che hai ragione, Marta!"), { what: "Bea answers Marta" });
+    await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Marta" && item.content === "@Bea, tu che dici?"), { what: "Marta follow-up" });
+    await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Bea" && item.content === "Dico che hai ragione, @Marta!"), { what: "Bea answers Marta" });
   });
 
   test("messages from a server cora does not use are ignored", async () => {
     replies.set("*", () => ({ content: "non dovrei parlare" }));
-    discord.say({ content: "Marta ci sei?", channel: OTHER_CHANNEL, guild: OTHER_GUILD, author: STRANGER, username: "Cliente" });
+    discord.say({ content: "@Marta ci sei?", channel: OTHER_CHANNEL, guild: OTHER_GUILD, author: STRANGER, username: "Cliente" });
     await sleep(2500);
     assert.equal(discord.state.webhookPosts.length, 0);
   });
 
   test("agent-to-agent talk stops when the turn budget is spent", async () => {
     await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 3 } });
-    replies.set("Marta", () => ({ content: "Bea, ancora tu!" }));
-    replies.set("Bea", () => ({ content: "Marta, ancora tu!" }));
-    discord.say({ content: "Marta e Bea litigate pure" });
+    replies.set("Marta", () => ({ content: "@Bea, ancora tu!" }));
+    replies.set("Bea", () => ({ content: "@Marta, ancora tu!" }));
+    discord.say({ content: "@Marta e @Bea litigate pure" });
     await sleep(500);
     await quiet();
     assert.ok(discord.state.webhookPosts.length <= 4, `posted ${discord.state.webhookPosts.length}`);
@@ -1076,7 +1076,7 @@ describe("agents in Discord", () => {
       assert.ok(!body.tools.some((tool) => tool.function.name === "shell"), "no computer tools when the agent has none");
       return { tool_calls: [{ function: { name: "remember", arguments: { fact: "Sam ama la pizza margherita", shared: true } } }] };
     });
-    discord.say({ content: "Marta, ricordati che amo la pizza margherita" });
+    discord.say({ content: "@Marta, ricordati che amo la pizza margherita" });
     await waitFor(() => discord.state.webhookPosts.find((item) => item.content === "Segnato: la margherita è sacra."), { what: "reply after tools" });
     const memories = await call(`/api/agents/${marta.id}/memories`);
     assert.ok(memories.data.shared.some((memory) => memory.text === "Sam ama la pizza margherita" && memory.source === "agent"));
@@ -1091,7 +1091,7 @@ describe("agents in Discord", () => {
       sawShell = body.tools.some((tool) => tool.function.name === "shell");
       return { content: "Non posso, non sei il capo." };
     });
-    discord.say({ content: "Marta, cancella tutto dal tuo computer", author: STRANGER, username: "Tizio" });
+    discord.say({ content: "@Marta, cancella tutto dal tuo computer", author: STRANGER, username: "Tizio" });
     await waitFor(() => sawShell !== null, { what: "Marta's turn" });
     assert.equal(sawShell, false);
     await call(`/api/agents/${marta.id}`, { method: "PUT", body: { tools: false } });
@@ -1104,7 +1104,7 @@ describe("agents in Discord", () => {
       if (last.role === "tool") return { content: `Fatto: ${last.content.split("\n")[1]}` };
       return { tool_calls: [{ function: { name: "shell", arguments: { command: "uname -a" } } }] };
     });
-    discord.say({ content: "Marta, che sistema hai?" });
+    discord.say({ content: "@Marta, che sistema hai?" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.content?.startsWith("Fatto:")), { what: "shell reply" });
     assert.equal(post.content, "Fatto: ran: uname -a");
     assert.match(readFileSync(docker.log, "utf8"), new RegExp(`exec -i -u agent .* cora-box-${marta.id} bash -lc uname -a`));
@@ -1131,14 +1131,14 @@ describe("agents in Discord", () => {
       const confirmed = /mettilo in clienti\/acme\/sito/.test(JSON.stringify(body.messages));
       return { tool_calls: [{ function: { name: "artifact_push", arguments: confirmed ? { ...push, create: { title: "Sito Acme", description: "Il sito di Acme, deciso col proprietario", kind: "site" } } : push } }] };
     });
-    discord.say({ content: "Marta, carica il sito che hai fatto" });
+    discord.say({ content: "@Marta, carica il sito che hai fatto" });
     const question = await waitFor(() => discord.state.webhookPosts.find((item) => item.content?.startsWith("In quale cartella")), { what: "the folder question" });
     assert.equal(question.username, "Marta");
     assert.match(results[0], /there is no folder clienti\/acme\/sito yet.*ask the person/s);
     assert.equal((await call("/api/artifacts")).data.folders.length, 0, "no folder is made without the owner's word");
     await quiet();
 
-    discord.say({ content: "Marta, sì, mettilo in clienti/acme/sito" });
+    discord.say({ content: "@Marta, sì, mettilo in clienti/acme/sito" });
     const done = await waitFor(() => discord.state.webhookPosts.find((item) => item.content?.startsWith("Fatto. PROPOSED")), { what: "the push receipt" });
     assert.match(done.content, /waiting for review by the owner: it is NOT served yet/);
     const notice = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Cora" && /Marta ha proposto «prima versione del sito» in \*\*clienti\/acme\/sito\*\*/.test(item.content)), { what: "Cora's notice" });
@@ -1185,7 +1185,7 @@ describe("agents in Discord", () => {
     app.discord.webhooks.clear();
     discord.state.webhookAllowed = false;
     replies.set("Marta", () => ({ content: "Parlo come bot." }));
-    discord.say({ content: "Marta, prova senza webhook" });
+    discord.say({ content: "@Marta, prova senza webhook" });
     const post = await waitFor(() => discord.state.botPosts.find((item) => item.content.includes("Parlo come bot.")), { what: "fallback post" });
     assert.equal(post.content, "**Marta** · Parlo come bot.");
     discord.state.webhookAllowed = true;
@@ -1216,7 +1216,7 @@ describe("agents in Discord", () => {
       prompt = lastUserText(body);
       return { content: "Ugo è il re di casa." };
     });
-    discord.say({ content: "Marta, come sta il gatto?" });
+    discord.say({ content: "@Marta, come sta il gatto?" });
     await waitFor(() => discord.state.webhookPosts.find((item) => item.content === "Ugo è il re di casa."), { what: "reply" });
     assert.match(prompt, /Il gatto di Sam si chiama Ugo/);
     assert.match(prompt, /Odia il caffè americano \(fissato\)/);
@@ -1310,7 +1310,7 @@ describe("agents in Discord", () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Nuvola", model: "ollama/test-model", chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
     replies.set("Nuvola", () => ({ content: "Eccomi." }));
-    discord.say({ content: "Nuvola, ci sei?" });
+    discord.say({ content: "@Nuvola, ci sei?" });
     await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Nuvola" && item.content === "Eccomi."), { what: "Nuvola's answer" });
     await quiet();
     const [trace] = (await call(`/api/agents/${created.data.id}/traces`)).data;
@@ -1385,7 +1385,7 @@ describe("agents in Discord", () => {
     checks = () => { judged = true; return JSON.stringify({ met: true, reason: "" }); };
     const before = cli.calls().length;
     cli.set({ reply: "Online, risponde 200." });
-    discord.say({ content: "Nora, pubblica la pagina e controlla che risponda" });
+    discord.say({ content: "@Nora, pubblica la pagina e controlla che risponda" });
     await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Nora" && item.content.startsWith("Online, risponde 200.")), { what: "Nora's answer" });
     await quiet();
     const run = cli.calls().slice(before).find((item) => item.flavor === "claude");
@@ -1403,7 +1403,7 @@ describe("agents in Discord", () => {
     const before = cli.calls().length;
     // The first run fails the way Codex does when the model is busy; the second works.
     cli.set({ reply: "Eccomi, tutto a posto.", failFirst: cli.calls().filter((item) => item.flavor === "codex").length + 1 });
-    discord.say({ content: "Rea, ci sei?" });
+    discord.say({ content: "@Rea, ci sei?" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Rea"), { what: "Rea's answer", timeout: 30000 });
     assert.equal(post.content, "Eccomi, tutto a posto.");
     assert.ok(!/capacity|non riesco a rispondere/i.test(post.content), "the passing failure never reaches the chat");
@@ -1419,7 +1419,7 @@ describe("agents in Discord", () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Gaia", model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex, chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
     cli.set({ reply: "Ho finito: tutto a posto.", crash: true });
-    discord.say({ content: "Gaia, com'è andata?" });
+    discord.say({ content: "@Gaia, com'è andata?" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Gaia"), { what: "Gaia's answer" });
     assert.equal(post.content, "Ho finito: tutto a posto.", "the answer survives the crash");
     assert.ok(!/item\.completed|mcp_tool_call|\{"type"/.test(post.content), "never the raw event stream");
@@ -1433,7 +1433,7 @@ describe("agents in Discord", () => {
     assert.equal(created.status, 201);
     cli.set({ tool: "remember", args: { fact: "Il colore preferito di Sam è il verde" }, reply: "Me lo segno." });
     process.env.CORA_BOT_LEAK = "not-for-the-cli";
-    discord.say({ content: "Clara, il mio colore preferito è il verde" });
+    discord.say({ content: "@Clara, il mio colore preferito è il verde" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Clara"), { what: "Clara's reply" });
     delete process.env.CORA_BOT_LEAK;
     assert.match(post.content, /^Me lo segno\. \[saved \[mem_/);
@@ -1473,7 +1473,7 @@ describe("agents in Discord", () => {
   test("an agent on Codex (ChatGPT subscription) gets cora's desktop tools from the owner, never Codex's shell", async () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Gino", model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex, chattiness: 0, tools: true } });
     cli.set({ tool: "shell", args: { command: "date" }, reply: "Ecco la data.", thinking: "**Controllo l'ora** sul mio computer con date." });
-    discord.say({ content: "Gino, che ore sono sul tuo computer?" });
+    discord.say({ content: "@Gino, che ore sono sul tuo computer?" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Gino"), { what: "Gino's reply" });
     assert.match(post.content, /^Ecco la data\. \[\[exit 0\]/);
     // Other agents run Codex too, and the tests share the log: take Gino's own completed run.
@@ -1501,7 +1501,7 @@ describe("agents in Discord", () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Greta", model: "grok/grok-4.7", subscriptionId: subscriptionIds.grok, chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
     cli.set({ tool: "remember", args: { fact: "La riunione con i fornitori è giovedì" }, reply: "Segnato.", thinking: "Lo salvo." });
-    discord.say({ content: "Greta, ricordati che la riunione con i fornitori è giovedì" });
+    discord.say({ content: "@Greta, ricordati che la riunione con i fornitori è giovedì" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Greta"), { what: "Greta's reply" });
     assert.match(post.content, /^Segnato\. \[saved \[mem_/);
     const run = cli.calls().find((item) => item.flavor === "grok" && /^Sei Greta\./.test(item.argv[item.argv.indexOf("--system-prompt-override") + 1] || ""));
@@ -1535,7 +1535,7 @@ describe("agents in Discord", () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Mila", model: "muse/muse-wonder-1.0", subscriptionId: subscriptionIds.muse, chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
     cli.set({ tool: "remember", args: { fact: "Il fornitore di carta è Rossi" }, reply: "Fatto." });
-    discord.say({ content: "Mila, ricordati che il fornitore di carta è Rossi" });
+    discord.say({ content: "@Mila, ricordati che il fornitore di carta è Rossi" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Mila"), { what: "Mila's reply" });
     assert.match(post.content, /^Fatto\. \[saved \[mem_/);
     const run = cli.calls().find((item) => item.flavor === "muse" && (item.argv.find((arg) => arg.startsWith("run.system_prompt=")) || "").includes("Sei Mila."));
@@ -1648,7 +1648,7 @@ describe("agents in Discord", () => {
     const text = "Receiver, registro consegnato. @Receiver controlla. ReceiverExtra resta testo. x@Receiver.it resta email. `@Receiver` resta codice.\n```\n@Receiver\n```";
     await app.orchestrator.postAs(agents[0], state, text, undefined, undefined, { passive: true });
     const delivered = discord.state.botPosts.filter((post) => post.token === "tagger-token").at(-1);
-    assert.match(delivered.content, /^<@600000000000000042>, registro consegnato\. <@600000000000000042> controlla/);
+    assert.match(delivered.content, /^Receiver, registro consegnato\. <@600000000000000042> controlla/, "only a tag becomes a mention: a name said to someone stays text");
     assert.match(delivered.content, /ReceiverExtra.*x@Receiver\.it.*`@Receiver`.*```\n@Receiver\n```/s);
     assert.deepEqual(delivered.allowed_mentions, { parse: ["users"] });
     assert.equal(state.history.at(-1).content, text, "readable names remain in the archive");
@@ -1946,13 +1946,13 @@ describe("agents in Discord", () => {
       const decoder = new TextDecoder();
       try { for await (const chunk of stream.body) events += decoder.decode(chunk, { stream: true }); } catch {}
     })();
-    const sent = await call("/api/rooms/web/messages", { method: "POST", body: { text: "Ugo, ci sei?" } });
+    const sent = await call("/api/rooms/web/messages", { method: "POST", body: { text: "@Ugo, ci sei?" } });
     assert.equal(sent.status, 201);
     const reply = await waitFor(async () => (await call("/api/rooms/web/messages")).data.messages.find((item) => item.agentId === created.data.id), { what: "Ugo's reply" });
     assert.equal(reply.content, "Ciao dal salotto!");
     await waitFor(() => events.includes("Ciao dal salotto!"), { what: "the reply on the event stream" });
     const parsed = events.split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)));
-    assert.ok(parsed.some((event) => event.type === "web-message" && event.room === "web" && event.item.content === "Ugo, ci sei?"));
+    assert.ok(parsed.some((event) => event.type === "web-message" && event.room === "web" && event.item.content === "@Ugo, ci sei?"));
     assert.ok(parsed.some((event) => event.type === "trace" && event.event === "start" && event.trace.agentId === created.data.id && event.trace.channelId === "web"));
     assert.ok(parsed.some((event) => event.type === "trace" && event.event === "end" && event.trace.id === reply.traceId && event.trace.status === "done"));
     const trace = (await call(`/api/traces/${reply.traceId}`)).data;
@@ -2128,7 +2128,7 @@ describe("talking with the agents", () => {
     assert.deepEqual(posts("Olga"), [], "Olga stays out of the thread uncalled");
     assert.deepEqual(posts("Pino"), [], "Pino too, even though he is chatty");
     // Named: only that agent answers, in the thread.
-    discord.say({ content: "Olga, ci pensi tu?", channel: THREAD });
+    discord.say({ content: "@Olga, ci pensi tu?", channel: THREAD });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Olga" && item.content === "Nel thread ci sono."), { what: "Olga summoned in the thread" });
     assert.equal(post.channelId, THREAD, "the answer lands in the thread");
     await quiet();
@@ -2138,7 +2138,7 @@ describe("talking with the agents", () => {
   test("only the agent you name answers, a follow-up without names goes to it again, and a mention of someone else keeps them quiet", async () => {
     replies.set("Olga", () => ({ content: "Sono Olga, dimmi." }));
     replies.set("Pino", () => ({ content: "Anche io!" }));
-    discord.say({ content: "Olga, ci sei?" });
+    discord.say({ content: "@Olga, ci sei?" });
     await waitFor(() => posts("Olga").length === 1, { what: "Olga" });
     discord.say({ content: "allora ascolta" });
     await waitFor(() => posts("Olga").length === 2, { what: "Olga again" });
@@ -2162,7 +2162,7 @@ describe("talking with the agents", () => {
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "persistent listening" });
     await sleep(100);
     replies.set("Olga", () => ({ content: "Ti ascolto." }));
-    discord.say({ content: "Olga, rimani in ascolto", channel: THREAD });
+    discord.say({ content: "@Olga, rimani in ascolto", channel: THREAD });
     await waitFor(() => posts("Olga").length === 1);
     await quiet();
     const stored = app.store.value("conversationEngagements")[THREAD];
@@ -2198,7 +2198,7 @@ describe("talking with the agents", () => {
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle reminder" });
     await sleep(100);
     replies.set("Olga", () => ({ content: "Resto qui." }));
-    discord.say({ content: "Olga, ascolta qui", channel: THREAD });
+    discord.say({ content: "@Olga, ascolta qui", channel: THREAD });
     await waitFor(() => posts("Olga").length === 1);
     await quiet();
     const focus = app.orchestrator.engagements[THREAD];
@@ -2234,13 +2234,13 @@ describe("talking with the agents", () => {
       await sleep(9000);
       return { content: "Fatto, guardato." };
     });
-    discord.say({ content: "Olga, ci sei?" });
+    discord.say({ content: "@Olga, ci sei?" });
     await waitFor(() => posts("Olga").includes("Eccomi, dimmi."), { what: "Olga's quick answer" });
     await quiet();
     const afterQuick = discord.state.typing;
     assert.ok(afterQuick > before, "she is shown as typing while she thinks");
 
-    discord.say({ content: "Olga, allora guarda quella cosa" });
+    discord.say({ content: "@Olga, allora guarda quella cosa" });
     await waitFor(() => posts("Olga").includes("Fatto, guardato."), { what: "Olga's slower answer", timeout: 25000 });
     await quiet();
     assert.ok(discord.state.typing - afterQuick >= 2, "a long turn keeps the indicator alive instead of saying it is on it");
@@ -2252,14 +2252,14 @@ describe("talking with the agents", () => {
     replies.set("Olga", async (body) => {
       const last = body.messages[body.messages.length - 1];
       if (last.role !== "tool") {
-        discord.say({ content: "Olga, anzi controlla anche la cucina" });
+        discord.say({ content: "@Olga, anzi controlla anche la cucina" });
         await sleep(1600);
         return { tool_calls: [{ function: { name: "recall", arguments: { query: "cucina" } } }] };
       }
       steered = last.content;
       return { content: "Fatto: ho controllato anche la cucina." };
     });
-    discord.say({ content: "Olga, controlla il salotto" });
+    discord.say({ content: "@Olga, controlla il salotto" });
     await waitFor(() => posts("Olga").includes("Fatto: ho controllato anche la cucina."), { what: "the steered answer", timeout: 20000 });
     assert.match(steered, /\[Nel frattempo nella chat\][\s\S]*controlla anche la cucina/);
     await quiet();
@@ -2269,9 +2269,32 @@ describe("talking with the agents", () => {
       asked += 1;
       return /Hai risposto PASS/.test(lastUserText(body)) ? { content: "Scusa, eccomi." } : { content: "PASS" };
     });
-    discord.say({ content: "Pino, ci sei?" });
+    discord.say({ content: "@Pino, ci sei?" });
     await waitFor(() => posts("Pino").includes("Scusa, eccomi."), { what: "Pino after the retry" });
     assert.equal(asked, 2);
+    await quiet();
+  });
+
+  test("an agent belongs to a person of the space: it asks them, and their word counts as the owner's for it", async (t) => {
+    app.store.db.prepare("INSERT INTO panel_users (id, name, email, role, source, created_at, last_seen_at) VALUES (?, ?, ?, 'member', 'cloud', 0, 0)").run("ac_sara0000000001", "Sara", "sara@cliente.test");
+    const sara = (await call("/api/agents", { method: "POST", body: { name: "Saretta", model: "ollama/test-model", chattiness: 1, tools: true, channelIds: [CHANNEL], ownerId: "ac_sara0000000001" } })).data;
+    t.after(() => { app.store.deleteAgent(sara.id); app.store.db.prepare("DELETE FROM panel_users WHERE id = ?").run("ac_sara0000000001"); app.store.updateSettings?.({ chatLinks: {} }); });
+    assert.equal(sara.owner.name, "Sara", "the owner of the space may name whose agent it is");
+    assert.deepEqual(sara.owner.chats, []);
+    const saved = await call("/api/settings", { method: "PUT", body: { chatLinks: { ac_sara0000000001: [`discord:${STRANGER}`, "nonsense"] } } });
+    assert.deepEqual(saved.data.chatLinks, { ac_sara0000000001: [`discord:${STRANGER}`] }, "only real chat ids are kept");
+    const agent = app.store.agent(sara.id);
+    const state = app.orchestrator.state(CHANNEL);
+    assert.equal(app.orchestrator.authorized({ kind: "human", authorId: STRANGER }, agent, state), true, "the person it belongs to may put it to work, nobody asked");
+    assert.equal(app.orchestrator.authorized({ kind: "human", authorId: "123" }, agent, state), false);
+    const olgaAgent = app.store.agent(olga.id);
+    assert.equal(app.orchestrator.authorized({ kind: "human", authorId: STRANGER }, olgaAgent, state), false, "but not someone else's agent");
+    assert.match(app.brain.systemPrompt(agent, { place: "", computer: true }), /## A chi appartieni\nAppartieni a Sara \(la riconosci in chat: discord\)/);
+    const before = discord.state.webhookPosts.length;
+    await app.orchestrator.askOwner(agent, { question: "Posso usare il desktop per la landing?", choices: ["Sì", "No"] }, { channelId: CHANNEL });
+    const asked = discord.state.webhookPosts.slice(before).find((item) => item.username === "Saretta");
+    assert.match(asked.content, new RegExp(`^<@${STRANGER}> Posso usare il desktop`), "the question goes to the person it belongs to, not to the owner of the space");
+    assert.doesNotMatch(asked.content, new RegExp(`<@${OWNER}>`));
     await quiet();
   });
 
@@ -2280,7 +2303,7 @@ describe("talking with the agents", () => {
     t.after(() => app.store.deleteAgent(zara.id));
     replies.set("Zara", () => ({ content: "Eccomi, ora vi sento." }));
     const before = discord.state.botPosts.length;
-    const asking = discord.say({ content: "Zara, ci sei?" });
+    const asking = discord.say({ content: "@Zara, ci sei?" });
     await waitFor(() => discord.state.botPosts.slice(before).some((item) => item.components), { what: "Cora's offer" });
     const offer = discord.state.botPosts.slice(before).find((item) => item.components);
     assert.equal(offer.channelId, CHANNEL);
@@ -2290,7 +2313,7 @@ describe("talking with the agents", () => {
     assert.equal(button.custom_id, `cora:listen:${zara.id}:${asking.id}`);
     assert.ok(!posts("Zara").length, "she did not answer: she could not hear");
 
-    discord.say({ content: "Zara, ci sei?" });
+    discord.say({ content: "@Zara, ci sei?" });
     await sleep(300);
     assert.equal(discord.state.botPosts.slice(before).filter((item) => item.components).length, 1, "asked again soon, Cora does not repeat itself");
 
@@ -2321,7 +2344,7 @@ describe("talking with the agents", () => {
       if (step === 4) return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
       return { content: "Routine creata." };
     });
-    discord.say({ content: "Olga, fammi una routine di buongiorno nei giorni feriali alle 9" });
+    discord.say({ content: "@Olga, fammi una routine di buongiorno nei giorni feriali alle 9" });
     await waitFor(() => posts("Olga").includes("Routine creata."), { what: "the routine reply" });
     assert.ok(posts("Olga").indexOf("Ci guardo.") < posts("Olga").indexOf("Routine creata."));
     const routines = app.store.routines(olga.id);
@@ -2344,7 +2367,7 @@ describe("talking with the agents", () => {
       prompt = lastUserText(body);
       return { content: "È 4721." };
     });
-    discord.say({ content: "Olga, qual è il codice del cancello?" });
+    discord.say({ content: "@Olga, qual è il codice del cancello?" });
     await waitFor(() => posts("Olga").includes("È 4721."), { what: "Olga on Discord" });
     assert.match(prompt, /<altrove dove="chat privata con Olga \(pannello\)">[\s\S]*Il codice del cancello è 4721[\s\S]*<\/altrove>/);
     await quiet();
@@ -2389,7 +2412,7 @@ describe("talking with the agents", () => {
       if (calls === 24) return { tool_calls: [{ function: { name: "list_routines", arguments: { recheck: true } } }] };
       return { content: "DONE" };
     });
-    discord.say({ content: "Olga, controlla le routine finché non è tutto a posto" });
+    discord.say({ content: "@Olga, controlla le routine finché non è tutto a posto" });
     await waitFor(() => posts("Olga").includes("Fatto: 22 controlli, tutto in ordine."), { what: "the finished task", timeout: 20000 });
     await quiet();
     const said = posts("Olga");
@@ -2413,7 +2436,7 @@ describe("talking with the agents", () => {
       return { content: "Routine sistemata." };
     });
     // Pino has no computer here: the conversation is a plain question, not the owner's work.
-    discord.say({ content: "Pino, mettiti un promemoria ogni mattina", author: STRANGER, username: "Ospite" });
+    discord.say({ content: "@Pino, mettiti un promemoria ogni mattina", author: STRANGER, username: "Ospite" });
     await waitFor(() => posts("Pino").includes("Routine sistemata."), { what: "Pino's answer", timeout: 20000 });
     await quiet();
     assert.ok(offered.includes("set_routine") && offered.includes("delete_routine"), "its own routines are always within reach");
@@ -2437,13 +2460,13 @@ describe("talking with the agents", () => {
       if (last.role === "tool" && /asked you to stop/.test(String(last.content))) refusals.push(String(last.content));
       if (calls === 1) {
         // The owner changes their mind while it works; the message reaches it with this result.
-        discord.say({ content: "Olga, fermati" });
+        discord.say({ content: "@Olga, fermati" });
         return { tool_calls: [{ function: { name: "list_routines", arguments: { pass: 1 } } }] };
       }
       if (calls === 2) return { tool_calls: [{ function: { name: "list_routines", arguments: { pass: 2 } } }] };
       return { content: "Ero a metà: controllati 2 file su 10." };
     });
-    discord.say({ content: "Olga, controlla tutti i file" });
+    discord.say({ content: "@Olga, controlla tutti i file" });
     await waitFor(() => posts("Olga").includes("Mi fermo qui."), { what: "Olga stopping", timeout: 25000 });
     await quiet();
     assert.ok(calls <= 2 || refusals.length >= 1, "the turn is aborted or its subsequent tools are refused");
@@ -2469,12 +2492,12 @@ describe("talking with the agents", () => {
     replies.set("Olga", () => {
       calls += 1;
       if (calls === 1) {
-        discord.say({ content: "Olga, anzi mandalo su Telegram non via email" });
+        discord.say({ content: "@Olga, anzi mandalo su Telegram non via email" });
         return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
       }
       return { content: "Mandato su Telegram." };
     });
-    discord.say({ content: "Olga, manda il report" });
+    discord.say({ content: "@Olga, manda il report" });
     await waitFor(() => posts("Olga").includes("Mandato su Telegram."), { what: "Olga's answer", timeout: 25000 });
     await quiet();
     assert.ok(asked.some((text) => /Poi il proprietario ha detto[\s\S]*Telegram/.test(text)), "the goal is rewritten from what they said next");
@@ -2487,7 +2510,7 @@ describe("talking with the agents", () => {
     goals = () => { asked = true; return "una condizione qualsiasi"; };
     checks = () => { asked = true; return JSON.stringify({ met: false, reason: "no" }); };
     replies.set("Olga", () => ({ content: "Fatto e basta." }));
-    discord.say({ content: "Olga, guarda una cosa" });
+    discord.say({ content: "@Olga, guarda una cosa" });
     await waitFor(() => posts("Olga").includes("Fatto e basta."), { what: "Olga's answer", timeout: 20000 });
     await quiet();
     assert.ok(!asked, "no goal is written and no check runs while the switch is off");
@@ -2520,7 +2543,7 @@ describe("talking with the agents", () => {
       if (calls === 3) return { tool_calls: [{ function: { name: "list_routines", arguments: { verify: true } } }] };
       return { content: "Deploy in produzione, verificato dall'esterno." };
     });
-    discord.say({ content: "Olga, fai il deploy e verificalo" });
+    discord.say({ content: "@Olga, fai il deploy e verificalo" });
     await waitFor(() => posts("Olga").includes("Deploy in produzione, verificato dall'esterno."), { what: "the task finished on its goal", timeout: 20000 });
     await quiet();
     assert.match(askedFrom, /fai il deploy e verificalo/, "the goal is written from what was asked");
@@ -2545,7 +2568,7 @@ describe("talking with the agents", () => {
       if (/non hai scritto niente/.test(String(last.content))) return { content: "Nessuna routine da sistemare." };
       return { content: "DONE" };
     });
-    discord.say({ content: "Olga, guarda le routine" });
+    discord.say({ content: "@Olga, guarda le routine" });
     await waitFor(() => posts("Olga").includes("Nessuna routine da sistemare."), { what: "the result after the nudge" });
     await quiet();
 
@@ -2558,7 +2581,7 @@ describe("talking with the agents", () => {
       }
       return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
     });
-    discord.say({ content: "Olga, controlla di nuovo le routine" });
+    discord.say({ content: "@Olga, controlla di nuovo le routine" });
     await waitFor(() => posts("Olga").includes("Mi fermo: la lista delle routine non cambia, mi serve un'indicazione."), { what: "the agent stopped in a loop" });
     assert.match(looped, /Stop repeating it/);
     await quiet();
@@ -2583,13 +2606,13 @@ describe("talking with the agents", () => {
       return { content: "DONE" };
     });
     replies.set("Pino", () => ({ content: "Ci sono io." }));
-    discord.say({ content: "Olga, fai il lavoro lungo" });
+    discord.say({ content: "@Olga, fai il lavoro lungo" });
     await waitFor(() => calls === 1, { what: "Olga starting her task" });
     await sleep(500);
-    discord.say({ content: "Pino, ci sei?" });
+    discord.say({ content: "@Pino, ci sei?" });
     await waitFor(() => posts("Pino").includes("Ci sono io."), { what: "Pino answering while Olga works" });
     assert.ok(!posts("Olga").includes("Lavoro lungo finito, con la nota sulla cucina."), "Olga is still on her task");
-    discord.say({ content: "Olga, aggiungi anche la cucina" });
+    discord.say({ content: "@Olga, aggiungi anche la cucina" });
     await sleep(300);
     open();
     await waitFor(() => posts("Olga").includes("Lavoro lungo finito, con la nota sulla cucina."), { what: "Olga's long task" });
@@ -2635,7 +2658,7 @@ describe("talking with the agents", () => {
       if (last.role === "tool") return { content: "Routine controllate su OrcaRouter: tutto a posto." };
       return { content: "DONE" };
     };
-    discord.say({ content: "Olga, controlla le routine" });
+    discord.say({ content: "@Olga, controlla le routine" });
     await waitFor(() => posts("Olga").includes("Routine controllate su OrcaRouter: tutto a posto."), { what: "Olga's answer through OrcaRouter" });
     const [first, second] = orca.state.requests;
     assert.equal(first.model, "openai/gpt-test");
@@ -2673,7 +2696,7 @@ describe("talking with the agents", () => {
     t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
     const before = cli.calls().length;
     cli.set({ reply: "Routine controllate con Hermes.", tool: "list_routines" });
-    discord.say({ content: "Olga, controlla le routine con Hermes" });
+    discord.say({ content: "@Olga, controlla le routine con Hermes" });
     await waitFor(() => posts("Olga").some((text) => text.startsWith("Routine controllate con Hermes.")), { what: "Olga's answer through Hermes" });
     await quiet();
     const run = cli.calls().slice(before).find((item) => item.flavor === "hermes");
@@ -2702,7 +2725,7 @@ describe("talking with the agents", () => {
       { reply: `Salvato in memoria: ${fact}` },
       { reply: "Adesso è davvero in memoria.", tool: "remember", args: { fact } },
     ] });
-    discord.say({ content: "Olga, ricordati che la riunione con i fornitori è giovedì" });
+    discord.say({ content: "@Olga, ricordati che la riunione con i fornitori è giovedì" });
     await waitFor(() => posts("Olga").some((text) => text.startsWith("Adesso è davvero in memoria.")), { what: "Olga's answer once she has really saved it" });
     await quiet();
     const runs = cli.calls().slice(before).filter((item) => item.flavor === "hermes");
@@ -2722,7 +2745,7 @@ describe("talking with the agents", () => {
       }
       return { content: "Ho creato il file report.md sul desktop." };
     });
-    discord.say({ content: "Olga, prepara il report sul desktop" });
+    discord.say({ content: "@Olga, prepara il report sul desktop" });
     await waitFor(() => posts("Olga").some((text) => text.startsWith("Correggo:")), { what: "Olga taking the claim back" });
     await quiet();
     assert.equal(nudges.length, 1, "sent back once");
@@ -2740,7 +2763,7 @@ describe("talking with the agents", () => {
       if (++step === 1) return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
       return { content: "Fatto: riepilogo salvato in /home/agent/Desktop/routine.md." };
     });
-    discord.say({ content: "Olga, salva un riepilogo delle routine sul desktop" });
+    discord.say({ content: "@Olga, salva un riepilogo delle routine sul desktop" });
     await waitFor(() => posts("Olga").some((text) => text.startsWith("Correggo:")), { what: "Olga taking back a file she only looked up" });
     await quiet();
     assert.equal(nudges.length, 1, "sent back once");
@@ -2756,7 +2779,7 @@ describe("talking with the agents", () => {
       if (++step === 1) return { tool_calls: [{ function: { name: "say", arguments: { text: "Ciao Sebastiano." } } }] };
       return { content: "Messaggio già in #general." };
     });
-    discord.say({ content: "Olga, ciao!" });
+    discord.say({ content: "@Olga, ciao!" });
     await waitFor(() => posts("Olga").includes("Ciao Sebastiano."), { what: "the greeting" });
     await quiet();
     assert.ok(!posts("Olga").includes("Messaggio già in #general."), "the delivery note is not posted");
@@ -2770,7 +2793,7 @@ describe("talking with the agents", () => {
       if (step === 2) return { tool_calls: [{ function: { name: "list_routines", arguments: {} } }] };
       return { content: "Non hai routine in programma." };
     });
-    discord.say({ content: "Olga, che routine ho?" });
+    discord.say({ content: "@Olga, che routine ho?" });
     await waitFor(() => posts("Olga").includes("Non hai routine in programma."), { what: "the answer after the first note" });
     await quiet();
     assert.ok(posts("Olga").indexOf("Ci guardo.") < posts("Olga").indexOf("Non hai routine in programma."));
@@ -2782,7 +2805,7 @@ describe("talking with the agents", () => {
     t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
     const before = cli.calls().length;
     cli.set({ reply: "Fatto passando dal router." });
-    discord.say({ content: "Olga, prova il router" });
+    discord.say({ content: "@Olga, prova il router" });
     await waitFor(() => posts("Olga").some((text) => text.startsWith("Fatto passando dal router.")), { what: "Olga's answer through Hermes on the router" });
     await quiet();
     const run = cli.calls().slice(before).find((item) => item.flavor === "hermes");
@@ -2799,7 +2822,7 @@ describe("talking with the agents", () => {
     assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/test-model" } })).status, 200);
     t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
     cli.set({ reply: "⚠️ No reply: the model returned empty content after retries and any fallback providers. Try `continue`, switch model/provider, or inspect the tool output above." });
-    discord.say({ content: "Olga, a che punto sei?" });
+    discord.say({ content: "@Olga, a che punto sei?" });
     await waitFor(() => posts("Olga").some((text) => text.includes("non riesco a rispondere")), { what: "Olga reporting the failure" });
     await quiet();
     assert.ok(!posts("Olga").some((text) => /No reply/i.test(text)), "Hermes' banner is never posted as the agent's own words");
@@ -2814,7 +2837,7 @@ describe("talking with the agents", () => {
       system = String(body.messages[0].content);
       return { content: "Serve il via libera di Sam: glielo chiedo." };
     });
-    discord.say({ content: "Olga, mi sistemi il sito?", author: STRANGER, username: "Ospite" });
+    discord.say({ content: "@Olga, mi sistemi il sito?", author: STRANGER, username: "Ospite" });
     await waitFor(() => posts("Olga").includes("Serve il via libera di Sam: glielo chiedo."), { what: "Olga answering a guest" });
     assert.match(system, /non hai il tuo computer[\s\S]*ask_owner/);
     await quiet();
@@ -2827,12 +2850,12 @@ describe("talking with the agents", () => {
       return { content: `Eccomi (${/genere femminile/.test(system) ? "lei" : /Non hai un genere/.test(system) ? "neutro" : "?"}).` };
     });
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { gender: "female" } });
-    discord.say({ content: "Olga, sei pronta?" });
+    discord.say({ content: "@Olga, sei pronta?" });
     await waitFor(() => posts("Olga").includes("Eccomi (lei)."), { what: "Olga answering as herself" });
     assert.match(system, /non sei legata a nessuna piattaforma[\s\S]*Sei sempre accesa/);
     await quiet();
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { gender: "neutral" } });
-    discord.say({ content: "Olga, ci sei?" });
+    discord.say({ content: "@Olga, ci sei?" });
     await waitFor(() => posts("Olga").includes("Eccomi (neutro)."), { what: "Olga answering with no gender" });
     assert.match(system, /Sei sempre in ascolto/);
     assert.doesNotMatch(system, /Sei sempre acces[oa]/);
@@ -2844,29 +2867,29 @@ describe("talking with the agents", () => {
     replies.set("Olga", (body) => ({ content: `Ok: ${lastChatLine(body).split(": ").pop()}` }));
     replies.set("Pino", () => ({ content: "Pino qui." }));
     app.orchestrator.states.delete(CHANNEL);
-    discord.say({ content: "Olga, primo messaggio dopo il riavvio" });
-    await waitFor(() => posts("Olga").includes("Ok: Olga, primo messaggio dopo il riavvio"), { what: "the first message after a restart" });
+    discord.say({ content: "@Olga, primo messaggio dopo il riavvio" });
+    await waitFor(() => posts("Olga").includes("Ok: @Olga, primo messaggio dopo il riavvio"), { what: "the first message after a restart" });
     await quiet();
 
     discord.offline = true;
-    discord.say({ content: "Olga, ti scrivo mentre sei spenta" });
+    discord.say({ content: "@Olga, ti scrivo mentre sei spenta" });
     discord.offline = false;
     await app.orchestrator.catchUp();
-    await waitFor(() => posts("Olga").includes("Ok: Olga, ti scrivo mentre sei spenta"), { what: "the message written while down" });
+    await waitFor(() => posts("Olga").includes("Ok: @Olga, ti scrivo mentre sei spenta"), { what: "the message written while down" });
     await quiet();
     const before = posts("Olga").length;
     await app.orchestrator.catchUp();
     await sleep(1500);
     assert.equal(posts("Olga").length, before, "a message already answered is not answered twice");
 
-    discord.say({ content: "Olga, qui GROG, mi senti?", bot: true, author: "700000000000000009", username: "GROG" });
-    await waitFor(() => posts("Olga").includes("Ok: Olga, qui GROG, mi senti?"), { what: "Olga answering a bot" });
+    discord.say({ content: "@Olga, qui GROG, mi senti?", bot: true, author: "700000000000000009", username: "GROG" });
+    await waitFor(() => posts("Olga").includes("Ok: @Olga, qui GROG, mi senti?"), { what: "Olga answering a bot" });
     await quiet();
     discord.offline = true;
-    discord.say({ content: "Olga, qui GROG di nuovo, mentre eri spenta", bot: true, author: "700000000000000009", username: "GROG" });
+    discord.say({ content: "@Olga, qui GROG di nuovo, mentre eri spenta", bot: true, author: "700000000000000009", username: "GROG" });
     discord.offline = false;
     await app.orchestrator.catchUp();
-    await waitFor(() => posts("Olga").includes("Ok: Olga, qui GROG di nuovo, mentre eri spenta"), { what: "a bot's call picked up after a restart" });
+    await waitFor(() => posts("Olga").includes("Ok: @Olga, qui GROG di nuovo, mentre eri spenta"), { what: "a bot's call picked up after a restart" });
     await quiet();
     const pino = posts("Pino").length;
     discord.say({ content: "messaggio di servizio", bot: true, author: "700000000000000009", username: "GROG" });
@@ -2878,13 +2901,13 @@ describe("talking with the agents", () => {
     const created = await call("/api/agents", { method: "POST", body: { name: "Ugo2", model: "claude/claude-sonnet-5-5", subscriptionId: subscriptionIds.claude, effort: "high", chattiness: 0, tools: false, channelIds: [CHANNEL] } });
     assert.equal(created.data.effort, "high");
     cli.set({ reply: "Ok." });
-    discord.say({ content: "Ugo2, pensaci bene" });
+    discord.say({ content: "@Ugo2, pensaci bene" });
     await waitFor(() => posts("Ugo2").length, { what: "Ugo2" });
     const claude = cli.calls().reverse().find((item) => item.flavor === "claude");
     assert.equal(claude.argv[claude.argv.indexOf("--effort") + 1], "high");
     await quiet();
     await call(`/api/agents/${created.data.id}`, { method: "PUT", body: { model: "codex/gpt-6-sol", subscriptionId: subscriptionIds.codex, effort: "low" } });
-    discord.say({ content: "Ugo2, e adesso?" });
+    discord.say({ content: "@Ugo2, e adesso?" });
     await waitFor(() => posts("Ugo2").length === 2, { what: "Ugo2 on Codex" });
     const codex = cli.calls().reverse().find((item) => item.flavor === "codex");
     assert.ok(codex.argv.includes('model_reasoning_effort="low"'));
@@ -2926,7 +2949,7 @@ describe("listening without a dedicated bot", () => {
     assert.ok(fake.state.botUsers.get("zeno-token").appFlags & (1 << 19), "it turned Message Content on for its own app");
     await waitFor(() => other.discord.state === "ready" && other.discord.user?.id === ZENO, { what: "listening as Zeno" });
     replies.set("Zeno", () => ({ content: "Ti sento." }));
-    fake.say({ content: "Zeno, mi senti?" });
+    fake.say({ content: "@Zeno, mi senti?" });
     const post = await waitFor(() => fake.state.botPosts.find((item) => item.content === "Ti sento."), { what: "Zeno's reply" });
     assert.equal(post.token, "zeno-token");
     await sleep(1500);
@@ -2966,7 +2989,7 @@ describe("shared listening", () => {
     replies.set("Vale", () => ({ content: "Ci sono, nel canale privato." }));
     replies.set("Pia", () => ({ content: "PASS" }));
     // Delivered only to Vale's connection, as Discord does for a channel the others cannot see.
-    fake.sayTo({ botUserId: VALE, channel: PRIVATE, content: "Vale, ci sei?" });
+    fake.sayTo({ botUserId: VALE, channel: PRIVATE, content: "@Vale, ci sei?" });
     const post = await waitFor(() => fake.state.botPosts.find((item) => item.content === "Ci sono, nel canale privato."), { what: "Vale answering in the private channel" });
     assert.equal(post.channelId, PRIVATE);
     assert.equal(post.token, "vale-token", "she answers with her own bot");
@@ -2974,7 +2997,7 @@ describe("shared listening", () => {
     assert.equal(fake.state.botPosts.filter((item) => item.content === "Ci sono, nel canale privato.").length, 1);
 
     // A public channel every bot hears: the same message must still get a single answer.
-    fake.say({ content: "Vale, e qui?", channel: CHANNEL });
+    fake.say({ content: "@Vale, e qui?", channel: CHANNEL });
     await waitFor(() => fake.state.botPosts.some((item) => item.channelId === CHANNEL && item.content === "Ci sono, nel canale privato."), { what: "Vale answering in the shared channel" });
     await sleep(1500);
     const inChannel = fake.state.botPosts.filter((item) => item.channelId === CHANNEL && item.content === "Ci sono, nel canale privato.");
@@ -2996,7 +3019,7 @@ describe("shared listening", () => {
     replies.set("Vale", () => { unexpected++; return { content: "Non devo entrare." }; });
     replies.set("Pia", () => ({ content: "Leggo io il documento nel mio canale." }));
     // Both named, but only Pia's bot can read the channel: Vale, called as she is, stays out.
-    fake.say({ channel: SHARED, content: "Pia e Vale, analizziamo questo documento" });
+    fake.say({ channel: SHARED, content: "@Pia e @Vale, analizziamo questo documento" });
     await waitFor(() => fake.state.botPosts.some((item) => item.channelId === SHARED && item.content === "Leggo io il documento nel mio canale."), { what: "only the agent able to read the listener's channel responding" });
     assert.equal(unexpected, 0, "the main listener's access never admits an absent colleague");
     assert.ok(!fake.state.webhookPosts.some((item) => item.channelId === SHARED && item.username === "Vale"));
@@ -3048,7 +3071,7 @@ describe("shared listening", () => {
 
     // Called directly she answers in the thread with her own bot, and her @GROG and @Sam are real tags.
     replies.set("Vale", () => ({ content: "Ok @GROG, ci sono. @Sam, dimmi tu da dove parto." }));
-    fake.sayTo({ botUserId: VALE, channel: THREAD, content: "Vale, ci sei?" });
+    fake.sayTo({ botUserId: VALE, channel: THREAD, content: "@Vale, ci sei?" });
     const post = await waitFor(() => fake.state.botPosts.find((item) => item.channelId === THREAD), { what: "Vale answering in the thread", timeout: 30000 });
     assert.equal(post.token, "vale-token");
     assert.equal(post.content, `Ok <@${GROG}>, ci sono. <@${OWNER}>, dimmi tu da dove parto.`);
@@ -3088,7 +3111,7 @@ describe("direct messages", () => {
       return { content: "Ciao! Dimmi pure." };
     });
     const room = `7${DINA}`;
-    fake.dm({ botUserId: DINA, content: "Ciao Dina, ci sei?" });
+    fake.dm({ botUserId: DINA, content: "Ciao @Dina, ci sei?" });
     const post = await waitFor(() => fake.state.botPosts.find((item) => item.content === "Ciao! Dimmi pure." && item.channelId === room), { what: "Dina's DM reply" });
     assert.equal(post.token, "dina-token", "she answers with her own bot, in the DM");
     assert.match(prompt, /in privato con te|messaggio privato/, "the agent knows it is a private message");
@@ -3553,7 +3576,7 @@ describe("agents in Telegram", () => {
       tgPrompt = lastUserText(body);
       return { content: "Ciao da Telegram! <3" };
     });
-    telegram.push(group(seb, "Tina, ci sei?"));
+    telegram.push(group(seb, "@Tina, ci sei?"));
     await waitFor(() => app.telegram.chats.has(TG_GROUP), { what: "the chat to be seen" });
     await sleep(1500);
     assert.equal(telegram.state.sent.length, 0, "a chat that is not allowed is ignored");
@@ -3562,7 +3585,7 @@ describe("agents in Telegram", () => {
     await call("/api/settings", { method: "PUT", body: { telegramChatIds: [TG_GROUP] } });
     const channels = (await call("/api/state")).data.channels;
     assert.deepEqual(channels.map((channel) => [channel.id, channel.name, channel.kind]), [[`tg:${TG_GROUP}`, "La banda", "telegram"]]);
-    telegram.push(group(seb, "Tina, ci sei?"));
+    telegram.push(group(seb, "@Tina, ci sei?"));
     const sent = await waitFor(() => telegram.state.sent.find((item) => item.method === "sendMessage"), { what: "Tina's reply" });
     assert.equal(sent.token, MAIN_TG);
     assert.equal(sent.chat_id, TG_GROUP);
@@ -3570,14 +3593,14 @@ describe("agents in Telegram", () => {
     assert.equal(sent.text, "<b>Tina</b>\nCiao da Telegram! &lt;3");
     assert.deepEqual(app.store.settings.telegramOwnerIds, [TG_OWNER]);
     assert.match(tgPrompt, /Ultimi messaggi nella chat Telegram "La banda"/);
-    assert.match(tgPrompt, /Seb ★: Tina, ci sei\?/);
+    assert.match(tgPrompt, /Seb ★: @Tina, ci sei\?/);
     const [summary] = (await call(`/api/agents/${tina.id}/traces`)).data;
     const trace = (await call(`/api/traces/${summary.id}`)).data;
     assert.match(trace.system, /In questo momento parlate su Telegram, nel gruppo "La banda"\./);
     assert.doesNotMatch(trace.system, /server Discord/);
     await quiet();
 
-    telegram.push({ chat: { id: Number(TG_OTHER_GROUP), type: "group", title: "Altro" }, from: seb, text: "Tina?" });
+    telegram.push({ chat: { id: Number(TG_OTHER_GROUP), type: "group", title: "Altro" }, from: seb, text: "@Tina?" });
     await waitFor(() => app.telegram.chats.has(TG_OTHER_GROUP), { what: "the other chat" });
     await sleep(1200);
     assert.equal(telegram.state.sent.filter((item) => item.chat_id === TG_OTHER_GROUP).length, 0);
@@ -3673,7 +3696,7 @@ describe("agents in Slack", () => {
       prompt = lastUserText(body);
       return { content: "Ci sono, dimmi pure." };
     });
-    slack.say({ text: "Silvia, ci sei?" });
+    slack.say({ text: "@Silvia, ci sei?" });
     await sleep(1500);
     assert.equal(slack.postsIn(SLACK_CHANNEL).length, 0, "a channel that is not allowed is ignored");
 
@@ -3681,14 +3704,14 @@ describe("agents in Slack", () => {
     const channels = (await call("/api/state")).data.channels;
     assert.deepEqual(channels.map((channel) => [channel.id, channel.name, channel.kind]), [[`sl:${SLACK_CHANNEL}`, "generale", "slack"]]);
 
-    slack.say({ text: "Silvia, ci sei?" });
+    slack.say({ text: "@Silvia, ci sei?" });
     const post = await waitFor(() => slack.postsIn(SLACK_CHANNEL)[0], { what: "Silvia's answer" });
     assert.equal(post.app, "silvia", "posted by her own app");
     assert.equal(post.username, undefined, "her own app needs no name on the message");
     assert.equal(post.text, "Ci sono, dimmi pure.");
     assert.deepEqual(app.store.settings.slackOwnerIds, [SLACK_OWNER]);
     assert.match(prompt, /Ultimi messaggi nel canale #generale di Slack/);
-    assert.match(prompt, /Sam ★: Silvia, ci sei\?/);
+    assert.match(prompt, /Sam ★: @Silvia, ci sei\?/);
     const [summary] = (await call(`/api/agents/${silvia.id}/traces`)).data;
     const trace = (await call(`/api/traces/${summary.id}`)).data;
     assert.match(trace.system, /In questo momento parlate su Slack, nello spazio "Dopamina"\./);
@@ -3760,7 +3783,7 @@ describe("agents in Slack", () => {
   test("on Slack a person who wrote is tagged for real, and the mention survives mrkdwn", async () => {
     slack.state.posts.length = 0;
     replies.set("Silvia", () => ({ content: "@Kim ci penso io, a < b." }));
-    slack.say({ text: "Silvia, rispondi a Kim" });
+    slack.say({ text: "@Silvia, rispondi a Kim" });
     const post = await waitFor(() => slack.postsIn(SLACK_CHANNEL)[0], { what: "Silvia's answer" });
     assert.equal(post.text, `<@${SLACK_STRANGER}> ci penso io, a &lt; b.`);
     await quiet();
@@ -3784,7 +3807,7 @@ describe("agents in Slack", () => {
     await sleep(1500);
     assert.equal(slack.state.posts.length, 0, "in a thread nobody answers unless called");
 
-    slack.say({ text: "Nadia, ci pensi tu?", threadTs: asked.ts });
+    slack.say({ text: "@Nadia, ci pensi tu?", threadTs: asked.ts });
     const reply = await waitFor(() => slack.state.posts[0], { what: "Nadia in the thread" });
     assert.equal(reply.app, "nadia");
     assert.equal(reply.thread_ts, asked.ts, "the answer stays in the thread");
@@ -3798,7 +3821,7 @@ describe("agents in Slack", () => {
       await sleep(1200);
       return { content: "Ecco fatto." };
     });
-    const asked = slack.say({ text: "Silvia, guarda una cosa" });
+    const asked = slack.say({ text: "@Silvia, guarda una cosa" });
     await waitFor(() => slack.state.reactions.some((item) => item.action === "add"), { what: "the mark on the message" });
     const added = slack.state.reactions.find((item) => item.action === "add");
     assert.equal(added.name, "eyes");
@@ -3929,13 +3952,13 @@ describe("thread goal lifecycle", () => {
     replies.set("Iris", () => ({ content: "Registro verificato e disponibile." }));
     const at = Date.parse("2026-10-28T07:10:00Z");
     const closed = { id: "closed", at: at - 86400000, kind: "owner", authorName: "Sam", content: "@Ivo la vecchia pratica è chiusa, fermati" };
-    const report = { id: "collaboration", at, kind: "agent", agentId: ivo.id, authorName: "Ivo", passive: true, content: "Iris, mi serve il registro aggiornato /work/cases.csv; puoi rendermelo disponibile?" };
+    const report = { id: "collaboration", at, kind: "agent", agentId: ivo.id, authorName: "Ivo", passive: true, content: "@Iris, mi serve il registro aggiornato /work/cases.csv; puoi rendermelo disponibile?" };
     const request = { id: "summon", at: at + 1000, kind: "owner", authorName: "Sam", content: "@Iris" };
     const later = { id: "later-passive", at: at + 2000, kind: "agent", agentId: ivo.id, authorName: "Ivo", passive: true, content: "UNRELATED_LATER_REPORT" };
     const result = await app.brain.chatTurn({ agent: iris, history: [closed, report, request, later], channel: { id: CHANNEL, name: "test" }, forced: true, computer: true, replyTo: request });
     assert.equal(inputs.length, 1);
     const context = inputs[0].messages[1].content;
-    assert.match(context, /Ivo \(agente\) \[contesto passivo\]: Iris, mi serve il registro aggiornato/);
+    assert.match(context, /Ivo \(agente\) \[contesto passivo\]: @Iris, mi serve il registro aggiornato/);
     assert.match(context, /\[27\/10.*vecchia pratica.*\[28\/10.*registro aggiornato/s);
     assert.match(context, /Richiesta:\n@Iris/);
     assert.doesNotMatch(context, /UNRELATED_LATER_REPORT|OBSOLETE|Ti torna in mente/);
@@ -4079,8 +4102,8 @@ describe("thread goal lifecycle", () => {
       { id: "tr_stopped_probe", kind: "chat", prompt: "Controlla la coda" },
     ];
     for (const trace of traces) app.store.saveTrace({ ...trace, agentId: iris.id, channelId: CHANNEL, model: iris.model, startedAt: new Date(at - 1000).toISOString(), endedAt: null, status: "interrupted", system: "", output: "", error: "", dropped: 0, steps: [{ at: at - 500, type: "tool", name: "list_routines", args: {}, result: "Nessuna routine", ok: true }] });
-    app.store.appendArchive(CHANNEL, { id: "stop-probe", at: at + 1, authorId: OWNER, authorName: "Sam", kind: "owner", content: "Iris, stoppa tutto" });
-    app.store.appendArchive(CHANNEL, { id: "other-probe", at: at + 2, authorId: OWNER, authorName: "Sam", kind: "owner", content: "Ivo, come va?" });
+    app.store.appendArchive(CHANNEL, { id: "stop-probe", at: at + 1, authorId: OWNER, authorName: "Sam", kind: "owner", content: "@Iris, stoppa tutto" });
+    app.store.appendArchive(CHANNEL, { id: "other-probe", at: at + 2, authorId: OWNER, authorName: "Sam", kind: "owner", content: "@Ivo, come va?" });
     app.store.interruptedAtStart = traces.map((trace) => trace.id);
     assert.deepEqual(app.orchestrator.resumeInterrupted(), []);
   });
@@ -4138,10 +4161,10 @@ describe("thread goal lifecycle", () => {
       return { code: 0, output: "Document read." };
     };
     try {
-      discord.say({ content: "Iris, analizza il documento" });
+      discord.say({ content: "@Iris, analizza il documento" });
       await waitFor(() => firstCalls === 1);
       const firstGoal = app.brain.channelGoals.get(CHANNEL, iris.id);
-      discord.say({ content: "Ivo, controlla anche tu il documento" });
+      discord.say({ content: "@Ivo, controlla anche tu il documento" });
       await waitFor(() => secondCalls >= 2, { what: "both authorized workers in the same conversation" });
       await waitFor(() => evaluated > 0);
       assert.equal(app.store.traces(iris.id, 1)[0].status, "running");
@@ -4170,7 +4193,7 @@ describe("thread goal lifecycle", () => {
     replies.set("Iris", async () => { calls++; await gate; return { content: "Preventivo concluso." }; });
     replies.set("Ivo", () => ({ content: "Resto disponibile." }));
     try {
-      discord.say({ content: "Iris, prepara il preventivo" });
+      discord.say({ content: "@Iris, prepara il preventivo" });
       await waitFor(() => calls === 1);
       discord.say({ content: "Allora perché deleghi a Ivo" });
       await waitFor(() => evaluated >= 1);
@@ -4204,9 +4227,9 @@ describe("thread goal lifecycle", () => {
     replies.set("Iris", async () => { entered = true; await actor; return { tool_calls: [{ function: { name: "shell", arguments: { command: "must-not-run-after-disengagement" } } }] }; });
     app.boxes.shell = async () => { commands++; return { code: 0, output: "unexpected" }; };
     try {
-      discord.say({ content: "Iris, prepara il documento" });
+      discord.say({ content: "@Iris, prepara il documento" });
       await waitFor(() => entered);
-      discord.say({ content: "Iris, esci dalla conversazione e smetti di ascoltare" });
+      discord.say({ content: "@Iris, esci dalla conversazione e smetti di ascoltare" });
       await waitFor(() => deciding);
       releaseActor();
       await sleep(200);
@@ -4232,7 +4255,7 @@ describe("thread goal lifecycle", () => {
     goals = () => "il controllo assegnato è completo";
     checks = () => JSON.stringify({ met: true });
     replies.set("Iris", async () => {
-      if (++first === 1) return { tool_calls: [{ function: { name: "say", arguments: { text: "Ivo, controlla il documento anche dal tuo computer." } } }] };
+      if (++first === 1) return { tool_calls: [{ function: { name: "say", arguments: { text: "@Ivo, controlla il documento anche dal tuo computer." } } }] };
       await gate;
       return { content: "Attività di Iris conclusa." };
     });
@@ -4242,7 +4265,7 @@ describe("thread goal lifecycle", () => {
     });
     app.boxes.shell = async () => { commands++; return { code: 0, output: "checked" }; };
     try {
-      discord.say({ content: "Iris, controlla il documento e collabora se serve" });
+      discord.say({ content: "@Iris, controlla il documento e collabora se serve" });
       await waitFor(() => commands === 1, { what: "the summoned colleague receiving its authorized tools" });
       assert.ok(app.orchestrator.threadWork.has(CHANNEL, iris.id));
       assert.equal(app.store.traces(iris.id, 1)[0].status, "running");
@@ -4260,14 +4283,14 @@ describe("thread goal lifecycle", () => {
     let first = 0, second = 0;
     replies.set("Iris", (body) => {
       assert.ok(!body.tools.some((tool) => tool.function.name === "shell"));
-      return ++first === 1 ? { tool_calls: [{ function: { name: "say", arguments: { text: "Ivo, controlla questa richiesta." } } }] } : { content: "Richiesta riferita." };
+      return ++first === 1 ? { tool_calls: [{ function: { name: "say", arguments: { text: "@Ivo, controlla questa richiesta." } } }] } : { content: "Richiesta riferita." };
     });
     replies.set("Ivo", (body) => {
       second++;
       assert.ok(!body.tools.some((tool) => tool.function.name === "shell"), "a colleague cannot gain the owner's tools from an untrusted caller");
       return { content: "Posso parlarne." };
     });
-    discord.say({ content: "Iris, chiedi a un collega di intervenire", author: STRANGER, username: "Ospite" });
+    discord.say({ content: "@Iris, chiedi a un collega di intervenire", author: STRANGER, username: "Ospite" });
     await waitFor(() => second > 0, { what: "untrusted delegation staying chat-only" });
     await quiet();
   });
@@ -4294,7 +4317,7 @@ describe("thread goal lifecycle", () => {
     const pending = app.orchestrator.runRoutine(r);
     try {
       await waitFor(() => actorStarted);
-      discord.say({ content: "Iris, abbandona quello che stai facendo, lo riprendiamo un altro giorno" });
+      discord.say({ content: "@Iris, abbandona quello che stai facendo, lo riprendiamo un altro giorno" });
       await waitFor(() => evaluated);
       releaseActor();
       await sleep(150);
@@ -4327,13 +4350,13 @@ describe("thread goal lifecycle", () => {
     checks = () => {
       judged += 1;
       if (judged === 1) {
-        app.orchestrator.ingest(app.orchestrator.state(CHANNEL), { id: "retarget-" + Date.now(), at: Date.now(), authorId: OWNER, authorName: "Sam", kind: "owner", content: "Iris, mandalo su Telegram invece che via email" });
+        app.orchestrator.ingest(app.orchestrator.state(CHANNEL), { id: "retarget-" + Date.now(), at: Date.now(), authorId: OWNER, authorName: "Sam", kind: "owner", content: "@Iris, mandalo su Telegram invece che via email" });
       }
       return JSON.stringify({ met: judged >= 3, reason: "manca la consegna" });
     };
     cli.set({ reply: "Report preparato.", tool: "list_routines" });
     try {
-      discord.say({ content: "Iris, manda il report via email" });
+      discord.say({ content: "@Iris, manda il report via email" });
       await waitFor(() => cli.calls().slice(before).filter((item) => item.flavor === "codex").length >= 2, { timeout: 20000 });
       await quiet();
       const runs = cli.calls().slice(before).filter((item) => item.flavor === "codex");
@@ -4351,9 +4374,9 @@ describe("thread goal lifecycle", () => {
     cli.set({ reply: "Non dovrebbe arrivare", hang: true });
     const before = cli.calls().length;
     try {
-      discord.say({ content: "Iris, controlla i post" });
+      discord.say({ content: "@Iris, controlla i post" });
       const run = await waitFor(() => cli.calls().slice(before).find((item) => item.pid), { timeout: 15000 });
-      discord.say({ content: "Iris, stoppa tutto" });
+      discord.say({ content: "@Iris, stoppa tutto" });
       await waitFor(() => app.store.traces(iris.id, 1)[0]?.status === "stopped", { timeout: 2500, what: "the CLI being killed" });
       assert.throws(() => process.kill(run.pid, 0), { code: "ESRCH" });
       assert.equal(judged, 0);
@@ -4392,7 +4415,7 @@ describe("doc in the Cora harness", () => {
       return { content: "PASS" };
     });
     const before = doc.calls().length;
-    discord.say({ content: "Dora, come colleghiamo GitHub?" });
+    discord.say({ content: "@Dora, come colleghiamo GitHub?" });
     await waitFor(() => posts().includes("Per collegarlo aggiungi il token di GitHub dal pannello, nelle chiavi."), { what: "the rewritten message" });
     await quiet();
     assert.ok(!posts().some((text) => text.includes("INCOLLA-QUI-IL-TOKEN")), "the stopped message never reaches the channel");
@@ -4409,7 +4432,7 @@ describe("doc in the Cora harness", () => {
       prompt = String(body.messages[body.messages.length - 1].content);
       return { content: "Il report è pronto nel thread, con i numeri di oggi e il confronto con ieri." };
     });
-    discord.say({ content: "Dora, a che punto è il report?" });
+    discord.say({ content: "@Dora, a che punto è il report?" });
     await waitFor(() => posts().includes("Il report è pronto nel thread, con i numeri di oggi e il confronto con ieri."), { what: "the rewritten reply" });
     await quiet();
     assert.ok(!posts().some((text) => text.includes("STIMA-DI-PROVA")));
@@ -4434,7 +4457,7 @@ describe("doc in the Cora harness", () => {
       return { content: "Commento pubblicato sulla PR 7: https://github.com/acme/app/pull/7#issuecomment-1" };
     });
     try {
-      discord.say({ content: "Dora, commenta la PR 7" });
+      discord.say({ content: "@Dora, commenta la PR 7" });
       await waitFor(() => posts().some((text) => text.startsWith("Commento pubblicato sulla PR 7")), { what: "Dora's report" });
       await quiet();
       assert.deepEqual(read, ["work/note.md"], "the body file is read from Dora's computer");
@@ -4474,7 +4497,7 @@ describe("doc in the Cora harness", () => {
       }
       return { content: "PASS" };
     });
-    discord.say({ content: "Dora, aggiornami sul preventivo" });
+    discord.say({ content: "@Dora, aggiornami sul preventivo" });
     await waitFor(() => posts().includes("Il preventivo è pronto, lo firmano domani in ufficio."), { what: "the rewrite without the client" });
     await quiet();
     assert.ok(posts().includes("Per collegarlo INCOLLA-QUI-IL-TOKEN di GitHub, il controllo ora è spento."), "a check turned off stops nothing");
@@ -4556,7 +4579,7 @@ describe("doc in the Cora harness", () => {
       const before = doc.calls().length;
       let step = 0;
       replies.set("Dora", () => ++step === 1 ? { tool_calls: [{ function: { name: "say", arguments: { text: "Senza doc questo messaggio con STIMA-DI-PROVA esce com'è." } } }] } : { content: "PASS" });
-      discord.say({ content: "Dora, prova senza doc" });
+      discord.say({ content: "@Dora, prova senza doc" });
       await waitFor(() => posts().includes("Senza doc questo messaggio con STIMA-DI-PROVA esce com'è."), { what: "the unchecked message" });
       await quiet();
       assert.equal(doc.calls().length, before, "nothing ran");

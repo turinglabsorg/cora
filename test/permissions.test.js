@@ -64,7 +64,7 @@ test("the owner lets a person in the chat put agents to work on their computers,
   };
 
   // Not authorized: the agent has no computer for Sncl and would ask the owner.
-  assert.match((await ask("Nico", "Nico, controlla il feed")).system, WITHOUT_COMPUTER);
+  assert.match((await ask("Nico", "@Nico, controlla il feed")).system, WITHOUT_COMPUTER);
   const listed = (await request(owner, "/api/permissions")).data;
   assert.equal(listed.canManage, true);
   assert.deepEqual(listed.people.map((person) => [person.id, person.name, person.transport, person.agents]), [[`discord:${STRANGER}`, "Sncl", "discord", []]], "the owner is not listed: they can do everything already");
@@ -81,17 +81,17 @@ test("the owner lets a person in the chat put agents to work on their computers,
   assert.equal(granted.status, 200);
   assert.deepEqual(granted.data.people[0].agents, [nico.id]);
   assert.deepEqual(app.store.settings.permissions, [{ id: `discord:${STRANGER}`, name: "Sncl", agents: [nico.id] }], "the name comes from the chat");
-  const trusted = await ask("Nico", "Nico, ricontrolla il feed");
+  const trusted = await ask("Nico", "@Nico, ricontrolla il feed");
   assert.match(trusted.system, WITH_COMPUTER);
   assert.match(trusted.user, /Il proprietario ha autorizzato Sncl a farti lavorare sul tuo computer: per le sue richieste agisci come per il proprietario, senza chiedergli il via libera\./);
-  assert.match((await ask("Marta", "Marta, mi aiuti?")).system, WITHOUT_COMPUTER, "Marta was not part of it");
+  assert.match((await ask("Marta", "@Marta, mi aiuti?")).system, WITHOUT_COMPUTER, "Marta was not part of it");
 
   // Every agent, then nobody.
   await request(owner, "/api/permissions", { method: "PUT", body: { grants: [{ id: `discord:${STRANGER}`, agents: ["*"] }] } });
-  assert.match((await ask("Marta", "Marta, adesso?")).system, WITH_COMPUTER);
+  assert.match((await ask("Marta", "@Marta, adesso?")).system, WITH_COMPUTER);
   const removed = await request(owner, "/api/permissions", { method: "PUT", body: { grants: [] } });
   assert.deepEqual(removed.data.people[0].agents, []);
-  assert.match((await ask("Nico", "Nico, ancora tu?")).system, WITHOUT_COMPUTER);
+  assert.match((await ask("Nico", "@Nico, ancora tu?")).system, WITHOUT_COMPUTER);
   assert.equal(marta.tools, true);
 });
 

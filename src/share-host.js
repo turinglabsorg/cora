@@ -111,6 +111,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
   };
   const secure = !config.insecureCookies;
   const COOKIE = secure ? "__Host-cora_share" : "cora_share";
+  const RAW_COOKIE = secure ? "__Host-cora_raw" : "cora_raw";
   const suffix = artifacts?.shareSuffix || "";
   const mac = (value) => createHmac("sha256", sessionKey || "cora-share").update(value).digest("base64url");
   const etag = (sha) => `"${mac(`etag.${sha}`).slice(0, 27)}"`;
@@ -217,7 +218,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
   }
 
   /** A stored file: its type for this kind of share, ETag, a single range, HEAD. */
-  function sendFile(req, res, file, { view, status = 200, attachment = false, frameAncestors = "'self'" }) {
+  function sendFile(req, res, file, { view, status = 200, attachment = false, frameAncestors = "'self'", extra = {} }) {
     const name = file.path.split("/").at(-1);
     const extension = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
     const download = attachment || (view === "files" && ACTIVE.has(extension));
@@ -229,6 +230,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       "Accept-Ranges": "bytes",
       "Content-Security-Policy": `frame-ancestors ${frameAncestors}`,
       ...(download || type === "application/octet-stream" ? { "Content-Disposition": `attachment; filename="${name.replace(/[^\w.-]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name)}` } : {}),
+      ...extra,
     });
     if (status === 200 && req.headers["if-none-match"] === tag) {
       res.writeHead(304, base);
@@ -251,12 +253,31 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
     artifacts.stream(file.sha).on("error", () => res.destroy()).pipe(res);
   }
 
-  /** The address a panel frames one file from: apart from the panel, for ten minutes, for that file alone. */
-  function rawUrl(commitId, path, minutes = 10) {
+  /**
+   * The address a panel frames one file from: apart from the panel, for ten minutes, for that
+   * file alone. A page shown as a site opens the whole commit instead, so its own links work.
+   */
+  function rawUrl(commitId, path, minutes = 10, { site = false } = {}) {
     if (!suffix || !cloud) return "";
     const expires = Date.now() + minutes * 60000;
     const encoded = path.split("/").map(encodeURIComponent).join("/");
+    if (site) return `https://r-${commitId.slice(3)}${suffix}/_t/${expires}.${mac(`rawsite.${commitId}.${expires}`)}/${encoded}`;
     return `https://r-${commitId.slice(3)}${suffix}/${encoded}?t=${expires}.${mac(`raw.${commitId}.${path}.${expires}`)}`;
+  }
+
+  /** A commit shown as a site in the panel: its token in the path, or in this host's own cookie for absolute links. */
+  function rawSite(req, res, target, url, panel) {
+    const tokened = /^\/_t\/([^/]+)(\/.*)?$/.exec(url.pathname);
+    const token = tokened ? tokened[1] : cookies(req.headers.cookie)[RAW_COOKIE];
+    const [expires, signature, extra] = String(token || "").split(".");
+    if (extra !== undefined || !signature || Number(expires) < Date.now() || !same(signature, mac(`rawsite.${target.commit.id}.${expires}`))) return page(req, res, 403, words(req, "gone"));
+    const prefix = tokened ? `/_t/${tokened[1]}` : "";
+    const tree = artifacts.readTree(target.commit.tree);
+    const found = artifacts.resolvePath(tree, tokened ? tokened[2] || "/" : url.pathname, "site");
+    if (found.redirect) return redirect(res, `${prefix}${found.redirect}${url.search}`);
+    if (!found.file) return page(req, res, found.status || 404, words(req, "notFound"));
+    const cookie = tokened ? { "Set-Cookie": `${RAW_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.max(0, Math.floor((Number(expires) - Date.now()) / 1000))}${secure ? "; Secure" : ""}` } : {};
+    return sendFile(req, res, found.file, { view: "site", frameAncestors: panel, extra: cookie });
   }
 
   function rawFile(req, res, target, url, host) {
@@ -264,6 +285,8 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       res.writeHead(405, headers({ Allow: "GET, HEAD" }));
       return res.end();
     }
+    const panel = `https://${host.slice(host.indexOf("--") + 2)}`;
+    if (url.pathname.startsWith("/_t/") || !url.searchParams.get("t")) return rawSite(req, res, target, url, panel);
     let path;
     try { path = decodeURIComponent(url.pathname.slice(1)); } catch { path = ""; }
     const [expires, signature] = String(url.searchParams.get("t") || "").split(".");
@@ -271,7 +294,6 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
     const file = artifacts.fileAt(target.commit.id, path);
     if (!file) return page(req, res, 404, words(req, "notFound"));
     // Only the panel of this space may frame it, and the page itself runs nothing of its own.
-    const panel = `https://${host.slice(host.indexOf("--") + 2)}`;
     return sendFile(req, res, { path, sha: file.sha, size: file.size }, { view: "files", frameAncestors: panel });
   }
 

@@ -67,7 +67,7 @@ test("an agent on DeepSeek Harness runs on the instance's own DeepSeek key, with
 
   const dee = (await call("/api/agents", { method: "POST", body: { name: "Dee", model: "deepseek/deepseek-flash", effort: "high", chattiness: 0, tools: false } })).data;
   assert.equal(dee.model, "deepseek/deepseek-flash");
-  discord.say({ content: "Dee, ricordati che bevo il caffè amaro" });
+  discord.say({ content: "@Dee, ricordati che bevo il caffè amaro" });
   const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Dee"), { what: "Dee's answer" });
   assert.match(post.content, /^Me lo segno\. \[/, "the answer comes from dsh's final event, after the tool ran");
   assert.ok(app.store.memories(dee.id).some((memory) => /caffè amaro/.test(memory.text)), "remember ran through Cora's bridge");

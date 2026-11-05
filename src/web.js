@@ -317,6 +317,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const pulls = new Set();
   const publicAgent = async (agent) => ({
     ...agent,
+    // Who it answers to: set, or the person of its account; null means the owner of the space.
+    owner: (() => { const person = store.agentOwner(agent); return person ? { id: person.id, name: person.name || person.email, role: person.role, set: agent.ownerId === person.id, chats: store.settings.chatLinks?.[person.id] || [] } : null; })(),
     mailbox: store.value(`agentMailbox:${agent.id}`, null),
     memoryCount: store.memoryCount(agent.id),
     box: await boxStatus(agent),
@@ -787,7 +789,10 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
 
     if (path === "/api/agents" && method === "POST") {
-      const agent = store.createAgent(await readJson(req));
+      const body = await readJson(req);
+      // A person of the space who makes an agent owns it; the owner of the space may name someone else.
+      if (user?.role !== "owner") body.ownerId = user?.id || "";
+      const agent = store.createAgent(body);
       bots?.sync();
       tgBots?.sync();
       skBots?.sync();
@@ -802,7 +807,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!agent) throw new HttpError(404, "agente non trovato");
       if (method === "GET") return send(res, 200, await publicAgent(agent));
       if (method === "PUT") {
-        const updated = store.updateAgent(agent.id, await readJson(req));
+        const body = await readJson(req);
+        if (user?.role !== "owner") delete body.ownerId;
+        const updated = store.updateAgent(agent.id, body);
         bots?.envName(agent);
         skBots?.envNames(agent);
         bots?.sync();
@@ -1145,7 +1152,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       });
       return send(res, 201, artifacts.folderView(folder));
     }
-    let match = /^\/api\/artifacts\/folders\/(af_[a-f0-9]{12})(?:\/(restore|shares|blobs|upload|events))?$/.exec(path);
+    let match = /^\/api\/artifacts\/folders\/(af_[a-f0-9]{12})(?:\/(restore|shares|blobs|upload|remove|events))?$/.exec(path);
     if (match) {
       const folder = store.artifactFolder(match[1]);
       if (!folder) throw new HttpError(404, "cartella non trovata");
@@ -1162,6 +1169,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (match[2] === "upload" && method === "POST") {
         const body = await readJson(req, 2 * 1024 * 1024);
         return send(res, 201, await artifacts.commitUpload(folder.id, { user, dir: body.dir, base: body.base, files: body.files, message: body.message }));
+      }
+      // Files or subfolders taken out: a commit without them, like an upload.
+      if (match[2] === "remove" && method === "POST") {
+        const body = await readJson(req, 256 * 1024);
+        return send(res, 201, await artifacts.removeFiles(folder.id, { user, base: body.base, paths: body.paths, message: body.message }));
       }
       if (match[2] === "restore" && method === "POST") {
         const body = await readJson(req, 4096);
@@ -1210,11 +1222,14 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         const canReview = artifacts.canReview(folder, user);
         return send(res, 200, { ...artifacts.commitView(commit.id), canReview, previewUrl: canReview ? artifacts.previewUrl(commit.id) : "" });
       }
-      // A file the browser renders itself (a PDF) is framed from an address apart from the panel, for ten minutes.
+      // A file the browser renders itself (a PDF, a web page) is framed from an address apart from the panel, for ten minutes.
       if (match[2] === "view" && method === "GET") {
         const name = String(url.searchParams.get("path") || "");
         if (!artifacts.fileAt(commit.id, name)) throw new HttpError(404, "file non trovato");
-        const view = shares.rawUrl(commit.id, name);
+        const site = /\.html?$/i.test(name);
+        // A page of a commit nobody approved yet runs only for who reviews it, as on its preview host; others read its source.
+        if (site && commit.status !== "published" && !artifacts.canReview(folder, user)) return send(res, 200, { url: "" });
+        const view = shares.rawUrl(commit.id, name, 10, { site });
         if (!view) throw new HttpError(404, "l'anteprima a parte c'è solo negli spazi su usecora.space");
         return send(res, 200, { url: view });
       }
