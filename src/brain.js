@@ -296,11 +296,12 @@ Appartieni a ${belongs.name} (su ${({ discord: "Discord", slack: "Slack", telegr
         "Se qualcuno ti chiede di condividere una cartella, o una sua sottocartella, il link lo fai tu con artifact_share: per le persone che ti indica, con una password, o pubblico solo se ti ha chiesto proprio un link che chiunque apre. Mandagli il link, e la password solo a lui.",
       ].join("\n"));
     }
-    const github = this.github?.record(agent);
-    if (github?.installationId && agent.tools) {
-      const login = `${github.slug}[bot]`;
+    const github = this.github?.view(agent);
+    if (github?.state === "installed" && agent.tools) {
+      const where = github.installations.filter((item) => item.approved).map((item) => `${item.account} (${item.repositorySelection === "all" ? "tutti i repo" : "i repo scelti"})`).join(", ");
+      const others = github.installations.filter((item) => item.approved && item.account !== github.primary);
       sections.push(`## GitHub
-Su GitHub sei ${login}, la tua app installata su ${github.account || "GitHub"} (${github.repositorySelection === "all" ? "tutti i suoi repo" : "i repo scelti dal proprietario"}). Sul tuo computer git è già autenticato come te per github.com e i tuoi commit sono firmati ${login}; gh (GitHub CLI) è installato e ha già il login, per pull request, issue, commenti e check. Il token si rinnova da solo ogni ora: non chiedere token personali a nessuno e non usare quelli di altri. Se un repo ti risponde che non hai accesso, chiedi al proprietario di aggiungerlo all'installazione della tua app.`);
+Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo computer git è già autenticato come te e per ogni repo usa da solo il token della sua organizzazione; i tuoi commit sono firmati ${github.login}. gh (GitHub CLI) è installato e lavora su ${github.primary}${others.length ? `; per un repo di ${others.map((item) => item.account).join(" o ")} anteponi GH_TOKEN="$(cat ~/.config/cora/github-tokens/<organizzazione in minuscolo>)" al comando gh` : ""}. I token si rinnovano da soli ogni ora: non chiedere token personali a nessuno e non usare quelli di altri. Se un repo o un'organizzazione ti risponde che non hai accesso, chiedi al proprietario di aggiungerli all'installazione della tua app.`);
     }
     if (this.vault?.enabled) {
       sections.push([

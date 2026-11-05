@@ -511,10 +511,10 @@ export class Boxes {
     return ["exec", "-i", ...user, "-e", "DISPLAY=:1", "-e", `TZ=${this.timezone}`, this.name(agentId), ...argv];
   }
 
-  /** The agent's GitHub App token where git and gh read it; passed on stdin, never on a command line. */
-  async githubLogin(agentId, { token, login, name, email }) {
+  /** The agent's GitHub App tokens, one per account, where git and gh read them; passed on stdin, never on a command line. */
+  async githubLogin(agentId, { tokens, primary, login, name, email }) {
     const result = await runProcess(this.docker, this.execArgs(agentId, ["node", "--input-type=module", "-e", GITHUB_SCRIPT]), {
-      input: JSON.stringify({ token, login, name, email }), timeoutMs: 20000, maxBytes: 4096,
+      input: JSON.stringify({ tokens, primary, login, name, email }), timeoutMs: 20000, maxBytes: 4096,
     });
     if (result.code !== 0) throw new Error(`GitHub sul desktop: ${lastLine(result.stderr, "non riesco a scrivere il token")}`);
   }

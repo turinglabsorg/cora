@@ -222,8 +222,10 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (url.pathname === "/github/installed") {
         const agent = store.agent(String(url.searchParams.get("agent") || ""));
         if (!agent || !github.record(agent)) return page(404, "Agente non trovato", "Questa installazione non è di un agente di questa Cora.");
-        await github.installed(agent, url.searchParams.get("installation_id"));
-        return page(200, "App GitHub installata", `${agent.name} ora lavora su GitHub con la sua app.`, agent.id);
+        const view = await github.installed(agent, url.searchParams.get("installation_id"), { state: url.searchParams.get("state") || "" });
+        const added = view.installations.find((item) => item.id === Number(url.searchParams.get("installation_id")));
+        return added?.approved ? page(200, "App GitHub installata", `${agent.name} ora lavora anche su ${added.account}.`, agent.id)
+          : page(200, "Installazione da approvare", `L'app di ${agent.name} è stata installata su ${added?.account || "un account"}: la usa quando il proprietario la approva nel pannello.`, agent.id);
       }
       return page(404, "Non trovato", "Questo indirizzo non porta da nessuna parte.");
     } catch (error) {
@@ -998,7 +1000,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
 
     // The agent's own GitHub App: the owner makes it from here and installs it on GitHub.
-    match = /^\/api\/agents\/([\w-]+)\/github(?:\/(manifest|check))?$/.exec(path);
+    match = /^\/api\/agents\/([\w-]+)\/github(?:\/(manifest|check|install|installations\/(\d+)))?$/.exec(path);
     if (match && github) {
       if (user?.role !== "owner") throw new HttpError(403, "l'app GitHub di un agente la gestisce il proprietario");
       const agent = store.agent(match[1]);
@@ -1007,6 +1009,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (!match[2] && method === "GET") return send(res, 200, github.view(agent));
         if (match[2] === "manifest" && method === "POST") return send(res, 200, github.begin(agent));
         if (match[2] === "check" && method === "POST") return send(res, 200, await github.check(agent));
+        if (match[2] === "install" && method === "POST") return send(res, 200, github.installLink(agent));
+        if (match[3] && method === "PUT") return send(res, 200, await github.approve(agent, Number(match[3]), (await readJson(req, 1024)).approved === true));
         if (!match[2] && method === "DELETE") return send(res, 200, await github.forget(agent));
       } catch (error) {
         if (error.status) throw new HttpError(error.status, error.message);

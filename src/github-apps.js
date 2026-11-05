@@ -90,7 +90,8 @@ export class GithubApps {
       name: this.appName(agent),
       url: this.instanceUrl,
       description: `${agent.name}, an agent of Cora (${new URL(this.instanceUrl).host}).`,
-      public: false,
+      // Public, so it can be installed on any organization the owner administers, each with the repositories they pick.
+      public: true,
       redirect_url: `${this.instanceUrl}/github/created`,
       setup_url: `${this.instanceUrl}/github/installed?agent=${encodeURIComponent(agent.id)}`,
       setup_on_update: true,
@@ -99,28 +100,42 @@ export class GithubApps {
     };
   }
 
-  /** Where the panel posts the manifest, with a state that brings the owner back to this agent once. */
-  begin(agent) {
-    if (!this.available) throw new GithubError("le app GitHub vogliono un indirizzo pubblico di questo spazio, dove GitHub rimanda dopo ogni passo", 409);
-    if (this.record(agent)) throw new GithubError("questo agente ha già la sua app GitHub", 409);
+  /** A state for one trip to GitHub and back: signed here, for one agent and one purpose, good once for an hour. */
+  signState(agent, purpose) {
     const nonce = randomBytes(12).toString("hex");
     const expires = Date.now() + STATE_TTL_MS;
     for (const [key, at] of this.states) if (at < Date.now()) this.states.delete(key);
     this.states.set(nonce, expires);
     const body = `${agent.id}.${expires}.${nonce}`;
-    const state = `${body}.${createHmac("sha256", this.secret).update(`github.${body}`).digest("base64url")}`;
-    const where = this.org ? `${this.webBase}/organizations/${encodeURIComponent(this.org)}/settings/apps/new` : `${this.webBase}/settings/apps/new`;
-    return { action: `${where}?state=${encodeURIComponent(state)}`, manifest: JSON.stringify(this.manifest(agent)) };
+    return `${body}.${createHmac("sha256", this.secret).update(`github.${purpose}.${body}`).digest("base64url")}`;
   }
 
-  /** The agent a state was issued for: signed here, not expired, and used only once. */
-  readState(state) {
+  /** The agent a state was issued for, or null when it is not one of ours, has expired or was used. */
+  readState(state, purpose) {
     const [agentId, expires, nonce, signature, extra] = String(state || "").split(".");
-    const expected = createHmac("sha256", this.secret).update(`github.${agentId}.${expires}.${nonce}`).digest("base64url");
+    const expected = createHmac("sha256", this.secret).update(`github.${purpose}.${agentId}.${expires}.${nonce}`).digest("base64url");
     const valid = extra === undefined && signature && signature.length === expected.length && timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-    if (!valid || Number(expires) < Date.now() || !this.states.has(nonce)) throw new GithubError("questo ritorno da GitHub non è più valido: crea l'app di nuovo dal pannello", 403);
+    if (!valid || Number(expires) < Date.now() || !this.states.has(nonce)) return null;
     this.states.delete(nonce);
     return agentId;
+  }
+
+  /** Where the panel posts the manifest, with a state that brings the owner back to this agent once. */
+  begin(agent) {
+    if (!this.available) throw new GithubError("le app GitHub vogliono un indirizzo pubblico di questo spazio, dove GitHub rimanda dopo ogni passo", 409);
+    if (this.record(agent)) throw new GithubError("questo agente ha già la sua app GitHub", 409);
+    const where = this.org ? `${this.webBase}/organizations/${encodeURIComponent(this.org)}/settings/apps/new` : `${this.webBase}/settings/apps/new`;
+    return { action: `${where}?state=${encodeURIComponent(this.signState(agent, "create"))}`, manifest: JSON.stringify(this.manifest(agent)) };
+  }
+
+  /**
+   * Where the owner installs the app on one more account: GitHub asks which organization and
+   * which repositories. The state makes the installation that comes back trusted at once.
+   */
+  installLink(agent) {
+    const record = this.record(agent);
+    if (!record) throw new GithubError("questo agente non ha un'app GitHub", 404);
+    return { url: `${this.webBase}/apps/${record.slug}/installations/new?state=${encodeURIComponent(this.signState(agent, "install"))}` };
   }
 
   async request(method, path, { jwt = "", body } = {}) {
@@ -140,7 +155,9 @@ export class GithubApps {
 
   /** Back from GitHub with the app made: its key into hush, its name and id kept here. */
   async created({ code, state }) {
-    const agent = this.store.agent(this.readState(state));
+    const agentId = this.readState(state, "create");
+    if (!agentId) throw new GithubError("questo ritorno da GitHub non è più valido: crea l'app di nuovo dal pannello", 403);
+    const agent = this.store.agent(agentId);
     if (!agent) throw new GithubError("l'agente non c'è più", 404);
     if (!/^[\w-]{1,200}$/.test(String(code || ""))) throw new GithubError("GitHub non ha mandato il codice dell'app");
     const app = await this.request("POST", `/app-manifests/${encodeURIComponent(code)}/conversions`);
@@ -150,7 +167,7 @@ export class GithubApps {
     await this.storeSecret(env, key);
     this.keys.set(env, key);
     const bot = await this.request("GET", `/users/${encodeURIComponent(`${app.slug}[bot]`)}`).catch(() => null);
-    this.save(agent, { appId: app.id, slug: app.slug, name: app.name || app.slug, owner: app.owner?.login || "", ownerType: app.owner?.type || "", htmlUrl: app.html_url || "", botId: bot?.id || 0, createdAt: Date.now(), installationId: 0 });
+    this.save(agent, { appId: app.id, slug: app.slug, name: app.name || app.slug, owner: app.owner?.login || "", ownerType: app.owner?.type || "", htmlUrl: app.html_url || "", botId: bot?.id || 0, public: true, createdAt: Date.now(), installations: [] });
     this.tokens.delete(agent.id);
     this.log({ type: "github", agentId: agent.id, text: `app GitHub ${app.slug} creata, chiave salvata in hush come ${env}` });
     return agent;
@@ -166,39 +183,71 @@ export class GithubApps {
     return `${body}.${createSign("RSA-SHA256").update(body).sign(pem, "base64url")}`;
   }
 
-  /** The installation GitHub reports for this app: kept only once GitHub confirms it is this app's. */
-  async installed(agent, installationId) {
+  /** The accounts the app is installed on; an app recorded before there could be several has its one. */
+  installations(record) {
+    if (Array.isArray(record?.installations)) return record.installations;
+    return record?.installationId ? [{ id: record.installationId, account: record.account || "", accountType: record.accountType || "", repositorySelection: record.repositorySelection || "", approved: true }] : [];
+  }
+
+  saveInstallations(agent, list) {
+    const record = this.record(agent);
+    const { installationId, account, accountType, repositorySelection, ...rest } = record;
+    this.save(agent, { ...rest, installations: list });
+  }
+
+  /**
+   * An installation GitHub reports for this app, kept once GitHub confirms it is this app's.
+   * One started from the panel (its state checks out) is used at once; any other waits for the
+   * owner in the panel, since a public app can be installed by anyone.
+   */
+  async installed(agent, installationId, { state = "", trusted = false } = {}) {
     const record = this.record(agent);
     if (!record) throw new GithubError("questo agente non ha un'app GitHub", 404);
-    const installation = await this.request("GET", `/app/installations/${Number(installationId) || 0}`, { jwt: this.jwt(agent) });
-    this.save(agent, { ...record, installationId: installation.id, account: installation.account?.login || "", accountType: installation.account?.type || "", repositorySelection: installation.repository_selection || "", installedAt: Date.now(), error: "" });
-    this.tokens.delete(agent.id);
-    this.log({ type: "github", agentId: agent.id, text: `app GitHub ${record.slug} installata su ${installation.account?.login || "?"}` });
-    await this.provision(agent).catch(() => {});
+    const found = await this.request("GET", `/app/installations/${Number(installationId) || 0}`, { jwt: this.jwt(agent) });
+    const approvedNow = trusted || (state && this.readState(state, "install") === agent.id);
+    const list = this.installations(record);
+    const before = list.find((item) => item.id === found.id);
+    const entry = { id: found.id, account: found.account?.login || "", accountType: found.account?.type || "", repositorySelection: found.repository_selection || "", approved: Boolean(before?.approved || approvedNow), at: Date.now() };
+    this.saveInstallations(agent, [...list.filter((item) => item.id !== found.id), entry]);
+    this.tokens.delete(`${agent.id}:${found.id}`);
+    this.log({ type: "github", agentId: agent.id, text: `app GitHub ${record.slug} installata su ${entry.account}${entry.approved ? "" : ": da approvare nel pannello"}` });
+    if (entry.approved) await this.provision(agent, { force: true }).catch(() => {});
     return this.view(agent);
   }
 
-  /** Whether the app has been installed meanwhile, asked to GitHub. */
+  /** The owner says whether an installation is used. */
+  async approve(agent, installationId, approved) {
+    const record = this.record(agent);
+    const list = this.installations(record);
+    if (!record || !list.some((item) => item.id === Number(installationId))) throw new GithubError("installazione non trovata", 404);
+    this.saveInstallations(agent, list.map((item) => (item.id === Number(installationId) ? { ...item, approved: Boolean(approved) } : item)));
+    this.tokens.delete(`${agent.id}:${Number(installationId)}`);
+    await this.provision(agent, { force: true }).catch(() => {});
+    return this.view(agent);
+  }
+
+  /** The installations as GitHub has them now: new ones wait for the owner, removed ones go. */
   async check(agent) {
     const record = this.record(agent);
     if (!record) throw new GithubError("questo agente non ha un'app GitHub", 404);
-    const list = await this.request("GET", "/app/installations", { jwt: this.jwt(agent) });
-    const wanted = (this.org || record.owner).toLowerCase();
-    const found = (Array.isArray(list) ? list : []).find((item) => String(item.account?.login || "").toLowerCase() === wanted) || (Array.isArray(list) ? list[0] : null);
-    if (found) return this.installed(agent, found.id);
-    if (record.installationId) this.save(agent, { ...record, installationId: 0, account: "", repositorySelection: "" });
-    this.tokens.delete(agent.id);
+    const remote = await this.request("GET", "/app/installations", { jwt: this.jwt(agent) });
+    const known = new Map(this.installations(record).map((item) => [item.id, item]));
+    const list = (Array.isArray(remote) ? remote : []).map((found) => ({
+      id: found.id, account: found.account?.login || "", accountType: found.account?.type || "", repositorySelection: found.repository_selection || "",
+      approved: Boolean(known.get(found.id)?.approved), at: known.get(found.id)?.at || Date.now(),
+    }));
+    this.saveInstallations(agent, list);
+    await this.provision(agent, { force: true }).catch(() => {});
     return this.view(agent);
   }
 
-  async token(agent) {
-    const cached = this.tokens.get(agent.id);
+  async token(agent, installation) {
+    const key = `${agent.id}:${installation.id}`;
+    const cached = this.tokens.get(key);
     if (cached && cached.expiresAt - Date.now() > RENEW_BEFORE_MS) return cached;
-    const record = this.record(agent);
-    if (!record?.installationId) throw new GithubError("l'app GitHub non è ancora installata", 409);
-    const data = await this.request("POST", `/app/installations/${record.installationId}/access_tokens`, { jwt: this.jwt(agent) });
+    const data = await this.request("POST", `/app/installations/${installation.id}/access_tokens`, { jwt: this.jwt(agent) });
     const token = { token: String(data.token || ""), expiresAt: Date.parse(data.expires_at) || Date.now() + 3600000, written: false };
-    this.tokens.set(agent.id, token);
+    this.tokens.set(key, token);
     return token;
   }
 
@@ -208,29 +257,55 @@ export class GithubApps {
     return { login, name: login, email: record.botId ? `${record.botId}+${login}@users.noreply.github.com` : `${login}@users.noreply.github.com` };
   }
 
-  /** A fresh token on the agent's desktop, for git and gh, when the one there is about to end. */
-  async provision(agent) {
+  /** The account gh works on by default: the organization of the settings when the app is there, else the first. */
+  primary(agent, approved) {
+    const wanted = (this.org || this.record(agent)?.owner || "").toLowerCase();
+    return approved.find((item) => item.account.toLowerCase() === wanted) || approved[0] || null;
+  }
+
+  /**
+   * A live token per approved account on the agent's desktop, for git and gh, written again
+   * when one is renewed. An installation GitHub no longer has is dropped.
+   */
+  async provision(agent, { force = false } = {}) {
     const record = this.record(agent);
-    if (!record?.installationId || !this.boxes) return null;
-    const token = await this.token(agent);
-    if (token.written) return token;
+    if (!record || !this.boxes) return null;
+    let changed = force;
+    const tokens = [];
+    for (const installation of this.installations(record).filter((item) => item.approved)) {
+      try {
+        const token = await this.token(agent, installation);
+        if (!token.written) changed = true;
+        tokens.push({ account: installation.account, token });
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        this.saveInstallations(agent, this.installations(this.record(agent)).filter((item) => item.id !== installation.id));
+        this.log({ type: "github", agentId: agent.id, text: `app GitHub ${record.slug} non è più installata su ${installation.account}` });
+        changed = true;
+      }
+    }
+    if (!changed) return tokens;
     try {
-      // gh is put on the desktop if it is missing; without it git still pushes, so a failure only gets logged.
-      await this.boxes.ensureGh?.(agent.id).catch((error) => this.log({ type: "github", agentId: agent.id, text: error.message }));
-      await this.boxes.githubLogin(agent.id, { token: token.token, ...this.identity(record) });
-      token.written = true;
-      if (record.error) this.save(agent, { ...this.record(agent), error: "" });
+      if (!tokens.length) await this.boxes.githubLogout?.(agent.id);
+      else {
+        // gh is put on the desktop if it is missing; without it git still pushes, so a failure only gets logged.
+        await this.boxes.ensureGh?.(agent.id).catch((error) => this.log({ type: "github", agentId: agent.id, text: error.message }));
+        const main = this.primary(agent, this.installations(this.record(agent)).filter((item) => item.approved));
+        await this.boxes.githubLogin(agent.id, { tokens: tokens.map((item) => ({ account: item.account, token: item.token.token })), primary: main?.account || tokens[0].account, ...this.identity(record) });
+      }
+      for (const item of tokens) item.token.written = true;
+      if (this.record(agent).error) this.save(agent, { ...this.record(agent), error: "" });
     } catch (error) {
       this.save(agent, { ...this.record(agent), error: String(error.message).slice(0, 200) });
       throw error;
     }
-    return token;
+    return tokens;
   }
 
   /** Every agent with an installed app keeps a live token on its desktop; a stopped desktop is tried again later. */
   async refreshAll() {
     for (const agent of this.store.agents()) {
-      if (!agent.enabled || !agent.tools || !this.record(agent)?.installationId) continue;
+      if (!agent.enabled || !agent.tools || !this.installations(this.record(agent)).some((item) => item.approved)) continue;
       await this.provision(agent).catch(() => {});
     }
   }
@@ -252,7 +327,7 @@ export class GithubApps {
     if (!record) return this.view(agent);
     this.store.setValue(`githubApp:${agent.id}`, null);
     this.keys.delete(this.envName(agent));
-    this.tokens.delete(agent.id);
+    for (const key of this.tokens.keys()) if (key.startsWith(`${agent.id}:`)) this.tokens.delete(key);
     await this.boxes?.githubLogout?.(agent.id).catch(() => {});
     this.log({ type: "github", agentId: agent.id, text: `app GitHub ${record.slug} scollegata` });
     return { ...this.view(agent), deleteUrl: this.settingsUrl(record) };
@@ -263,21 +338,24 @@ export class GithubApps {
     return org ? `${this.webBase}/organizations/${record.owner || this.org}/settings/apps/${record.slug}` : `${this.webBase}/settings/apps/${record.slug}`;
   }
 
-  /** What the panel shows: where the app is, and the links for the steps that are the owner's. */
+  /** What the panel shows: where the app is installed, and the links for the steps that are the owner's. */
   view(agent) {
     const record = this.record(agent);
     const base = { available: this.available, org: this.org };
     if (!record) return { ...base, state: "none" };
-    const token = this.tokens.get(agent.id);
-    const installation = record.installationId
-      ? record.accountType === "User" ? `${this.webBase}/settings/installations/${record.installationId}` : `${this.webBase}/organizations/${record.account}/settings/installations/${record.installationId}`
-      : "";
+    const installations = this.installations(record).map((item) => {
+      const token = this.tokens.get(`${agent.id}:${item.id}`);
+      return {
+        id: item.id, account: item.account, repositorySelection: item.repositorySelection, approved: Boolean(item.approved), tokenUntil: token?.written ? token.expiresAt : 0,
+        url: item.accountType === "User" ? `${this.webBase}/settings/installations/${item.id}` : `${this.webBase}/organizations/${item.account}/settings/installations/${item.id}`,
+      };
+    });
+    const approved = installations.filter((item) => item.approved);
     return {
       ...base,
-      state: record.installationId ? "installed" : "created",
+      state: approved.length ? "installed" : "created",
       slug: record.slug, name: record.name, login: this.identity(record).login, appUrl: record.htmlUrl || `${this.webBase}/apps/${record.slug}`,
-      settingsUrl: this.settingsUrl(record), installUrl: `${this.webBase}/apps/${record.slug}/installations/new`, installationUrl: installation,
-      account: record.account || "", repositorySelection: record.repositorySelection || "", tokenUntil: token?.written ? token.expiresAt : 0,
+      settingsUrl: this.settingsUrl(record), public: record.public === true, installations, primary: this.primary(agent, approved)?.account || "",
       keyMissing: !this.privateKey(agent), error: record.error || "",
     };
   }

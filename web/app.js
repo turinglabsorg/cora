@@ -2147,12 +2147,11 @@ function githubAccount(agent) {
   const head = { icon: "github", title: "Account GitHub", hint: "La sua app su GitHub: commit, pull request e issue a nome suo." };
   if (!gh.available) return panel(head, h("p", { class: "muted" }, "Le app GitHub vogliono un indirizzo pubblico di questo spazio, dove GitHub rimanda dopo ogni passo."));
   const refresh = async () => { await loadState(); renderAgent(); };
-  const check = btn("Ho installato: controlla", { icon: "refresh", cls: "ghost", onclick: async () => {
+  const check = btn("Controlla su GitHub", { icon: "refresh", cls: "ghost", onclick: async () => {
     check.disabled = true;
     const view = await guard(api(`/api/agents/${agent.id}/github/check`, { method: "POST" }));
-    if (view) toast(view.state === "installed" ? "App installata" : "Su GitHub non risulta ancora installata", view.state !== "installed");
     check.disabled = false;
-    if (view?.state === "installed") refresh();
+    if (view) refresh();
   } });
   // GitHub takes the app's picture only from its own page: the agent's, ready to upload there.
   const picture = setRow("Immagine", "GitHub non la prende da qui: scarica quella dell'agente e caricala nell'app, in Display information.",
@@ -2179,23 +2178,37 @@ function githubAccount(agent) {
     return panel({ ...head, actions: badge("Nessuna app", "", "github") },
       setRows(setRow("La sua app", `${where} ${tr("Su GitHub premi Create, poi la installi sui repo che scegli: due clic, e torni qui da solo.")}`, create)));
   }
-  if (gh.state === "created") {
-    return panel({ ...head, actions: badge("Da installare", "warn", "alert") },
-      setRows(
-        setRow("Installala", tr("L'app {slug} c'è. Installala su GitHub e scegli i repo dove lavora: poi torni qui da solo.", { slug: gh.slug }),
-          h("div", { class: "row" }, btn("Installa su GitHub", { icon: "external", cls: "primary", href: gh.installUrl }), check)),
-        gh.keyMissing ? setRow("Chiave", "La chiave dell'app non è più in hush: scollegala e creala di nuovo.", null) : null,
-        picture, forget));
-  }
-  const repos = gh.repositorySelection === "all" ? tr("tutti i repo di {account}", { account: gh.account }) : tr("i repo scelti in {account}", { account: gh.account });
-  const desktop = gh.error ? tr("Non riesco a scrivere il token sul suo desktop: {error}.", { error: gh.error })
-    : gh.tokenUntil ? tr("git è già autenticato come lui; il token si rinnova da solo, ora vale fino alle {time}.", { time: fmtTime(new Date(gh.tokenUntil).toISOString()) })
-      : "git sarà autenticato come lui appena il suo desktop è acceso.";
-  return panel({ ...head, actions: badge(gh.error ? "Desktop da aggiornare" : "Collegata", gh.error ? "warn" : "on", gh.error ? "alert" : "check") },
+  // Each organization, its repositories and whether the agent uses it; one more is added on GitHub.
+  const add = btn(gh.installations.length ? "Aggiungi un'organizzazione" : "Installa su GitHub", { icon: "plus", cls: gh.installations.length ? "ghost" : "primary", onclick: async () => {
+    const link = await guard(api(`/api/agents/${agent.id}/github/install`, { method: "POST" }));
+    if (link?.url) location.href = link.url;
+  } });
+  const decide = (installation, approved) => async () => {
+    if (await guard(api(`/api/agents/${agent.id}/github/installations/${installation.id}`, { method: "PUT", body: { approved } }), approved ? tr("Ora lavora su {account}", { account: installation.account }) : tr("Non usa più {account}", { account: installation.account }))) refresh();
+  };
+  const orgs = gh.installations.length
+    ? h("div", { class: "gh-orgs" }, gh.installations.map((installation) => h("div", { class: `gh-org${installation.approved ? "" : " pending"}` },
+      icon(installation.approved ? "check" : "alert"),
+      h("span", { class: "grow" }, h("b", { class: "mono" }, raw(installation.account)),
+        h("small", {}, raw(installation.repositorySelection === "all" ? tr("tutti i repo") : tr("i repo scelti")), raw(" · "),
+          installation.approved ? tr(installation.account === gh.primary ? "in uso · gh lavora qui" : "in uso") : tr("installata da qualcun altro: da approvare"))),
+      installation.approved ? null : btn("Approva", { icon: "check", cls: "sm primary", onclick: decide(installation, true) }),
+      btn("Repo", { icon: "external", cls: "sm ghost", href: installation.url, target: "_blank", title: tr("Cambia i repo su GitHub") }))))
+    : h("p", { class: "muted small" }, "Non è ancora installata da nessuna parte.");
+  const desktopUntil = gh.installations.filter((item) => item.approved && item.tokenUntil).map((item) => item.tokenUntil).sort((a, b) => a - b)[0];
+  const desktop = gh.error ? tr("Non riesco a scrivere i token sul suo desktop: {error}.", { error: gh.error })
+    : desktopUntil ? tr("git e gh sono già autenticati come lui, un token per organizzazione; si rinnovano da soli, ora valgono fino alle {time}.", { time: fmtTime(new Date(desktopUntil).toISOString()) })
+      : "git e gh saranno autenticati come lui appena il suo desktop è acceso.";
+  const pending = gh.installations.filter((item) => !item.approved).length;
+  const state = gh.state === "installed" ? badge(pending ? "Da approvare" : gh.error ? "Desktop da aggiornare" : "Collegata", pending || gh.error ? "warn" : "on", pending || gh.error ? "alert" : "check")
+    : badge("Da installare", "warn", "alert");
+  return panel({ ...head, actions: state },
     setRows(
-      setRow("Su GitHub è", h("span", {}, h("b", { class: "mono" }, raw(gh.login)), raw(` · ${repos}`)),
-        btn("Repo dell'app", { icon: "external", cls: "ghost sm", href: gh.installationUrl, target: "_blank" })),
-      setRow("Dal suo desktop", desktop, null),
+      gh.state === "installed" ? setRow("Su GitHub è", h("span", {}, h("b", { class: "mono" }, raw(gh.login)))) : null,
+      setRow("Organizzazioni", gh.public ? "Su GitHub scegli l'organizzazione e i repo; ripeti per ognuna. Quelle aggiunte da qui le usa subito." : tr("Quest'app è privata: si installa solo su {owner}. Per le altre organizzazioni scollegala e creala di nuovo: nasce pubblica.", { owner: gh.org || "il tuo account" }),
+        h("div", { class: "stack-sm" }, orgs, h("div", { class: "row" }, add, check)), { stack: true }),
+      gh.state === "installed" ? setRow("Dal suo desktop", desktop, null) : null,
+      gh.keyMissing ? setRow("Chiave", "La chiave dell'app non è più in hush: scollegala e creala di nuovo.", null) : null,
       picture, forget));
 }
 
