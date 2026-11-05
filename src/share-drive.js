@@ -131,7 +131,9 @@ const BROWSE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self
  * A folder of the share as a drive shows it. `tree` is the served version,
  * `dir` the folder being looked at ("" for the top), `q` a search over everything.
  */
-export function browse({ lang, tree, dir, q = "", mode = "grid", title, sharedBy = "", updatedAt = 0, signedIn = false, zip = true, read = null }) {
+export function browse({ lang, tree, dir, q = "", mode = "grid", title, sharedBy = "", updatedAt = 0, signedIn = false, zip = true, read = null, direct = false }) {
+  // On a site a file opens as itself (a page runs as a page); in a folder of files it opens on its preview page.
+  const openHref = (path) => (direct ? href(path) : viewHref(path));
   const words = WORDS[lang] || WORDS.it;
   const here = dir ? `${dir}/` : "";
   const query = String(q || "").trim().toLowerCase();
@@ -179,12 +181,12 @@ export function browse({ lang, tree, dir, q = "", mode = "grid", title, sharedBy
   if (mode === "list") {
     const rows = [
       ...[...folders.values()].sort((a, b) => a.name.localeCompare(b.name, lang)).map((folder) => `<div class="row"><a class="open" href="${esc(dirHref(folder.path))}">${icon("folder")}<span>${esc(folder.name)}</span></a><small>${esc(counted(words, folder.count))}</small><small>${esc(words.kinds.folder)}</small><span></span></div>`),
-      ...files.map((file) => { const kind = kindOf(file.name); return `<div class="row k-${kind}"><a class="open" href="${esc(viewHref(file.path))}"><span class="k">${icon(["image", "video", "audio"].includes(kind) ? kind : "file")}</span><span>${esc(file.name)}${file.where !== undefined ? `<small>${esc(file.where || "/")}</small>` : ""}</span></a><small>${fmtBytes(file.size)}</small><small>${esc(words.kinds[kind])}</small>${download(file)}</div>`; }),
+      ...files.map((file) => { const kind = kindOf(file.name); return `<div class="row k-${kind}"><a class="open" href="${esc(openHref(file.path))}"><span class="k">${icon(["image", "video", "audio"].includes(kind) ? kind : "file")}</span><span>${esc(file.name)}${file.where !== undefined ? `<small>${esc(file.where || "/")}</small>` : ""}</span></a><small>${fmtBytes(file.size)}</small><small>${esc(words.kinds[kind])}</small>${download(file)}</div>`; }),
     ];
     content = rows.length ? `<div class="rows"><div class="row head"><span>${esc(words.name)}</span><span>${esc(words.size)}</span><span>${esc(words.type)}</span><span></span></div>${rows.join("")}</div>` : "";
   } else {
     const folderCards = [...folders.values()].sort((a, b) => a.name.localeCompare(b.name, lang)).map((folder) => `<div class="card folder"><a class="open" href="${esc(dirHref(folder.path))}">${icon("folder")}<span class="meta"><b>${esc(folder.name)}</b><small>${esc(counted(words, folder.count))} · ${fmtBytes(folder.size)}</small></span></a></div>`);
-    const fileCards = files.map((file) => `<div class="card k-${kindOf(file.name)}"><a class="open" href="${esc(viewHref(file.path))}">${thumb(file)}<span class="meta"><b title="${esc(file.name)}">${esc(file.name)}</b><small>${sub(file)}</small></span></a>${download(file)}</div>`);
+    const fileCards = files.map((file) => `<div class="card k-${kindOf(file.name)}"><a class="open" href="${esc(openHref(file.path))}">${thumb(file)}<span class="meta"><b title="${esc(file.name)}">${esc(file.name)}</b><small>${sub(file)}</small></span></a>${download(file)}</div>`);
     content = [
       folderCards.length ? `<h2>${esc(words.folders)}</h2><div class="grid">${folderCards.join("")}</div>` : "",
       fileCards.length ? `<h2>${esc(terms.length ? words.results.replace("{q}", q) : words.files)}</h2><div class="grid">${fileCards.join("")}</div>` : "",

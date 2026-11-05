@@ -527,3 +527,26 @@ test("a secret sent to named people lives on its own host: they sign in like to 
   assert.deepEqual(kinds, [["secret-created", ""], ["send-created", ""], ["send-page", ""], ["send-refused", "mario@other.test"], ["send-enter", "giulia@cliente.test"], ["send-page", "giulia@cliente.test"], ["send-opened", "giulia@cliente.test"]]);
   assert.ok(app.vault);
 });
+
+test("a site without an index shows its files, and a click serves the page itself", async (t) => {
+  const { app, port, call, agent, put, owner } = await fixture(t);
+  put("landing/v1/landing.html", "<h1>Landing</h1>");
+  put("landing/v1/style.css", "h1{color:red}");
+  put("landing/onboarding.html", "<h1>Onboarding</h1>");
+  const pushed = await app.artifacts.push({ agent, folder: "landing", path: "/home/agent/work/landing", message: "bozze", requester: { kind: "owner", id: "1", name: "Owner" }, create: { description: "Bozze della landing", kind: "site" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  await call(`/api/artifacts/folders/${pushed.folder.id}/shares`, { method: "POST", body: { label: "bozze-landing", view: "site", access: { mode: "public" } } });
+  const HOST = "bozze-landing--acme.usecora.test";
+  const top = await hit(port, HOST, "/");
+  assert.equal(top.status, 200, "no index.html: the files instead of a 404");
+  assert.match(top.body, /<b>v1<\/b>/);
+  assert.match(top.body, /href="\/onboarding\.html"/, "on a site a page opens as itself");
+  assert.doesNotMatch(top.body, /\/_cora\/view\//);
+  assert.equal((await hit(port, HOST, "/v1")).headers.location, "/v1/", "a folder without an index is a place to list");
+  const inside = await hit(port, HOST, "/v1/");
+  assert.match(inside.body, /href="\/v1\/landing\.html"/);
+  const page = await hit(port, HOST, "/v1/landing.html");
+  assert.equal(page.headers["content-type"], "text/html; charset=utf-8");
+  assert.equal(page.body, "<h1>Landing</h1>");
+  assert.equal((await hit(port, HOST, "/nowhere/")).status, 404);
+});

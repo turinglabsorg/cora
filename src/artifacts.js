@@ -1050,13 +1050,16 @@ export class Artifacts {
       if (isDir(`${clean}/`)) return { redirect: `${encoded(clean)}/` };
       return { status: 404 };
     }
+    // A site's folder without an index shows its files, as a web server lists a directory.
     if (!clean || clean.endsWith("/")) {
       const index = `${clean}index.html`;
-      return tree.has(index) ? { file: { path: index, ...tree.get(index) } } : { status: 404 };
+      if (tree.has(index)) return { file: { path: index, ...tree.get(index) } };
+      return !clean || isDir(clean) ? { listing: clean } : { status: 404 };
     }
     if (tree.has(clean)) return { file: { path: clean, ...tree.get(clean) } };
     if (tree.has(`${clean}/index.html`)) return { redirect: `${encoded(clean)}/` };
     if (tree.has(`${clean}.html`)) return { file: { path: `${clean}.html`, ...tree.get(`${clean}.html`) } };
+    if (isDir(`${clean}/`)) return { redirect: `${encoded(clean)}/` };
     return { status: 404 };
   }
 

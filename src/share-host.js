@@ -404,7 +404,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       record(req, target, "view", { path: found.file.path });
       return drivePage(viewPage({ lang, file: found.file, siblings, title: target.folder.title, read: (max) => artifacts.readObject(found.file.sha, max) }));
     }
-    if (target.view === "files" && url.pathname === "/_cora/zip") {
+    if (url.pathname === "/_cora/zip") {
       const dir = String(url.searchParams.get("dir") || "").replace(/^\/+|\/+$/g, "");
       const inside = dir ? `${dir}/` : "";
       const entries = [...tree.entries()].filter(([path]) => path.startsWith(inside)).sort(([a], [b]) => a.localeCompare(b));
@@ -428,7 +428,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       return drivePage(browse({
         lang, tree, dir: found.listing.replace(/\/$/, ""), q: String(url.searchParams.get("q") || "").slice(0, 200), mode: url.searchParams.get("v") === "list" ? "list" : "grid",
         title: target.folder.title, sharedBy: target.kind === "share" ? target.share.createdBy?.name || "" : "", updatedAt: target.commit.publishedAt || target.commit.createdAt, signedIn,
-        read: (sha, max) => artifacts.readObject(sha, max),
+        read: (sha, max) => artifacts.readObject(sha, max), direct: target.view === "site",
       }));
     }
     if (found.file) {

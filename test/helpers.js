@@ -119,6 +119,8 @@ export async function fakeDiscord() {
     intentPatches: [],
     refuseIntent: new Set(),
     profilePatches: [],
+    // Answers to pressed buttons: POST /interactions/<id>/<token>/callback.
+    interactionAnswers: [],
     nextId: 900000000000000000n,
   };
   const id = () => String(state.nextId++);
@@ -132,6 +134,11 @@ export async function fakeDiscord() {
     const body = await readBody(req);
     let match;
     if (url.pathname === "/gateway/bot") return json(res, 200, { url: `ws://127.0.0.1:${server.address().port}/gateway`, session_start_limit: { remaining: 999 } });
+    if ((match = /^\/interactions\/(\d+)\/([^/]+)\/callback$/.exec(url.pathname)) && req.method === "POST") {
+      state.interactionAnswers.push({ id: match[1], token: match[2], ...JSON.parse(String(body || "{}")) });
+      res.writeHead(204);
+      return res.end();
+    }
     if ((match = /^\/attachments\/(.+)$/.exec(url.pathname)) && state.files.has(match[1])) {
       const file = state.files.get(match[1]);
       res.writeHead(200, { "Content-Type": file.type });

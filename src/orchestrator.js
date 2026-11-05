@@ -117,6 +117,9 @@ export class Orchestrator {
     this.knownPeople = new Map();
     // A task can take hours: after this long the channel is free again for the others while the agent keeps working.
     this.releaseAfterMs = RELEASE_AFTER_MS;
+    // When an agent called by name could not hear: one offer per agent and channel every half hour.
+    this.offered = new Map();
+    this.instanceUrl = "";
   }
 
   state(channelId) {
@@ -491,6 +494,8 @@ export class Orchestrator {
     this.engagements[state.id] = state.focus;
     this.store.setValue("conversationEngagements", this.engagements);
     item.addressed = recipients.filter((id) => available.some((agent) => agent.id === id));
+    // Called by name where they do not listen, or while switched off: they cannot answer, so Cora says why.
+    item.deaf = direct ? [] : this.store.agents().filter((agent) => !available.some((candidate) => candidate.id === agent.id) && addresses(item.content, agent.name)).map((agent) => agent.id);
     item.handledBy = [...leaving];
     item.toOthers = !named.length && Boolean(item.others?.length);
     item.disengaged = leaving;
@@ -546,6 +551,7 @@ export class Orchestrator {
       if (!this.push(state, item)) return;
       this.store.appendArchive(state.id, item);
       this.log({ type: "message", channelId: state.id, author: item.authorName, kind: item.kind, text: item.content.slice(0, 300) });
+      if (human && item.deaf?.length) this.offerListening(state, item).catch((error) => this.log({ type: "error", channelId: state.id, text: `ascolto: ${error.message}` }));
       if (human) {
         if (item.addressed.some((id) => !item.handledBy.includes(id)) || (!item.disengaged.length && (roomAgentId(state.id) || this.dmAgentId(state.id)))) state.humanQueue.set(item.id, item);
         state.generation += 1;
@@ -998,6 +1004,75 @@ export class Orchestrator {
       return this.slack.say(info.channelId, { content, name: "Cora", threadTs: info.threadTs });
     }
     return this.discord.post(channelId, { username: "Cora", content });
+  }
+
+  /**
+   * An agent called by name where it does not listen: Cora says so. On Discord the owner gets a
+   * button that puts the agent to listen here, and the agent then answers what it was asked;
+   * anywhere else, or if the button cannot be sent, the notice says where to do it in the panel.
+   */
+  async offerListening(state, item, now = Date.now()) {
+    const english = this.store.settings.language === "en";
+    for (const id of item.deaf || []) {
+      const agent = this.store.agent(id);
+      const key = `${state.id}:${id}`;
+      if (!agent || (this.offered.get(key) || 0) > now - 30 * 60000) continue;
+      this.offered.set(key, now);
+      const transport = transportOf(state.id);
+      const where = agent.channelIds.filter((channelId) => transportOf(channelId) === transport).map((channelId) => this.channelMeta(channelId)?.name).filter(Boolean).map((name) => `#${name}`);
+      const link = this.instanceUrl ? `${this.instanceUrl}/#/agent/${agent.id}/profilo` : "";
+      const why = !agent.enabled
+        ? (english ? `**${agent.name}** is switched off, so it cannot answer.` : `**${agent.name}** è spento, quindi non può rispondere.`)
+        : (english ? `**${agent.name}** is not listening in this channel${where.length ? `: it answers in ${where.join(", ")}` : ""}.` : `**${agent.name}** non è in ascolto in questo canale${where.length ? `: risponde in ${where.join(", ")}` : ""}.`);
+      if (agent.enabled && transport === "discord" && !this.dmAgentId(state.id)) {
+        try {
+          await this.discord.say(state.id, {
+            content: `${why} ${english ? "The owner can put it to listen here:" : "Il proprietario può metterlo in ascolto qui:"}`,
+            components: [{ type: 1, components: [{ type: 2, style: 1, label: (english ? `Let ${agent.name} listen here` : `Metti ${agent.name} in ascolto qui`).slice(0, 80), custom_id: `cora:listen:${agent.id}:${item.id}` }] }],
+          });
+          continue;
+        } catch (error) {
+          this.log({ type: "warning", channelId: state.id, text: `pulsante di ascolto non inviato: ${error.message}` });
+        }
+      }
+      const how = !agent.enabled
+        ? (english ? `Switch it on in the panel${link ? `: ${link}` : ""}.` : `Lo riaccendi dal pannello${link ? `: ${link}` : ""}.`)
+        : (english ? `To have it answer here, open it in the panel${link ? ` (${link})` : ""} and add this channel under Listening.` : `Per farlo rispondere qui aprilo nel pannello${link ? ` (${link})` : ""} e aggiungi questo canale in Ascolto.`);
+      await this.notice(state.id, `${why} ${how}`);
+    }
+  }
+
+  /** A button pressed on one of Cora's messages: only the owner may put an agent to listen. */
+  async onInteraction(interaction) {
+    const match = /^cora:listen:(ag_[a-f0-9]{12}):(\d+)$/.exec(String(interaction?.data?.custom_id || ""));
+    if (!match) return;
+    const english = this.store.settings.language === "en";
+    const userId = interaction.member?.user?.id || interaction.user?.id || "";
+    const channelId = String(interaction.channel_id || "");
+    const agent = this.store.agent(match[1]);
+    if (!this.isOwner(userId)) {
+      return this.discord.answerInteraction(interaction, { content: english ? "Only Cora's owner can do that." : "Lo può fare solo il proprietario di Cora." });
+    }
+    if (!agent || !channelId) return this.discord.answerInteraction(interaction, { content: english ? "That agent is no longer here." : "Questo agente non c'è più." });
+    if (agent.channelIds.length && !agent.channelIds.includes(channelId)) this.store.updateAgent(agent.id, { ...agent, channelIds: [...agent.channelIds, channelId] });
+    const who = interaction.member?.user?.global_name || interaction.member?.user?.username || interaction.user?.username || "";
+    this.log({ type: "agent", agentId: agent.id, text: `${agent.name} ora ascolta ${this.channelMeta(channelId)?.name || channelId}${who ? ` (da Discord, ${who})` : ""}` });
+    await this.discord.answerInteraction(interaction, { update: true, content: english ? `✅ **${agent.name}** is listening here now.` : `✅ **${agent.name}** ora è in ascolto qui.` });
+    // The message that called it gets its answer now.
+    const state = this.state(channelId);
+    const item = state.history.find((entry) => entry.id === match[2]);
+    if (item) {
+      item.addressed = [...new Set([...(item.addressed || []), agent.id])];
+      item.handledBy = (item.handledBy || []).filter((id) => id !== agent.id);
+      state.focus = { ids: [...new Set([...(state.focus?.ids || []), agent.id])], at: Date.now(), remindedAt: 0, owner: true };
+      this.engagements[state.id] = state.focus;
+      this.store.setValue("conversationEngagements", this.engagements);
+      state.humanQueue.set(item.id, item);
+      state.ownerOrigin = item.kind === "owner";
+      state.generation += 1;
+      state.budget = this.store.settings.maxAgentTurns;
+      this.schedule(state, 0);
+    }
   }
 
   /** A notice from usecora.space, posted as "Cora" in the channel named in settings.noticeChannel. */

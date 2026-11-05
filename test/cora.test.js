@@ -2274,6 +2274,42 @@ describe("talking with the agents", () => {
     await quiet();
   });
 
+  test("an agent called where it does not listen: Cora says so, and the owner's button puts it to listen and has it answer", async (t) => {
+    const zara = (await call("/api/agents", { method: "POST", body: { name: "Zara", model: "ollama/test-model", chattiness: 1, tools: false, channelIds: [OTHER_CHANNEL] } })).data;
+    t.after(() => app.store.deleteAgent(zara.id));
+    replies.set("Zara", () => ({ content: "Eccomi, ora vi sento." }));
+    const before = discord.state.botPosts.length;
+    const asking = discord.say({ content: "Zara, ci sei?" });
+    await waitFor(() => discord.state.botPosts.slice(before).some((item) => item.components), { what: "Cora's offer" });
+    const offer = discord.state.botPosts.slice(before).find((item) => item.components);
+    assert.equal(offer.channelId, CHANNEL);
+    assert.match(offer.content, /\*\*Zara\*\* non è in ascolto in questo canale/);
+    const button = offer.components[0].components[0];
+    assert.equal(button.label, "Metti Zara in ascolto qui");
+    assert.equal(button.custom_id, `cora:listen:${zara.id}:${asking.id}`);
+    assert.ok(!posts("Zara").length, "she did not answer: she could not hear");
+
+    discord.say({ content: "Zara, ci sei?" });
+    await sleep(300);
+    assert.equal(discord.state.botPosts.slice(before).filter((item) => item.components).length, 1, "asked again soon, Cora does not repeat itself");
+
+    const press = (user) => discord.dispatch("INTERACTION_CREATE", { id: String(Date.now()), token: `tok${user}`, type: 3, channel_id: CHANNEL, guild_id: GUILD, member: { user: { id: user, username: user === OWNER ? "Sam" : "Mallory" } }, data: { custom_id: button.custom_id } });
+    press(STRANGER);
+    await waitFor(() => discord.state.interactionAnswers.some((answer) => answer.token === `tok${STRANGER}`), { what: "the refusal" });
+    const refusal = discord.state.interactionAnswers.find((answer) => answer.token === `tok${STRANGER}`);
+    assert.deepEqual([refusal.type, refusal.data.flags], [4, 64], "someone else is told privately that only the owner can");
+    assert.deepEqual(app.store.agent(zara.id).channelIds, [OTHER_CHANNEL]);
+
+    press(OWNER);
+    await waitFor(() => posts("Zara").includes("Eccomi, ora vi sento."), { what: "Zara answering the message that called her" });
+    const done = discord.state.interactionAnswers.find((answer) => answer.token === `tok${OWNER}`);
+    assert.equal(done.type, 7, "the offer becomes the outcome");
+    assert.match(done.data.content, /Zara\*\* ora è in ascolto qui/);
+    assert.deepEqual(done.data.components, []);
+    assert.deepEqual(app.store.agent(zara.id).channelIds, [OTHER_CHANNEL, CHANNEL]);
+    await quiet();
+  });
+
   test("agents post along the way with say, and create, list and delete their own routines when the owner asks", async () => {
     let step = 0;
     replies.set("Olga", () => {

@@ -82,6 +82,7 @@ Always-on Discord agents with personalities, layered memory, routines and their 
     - `browse()` draws a level, or a search over the whole tree with `?q=`, as cards or rows (`?v=list`). Pictures are thumbnails of themselves, and texts up to 256 KB show their first lines (at most 60 per page).
     - `viewer()` serves `/_cora/view/<path>`: image, video, audio, PDF in a frame, text with line numbers (512 KB), CSV/TSV as a table (500 rows), active types as escaped source. Previous and next go through the same level.
     - `?download=1` makes any file an attachment. `/_cora/zip?dir=` streams a stored zip, CRC computed on the way (`writeZip()`, at most 2 GB, no zip64).
+    - On a site, `resolvePath()` answers a folder without `index.html` (the top included) with `{listing}` and a folder path without the slash with a redirect to it; the share host draws it with `browse({ direct: true })`, so files open as themselves instead of on `/_cora/view/`. The zip works on both views.
     - `/_cora/icon.svg` is Cora's mark, open to anyone, as the tab icon of the drive and of the host's own pages (never injected into a shared site).
   - **The log.** `record()` in `share-host.js` writes `artifact_events` (`store.addArtifactEvent`): `open` (the top of a link, once per visitor every 30 minutes), `search`, `view`, `download`, `enter`, `refused`, and `share` for link changes (`Artifacts.shareEvent()`: created, requested, activated, access, expiry, pinned, revoked, deleted).
     - `who` is the proven address and how it was proven, or for others `visitor` (6 characters of an HMAC of IP and user agent) and `device` (browser · system). The IP and the user agent are never stored.
@@ -98,6 +99,12 @@ Always-on Discord agents with personalities, layered memory, routines and their 
     - `share_links` stores only token hashes. The link's GET shows a button and its POST spends it, since mail scanners prefetch links.
   - **Relay.** The grog relay serves `*.usecora.space` through one wildcard claim (`tunnel_for()` in `relay.py`, `"*.usecora.space"` in `sites.json`).
   - **Tests.** `test/artifact-shares.test.js`, and the "shared folders" block of `test/cloud.test.js`.
+- **Called where it cannot hear:** `Orchestrator.address()` marks `item.deaf`, the agents named with `addresses()` that are not among `agentsFor(channel)` (a channel list that leaves this channel out, or switched off). `offerListening()` answers once per agent and channel every 30 minutes.
+  - On Discord, for an agent that is on, it posts as the main bot (`discord.say({ components })`; webhook messages cannot carry buttons) with a button `cora:listen:<agentId>:<messageId>`.
+  - `Discord` emits `interaction` for `INTERACTION_CREATE` (the app has no interactions URL, so presses come over the gateway) and answers with `answerInteraction()` (`/interactions/<id>/<token>/callback`).
+  - `onInteraction()` accepts only `isOwner()`; anyone else gets a private reply (flags 64). It adds the channel (the thread itself, for a thread) to the agent's `channelIds`, rewrites the offer (type 7) and queues the message that called it, so the agent answers it.
+  - Anywhere else, or when the button cannot be sent, `notice()` says where to do it in the panel (`<instance>/#/agent/<id>/profilo`, *Ascolto*); a switched-off agent gets the same, to switch it on.
+  - Tests: the journey in `test/cora.test.js` (`fakeDiscord` records `interactionAnswers`).
 - **Vault (secrets):** `src/vault.js` (`Vault`), with tables `vault_secrets`, `vault_requests` (token hashes only) and `vault_sends` in `src/store.js`.
   - **Encryption.** AES-256-GCM under a key from HKDF(`CORA_VAULT_KEY` or `CORA_SESSION_KEY`, "cora vault v1"). The AAD is `<id>.<name>`, so a record moved under another name does not open.
   - **Into an agent's hush.** `Boxes.importSecret()` runs a bash script on the desktop. The value goes in on stdin: `hush init`/`box init` if missing (both `</dev/null`, or init eats the value), then `box seal --to self --pubkey-file … | box open NAME`. Verified against a throwaway vault.

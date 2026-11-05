@@ -334,6 +334,10 @@ export class Discord extends EventEmitter {
       case "THREAD_DELETE":
         this.guilds.get(data.guild_id)?.threads.delete(data.id);
         break;
+      // A button on one of this bot's messages pressed: it arrives here when the app has no interactions URL.
+      case "INTERACTION_CREATE":
+        this.emit("interaction", data);
+        break;
       case "MESSAGE_CREATE":
         this.emit("message", data);
         break;
@@ -460,19 +464,30 @@ export class Discord extends EventEmitter {
   }
 
   /** Post as this bot user (an agent with its own Discord application). */
-  async say(channelId, { content, file }) {
+  async say(channelId, { content, file, components }) {
     const chunks = splitMessage(content);
     if (!chunks.length && !file) return [];
     const sent = [];
     for (let index = 0; index < Math.max(chunks.length, 1); index += 1) {
       const attach = index === Math.max(chunks.length, 1) - 1 ? file : null;
       let message;
-      try { message = await this.sendPayload(`/channels/${channelId}/messages`, { content: chunks[index] || "", allowed_mentions: { parse: ["users"] } }, attach, true); }
+      const last = index === Math.max(chunks.length, 1) - 1;
+      try { message = await this.sendPayload(`/channels/${channelId}/messages`, { content: chunks[index] || "", allowed_mentions: { parse: ["users"] }, ...(last && components ? { components } : {}) }, attach, true); }
       catch (error) { error.sentCount = sent.length; throw error; }
       this.rememberOwn(message);
       sent.push(message);
     }
     return sent;
+  }
+
+  /**
+   * Answers a pressed button: `update` rewrites the message it was on, otherwise a reply
+   * that only the person who pressed sees.
+   */
+  async answerInteraction(interaction, { content, components = [], update = false }) {
+    return this.request("POST", `/interactions/${interaction.id}/${interaction.token}/callback`, {
+      body: { type: update ? 7 : 4, data: { content, components, allowed_mentions: { parse: [] }, ...(update ? {} : { flags: 64 }) } },
+    });
   }
 
   /** Align this bot's Discord profile with the agent's name and picture (a PNG). */

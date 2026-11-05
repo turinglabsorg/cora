@@ -122,6 +122,7 @@ export function startCora(overrides = {}) {
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
   // Where the owner reviews the brain: the address people reach this Cora on.
   const instanceUrl = cfg.publicHost ? `https://${cfg.publicHost}` : cfg.cloudUrl && cfg.cloudSpace ? `https://${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
+  orchestrator.instanceUrl = instanceUrl;
   // The agents' pictures are served from here, so Slack and Discord fetch them from this address.
   store.setAvatarBase(instanceUrl);
   // What the agents make on their desktops, versioned and reviewed on this server.
@@ -154,6 +155,9 @@ export function startCora(overrides = {}) {
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
+  });
+  discord.on("interaction", (interaction) => {
+    orchestrator.onInteraction(interaction).catch((error) => activity({ type: "error", channelId: interaction.channel_id, text: `pulsante: ${error.message}` }));
   });
   discord.on("status", (status) => web.broadcast({ type: "discord", state: status.state, error: status.error }));
   discord.on("warning", (text) => activity({ type: "warning", text }));
