@@ -1769,7 +1769,10 @@ a.share-stats:hover { color: var(--amber); }
 .art-modes { flex: none; }
 .art-modes button { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; font-size: 12.5px; }
 @media (max-width: 640px) {
-  .art-preview-head:has(.art-modes) { flex-wrap: wrap; }
+  /* A file's name keeps a whole line on a phone; its buttons go on the line under it. */
+  .art-preview-head { flex-wrap: wrap; row-gap: 6px; }
+  .art-preview-head > .grow { flex: 1 1 100%; }
+  .art-preview-head > .btn { padding-inline: 8px; }
   .art-preview-head .art-modes { order: 5; width: 100%; }
   .art-modes button { flex: 1; justify-content: center; }
 }
