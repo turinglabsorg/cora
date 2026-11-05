@@ -1734,10 +1734,15 @@ a.share-stats:hover { color: var(--amber); }
 .art-newdir input { flex: 1 1 200px; min-width: 0; height: 36px; }
 .art-back { margin-bottom: -6px; }
 @media (max-width: 899px) { .art-back { display: none; } }
-.art-sheet { max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); }
-.art-sheet table { border-collapse: collapse; min-width: 100%; font: 400 12.5px/1.4 var(--mono); }
-.art-sheet th, .art-sheet td { padding: 8px 12px; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.art-preview > *, .art-table-box, .art-editor { min-width: 0; }
+.art-sheet { max-width: 100%; max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); overscroll-behavior: contain; }
+.art-sheet table { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max(100%, var(--total)); font: 400 12.5px/1.45 var(--mono); }
+.art-sheet col { width: var(--w); }
+.art-sheet th, .art-sheet td { padding: 8px 12px; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); text-align: left; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
 .art-sheet th { position: sticky; top: 0; z-index: 1; background: var(--panel-2); color: var(--muted); font-weight: 500; }
+.art-sheet th .grip { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 2; touch-action: none; }
+.art-sheet th .grip::after { content: ""; position: absolute; top: 25%; bottom: 25%; left: 4px; width: 1px; background: var(--line-strong); }
+.art-sheet th:hover .grip::after, .art-sheet th .grip:active::after { background: var(--amber); }
 .art-sheet td.num { text-align: right; color: var(--text); }
 .art-sheet tr:hover td { background: var(--amber-wash); }
 .art-pdf { width: 100%; height: 70vh; min-height: 420px; border: 1px solid var(--line); border-radius: var(--r-md); background: #fff; }
@@ -1745,3 +1750,21 @@ a.share-stats:hover { color: var(--amber); }
 .art-preview:fullscreen .art-pdf, .art-preview.full .art-pdf, .art-preview:fullscreen .art-sheet, .art-preview.full .art-sheet { height: calc(100vh - 110px); max-height: none; }
 .art-preview:fullscreen .art-media img, .art-preview.full .art-media img, .art-preview:fullscreen .art-media video, .art-preview.full .art-media video { max-height: calc(100vh - 110px); }
 .art-preview:fullscreen .art-code, .art-preview.full .art-code { max-height: calc(100vh - 110px); }
+.art-md { align-content: start; max-height: 70vh; overflow: auto; padding: 18px 22px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); }
+.art-preview:fullscreen .art-md, .art-preview.full .art-md { max-height: calc(100vh - 110px); }
+.art-editor-split { display: grid; gap: 12px; min-width: 0; }
+.art-editor-split.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.art-editor-text { width: 100%; min-height: 55vh; padding: 14px 16px; resize: vertical; font-size: 13px; line-height: 1.55; }
+.art-editor-preview { max-height: none; min-height: 55vh; }
+.art-editor-save { flex-wrap: wrap; gap: 8px; }
+.art-editor-save input { flex: 1 1 220px; min-width: 0; height: 36px; }
+.art-editor-tools { flex-wrap: wrap; gap: 6px; }
+.art-sheet.editing td, .art-sheet.editing th { padding: 0; }
+.art-sheet.editing .cell { display: block; width: 100%; min-height: 34px; padding: 7px 10px; border: 0; border-radius: 0; background: transparent; color: var(--text); font: 400 12.5px/1.45 var(--mono); resize: none; field-sizing: content; }
+.art-sheet.editing th .cell { color: var(--muted); font-weight: 500; }
+.art-sheet.editing .cell:focus { outline: none; background: var(--amber-wash); box-shadow: inset 0 0 0 1px var(--amber-line); }
+.art-sheet .row-n { width: 44px; color: var(--faint); font-size: 11px; text-align: right; padding: 8px 8px 0 0; position: relative; }
+.art-sheet .row-x { display: none; position: absolute; left: 2px; top: 6px; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--red); cursor: pointer; }
+.art-sheet .row-x .ico { width: 12px; height: 12px; }
+.art-sheet tr:hover .row-x { display: grid; place-items: center; }
+@media (max-width: 899px) { .art-editor-split.two { grid-template-columns: minmax(0, 1fr); } .art-editor-preview { min-height: 0; } }

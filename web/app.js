@@ -532,10 +532,10 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     ["agenti", "Agenti", "users", ["agenti", "agent", "new"].includes(section)],
     // The salotto opens from the Banco: it is one of the desk's rooms, not a section of its own.
     ["banco", "Banco", "grid", section === "banco" || section === "salotto"],
-    ["contesto", "Contesto", "book", section === "contesto"],
     ["brain", "Brain", "bulb", section === "brain"],
     ["artefatti", "Artefatti", "archive", section === "artefatti", S.data?.artifacts?.reviews || 0],
-    ["settings", "Impostazioni", "sliders", section === "settings"],
+    // Contesto opens from Impostazioni: what the agents read is a setting of the space, not a place of its own.
+    ["settings", "Impostazioni", "sliders", section === "settings" || section === "contesto"],
   ];
   const info = S.data ? transportInfo() : { icon: "radio", label: "Cora", where: tr("Caricamento…") };
   app.replaceChildren(h("div", { class: `app${mode ? ` mode-${mode}` : ""}` },
@@ -3909,7 +3909,7 @@ function artifactKind(path) {
  * One file, shown the way the panel may show it: pictures and media as they are,
  * text as text with line numbers, anything else to download. Never rendered as a page.
  */
-async function artifactPreview(url, path, size) {
+async function artifactPreview(url, path, size, edit = null) {
   const kind = artifactKind(path);
   const download = btn("Scarica", { icon: "download", cls: "sm ghost", href: `${url}?download=1` });
   // Full screen: the browser's own when it has one, otherwise the preview covers the page until Esc.
@@ -3921,7 +3921,30 @@ async function artifactPreview(url, path, size) {
     if (box.requestFullscreen) box.requestFullscreen().catch(() => box.classList.add("full"));
     else box.classList.add("full");
   } });
-  const head = h("header", { class: "art-preview-head" }, h("span", { class: "grow" }, h("b", {}, raw(path.split("/").at(-1))), h("small", {}, raw(`${path} · ${fmtBytes(size)}`))), full, download);
+  let source = null;
+  // A text the panel can write back: opened in its editor, saved as a new commit like an upload.
+  const change = edit && ARTIFACT_EDITABLE.test(path) && size <= 1024 * 1024 ? btn(edit.canReview ? "Modifica" : "Proponi una modifica", { icon: "edit", cls: "sm ghost", onclick: async () => {
+    const box = change.closest(".art-preview");
+    if (!box) return;
+    if (source === null) {
+      try { source = await (await fetch(url, { credentials: "same-origin" })).text(); } catch (error) { return toast(error.message, true); }
+    }
+    const restore = [...box.childNodes];
+    const onCancel = () => box.replaceChildren(...restore);
+    const onSave = async (text, message) => {
+      if (text === source) { toast("Nessuna modifica da salvare"); return false; }
+      try {
+        const done = await saveArtifactText({ folder: edit.folder, head: edit.head, path, text, message });
+        toast(done.commit.status === "published" ? tr("Salvato: {message}", { message: done.commit.message }) : "Proposta: aspetta una revisione");
+        edit.onSaved(done.commit);
+        return true;
+      } catch (error) { toast(error.message, true); return false; }
+    };
+    const editor = /\.(csv|tsv)$/i.test(path) && source.length < 3 * 1024 * 1024 ? csvEditor(source, /\.tsv$/i.test(path) ? "\t" : "", { onSave, onCancel }) : textEditor(source, path, { onSave, onCancel });
+    box.replaceChildren(h("header", { class: "art-preview-head" }, h("span", { class: "grow" }, h("b", {}, raw(path.split("/").at(-1))), h("small", {}, raw(tr("Modifica · {path}", { path })))), full), editor);
+    box.querySelector("textarea")?.focus?.();
+  } }) : null;
+  const head = h("header", { class: "art-preview-head" }, h("span", { class: "grow" }, h("b", {}, raw(path.split("/").at(-1))), h("small", {}, raw(`${path} · ${fmtBytes(size)}`))), change, full, download);
   if (kind === "image") return [head, h("div", { class: "art-media checker" }, h("img", { src: url, alt: raw(path) }))];
   if (kind === "video") return [head, h("div", { class: "art-media" }, h("video", { src: url, controls: true, preload: "metadata" }))];
   if (kind === "audio") return [head, h("div", { class: "art-media" }, h("audio", { src: url, controls: true, preload: "metadata" }))];
@@ -3938,10 +3961,12 @@ async function artifactPreview(url, path, size) {
       const response = await fetch(url, { credentials: "same-origin" });
       if (response.ok && /^text\/plain/.test(response.headers.get("content-type") || "")) {
         const text = await response.text();
+        source = text;
         if (/\.(csv|tsv)$/i.test(path)) {
           const table = artifactTable(text, /\.tsv$/i.test(path) ? "\t" : "");
           if (table) return [head, table];
         }
+        if (/\.(md|markdown)$/i.test(path)) return [head, h("div", { class: "md art-md" }, markdown(text))];
         const lines = text.split("\n");
         const shown = lines.slice(0, 3000);
         return [head, h("pre", { class: "art-code" }, h("code", {}, shown.map((line, index) => h("span", { class: "art-line" }, h("i", { "aria-hidden": "true" }, raw(String(index + 1))), raw(line || " "))))),
@@ -3952,17 +3977,16 @@ async function artifactPreview(url, path, size) {
   return [head, h("div", { class: "art-noview" }, icon("file"), h("p", {}, "Il pannello non mostra questo tipo di file: scaricalo."), download.cloneNode(true))];
 }
 
-/** A CSV or TSV as a table: the first 500 rows under a sticky header, the separator guessed from the first line. */
-function artifactTable(text, separator = "") {
+/** A CSV or TSV read whole: its separator (guessed from the first line), its records, how many. */
+function parseCsv(text, separator = "") {
   const first = text.split("\n", 1)[0];
   const sep = separator || [",", ";", "\t"].sort((a, b) => first.split(b).length - first.split(a).length)[0];
-  // Every record is counted, a quoted cell may span lines; only the first 501 are kept.
+  // A quoted cell may hold the separator and line breaks; every record counts, blank lines do not.
   const rows = [];
-  let records = 0;
   let row = [];
   let cell = "";
   let quoted = false;
-  const end = () => { row.push(cell.replace(/\r$/, "")); if (row.length > 1 || row[0]) { records += 1; if (rows.length < 501) rows.push(row); } row = []; cell = ""; };
+  const end = () => { row.push(cell.replace(/\r$/, "")); if (row.length > 1 || row[0]) rows.push(row); row = []; cell = ""; };
   for (let i = 0; i < text.length; i += 1) {
     const char = text[i];
     if (quoted) {
@@ -3975,15 +3999,134 @@ function artifactTable(text, separator = "") {
     else cell += char;
   }
   if (cell || row.length) end();
+  return { sep, rows, crlf: text.includes("\r\n") };
+}
+
+/** Records back into CSV text: a cell is quoted when it holds the separator, a quote, a line break or edge spaces. */
+function csvText(rows, sep, crlf = false) {
+  const cell = (value) => (/["\r\n]/.test(value) || value.includes(sep) || /^\s|\s$/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
+  const eol = crlf ? "\r\n" : "\n";
+  return rows.map((row) => row.map((value) => cell(String(value ?? ""))).join(sep)).join(eol) + eol;
+}
+
+/** Widths to start from: as wide as what a column holds, between 80 and 360 pixels; long text wraps. */
+function csvWidths(rows) {
+  const columns = Math.max(...rows.map((row) => row.length));
+  const sample = rows.slice(0, 200);
+  return Array.from({ length: columns }, (_, index) => {
+    const lengths = sample.map((row) => String(row[index] ?? "").length).sort((a, b) => a - b);
+    const typical = lengths[Math.floor(lengths.length * 0.9)] || 0;
+    return Math.round(Math.min(360, Math.max(80, Math.max(String(rows[0]?.[index] ?? "").length, typical) * 7.6 + 26)));
+  });
+}
+
+/** A table whose columns grow or shrink by dragging the edge of their heading; a double click puts one back. */
+function resizableTable(widths, head, body) {
+  const cols = widths.map((width) => h("col", { vars: { "--w": `${width}px` } }));
+  const table = h("table", { vars: { "--total": `${widths.reduce((sum, width) => sum + width, 0)}px` } }, h("colgroup", {}, cols), head, body);
+  const total = () => table.style.setProperty("--total", `${cols.reduce((sum, col) => sum + parseFloat(col.style.getPropertyValue("--w")), 0)}px`);
+  for (const [index, th] of [...(head.querySelector?.("tr")?.children || [])].entries()) {
+    const grip = h("span", { class: "grip", "aria-hidden": "true" });
+    grip.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      const start = event.clientX;
+      const from = parseFloat(cols[index].style.getPropertyValue("--w"));
+      grip.setPointerCapture?.(event.pointerId);
+      const move = (moved) => { cols[index].style.setProperty("--w", `${Math.min(1200, Math.max(48, from + moved.clientX - start))}px`); total(); };
+      const up = () => { grip.removeEventListener("pointermove", move); grip.removeEventListener("pointerup", up); };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+    });
+    grip.addEventListener("dblclick", () => { cols[index].style.setProperty("--w", `${widths[index]}px`); total(); });
+    th.append(grip);
+  }
+  return table;
+}
+
+/** A CSV or TSV as a table: the first 500 rows under a sticky header, contained in its frame, columns to resize. */
+function artifactTable(text, separator = "") {
+  const { rows } = parseCsv(text, separator);
   if (rows.length < 1 || rows.every((line) => line.length < 2)) return null;
   const [header, ...body] = rows;
-  const total = records - 1;
-  return h("div", { class: "stack-sm" },
-    h("div", { class: "art-sheet" }, h("table", {},
-      h("thead", {}, h("tr", {}, header.map((name) => h("th", {}, raw(name))))),
-      h("tbody", {}, body.slice(0, 500).map((line) => h("tr", {}, line.map((value) => h("td", { class: /^-?[\d.,]+%?$/.test(value.trim()) ? "num" : "" }, raw(value)))))))),
+  const total = body.length;
+  const widths = csvWidths(rows);
+  const table = resizableTable(widths,
+    h("thead", {}, h("tr", {}, widths.map((_, index) => h("th", {}, h("span", {}, raw(header[index] ?? "")))))),
+    h("tbody", {}, body.slice(0, 500).map((line) => h("tr", {}, widths.map((_, index) => {
+      const value = String(line[index] ?? "");
+      return h("td", { class: /^-?[\d.,]+%?$/.test(value.trim()) ? "num" : "" }, raw(value));
+    })))));
+  return h("div", { class: "stack-sm art-table-box" },
+    h("div", { class: "art-sheet" }, table),
     h("p", { class: "muted small" }, raw(total > 500 ? tr("Le prime 500 righe di {total}: scarica il file per il resto.", { total }) : tr(total === 1 ? "1 riga" : "{count} righe", { count: total }))));
 }
+
+/**
+ * Editing a CSV as a grid: every cell a field, rows and columns to add or take away.
+ * Saving writes the file back with its own separator and line ends.
+ */
+function csvEditor(text, separator, { onSave, onCancel }) {
+  const { sep, rows, crlf } = parseCsv(text, separator);
+  const data = rows.length ? rows.map((row) => [...row]) : [["", ""]];
+  let width = Math.max(...data.map((row) => row.length));
+  for (const row of data) while (row.length < width) row.push("");
+  const box = h("div", { class: "art-sheet editing" });
+  const draw = () => {
+    const widths = csvWidths(data).map((value) => Math.max(value, 120));
+    const field = (rowIndex, colIndex) => {
+      const input = h("textarea", { rows: 1, class: "cell", spellcheck: "false", value: data[rowIndex][colIndex], "aria-label": tr("Riga {row}, colonna {col}", { row: rowIndex, col: colIndex + 1 }) });
+      input.addEventListener("input", () => { data[rowIndex][colIndex] = input.value; });
+      return input;
+    };
+    const remove = (rowIndex) => h("button", { type: "button", class: "row-x", title: tr("Togli la riga"), "aria-label": tr("Togli la riga"), onclick: () => { data.splice(rowIndex, 1); draw(); } }, icon("close"));
+    box.replaceChildren(resizableTable([44, ...widths],
+      h("thead", {}, h("tr", {}, h("th", { class: "row-n" }, "#"), data[0].map((_, colIndex) => h("th", {}, field(0, colIndex))))),
+      h("tbody", {}, data.slice(1).map((row, offset) => h("tr", {}, h("td", { class: "row-n" }, raw(String(offset + 1)), remove(offset + 1)), row.map((_, colIndex) => h("td", {}, field(offset + 1, colIndex))))))));
+  };
+  draw();
+  const message = h("input", { type: "text", maxlength: 300, placeholder: tr("Cosa hai cambiato (facoltativo)"), "aria-label": tr("Cosa hai cambiato") });
+  const save = btn("Salva", { icon: "check", cls: "sm primary", onclick: async () => {
+    save.disabled = true;
+    const ok = await onSave(csvText(data, sep, crlf), message.value.trim());
+    save.disabled = false;
+    return ok;
+  } });
+  return h("div", { class: "stack-sm art-editor" },
+    h("div", { class: "row art-editor-tools" },
+      btn("Aggiungi riga", { icon: "plus", cls: "sm ghost", onclick: () => { data.push(Array.from({ length: width }, () => "")); draw(); box.scrollTop = box.scrollHeight; } }),
+      btn("Aggiungi colonna", { icon: "plus", cls: "sm ghost", onclick: () => { width += 1; for (const row of data) row.push(""); draw(); box.scrollLeft = box.scrollWidth; } }),
+      width > 1 ? btn("Togli l'ultima colonna", { icon: "minus", cls: "sm ghost", onclick: () => { width -= 1; for (const row of data) row.pop(); draw(); } }) : null),
+    box,
+    h("div", { class: "row art-editor-save" }, message, btn("Annulla", { cls: "sm ghost", onclick: onCancel }), save));
+}
+
+/** Editing a text, a Markdown file with its rendering beside it as it is written. */
+function textEditor(text, path, { onSave, onCancel }) {
+  const area = h("textarea", { class: "mono art-editor-text", spellcheck: "false", value: text, "aria-label": tr("Testo del file") });
+  const isMarkdown = /\.(md|markdown)$/i.test(path);
+  const rendered = isMarkdown ? h("div", { class: "md art-md art-editor-preview" }, markdown(text)) : null;
+  let timer = null;
+  if (rendered) area.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => rendered.replaceChildren(...markdown(area.value)), 200); });
+  const message = h("input", { type: "text", maxlength: 300, placeholder: tr("Cosa hai cambiato (facoltativo)"), "aria-label": tr("Cosa hai cambiato") });
+  const save = btn("Salva", { icon: "check", cls: "sm primary", onclick: async () => {
+    save.disabled = true;
+    await onSave(area.value.endsWith("\n") || !text.endsWith("\n") ? area.value : `${area.value}\n`, message.value.trim());
+    save.disabled = false;
+  } });
+  return h("div", { class: "stack-sm art-editor" },
+    h("div", { class: `art-editor-split${rendered ? " two" : ""}` }, area, rendered),
+    h("div", { class: "row art-editor-save" }, message, btn("Annulla", { cls: "sm ghost", onclick: onCancel }), save));
+}
+
+/** A file written back from the panel: its bytes as an upload, then one commit over the version that was open. */
+async function saveArtifactText({ folder, head, path, text, message }) {
+  const response = await fetch(`/api/artifacts/folders/${folder.id}/blobs`, { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/octet-stream" }, body: text, credentials: "same-origin" });
+  const sent = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(sent.error || response.statusText);
+  return api(`/api/artifacts/folders/${folder.id}/upload`, { method: "POST", body: { base: head.id, files: [{ path, sha: sent.sha }], message: message || tr("Modificato {name}", { name: path.split("/").at(-1) }) } });
+}
+
+const ARTIFACT_EDITABLE = /\.(md|markdown|csv|tsv|txt|json|ya?ml|toml|ini)$/i;
 
 document.addEventListener?.("keydown", (event) => { if (event.key === "Escape") document.querySelector(".art-preview.full")?.classList.remove("full"); });
 
@@ -4120,7 +4263,14 @@ function artifactFiles(data, head, dir = "") {
     chosen = file.path;
     for (const item of list.querySelectorAll(".art-file")) item.classList.toggle("on", item === row);
     preview.replaceChildren(skeleton("rows", 2));
-    const shown = await artifactPreview(`/api/artifacts/commits/${head.id}/files/${artifactPath(file.path)}`, file.path, file.size);
+    const shown = await artifactPreview(`/api/artifacts/commits/${head.id}/files/${artifactPath(file.path)}`, file.path, file.size, {
+      folder, head, canReview: data.canReview,
+      onSaved: (commit) => {
+        if (commit.status !== "published") { location.hash = `#/artefatti/${folder.id}/c/${commit.id}`; return; }
+        S.reopenFile = file.path;
+        renderArtifactFolder(folder.id, "file", dir);
+      },
+    });
     if (chosen === file.path) preview.replaceChildren(...shown.flat().filter(Boolean));
     if (scroll && matchMedia("(max-width: 899px)").matches) preview.scrollIntoView({ block: "start", behavior: "smooth" });
   };
@@ -4206,7 +4356,9 @@ function artifactFiles(data, head, dir = "") {
     return panel({ icon: "file", title: "File", hint: data.commits.length ? "Nessuna versione è ancora in onda: approva un commit, o carica i primi file." : "Ancora nessun file: caricali da qui, o chiedi a un agente di farlo." }, zone);
   }
   const total = data.tree.reduce((sum, file) => sum + file.size, 0);
-  const first = files.find((file) => /^index\.html?$/i.test(file.name)) || files.find((file) => /^readme/i.test(file.name)) || (dir ? null : files[0]);
+  const again = S.reopenFile ? files.find((file) => file.path === S.reopenFile) : null;
+  S.reopenFile = "";
+  const first = again || files.find((file) => /^index\.html?$/i.test(file.name)) || files.find((file) => /^readme/i.test(file.name)) || (dir ? null : files[0]);
   if (first) setTimeout(() => { const row = [...list.querySelectorAll("button.art-file")][files.indexOf(first)]; if (row) open(first, row, { scroll: false }); });
   return panel({ icon: "file", title: tr("File in onda"), hint: raw(tr("{count} file · {size} · commit {id}", { count: data.tree.length, size: fmtBytes(total), id: head.short })) }, zone);
 }
@@ -5045,8 +5197,9 @@ function renderContext() {
   const newButton = btn("Nuovo file", { icon: "plus", cls: "primary", onclick: () => begin() });
   const upload = btn("Carica file", { icon: "upgrade", onclick: () => fileInput.click() });
   const refresh = btn("Aggiorna", { icon: "refresh", cls: "ghost", onclick: load });
-  shell([pageHead("Contesto", "Le istruzioni del server e i file che tutti gli agenti leggono.", [upload, newButton, refresh]),
-    h("small", { class: "context-upload-hint" }, "File .md e .txt · 30.000 caratteri per file · 60.000 caratteri attivi in totale"), fileInput, body], { title: "Contesto" });
+  shell([btn("Impostazioni", { icon: "back", href: "#/settings", cls: "ghost sm back-link art-back" }),
+    pageHead("Contesto", "Le istruzioni del server e i file che tutti gli agenti leggono.", [upload, newButton, refresh]),
+    h("small", { class: "context-upload-hint" }, "File .md e .txt · 30.000 caratteri per file · 60.000 caratteri attivi in totale"), fileInput, body], { title: "Contesto", back: "#/settings" });
   newButton.disabled = upload.disabled = true;
   load();
 }
@@ -5776,6 +5929,7 @@ function renderSettings() {
   const people = (settings.permissions || []).length;
   const keyCount = settings.sshKeys.length;
   entries = [
+    { id: "contesto", group: "Contesto", label: "Contesto degli agenti", mark: "book", href: "#/contesto", state: () => [null, tr("istruzioni e file che tutti leggono")] },
     ...["discord", "telegram", "slack"].map((kind) => ({ id: kind, group: "Canali", label: TRANSPORTS[kind].label, mark: TRANSPORTS[kind].icon, state: () => channelState(kind) })),
     { id: "server", group: "Abbonamenti", label: "Account del server", mark: "monitor", state: () => [null, settings.useResidentSubscriptions ? tr("in uso per chi non sceglie") : tr("non usati")] },
     ...providers.map((provider) => ({ id: provider, group: "Abbonamenti", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
@@ -5805,7 +5959,7 @@ function renderSettings() {
       }
       const [led, line] = entry.state();
       const active = entry.id === (current || fallback());
-      items.push(h("button", { type: "button", class: `rail-item${active ? " active" : ""}`, "aria-current": active ? "page" : null, "data-page": entry.id, onclick: () => show(entry.id) },
+      items.push(h("button", { type: "button", class: `rail-item${active ? " active" : ""}`, "aria-current": active ? "page" : null, "data-page": entry.id, onclick: () => (entry.href ? (location.hash = entry.href) : show(entry.id)) },
         h("span", { class: "rail-mark", "aria-hidden": "true" }, icon(entry.mark)),
         h("span", { class: "rail-name" }, h("b", {}, raw(tr(entry.label))), h("small", {}, raw(line))),
         led ? h("i", { class: `led ${led}`, "aria-hidden": "true" }) : h("i", { class: "led none", "aria-hidden": "true" }), icon("next", "rail-go")));

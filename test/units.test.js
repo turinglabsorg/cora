@@ -728,3 +728,40 @@ test("Artefatti, File: a new subfolder to upload into, a way back, CSV as a tabl
   assert.equal(frame.attributes.src, "https://r-000000000009--acme.usecora.space/crm/contratto.pdf?t=1.x", "a PDF is framed from the space's preview host");
   assert.equal(frame.attributes.referrerpolicy, "no-referrer");
 });
+
+test("Artefatti, a file's preview: CSV round trips through the editor, Markdown renders, and a save is a commit", async () => {
+  const sent = [];
+  const panel = panelHarness({ fetch: async (path, options = {}) => {
+    if (path.endsWith("/blobs")) { sent.push({ path, body: options.body }); return { ok: true, status: 201, json: async () => ({ sha: "c".repeat(64), size: 10 }) }; }
+    if (path.endsWith("/upload")) { sent.push({ path, body: JSON.parse(options.body) }); return { ok: true, status: 201, json: async () => ({ commit: { id: "ac_00000000000b", status: "published", message: "Modificato clienti.csv" } }) }; }
+    if (path.includes("/files/note.md")) return { ok: true, status: 200, headers: { get: () => "text/plain; charset=utf-8" }, text: async () => "# Titolo\n\nUn **punto**.\n" };
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  const csv = 'nome;note\r\n"Rossi; Bianchi";"riga ""citata""\ne a capo"\r\nVerdi;\r\n';
+  const parsed = JSON.parse(panel.run(`JSON.stringify(parseCsv(${JSON.stringify(csv)}))`));
+  assert.deepEqual(parsed, { sep: ";", rows: [["nome", "note"], ["Rossi; Bianchi", "riga \"citata\"\ne a capo"], ["Verdi", ""]], crlf: true });
+  assert.equal(panel.run(`csvText(${JSON.stringify(parsed.rows)}, ";", true)`), csv, "written back exactly as it was read");
+
+  const saved = [];
+  panel.run(`window.savedCsv = []`);
+  const editor = panel.run(`csvEditor(${JSON.stringify(csv)}, "", { onSave: async (text, message) => { window.savedCsv.push([text, message]); return true; }, onCancel() {} })`);
+  const cells = editor.querySelectorAll("textarea");
+  assert.deepEqual(cells.map((cell) => cell.value), ["nome", "note", "Rossi; Bianchi", "riga \"citata\"\ne a capo", "Verdi", ""]);
+  cells[5].value = "nuovo";
+  cells[5].dispatch("input");
+  editor.querySelectorAll("button").find((button) => button.textContent === "Aggiungi riga").click();
+  editor.querySelectorAll("button").find((button) => button.textContent === "Salva").click();
+  for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  saved.push(...panel.run("window.savedCsv"));
+  assert.equal(saved[0][0], 'nome;note\r\n"Rossi; Bianchi";"riga ""citata""\ne a capo"\r\nVerdi;nuovo\r\n;\r\n', "the edit, a new row, its separator and line ends");
+
+  const shown = await panel.run(`artifactPreview("/api/artifacts/commits/ac_000000000009/files/note.md", "note.md", 30, { folder: { id: "af_000000000001" }, head: { id: "ac_000000000009" }, canReview: true, onSaved() {} })`);
+  const body = shown.find((node) => node?.className?.includes("art-md"));
+  assert.equal(body.querySelector("h3")?.textContent || body.querySelector("h1")?.textContent || "", "Titolo", "Markdown shows as Markdown");
+  assert.equal(body.querySelector("strong").textContent, "punto");
+  assert.ok(shown[0].querySelectorAll("button").some((button) => button.textContent === "Modifica"), "a text has its editor");
+  assert.equal(sent.length, 0);
+  const result = await panel.run(`saveArtifactText({ folder: { id: "af_000000000001" }, head: { id: "ac_000000000009" }, path: "crm/clienti.csv", text: "a;b\\n", message: "" })`);
+  assert.equal(result.commit.status, "published");
+  assert.deepEqual(sent.at(-1), { path: "/api/artifacts/folders/af_000000000001/upload", body: { base: "ac_000000000009", files: [{ path: "crm/clienti.csv", sha: "c".repeat(64) }], message: "Modificato clienti.csv" } }, "a save is an upload over the version that was open");
+});
