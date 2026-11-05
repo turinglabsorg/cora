@@ -237,6 +237,9 @@ export function runProcess(command, args, { input, timeoutMs = 60000, maxBytes =
       clearTimeout(timer);
       resolve({ code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString("utf8"), timedOut, truncated });
     });
+    // A process that exits before reading its input closes the pipe: its exit code says what happened,
+    // and the write error must not bring Cora down.
+    child.stdin.on("error", () => {});
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
