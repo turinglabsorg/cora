@@ -123,7 +123,7 @@ function crumbs(folderName, dir, words) {
 }
 
 function page(lang, title, csp, body) {
-  return { csp, html: `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title><style>${STYLE}</style></head><body>${body}</body></html>` };
+  return { csp, html: `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><link rel="icon" href="/_cora/icon.svg" type="image/svg+xml"><title>${esc(title)}</title><style>${STYLE}</style></head><body>${body}</body></html>` };
 }
 const BROWSE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 

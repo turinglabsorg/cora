@@ -84,6 +84,7 @@ main{width:100%;max-width:760px}h1{font:600 30px/1.15 "Outfit","Helvetica Neue",
 form{display:grid;gap:12px;max-width:420px}label{font:500 11px/1 "DM Mono",monospace;letter-spacing:.12em;text-transform:uppercase;color:#8f8f8a}input{height:46px;padding:0 14px;border:1px solid #353535;border-radius:10px;background:#000;color:#f5f5f3;font:400 16px/1.5 "Manrope",Arial,sans-serif;outline:none}input:focus{border-color:#f2a93b;box-shadow:0 0 0 3px rgba(242,169,59,.35)}button{height:46px;border:0;border-radius:10px;background:#f2a93b;color:#1d1b18;font:600 12px/1 "DM Mono",monospace;letter-spacing:.12em;text-transform:uppercase;cursor:pointer}.alert{color:#ff9c8b}ul{list-style:none;margin:18px 0 0;padding:0;border:1px solid #232323;border-radius:16px;background:#0f0f0f;overflow:hidden}
 li{border-top:1px solid #232323}li:first-child{border-top:0}li a{display:flex;gap:12px;align-items:center;padding:12px 16px;color:#f5f5f3;text-decoration:none;font:400 14px/1.4 "DM Mono",monospace}li a:hover{background:rgba(242,169,59,.08)}
 li a span{flex:1;min-width:0;overflow-wrap:anywhere}li small{color:#5c5c58;font:400 12px/1 "DM Mono",monospace}li.dir a span{color:#f2a93b}footer{margin-top:28px;font:400 11px/1.4 "DM Mono",monospace;color:#5c5c58;letter-spacing:.08em;text-transform:uppercase}footer a{color:#8f8f8a}`;
+const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#050505"/><g fill="none" stroke="#f2a93b" stroke-width="4.2" stroke-linecap="round"><circle cx="32" cy="32" r="18.5"/><g transform="rotate(-24 32 32)"><ellipse cx="32" cy="32" rx="18.5" ry="5.6" stroke-opacity="0.38"/><path d="M13.5 32A18.5 5.6 0 0 0 50.5 32"/></g></g></svg>`;
 const MARK = `<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="3"><circle cx="32" cy="32" r="18.5"/><g transform="rotate(-24 32 32)"><ellipse cx="32" cy="32" rx="18.5" ry="5.6" stroke-opacity="0.38"/><path d="M13.5 32A18.5 5.6 0 0 0 50.5 32"/></g></g></svg>`;
 
 function fmtBytes(value) {
@@ -138,7 +139,7 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
       "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
       ...(setCookie ? { "Set-Cookie": setCookie } : {}),
     }));
-    res.end(`<!doctype html><html lang="${language(req)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title><style>${STYLE}</style></head><body><main>${MARK}<h1>${esc(title)}</h1><p>${text}</p>${extra}</main></body></html>`);
+    res.end(`<!doctype html><html lang="${language(req)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><link rel="icon" href="/_cora/icon.svg" type="image/svg+xml"><title>${esc(title)}</title><style>${STYLE}</style></head><body><main>${MARK}<h1>${esc(title)}</h1><p>${text}</p>${extra}</main></body></html>`);
   }
 
   const redirect = (res, location, extra = {}) => {
@@ -241,6 +242,11 @@ export function shareHosts({ config, store, artifacts, cloud, firstUse, sessionK
     if (req.method !== "GET" && req.method !== "HEAD" && !(passwordForm && req.method === "POST")) {
       res.writeHead(405, headers({ Allow: "GET, HEAD" }));
       return res.end();
+    }
+    // The tab's icon for Cora's own pages on a share host: the mark, open to anyone.
+    if (url.pathname === "/_cora/icon.svg") {
+      res.writeHead(200, headers({ "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400", "Content-Security-Policy": "default-src 'none'" }));
+      return res.end(req.method === "HEAD" ? undefined : ICON);
     }
     const target = artifacts.resolveHost(label);
     if (!target) return page(req, res, 404, words(req, "gone"));

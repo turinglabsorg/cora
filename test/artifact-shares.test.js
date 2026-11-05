@@ -369,6 +369,10 @@ test("a folder of files opens like a drive: cards, search, a page per file, a zi
   assert.match(home.body, /href="\/dati\.bin\?download=1"/, "and downloads in one click");
   assert.match(home.body, /href="\/_cora\/zip"/, "the whole folder downloads as one zip");
   assert.match(home.body, /Condiviso da Owner · 5 file/);
+  assert.match(home.body, /<link rel="icon" href="\/_cora\/icon\.svg"/);
+  const mark = await hit(port, HOST, "/_cora/icon.svg");
+  assert.equal(mark.headers["content-type"], "image/svg+xml", "the tab shows Cora's mark");
+  assert.match(mark.body, /^<svg /);
   assert.doesNotMatch(home.body, /<script>alert/);
   const found = await get("/?q=NOTA");
   assert.match(found.body, /Risultati per «NOTA»/);
