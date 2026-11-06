@@ -98,13 +98,14 @@ test("request and send pages: only their own page posts, a send opens its set nu
   const docker = fakeDocker();
   const app = startCora({ home: tempHome(), host: "127.0.0.1", port: 0, insecureCookies: true,
     adminPassword: "fixture-password", sessionKey: "fixture-session-vault", useResidentSubscriptions: false,
-    // A space on its own domain has no share hosts: its sends stay on the instance's /send/s/ path.
     cloudUrl: "https://usecora.test", cloudKey: keys.publicKey, cloudSpace: "acme", publicHost: "acme.usecora.test",
     discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
     botTokenFor: () => "", docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
   });
   await app.ready;
   t.after(() => app.stop());
+  // A Cora whose shares the cloud does not route keeps its sends on the instance's /send/s/ path.
+  app.vault.shareSuffix = "";
   const port = app.server.address().port;
   const base = `http://127.0.0.1:${port}`;
   const enter = async (identity) => {
@@ -178,6 +179,8 @@ test("a send with a password asks for it before the bytes leave, and the vault's
   });
   await app.ready;
   t.after(() => app.stop());
+  // A Cora whose shares the cloud does not route keeps its sends on the instance's /send/s/ path.
+  app.vault.shareSuffix = "";
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const entered = await fetch(`${base}/auth/cloud?${new URLSearchParams({ pass: signPass(keys.privateKey, { aud: "acme.usecora.test", sub: "ac_owner", role: "owner", name: "Owner", email: "owner@example.test", emailVerified: true }) })}`, { redirect: "manual" });
   const owner = entered.headers.get("set-cookie").split(";")[0];
@@ -187,7 +190,7 @@ test("a send with a password asks for it before the bytes leave, and the vault's
   };
   await call("/api/secrets", { method: "POST", body: { name: "ACME_FTP", value: "ftp-fixture-value", agents: ["*"] } });
   const people = await call("/api/secrets/ACME_FTP/sends", { method: "POST", body: { views: 1, access: { mode: "people", emails: ["giulia@cliente.test"] } } });
-  assert.equal(people.status, 400, "a space on its own domain has no address for named people");
+  assert.equal(people.status, 400, "without the cloud's addresses there is none for named people");
   assert.match(people.data.error, /pubblico o con password/);
   const made = await call("/api/secrets/ACME_FTP/sends", { method: "POST", body: { views: 2, days: 1, note: "per Giulia", access: { mode: "password", password: "fixture-door" } } });
   assert.equal(made.status, 201);
