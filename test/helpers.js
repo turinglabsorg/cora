@@ -121,6 +121,8 @@ export async function fakeDiscord() {
     profilePatches: [],
     // Answers to pressed buttons: POST /interactions/<id>/<token>/callback.
     interactionAnswers: [],
+    // Threads opened through the API: id -> the thread, and who opened it.
+    threads: new Map(),
     nextId: 900000000000000000n,
   };
   const id = () => String(state.nextId++);
@@ -149,6 +151,21 @@ export async function fakeDiscord() {
       const asking = String(req.headers.authorization || "").replace(/^Bot /, "");
       if (only && only !== asking) return json(res, 403, { message: "Missing Access", code: 50001 });
       return json(res, 200, [...(state.history.get(match[1]) || [])].reverse());
+    }
+    if ((match = /^\/channels\/(\d+)\/threads$/.exec(url.pathname)) && req.method === "POST") {
+      const asked = JSON.parse(String(body || "{}"));
+      const opener = state.botUsers.get(String(req.headers.authorization || "").replace(/^Bot /, "")) || { id: BOT, username: "Cora" };
+      const thread = { id: id(), type: asked.type || 11, name: asked.name, parent_id: match[1], guild_id: GUILD, owner_id: opener.id, thread_metadata: { archived: false } };
+      state.threads.set(thread.id, { ...thread, openedBy: opener.username });
+      json(res, 201, thread);
+      setTimeout(() => dispatch("THREAD_CREATE", thread), 20);
+      return;
+    }
+    if ((match = /^\/channels\/(\d+)$/.exec(url.pathname)) && req.method === "GET") {
+      const thread = state.threads.get(match[1]);
+      if (thread) { const { openedBy, ...plain } = thread; return json(res, 200, plain); }
+      if (match[1] === CHANNEL) return json(res, 200, { id: CHANNEL, type: 0, name: "general", guild_id: GUILD });
+      return json(res, 404, { message: "Unknown Channel", code: 10003 });
     }
     if ((match = /^\/channels\/(\d+)\/webhooks$/.exec(url.pathname))) {
       if (!state.webhookAllowed) return json(res, 403, { message: "Missing Permissions" });

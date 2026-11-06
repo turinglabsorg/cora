@@ -1256,16 +1256,57 @@ export class Orchestrator {
 
   async postDirect(agent, current, target, text, options = {}) {
     if (!target || target === current.id) return this.postAs(agent, current, text, undefined, undefined, options);
-    const allowed = target === SALOTTO || target === privateRoom(agent.id) || this.channels.listFor(agent).some((channel) => channel.id === target);
+    let info = this.channels.listFor(agent).find((channel) => channel.id === target);
+    // A thread under a channel it may write to counts too, even one opened since the list was made.
+    if (!info && transportOf(target) === "discord") info = await this.threadFor(agent, target);
+    const allowed = target === SALOTTO || target === privateRoom(agent.id) || Boolean(info);
     if (!allowed || !this.channels.isActive(target)) throw new Error("destination not authorized; use list_channels");
     const state = this.state(target);
     if (transportOf(target) === "discord") {
-      const info = this.channels.listFor(agent).find((channel) => channel.id === target);
       if (!info?.guildId || !this.allowedGuild(info.guildId)) throw new Error("destination not authorized");
       const own = this.bots?.client(agent.id);
       await (own || this.discord).fetchMessages(target, 1);
     }
     return this.postAs(agent, state, text, undefined, undefined, { ...options, passive: true });
+  }
+
+  /**
+   * A thread an agent may write in: under a channel it may write to. Looked up on Discord when the
+   * cache does not have it yet (just opened, or archived), and remembered.
+   */
+  async threadFor(agent, threadId) {
+    if (transportOf(threadId) !== "discord" || !/^\d{5,30}$/.test(String(threadId))) return null;
+    const listed = this.channels.listFor(agent);
+    const known = listed.find((channel) => channel.id === threadId);
+    if (known) return known;
+    let thread = null;
+    try { thread = await this.discord.request("GET", `/channels/${threadId}`); } catch { return null; }
+    if (![10, 11, 12].includes(thread?.type)) return null;
+    const parent = listed.find((channel) => channel.id === thread.parent_id && !channel.thread);
+    if (!parent || !this.allowedGuild(parent.guildId)) return null;
+    this.discord.guilds?.get(parent.guildId)?.threads.set(thread.id, { ...thread, guild_id: parent.guildId });
+    return { id: thread.id, name: thread.name, kind: "discord", guildId: parent.guildId, guildName: parent.guildName, thread: true, parentId: parent.id };
+  }
+
+  /**
+   * A Discord thread an agent opens through Cora, under a channel it may write to (beside the
+   * current thread when it is in one), by its own bot when that bot reads the channel.
+   */
+  async openThread(agent, currentId, { name, channelId = "" } = {}) {
+    const title = String(name || "").trim().slice(0, 100);
+    if (!title) throw new Error("the thread needs a name");
+    const listed = this.channels.listFor(agent);
+    let parentId = String(channelId || currentId || "");
+    const here = listed.find((channel) => channel.id === parentId) || (transportOf(parentId) === "discord" ? await this.threadFor(agent, parentId) : null);
+    if (here?.thread) parentId = here.parentId;
+    const parent = listed.find((channel) => channel.id === parentId && !channel.thread);
+    if (!parent || transportOf(parentId) !== "discord" || !this.allowedGuild(parent.guildId)) throw new Error("a thread opens only under a Discord channel from list_channels");
+    const own = this.bots?.client(agent.id);
+    const client = own && (await this.bots.canRead(agent, parentId).catch(() => false)) ? own : this.discord;
+    const thread = await client.request("POST", `/channels/${parentId}/threads`, { body: { name: title, type: 11, auto_archive_duration: 10080 } });
+    for (const cache of [this.discord, own]) cache?.guilds?.get(parent.guildId)?.threads.set(thread.id, { ...thread, guild_id: parent.guildId });
+    this.log({ type: "message", agentId: agent.id, channelId: parentId, text: `${agent.name} ha aperto il thread «${thread.name}»` });
+    return { id: thread.id, name: thread.name, kind: "discord", guildId: parent.guildId, thread: true, parentId };
   }
 
   learnPerson(space, id, names) {

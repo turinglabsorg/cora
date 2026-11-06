@@ -122,6 +122,9 @@ export function startCora(overrides = {}) {
   skBots.onGuild = (event, agentId) => orchestrator.onSlackMessage(event, agentId).catch((error) => activity({ type: "error", agentId, text: `slack: ${error.message}` }));
   skBots.onDirect = (agentId, event) => orchestrator.onSlackDirect(agentId, event).catch((error) => activity({ type: "error", agentId, text: `slack dm: ${error.message}` }));
   brain.ask = (agent, request, where) => orchestrator.askOwner(agent, request, where);
+  // Threads opened and written in through Cora, never through another bot.
+  brain.openThread = (agent, currentId, options) => orchestrator.openThread(agent, currentId, options);
+  brain.threadFor = (agent, threadId) => orchestrator.threadFor(agent, threadId);
   // A private word to the owner from Cora: where a secret's link goes when they ask an agent for it.
   brain.messageOwner = (text) => orchestrator.messageOwner(text);
   // Where the owner reviews the brain: the address people reach this Cora on.

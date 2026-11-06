@@ -1448,7 +1448,7 @@ describe("agents in Discord", () => {
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
     // Its own routines travel with it: they are the agent's own, not the owner's computer.
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);
@@ -1710,6 +1710,38 @@ describe("agents in Discord", () => {
     const prompt = app.brain.systemPrompt(postina, { place: "", people: channel.people });
     assert.match(prompt, new RegExp(`## Chi puoi taggare qui\\nPer avvisare una persona scrivi @ seguito dal suo nome esattamente come in questo elenco: @${channel.people[0].name} \\(il proprietario\\)`));
     assert.match(prompt, /resta testo e non avvisa nessuno/);
+  });
+
+  test("an agent opens a thread through Cora and writes in it, never through another bot", async (t) => {
+    const results = [];
+    let threadId = "";
+    replies.set("Marta", (body) => {
+      const last = body.messages[body.messages.length - 1];
+      if (last.role === "tool") {
+        results.push(last.content);
+        const opened = /opened thread (\d+)/.exec(last.content);
+        if (opened) { threadId = opened[1]; return { tool_calls: [{ function: { name: "say", arguments: { text: "Primo aggiornamento su REF-55", channel_id: threadId } } }] }; }
+        return { content: "Thread aperto, ci scrivo lì." };
+      }
+      return { tool_calls: [{ function: { name: "thread_open", arguments: { name: "REF-55 cluster production OOM" } } }] };
+    });
+    t.after(() => replies.delete("Marta"));
+    discord.say({ content: "@Marta, apri un thread per REF-55 e scrivici lì" });
+    await waitFor(() => discord.state.webhookPosts.some((post) => post.channelId === threadId && post.content === "Primo aggiornamento su REF-55") || discord.state.botPosts.some((post) => post.channelId === threadId && post.content?.includes("Primo aggiornamento su REF-55")), { what: "the first message in the new thread" });
+    await waitFor(() => results.length >= 2, { what: "say's receipt for the thread" });
+    const thread = discord.state.threads.get(threadId);
+    assert.equal(thread.name, "REF-55 cluster production OOM");
+    assert.equal(thread.parent_id, CHANNEL, "under the channel the conversation is in");
+    assert.match(results[0], /Write in it with say\(\{text, channel_id: "\d+"\}\)/);
+    assert.match(results[1] || "", new RegExp(`posted directly to ${threadId}`), `say takes the thread at once, though it was not there when the turn began: ${results[1]}`);
+    await quiet();
+
+    // A thread somebody else opened under an allowed channel is a place it may write in too.
+    const elsewhere = await fetch(`${discord.url}/channels/${CHANNEL}/threads`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bot other" }, body: JSON.stringify({ name: "aperto da altri", type: 11 }) }).then((response) => response.json());
+    const agent = app.store.agents().find((item) => item.name === "Marta");
+    assert.ok(await app.orchestrator.threadFor(agent, elsewhere.id), "a thread under an allowed channel counts");
+    assert.equal(await app.orchestrator.threadFor(agent, "123456789012345678"), null, "an unknown one does not");
+    assert.match(app.brain.systemPrompt(agent, { place: "" }), /Non usare mai grog né un altro bot/);
   });
 
   test("an owner task shares a file through Cora and refuses a disabled recipient", async (t) => {

@@ -15,7 +15,7 @@ export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget
  * changing, pausing or deleting one touches nothing else — so they are not
  * locked behind the computer, which only opens when the owner is the one asking.
  */
-export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history", "artifact_folders", "artifact_log", "secret_list", "secret_request"]);
+export const OWN_TOOLS = new Set([...MEMORY_TOOLS, "thread_open", "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history", "artifact_folders", "artifact_log", "secret_list", "secret_request"]);
 
 export const TOOL_DEFS = [
   {
@@ -114,6 +114,19 @@ export const TOOL_DEFS = [
     name: "brain_note",
     description: "Tell the librarian something the whole company should know: a decision, a client's preference, who does what, a deadline. It queues immediate consolidation into the company brain, with you as its source. Your own memory stays remember.",
     parameters: { type: "object", properties: { text: { type: "string", description: "the fact, short and specific, with who decided and when if you know" } }, required: ["text"] },
+  },
+  {
+    name: "thread_open",
+    description: "Open a Discord thread through Cora, under this conversation's channel (beside this thread, when you are in one) or under channel_id from list_channels, for a topic that deserves its own conversation, such as an issue. It opens as you, and you can write in it at once with say({text, channel_id}); set a reminder about it with that channel_id so its result is posted there. Never use grog or another bot to open threads or write on Discord: you would speak as someone else.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "the thread's title, e.g. REF-55 cluster production OOM" },
+        channel_id: { type: "string", description: "optional: the channel to open it under; default this conversation's" },
+        text: { type: "string", description: "optional: your first message in the thread" },
+      },
+      required: ["name"],
+    },
   },
   {
     name: "list_channels",
@@ -394,6 +407,7 @@ export function summarizeArgs(name, args) {
   if (name === "secret_import" || name === "secret_request" || name === "secret_send") return String(args.name || "");
   if (name === "notify") return String(args.message || "").slice(0, 200);
   if (name === "say") return String(args.text || "").slice(0, 200);
+  if (name === "thread_open") return String(args.name || "").slice(0, 100);
   if (name === "brain_search") return String(args.query || "").slice(0, 200);
   if (name === "brain_page") return String(args.slug || "");
   if (name === "brain_note") return String(args.text || "").slice(0, 200);
@@ -612,7 +626,12 @@ export async function executeTool(call, ctx) {
         if (!text) return { text: "error: empty message" };
         if (!ctx.say) return { text: "error: there is no conversation to post to right now" };
         const target = String(args.channel_id || channelId || "");
-        if (target !== channelId && !ctx.postingChannels?.some((channel) => channel.id === target)) return { text: "error: destination not authorized; choose a channel from list_channels" };
+        if (target !== channelId && !ctx.postingChannels?.some((channel) => channel.id === target)) {
+          // A thread under a channel the agent may write to counts, even one opened since this turn began.
+          const thread = await ctx.threadFor?.(target).catch(() => null);
+          if (!thread) return { text: "error: destination not authorized; choose a channel from list_channels" };
+          ctx.postingChannels.push({ id: thread.id, name: thread.name, kind: thread.kind });
+        }
         const sent = await ctx.say(text.slice(0, 4000), target, { voice: args.voice === true });
         const messages = Array.isArray(sent) ? sent : [];
         const receipt = {
@@ -624,6 +643,13 @@ export async function executeTool(call, ctx) {
         if (args.voice === true) receipt.voice = sent?.voice?.messages ? "sent" : `not sent: ${sent?.voice?.error || "unavailable"}`;
         const status = target === channelId ? "posted in this conversation. Your final reply is posted here too: if there is work left, keep working and write only what is new; if this message already says it all, end with just PASS" : `posted directly to ${target}; do not duplicate this report in your final reply`;
         return { text: `${status}\nCora delivery receipt: ${JSON.stringify(receipt)}` };
+      }
+      case "thread_open": {
+        if (!ctx.openThread) return { text: "error: threads cannot be opened here" };
+        const thread = await ctx.openThread({ name: args.name, channelId: args.channel_id });
+        ctx.postingChannels?.push({ id: thread.id, name: thread.name, kind: thread.kind });
+        if (String(args.text || "").trim() && ctx.say) await ctx.say(String(args.text).trim().slice(0, 4000), thread.id);
+        return { text: `opened thread ${thread.id} «${thread.name}» under ${thread.parentId}${String(args.text || "").trim() ? ", with your first message in it" : ""}. Write in it with say({text, channel_id: "${thread.id}"}); a reminder about it goes there with channel_id "${thread.id}".` };
       }
       case "ask_owner": {
         if (!ctx.ask) return { text: "error: requests are not available" };
