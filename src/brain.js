@@ -239,7 +239,7 @@ export class Brain {
     return this.channels ? this.channels.label(channelId) : `#${channelId}`;
   }
 
-  systemPrompt(agent, { place, computer, withoutComputer = false }) {
+  systemPrompt(agent, { place, computer, withoutComputer = false, people = [] }) {
     const others = this.store.agents()
       .filter((other) => other.id !== agent.id && other.enabled)
       .map((other) => `- ${other.name}${PRONOUNS[other.gender] ? ` (${PRONOUNS[other.gender]})` : ""}: ${other.personality.split("\n")[0].slice(0, 140) || "(nessuna descrizione)"}`)
@@ -281,6 +281,10 @@ Appartieni a ${belongs.name} (su ${({ discord: "Discord", slack: "Slack", telegr
     if (mailbox?.status === "ready") sections.push(`## La tua email\nLa tua casella è ${mailbox.email}, già configurata nel tuo computer con ambox. Usa shell per ambox whoami, ambox inbox, ambox read e ambox send; per testi su più righe usa --body-file. Le chiavi restano nel client: non aprirle, copiarle o stamparle. Rispetta l’autorizzazione della persona prima di inviare posta. Non registrare una seconda casella per lo stesso compito.`);
     sections.push(`## Commit Git\nQuando il compito autorizza un commit, controlla e metti in stage soltanto le modifiche pertinenti, poi usa git_commit con la directory del repository e il messaggio. Lo strumento conserva l’autore e le regole del repository. ${this.gitAttribution.enabled ? "Aggiunge la firma Cora configurata dall’istanza. La stessa firma viene aggiunta automaticamente anche dai normali comandi git commit sul tuo desktop e nei comandi shell via SSH; non dipende dal fatto che tu la scriva nel messaggio." : "L’attribuzione Cora è disattivata: non aggiungere quella firma."} Non aggiungere firme del modello o del provider. Rispetta un eventuale divieto esplicito di attribuzione del proprietario o del repository: in quel caso disattivala per quel comando con CORA_GIT_ATTRIBUTION=0, oppure per il repository con git config cora.attribution false. Non modificare commit già pubblicati per aggiungere l’attribuzione.`);
     sections.push("## Scrivere nei canali: strumenti Cora\nPuoi già scrivere direttamente nei canali autorizzati. Usa list_channels per trovare id e nome del canale, poi say({text, channel_id}); senza channel_id, say scrive nella conversazione attuale. Quando chiedi qualcosa a un collega o a una persona del team, o gli consegni un risultato, rivolgiti a lui con @ e il nome come appare in chat (es. @Nome): Cora lo converte nella vera menzione, per un agente se il suo bot è presente e può leggere il canale, per una persona se ha scritto o è stata taggata in questo server. Non inventare id Discord. Per esempio, per riportare un risultato in #social trova il suo id con list_channels e invialo con say. Non serve grog: non cercarlo, non installarlo e non chiedere altri login per questa funzione. I riferimenti delle istruzioni personali a grog o ad altri strumenti di messaggistica si applicano qui attraverso gli strumenti Cora equivalenti. Se say conferma l'invio, il messaggio è già stato consegnato: non ripubblicarlo. Il risultato di una routine conclude quel giro; un nuovo messaggio umano riapre una normale conversazione e va ascoltato, senza ripetere la routine.");
+    // The exact names a tag works with here: anything else (a nickname, a shortened name) stays plain text.
+    if (people.length) {
+      sections.push(`## Chi puoi taggare qui\nPer avvisare una persona scrivi @ seguito dal suo nome esattamente come in questo elenco: ${people.map((person) => `@${person.name}${person.owner ? " (il proprietario)" : ""}`).join(", ")}. Un nome scritto in un altro modo (un soprannome, un nome accorciato, il nome di battesimo) resta testo e non avvisa nessuno: per chi non è nell'elenco scrivi il nome senza @.`);
+    }
     const documents = this.store.contextDocuments().filter((document) => document.enabled);
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
     if (this.companyBrain?.enabled) {
@@ -578,7 +582,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     // The company brain's tools exist only where there is a brain to read.
     const tools = caps.tools ? TOOL_DEFS.filter((tool) => (OWN_TOOLS.has(tool.name) || computer) && (this.companyBrain?.enabled || !tool.name.startsWith("brain_")) && (this.artifacts || !tool.name.startsWith("artifact_")) && (this.vault?.enabled || !tool.name.startsWith("secret_"))) : [];
     const place = channel.place || "";
-    const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools) });
+    const system = this.systemPrompt(agent, { place, computer: computer && caps.tools, withoutComputer: Boolean(agent.tools && !computer && caps.tools), people: channel.people || [] });
     let { goal, usage: goalCost } = task && goalRequest ? await this.goalFor(goalRequest, "", goalContext) : { goal: "", usage: null };
     if (task && goal) this.channelGoals.set(channel.id, agent.id, goal);
     const currentPrompt = () => `Ora: ${formatNow(this.timezone)}.\n\n${user}${goal ? `\n\n[Obiettivo] Questa è l'unica condizione attuale; sostituisce gli obiettivi precedenti: ${goal}` : ""}`;

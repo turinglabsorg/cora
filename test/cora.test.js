@@ -1699,6 +1699,17 @@ describe("agents in Discord", () => {
     const delivered = discord.state.webhookPosts.filter((post) => post.username === "Postina").at(-1);
     assert.equal(delivered.content, "<@700000000000000071> e <@700000000000000072>: è pronto. @Anna resta testo, `@Lia` resta codice, @Postina è un agente, @Ugo è di un altro server.");
     assert.equal(state.history.at(-1).content, text, "readable names remain in the archive");
+
+    // Agents are told the names a tag works with here, so they do not make one up ("@Seb" for sebnotseb).
+    const channel = app.orchestrator.turnChannel(CHANNEL);
+    assert.equal(channel.people[0].owner, true, "the owner comes first");
+    const names = channel.people.map((person) => person.name);
+    assert.ok(names.includes("Lia") && names.includes("Bruno"));
+    assert.ok(!names.includes("Anna"), "a name two people share tags nobody, so it is not offered");
+    assert.ok(!names.includes("Postina"), "agents are called through their own bots");
+    const prompt = app.brain.systemPrompt(postina, { place: "", people: channel.people });
+    assert.match(prompt, new RegExp(`## Chi puoi taggare qui\\nPer avvisare una persona scrivi @ seguito dal suo nome esattamente come in questo elenco: @${channel.people[0].name} \\(il proprietario\\)`));
+    assert.match(prompt, /resta testo e non avvisa nessuno/);
   });
 
   test("an owner task shares a file through Cora and refuses a disabled recipient", async (t) => {

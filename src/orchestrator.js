@@ -906,7 +906,7 @@ export class Orchestrator {
     if (!forced.length && !optional.length) return;
 
     const generation = state.generation;
-    const channel = this.channelMeta(state.id);
+    const channel = this.turnChannel(state.id);
     const snapshot = state.history.slice(-this.store.settings.historySize);
     const limitOptional = Math.max(0, this.store.settings.maxRepliesPerRound - forced.length);
     let postedOptional = 0;
@@ -1179,7 +1179,7 @@ export class Orchestrator {
       const english = this.store.settings.language === "en";
       await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.");
       const result = await this.brain.resumeTurn({
-        agent, trace, channel: this.channelMeta(state.id),
+        agent, trace, channel: this.turnChannel(state.id),
         postFile: (file, caption) => this.postAs(agent, state, caption, file),
         say: (text, target = state.id, { voice = false } = {}) => this.postDirect(agent, state, target, text, { voice }),
         inbox: this.inbox(state, state.history), routine,
@@ -1282,6 +1282,21 @@ export class Orchestrator {
    * there. Agents are tagged through their own bots instead, and a name two
    * people share tags nobody.
    */
+  /**
+   * The channel as an agent's turn sees it, with whom it can tag there: one name per person,
+   * written as Cora turns it into a real mention, the owner first.
+   */
+  turnChannel(channelId) {
+    const channel = this.channelMeta(channelId);
+    const transport = transportOf(channelId);
+    if (transport !== "discord" && transport !== "slack") return channel;
+    const owners = new Set(transport === "slack" ? this.store.settings.slackOwnerIds : this.store.settings.ownerIds);
+    const byId = new Map();
+    for (const [name, id] of this.peopleFor({ id: channelId })) if (id && !byId.has(id)) byId.set(id, name);
+    const people = [...byId].map(([id, name]) => ({ name, owner: owners.has(id) })).sort((a, b) => Number(b.owner) - Number(a.owner)).slice(0, 25);
+    return { ...channel, people };
+  }
+
   peopleFor(state) {
     const slack = transportOf(state.id) === "slack";
     const meta = this.channelMeta(state.id);
@@ -1626,7 +1641,7 @@ export class Orchestrator {
         resumeRunId = pendingRun.id;
       } else this.store.recordRoutineRun(routine.id, "interrupted", "Esecuzione interrotta prima di registrare una traccia; nuova prova richiesta manualmente.", { runId: pendingRun.id });
     }
-    const channel = this.channelMeta(routine.channelId);
+    const channel = this.turnChannel(routine.channelId);
     if (!this.channels.isActive(routine.channelId)) {
       this.store.recordRoutineRun(routine.id, "error", `il canale è su ${TRANSPORT_LABELS[transportOf(routine.channelId)]}, ma ora Cora vive altrove`, { runId: pendingRun?.id });
       return { status: "error" };
