@@ -1,4 +1,5 @@
 import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 
 /**
@@ -13,13 +14,22 @@ function forwardHeaders(req) {
   for (const [name, value] of Object.entries(req.headers)) if (!HOP.has(name)) headers[name] = value;
   headers["x-forwarded-proto"] = "https";
   headers["x-forwarded-host"] = req.headers.host || "";
+  // Only the cloud vouches for which share a request is for.
+  delete headers["x-cora-share"];
   return headers;
 }
 
-export function proxyRequest(req, res, upstream, { onError }) {
+/**
+ * `rehost` calls the space by its own address (a space on its own domain is reached by name,
+ * through its tunnel), with `extra` headers such as the signed share it is for.
+ */
+export function proxyRequest(req, res, upstream, { onError, rehost = false, extra = {} }) {
   const target = new URL(upstream);
-  const outgoing = http.request({
-    host: target.hostname, port: target.port || 80, method: req.method, path: req.url, headers: forwardHeaders(req),
+  const secure = target.protocol === "https:";
+  const headers = { ...forwardHeaders(req), ...extra };
+  if (rehost) headers.host = target.host;
+  const outgoing = (secure ? https : http).request({
+    host: target.hostname, port: target.port || (secure ? 443 : 80), method: req.method, path: req.url, headers, ...(secure ? { servername: target.hostname } : {}),
   }, (incoming) => {
     const headers = {};
     for (const [name, value] of Object.entries(incoming.headers)) if (!HOP.has(name)) headers[name] = value;

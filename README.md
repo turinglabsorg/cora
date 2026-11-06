@@ -94,7 +94,7 @@ What the agents make on their computers and has to be kept or shown (a report, a
   - A proposal that is no longer needed (later work replaced it, or a conflict nobody wants to settle) can be *ignored*: it leaves the reviews and stays in the history as *Ignorato*, and nobody is told, since there is nothing to redo.
   - The agent's receipt says PROPOSED or PUBLISHED. Cora posts a passive notice in the conversation the push came from, and the owner gets a push notification.
 - **Pull.** `artifact_pull` writes a folder's served version onto a desktop, in `/home/agent/work/artifacts/<path>`, so an agent can continue another's work and push it back.
-- **Sharing.** A folder can be opened to people outside the space through a link with an address of its own, `<label>--<space>.usecora.space`.
+- **Sharing.** A folder can be opened to people outside the space through a link with an address of its own, `<label>--<space>.usecora.space`. The cloud routes those addresses for every space, also one on its own address (like a Cora reached through its own tunnel): the cloud calls it by that address and tells it, in a pass it signs, which link the visitor asked for.
   - **What it serves.** The served version, or a pinned one, and the whole folder or any subfolder of it (the link's root): a link for `landing/` serves only what is under it, as if it were the whole folder. It shows as a site (index pages, clean URLs, `404.html`; a folder without an `index.html` lists its files, and a click opens the page itself) or as a drive of files:
     - folders and files as cards (pictures as themselves, the first lines of a text) or as a list;
     - a search over the whole folder;

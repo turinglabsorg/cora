@@ -560,6 +560,7 @@ describe("shared folders: <label>--<space> hosts and their way in", () => {
   let shareOrigin;
   let shareStore;
   let space;
+  let ownSpace;
   let ambox;
   const mails = [];
   const asked = [];
@@ -593,6 +594,11 @@ describe("shared folders: <label>--<space> hosts and their way in", () => {
         res.end(JSON.stringify({ host: req.headers.host, path: req.url }));
       });
     });
+    // A space on its own domain: reached by its own name, it says what it was told.
+    ownSpace = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ host: req.headers.host, forwarded: req.headers["x-forwarded-host"], share: req.headers["x-cora-share"] || "" }));
+    });
     ambox = http.createServer((req, res) => {
       const chunks = [];
       req.on("data", (chunk) => chunks.push(chunk));
@@ -602,11 +608,11 @@ describe("shared folders: <label>--<space> hosts and their way in", () => {
         res.end(JSON.stringify({ message_id: "m1" }));
       });
     });
-    await Promise.all([space, ambox].map((server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))));
+    await Promise.all([space, ownSpace, ambox].map((server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))));
     shareStore = new CloudStore(tempHome());
     const owner = shareStore.createAccount({ name: "Owner" });
     shareStore.addSpace({ slug: "acme", accountId: owner.id, upstream: `http://127.0.0.1:${space.address().port}` });
-    shareStore.addSpace({ slug: "onprem", accountId: owner.id, upstream: "http://127.0.0.1:9", publicUrl: "https://cora.customer.test" });
+    shareStore.addSpace({ slug: "onprem", accountId: owner.id, upstream: `http://127.0.0.1:${ownSpace.address().port}`, publicUrl: "https://cora.customer.test" });
     const probe = net.createServer();
     await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
     sharePort = probe.address().port;
@@ -626,18 +632,23 @@ describe("shared folders: <label>--<space> hosts and their way in", () => {
   after(async () => {
     shareCloud.server.closeAllConnections();
     await new Promise((resolve) => shareCloud.server.close(resolve));
-    for (const server of [space, ambox]) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
+    for (const server of [space, ownSpace, ambox]) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
     shareStore.close();
   });
 
-  test("a share host reaches its space with the Host kept; a space on its own domain, or none, has no shares", async () => {
-    const proxied = await call("/docs?x=1", { host: "report--acme.usecora.test" });
+  test("a share host reaches its space with the Host kept; a space on its own domain by its own name, with the share signed", async () => {
+    const proxied = await call("/docs?x=1", { host: "report--acme.usecora.test", headers: { "x-cora-share": "forged" } });
     assert.equal(proxied.status, 200);
     assert.deepEqual(JSON.parse(proxied.body), { host: `report--acme.usecora.test:${sharePort}`, path: "/docs?x=1" });
     assert.equal((await call("/", { host: "report--nope.usecora.test" })).status, 404);
-    const onprem = await call("/", { host: "report--onprem.usecora.test" });
-    assert.equal(onprem.status, 404);
+    const onprem = await call("/", { host: "report--onprem.usecora.test", headers: { "x-cora-share": "forged" } });
+    assert.equal(onprem.status, 200);
     assert.equal(onprem.headers.location, undefined, "never a redirect to the customer's own domain");
+    const told = JSON.parse(onprem.body);
+    assert.equal(told.host, `127.0.0.1:${ownSpace.address().port}`, "called by its own address, which its tunnel knows");
+    const pass = verifyPass(shareCloud.publicKey, told.share, { audience: "share-route:cora.customer.test" });
+    assert.ok(pass, "the share it is for comes in a pass the cloud signed for that space; a header from outside never passes");
+    assert.equal(pass.host, "report--onprem.usecora.test");
     assert.equal(validSlug("share"), false);
     assert.equal(validSlug("p"), false);
   });

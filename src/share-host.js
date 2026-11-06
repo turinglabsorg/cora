@@ -116,10 +116,17 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
   const mac = (value) => createHmac("sha256", sessionKey || "cora-share").update(value).digest("base64url");
   const etag = (sha) => `"${mac(`etag.${sha}`).slice(0, 27)}"`;
 
-  /** The share or preview a request is for, from its Host. */
+  /**
+   * The share or preview a request is for, from its Host. A space on its own address gets its
+   * shares through the cloud, which must call it by that address: there the share's host comes
+   * in a pass the cloud signs, so nobody else can claim one.
+   */
   function match(req) {
     if (!suffix || !cloud) return null;
-    const host = String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "");
+    const routed = req.headers["x-cora-share"];
+    const host = routed
+      ? String(verifyPass(cloud.key, routed, { audience: `share-route:${cloud.audience}` })?.host || "").toLowerCase()
+      : String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "");
     if (!host.endsWith(suffix)) return null;
     return { host, label: host.slice(0, -suffix.length) };
   }
@@ -285,7 +292,8 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       res.writeHead(405, headers({ Allow: "GET, HEAD" }));
       return res.end();
     }
-    const panel = `https://${host.slice(host.indexOf("--") + 2)}`;
+    // The panel that frames it: the space's own address when it has one, its usecora.space name otherwise.
+    const panel = config.publicHost ? `https://${config.publicHost}` : `https://${host.slice(host.indexOf("--") + 2)}`;
     if (url.pathname.startsWith("/_t/") || !url.searchParams.get("t")) return rawSite(req, res, target, url, panel);
     let path;
     try { path = decodeURIComponent(url.pathname.slice(1)); } catch { path = ""; }

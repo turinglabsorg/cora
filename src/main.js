@@ -130,8 +130,9 @@ export function startCora(overrides = {}) {
   // The agents' pictures are served from here, so Slack and Discord fetch them from this address.
   store.setAvatarBase(instanceUrl);
   // What the agents make on their desktops, versioned and reviewed on this server.
-  // Shares answer on <label>--<space>.<cloud domain>: only for a space the cloud routes, not one on its own domain.
-  const shareSuffix = !cfg.publicHost && cfg.cloudUrl && cfg.cloudSpace ? `--${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
+  // Shares answer on <label>--<space>.<cloud domain>, routed by the cloud: to a space on its own address too,
+  // with the share's host in a pass the cloud signs.
+  const shareSuffix = cfg.cloudUrl && cfg.cloudSpace ? `--${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
   const artifacts = new Artifacts({
     store, home: cfg.home, boxes, companyBrain, log: activity, instanceUrl, shareSuffix,
     push: { notify: (notice) => (push.enabled ? push.notify(notice) : Promise.resolve()) },

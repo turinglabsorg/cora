@@ -213,7 +213,7 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
     const at = label.lastIndexOf("--");
     if (at < 1 || label.includes(".") || !/^[a-z0-9-]+$/.test(label)) return null;
     const space = store.space(label.slice(at + 2));
-    return space && !space.publicUrl ? { host, label: label.slice(0, at), space } : null;
+    return space ? { host, label: label.slice(0, at), space } : null;
   };
   const shareLanguage = (req) => (/^\s*it\b/i.test(String(req.headers["accept-language"] || "")) ? "it" : "en");
   /** Into the share, with a pass its space checks: who this is and how they proved it. */
@@ -486,10 +486,13 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       const { host, slug, share } = spaceOf(req);
       if (slug === "www") return redirect(res, `${origin.origin}${url.pathname}${url.search}`);
       if (slug && share) {
-        // A share answers from its space, Host and all; a space on its own domain has none here.
+        // A share answers from its space, Host and all. A space on its own domain is called by that
+        // name (its tunnel knows no other), and the share's host goes along in a pass signed here.
         const space = store.space(slug);
-        if (!space || space.publicUrl) return html(res, 404, views.shareGone({ language: shareLanguage(req) }));
+        if (!space) return html(res, 404, views.shareGone({ language: shareLanguage(req) }));
+        const routed = space.publicUrl ? { rehost: true, extra: { "x-cora-share": signPass(keys.privateKey, { aud: `share-route:${spaceAudience(space)}`, host }) } } : {};
         return proxyRequest(req, res, space.upstream, {
+          ...routed,
           onError: (error) => {
             log({ type: "space-offline", space: slug, error: error.message });
             html(res, 502, views.offline({ slug }));

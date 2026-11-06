@@ -753,3 +753,43 @@ test("a reviewer can ignore a proposal that is no longer needed: out of the revi
   assert.match(again.data.error, /già ignorato/);
   assert.equal((await call(`/api/artifacts/commits/${first.commit.id}/review`, { method: "POST", body: { decision: "nope" } })).status, 400);
 });
+
+test("a space on its own address has shares too: the cloud calls it by that address, with the share's host signed", async (t) => {
+  const docker = fakeDocker();
+  const app = startCora({ home: tempHome(), host: "127.0.0.1", port: 0, insecureCookies: true,
+    adminPassword: "fixture-password", sessionKey: "fixture-session-own-address", useResidentSubscriptions: false,
+    cloudUrl: "https://usecora.test", cloudKey: keys.publicKey, cloudSpace: "acme", publicHost: "cora-acme.example.test",
+    discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
+    botTokenFor: () => "", docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
+  });
+  await app.ready;
+  t.after(() => app.stop());
+  const port = app.server.address().port;
+  assert.equal(app.artifacts.shareSuffix, "--acme.usecora.test", "shares are on, though the space has its own address");
+  const agent = app.store.createAgent({ name: "Nico", model: "ollama/test-model", tools: true });
+  const target = join(docker.desktop(agent.id), "work", "sito", "index.html");
+  mkdirSync(join(target, ".."), { recursive: true });
+  writeFileSync(target, "<h1>Sito</h1>");
+  writeFileSync(join(target, "..", "doc.pdf"), "%PDF-1.4\n");
+  const owner = { id: "u1", name: "Owner", role: "owner" };
+  const pushed = await app.artifacts.push({ agent, folder: "sito", path: "/home/agent/work/sito", message: "sito", requester: { kind: "owner", id: "1", name: "Owner" }, create: { description: "Il sito", kind: "site" } });
+  await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+  app.artifacts.createShare(pushed.folder.id, { label: "report", access: { mode: "public" }, createdBy: owner });
+  const OWN = "cora-acme.example.test";
+  const routed = (host, audience = `share-route:${OWN}`) => signPass(keys.privateKey, { aud: audience, host });
+  const viaCloud = await hit(port, OWN, "/", { headers: { "x-cora-share": routed(SHARE) } });
+  assert.equal(viaCloud.status, 200);
+  assert.equal(viaCloud.body, "<h1>Sito</h1>", "the share answers, called by the space's own address");
+  assert.notEqual((await hit(port, OWN, "/")).body, "<h1>Sito</h1>", "without the cloud's pass the address is the panel");
+  assert.notEqual((await hit(port, OWN, "/", { headers: { "x-cora-share": routed(SHARE, "share-route:other.example.test") } })).body, "<h1>Sito</h1>", "a pass for another space is no good");
+  assert.notEqual((await hit(port, OWN, "/", { headers: { "x-cora-share": "forged.pass" } })).body, "<h1>Sito</h1>");
+  // The panel that frames a preview is the space's own address, not its usecora.space name.
+  const entered = await fetch(`http://127.0.0.1:${port}/auth/cloud?${new URLSearchParams({ pass: signPass(keys.privateKey, { aud: OWN, ...OWNER }) })}`, { redirect: "manual" });
+  const cookie = entered.headers.get("set-cookie").split(";")[0];
+  const view = await (await fetch(`http://127.0.0.1:${port}/api/artifacts/commits/${pushed.commit.id}/view?path=doc.pdf`, { headers: { Cookie: cookie, "X-Cora": "1" } })).json();
+  const raw = new URL(view.url);
+  assert.equal(raw.host, `r-${pushed.commit.id.slice(3)}--acme.usecora.test`);
+  const framed = await hit(port, OWN, `${raw.pathname}${raw.search}`, { headers: { "x-cora-share": routed(raw.host) } });
+  assert.equal(framed.status, 200);
+  assert.equal(framed.headers["content-security-policy"], `frame-ancestors https://${OWN}`);
+});
