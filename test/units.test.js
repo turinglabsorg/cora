@@ -186,6 +186,20 @@ describe("text helpers", () => {
 });
 
 describe("SQLite store", () => {
+  test("an agent saved before platforms could be switched off for it is on every platform", () => {
+    const home = tempHome();
+    const store = new Store(home);
+    const agent = store.createAgent({ name: "Ugo" });
+    const { platformsOff: _gone, ...old } = agent;
+    store.db.prepare("UPDATE agents SET data = ? WHERE id = ?").run(JSON.stringify(old), agent.id);
+    store.close();
+    const reopened = new Store(home);
+    assert.deepEqual(reopened.agent(agent.id).platformsOff, []);
+    reopened.updateSettings({ transports: ["discord", "telegram"] });
+    assert.deepEqual(reopened.updateAgent(agent.id, { platformsOff: [...reopened.agent(agent.id).platformsOff, "telegram"] }).platformsOff, ["telegram"]);
+    reopened.close();
+  });
+
   test("keeps reasoning traces; a turn cut short by a restart is marked interrupted", () => {
     const home = tempHome();
     const store = new Store(home);

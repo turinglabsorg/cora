@@ -485,7 +485,8 @@ export class Store {
     const settingsRow = this.db.prepare("SELECT value FROM settings WHERE key = 'settings'").get();
     const savedSettings = settingsRow ? JSON.parse(settingsRow.value) : {};
     this.cachedSettings = sanitizeSettings(savedSettings, DEFAULT_SETTINGS);
-    this.cachedAgents = this.db.prepare("SELECT data FROM agents ORDER BY position").all().map((row) => JSON.parse(row.data));
+    // Agents saved before a platform could be switched off for them are on every platform.
+    this.cachedAgents = this.db.prepare("SELECT data FROM agents ORDER BY position").all().map((row) => ({ platformsOff: [], ...JSON.parse(row.data) }));
     this.cachedRoutines = this.db.prepare("SELECT data FROM routines ORDER BY rowid").all().map((row) => JSON.parse(row.data));
     this.recoverRoutineRuns();
     this.importRoutineHistory();
