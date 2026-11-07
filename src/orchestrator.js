@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ThreadState } from "./thread-state.js";
-import { TRANSPORT_LABELS, isSlackChannel, isTelegramChannel, slackChannel, slackIds, telegramChannel, telegramChatId, transportOf } from "./channels.js";
+import { TRANSPORT_LABELS, isSlackChannel, isTelegramChannel, slackChannel, slackIds, telegramBotAgent, telegramChannel, telegramChatId, transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { MEMORY_TOOLS } from "./tools.js";
 import { userName } from "./telegram.js";
@@ -146,13 +146,13 @@ export class Orchestrator {
 
   channelMeta(channelId) {
     if (this.dmAgentId(channelId)) {
-      return { id: channelId, kind: this.channels.active, name: "DM", guildId: null, guildName: "", parentId: null, where: "in privato con te", place: "in un messaggio privato", note: "messaggio privato" };
+      return { id: channelId, kind: transportOf(channelId), name: "DM", guildId: null, guildName: "", parentId: null, where: "in privato con te", place: "in un messaggio privato", note: "messaggio privato" };
     }
     return this.channels.info(channelId);
   }
 
   dmAgentId(channelId) {
-    return this.dmAgent.get(channelId) || null;
+    return this.dmAgent.get(channelId) || telegramBotAgent(channelId) || null;
   }
 
   agentsFor(channelId) {
@@ -168,7 +168,7 @@ export class Orchestrator {
     const transport = transportOf(channelId);
     const info = transport === "discord" ? this.channels.discordInfo(channelId) : transport === "slack" ? this.channels.info(channelId) : null;
     return this.store.agents().filter((agent) => {
-      if (!agent.enabled) return false;
+      if (!agent.enabled || !this.channels.agentOn(agent, transport)) return false;
       const chosen = agent.channelIds.filter((id) => transportOf(id) === transport);
       return !chosen.length || chosen.includes(channelId) || Boolean(info?.parentId && chosen.includes(info.parentId));
     });
@@ -458,9 +458,9 @@ export class Orchestrator {
    * down are archived, and a recent human message nobody answered gets answered.
    */
   async catchUp() {
-    if (this.channels.active === "slack") return this.catchUpSlack();
-    if (this.channels.active !== "discord") return;
-    for (const channel of this.channels.list()) {
+    if (this.channels.on("slack")) await this.catchUpSlack();
+    if (!this.channels.on("discord")) return;
+    for (const channel of this.channels.list().filter((item) => item.kind === "discord")) {
       const state = this.state(channel.id);
       if (state.running || state.nextRoundAt) continue;
       state.loaded = false;
@@ -597,13 +597,13 @@ export class Orchestrator {
   }
 
   /** Until an owner is set, the person in a private chat or the group's creator becomes it. */
-  async claimTelegramOwner(chat, from) {
+  async claimTelegramOwner(chat, from, client = this.telegram) {
     if (this.store.settings.telegramOwnerIds.length || !from?.id) return;
     let ownerId = null;
     if (chat.type === "private") ownerId = String(from.id);
     else {
       try {
-        const admins = await this.telegram.request("getChatAdministrators", { chat_id: chat.id });
+        const admins = await client.request("getChatAdministrators", { chat_id: chat.id });
         const creator = admins.find((member) => member.status === "creator");
         if (creator) ownerId = String(creator.user.id);
       } catch {}
@@ -649,18 +649,31 @@ export class Orchestrator {
     return parts.join(" ").slice(0, 3000) || "(messaggio vuoto)";
   }
 
-  async onTelegramMessage(message) {
-    if (this.channels.active !== "telegram" || !message?.chat) return;
+  /**
+   * A Telegram message, heard by the main bot or by an agent's own bot. A private chat with an
+   * agent's bot is a conversation only that agent answers (tg:<chat>@<agent>); a group is heard
+   * by any of them, once.
+   */
+  async onTelegramMessage(message, viaAgentId = null) {
+    if (!this.channels.on("telegram") || !message?.chat) return;
     const chatId = String(message.chat.id);
-    if (!this.store.settings.telegramChatIds.includes(chatId)) return;
+    const privateWith = viaAgentId && message.chat.type === "private" ? viaAgentId : null;
+    if (!privateWith && !this.store.settings.telegramChatIds.includes(chatId)) return;
+    const client = (viaAgentId && this.tgBots?.client(viaAgentId)) || this.telegram;
     const from = message.from || {};
     if (from.is_bot && (String(from.id) === String(this.telegram.user?.id) || this.tgBots?.agentIdForUser(from.id))) return;
-    await this.claimTelegramOwner(message.chat, from);
-    const state = this.state(telegramChannel(chatId));
+    if (privateWith && !this.store.agent(privateWith)?.enabled) return;
+    // Anyone can write to an agent's bot: a private chat with one never makes its writer the
+    // owner, nor counts as the owner's while none is set. The owner's own chats are chosen in Settings.
+    if (!privateWith) await this.claimTelegramOwner(message.chat, from, client);
+    const channelId = telegramChannel(chatId, privateWith || "");
+    if (privateWith) this.dmAgent.set(channelId, privateWith);
+    const state = this.state(channelId);
     await this.ensureHistory(state);
-    const kind = from.is_bot ? "bot" : this.isTelegramOwner(from.id) ? "owner" : "human";
+    const owner = this.isTelegramOwner(from.id) && !(privateWith && !this.store.settings.telegramOwnerIds.length);
+    const kind = from.is_bot ? "bot" : owner ? "owner" : "human";
     const item = {
-      id: `tg_${chatId}_${message.message_id}`,
+      id: `tg_${chatId}${privateWith ? `@${privateWith}` : ""}_${message.message_id}`,
       at: (message.date || Date.now() / 1000) * 1000,
       authorId: String(from.id || ""),
       authorName: userName(from),
@@ -670,14 +683,14 @@ export class Orchestrator {
     };
     if ((kind === "owner" || kind === "human") && message.photo?.length) {
       const photo = [...message.photo].sort((a, b) => (b.file_size || 0) - (a.file_size || 0)).find((size) => !size.file_size || size.file_size <= IMAGE_LIMIT_BYTES);
-      const data = photo && await this.telegram.download(photo.file_id, IMAGE_LIMIT_BYTES).catch(() => null);
+      const data = photo && await client.download(photo.file_id, IMAGE_LIMIT_BYTES).catch(() => null);
       if (data) item.images = [data.toString("base64")];
     }
     const audio = message.voice || message.audio;
     if (audio?.file_id) {
       await this.hear(state, item, {
         placeholder: "[messaggio vocale]", filename: message.voice ? "voice.ogg" : audio.file_name || "audio.mp3", size: audio.file_size,
-        read: () => this.telegram.download(audio.file_id, AUDIO_LIMIT_BYTES),
+        read: () => client.download(audio.file_id, AUDIO_LIMIT_BYTES),
       });
     }
     await this.ingest(state, item);
@@ -752,7 +765,7 @@ export class Orchestrator {
    * thread belongs to that thread, where agents speak only when summoned.
    */
   async onSlackMessage(event, viaAgentId = null) {
-    if (this.channels.active !== "slack" || !event?.channel) return;
+    if (!this.channels.on("slack") || !event?.channel) return;
     // Edits, deletions, joins and the rest carry no new words for the agents.
     if (event.subtype && !SLACK_SUBTYPES.has(event.subtype)) return;
     if (!this.store.settings.slackChannelIds.includes(event.channel)) return;
@@ -778,7 +791,7 @@ export class Orchestrator {
 
   /** A direct message to an agent's own Slack app: a private conversation only that agent answers. */
   async onSlackDirect(agentId, event) {
-    if (this.channels.active !== "slack" || !event?.channel) return;
+    if (!this.channels.on("slack") || !event?.channel) return;
     const agent = this.store.agent(agentId);
     if (!agent?.enabled) return;
     if (event.subtype && event.subtype !== "file_share") return;
@@ -1017,7 +1030,7 @@ export class Orchestrator {
       return [item];
     }
     const chatId = telegramChatId(channelId);
-    if (chatId) return this.telegram.say(chatId, { content, name: "Cora" });
+    if (chatId) return (this.telegramClientFor(channelId) || this.telegram).say(chatId, { content, name: "Cora" });
     if (slackIds(channelId)) {
       const info = this.channels.info(channelId);
       return this.slack.say(info.channelId, { content, name: "Cora", threadTs: info.threadTs });
@@ -1040,8 +1053,12 @@ export class Orchestrator {
       const transport = transportOf(state.id);
       const where = agent.channelIds.filter((channelId) => transportOf(channelId) === transport).map((channelId) => this.channelMeta(channelId)?.name).filter(Boolean).map((name) => `#${name}`);
       const link = this.instanceUrl ? `${this.instanceUrl}/#/agent/${agent.id}/profilo` : "";
+      // Switched off on this whole platform, not just away from this channel.
+      const away = agent.enabled && !this.channels.agentOn(agent, transport);
+      const platform = TRANSPORT_LABELS[transport] || transport;
       const why = !agent.enabled
         ? (english ? `**${agent.name}** is switched off, so it cannot answer.` : `**${agent.name}** è spento, quindi non può rispondere.`)
+        : away ? (english ? `**${agent.name}** is not on ${platform}.` : `**${agent.name}** non è su ${platform}.`)
         : (english ? `**${agent.name}** is not listening in this channel${where.length ? `: it answers in ${where.join(", ")}` : ""}.` : `**${agent.name}** non è in ascolto in questo canale${where.length ? `: risponde in ${where.join(", ")}` : ""}.`);
       if (agent.enabled && transport === "discord" && !this.dmAgentId(state.id)) {
         try {
@@ -1056,6 +1073,7 @@ export class Orchestrator {
       }
       const how = !agent.enabled
         ? (english ? `Switch it on in the panel${link ? `: ${link}` : ""}.` : `Lo riaccendi dal pannello${link ? `: ${link}` : ""}.`)
+        : away ? (english ? `To have it answer here, open it in the panel${link ? ` (${link})` : ""} and turn ${platform} on under Listening.` : `Per farlo rispondere qui aprilo nel pannello${link ? ` (${link})` : ""} e accendi ${platform} in Ascolto.`)
         : (english ? `To have it answer here, open it in the panel${link ? ` (${link})` : ""} and add this channel under Listening.` : `Per farlo rispondere qui aprilo nel pannello${link ? ` (${link})` : ""} e aggiungi questo canale in Ascolto.`);
       await this.notice(state.id, `${why} ${how}`);
     }
@@ -1073,7 +1091,13 @@ export class Orchestrator {
       return this.discord.answerInteraction(interaction, { content: english ? "Only Cora's owner can do that." : "Lo può fare solo il proprietario di Cora." });
     }
     if (!agent || !channelId) return this.discord.answerInteraction(interaction, { content: english ? "That agent is no longer here." : "Questo agente non c'è più." });
-    if (agent.channelIds.length && !agent.channelIds.includes(channelId)) this.store.updateAgent(agent.id, { ...agent, channelIds: [...agent.channelIds, channelId] });
+    const chosen = agent.channelIds.filter((id) => transportOf(id) === "discord");
+    const listening = {
+      // Away from Discord altogether, it comes back for this channel only.
+      ...(agent.platformsOff.includes("discord") ? { platformsOff: agent.platformsOff.filter((kind) => kind !== "discord"), channelIds: [...new Set([...agent.channelIds, channelId])] } : {}),
+      ...(chosen.length && !chosen.includes(channelId) ? { channelIds: [...new Set([...agent.channelIds, channelId])] } : {}),
+    };
+    if (Object.keys(listening).length) this.store.updateAgent(agent.id, { ...agent, ...listening });
     const who = interaction.member?.user?.global_name || interaction.member?.user?.username || interaction.user?.username || "";
     this.log({ type: "agent", agentId: agent.id, text: `${agent.name} ora ascolta ${this.channelMeta(channelId)?.name || channelId}${who ? ` (da Discord, ${who})` : ""}` });
     await this.discord.answerInteraction(interaction, { update: true, content: english ? `✅ **${agent.name}** is listening here now.` : `✅ **${agent.name}** ora è in ascolto qui.` });
@@ -1214,7 +1238,7 @@ export class Orchestrator {
     if (chatId) {
       let shared = false;
       for (const agent of agents) {
-        const own = this.tgBots?.client(agent.id);
+        const own = this.telegramClientFor(channelId) || this.tgBots?.client(agent.id);
         if (own) own.typing(chatId);
         else shared = true;
       }
@@ -1259,7 +1283,7 @@ export class Orchestrator {
     let info = this.channels.listFor(agent).find((channel) => channel.id === target);
     // A thread under a channel it may write to counts too, even one opened since the list was made.
     if (!info && transportOf(target) === "discord") info = await this.threadFor(agent, target);
-    const allowed = target === SALOTTO || target === privateRoom(agent.id) || Boolean(info);
+    const allowed = target === SALOTTO || target === privateRoom(agent.id) || telegramBotAgent(target) === agent.id || Boolean(info);
     if (!allowed || !this.channels.isActive(target)) throw new Error("destination not authorized; use list_channels");
     const state = this.state(target);
     if (transportOf(target) === "discord") {
@@ -1409,8 +1433,8 @@ export class Orchestrator {
     if (isWebRoom(state.id)) return this.postWeb(agent, state, "", clip, undefined, { passive: true, silent: true });
     const chatId = telegramChatId(state.id);
     if (chatId) {
-      const own = this.tgBots?.client(agent.id);
-      if (own && await this.tgBots.inChat(agent.id, chatId)) {
+      const own = this.telegramClientFor(state.id) || this.tgBots?.client(agent.id);
+      if (own && (telegramBotAgent(state.id) || !this.telegram.token || await this.tgBots.inChat(agent.id, chatId))) {
         try { return await own.voiceNote(chatId, note); }
         catch (error) { this.log({ type: "warning", agentId: agent.id, channelId: state.id, text: `vocale col bot Telegram suo: ${error.message}; lo mando col bot principale` }); }
       }
@@ -1446,7 +1470,7 @@ export class Orchestrator {
     const body = chatId ? text || "" : slack ? await this.slackMentions(agent, state, text) : await this.discordMentions(agent, state, text);
     const content = ping && body ? `${ping} ${body}` : body;
     let sent;
-    if (chatId) sent = await this.postTelegram(agent, chatId, content, file);
+    if (chatId) sent = await this.postTelegram(agent, chatId, content, file, state.id);
     else if (slack) sent = await this.postSlack(agent, state, content, file);
     else {
       const own = this.bots?.client(agent.id);
@@ -1538,12 +1562,26 @@ export class Orchestrator {
   }
 
   /** As the agent's own Telegram bot when it is in the chat, otherwise through the main bot with its name on top. */
-  async postTelegram(agent, chatId, text, file) {
+  /** The bot a Telegram chat is answered through: an agent's own private chat only by that bot. */
+  telegramClientFor(channelId) {
+    const privateBot = telegramBotAgent(channelId);
+    return privateBot ? this.tgBots?.client(privateBot) || null : null;
+  }
+
+  async postTelegram(agent, chatId, text, file, channelId = "") {
+    if (telegramBotAgent(channelId)) {
+      const bot = this.telegramClientFor(channelId);
+      if (!bot) throw new Error("il bot Telegram di questo agente non è collegato");
+      return bot.say(chatId, { content: text || "", file });
+    }
     const own = this.tgBots?.client(agent.id);
-    if (own && await this.tgBots.inChat(agent.id, chatId)) {
+    // Without a main bot, an agent's own bot is the only voice there is.
+    const main = Boolean(this.telegram.token);
+    if (own && (!main || await this.tgBots.inChat(agent.id, chatId))) {
       try {
         return await own.say(chatId, { content: text || "", file });
       } catch (error) {
+        if (!main) throw error;
         this.tgBots.forgetMembership(agent.id);
         this.log({ type: "warning", agentId: agent.id, channelId: telegramChannel(chatId), text: `bot Telegram suo: ${error.message}; scrivo col bot principale` });
       }

@@ -523,6 +523,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         currentUser: user,
         access: { hosted: Boolean(cloud), canManage: user.role === "owner" },
         transport: channels.active,
+        transports: channels.enabled,
         discord: discord.status(),
         telegram: telegram.status(),
         slack: slack ? { ...slack.status(), apps: slackApps?.status() || null, appSync: slackApps?.configured ? slackApps.record("main") : null } : null,
@@ -675,6 +676,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     if (path === "/api/settings" && method === "PUT") {
       const before = channels.active;
+      const enabledBefore = channels.enabled;
       const residentsBefore = store.settings.useResidentSubscriptions;
       const keysBefore = store.settings.sshKeys.join("\n");
       // Permissions change only through /api/permissions, which only the owner may call.
@@ -686,9 +688,17 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           boxes.inspect(agent.id).then((state) => state.running && boxes.syncAccess(agent)).catch(() => {});
         }
       }
-      if (settings.transport !== before) {
+      const enabled = channels.enabled;
+      const added = enabled.filter((kind) => !enabledBefore.includes(kind));
+      // A platform switched on next to others starts empty: each agent joins it from its own page.
+      if (added.length && enabled.length > added.length) {
+        for (const agent of store.agents()) store.updateAgent(agent.id, { platformsOff: [...new Set([...agent.platformsOff, ...added])] });
+      }
+      if (settings.transport !== before || enabled.join() !== enabledBefore.join()) {
         channels.apply();
-        activity({ type: "settings", text: `Cora ora vive su ${TRANSPORT_LABELS[settings.transport] || settings.transport}` });
+        tgBots?.sync();
+        const names = enabled.map((kind) => TRANSPORT_LABELS[kind] || kind).join(", ");
+        activity({ type: "settings", text: enabled.length > 1 ? `Cora ora vive su ${names}; i messaggi privati per te su ${TRANSPORT_LABELS[settings.transport] || settings.transport}` : `Cora ora vive su ${names}` });
       }
       return send(res, 200, settings);
     }
@@ -727,7 +737,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (tgBots?.agentIdForUser(user.id)) throw new HttpError(400, "questo è il bot di un agente: per ascoltare serve un bot a parte");
       await storeSecret("CORA_TELEGRAM_BOT_TOKEN", token);
       telegram.useToken(token);
-      if (channels.active === "telegram") telegram.start();
+      if (channels.on("telegram")) telegram.start();
       activity({ type: "telegram", text: `token del bot Telegram salvato in hush (@${user.username})` });
       return send(res, 200, { telegram: telegram.status(), bot: { id: String(user.id), username: user.username, name: user.first_name } });
     }
@@ -751,7 +761,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       await storeSecret("CORA_SLACK_APP_TOKEN", appToken);
       slack.useTokens(botToken, appToken);
       if (probe.team?.id) store.updateSettings({ slackTeamId: probe.team.id });
-      if (channels.active === "slack") slack.start();
+      if (channels.on("slack")) slack.start();
       activity({ type: "slack", text: `token dell'app Slack salvati in hush (@${user.name})` });
       return send(res, 200, { slack: slack.status(), bot: { id: user.id, username: user.name }, team: probe.team });
     }

@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { ThreadState } from "./thread-state.js";
 import { Memory, parseJsonObject } from "./memory.js";
-import { transportOf } from "./channels.js";
+import { telegramBotAgent, transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom } from "./rooms.js";
 import { SHARED, TRANSPORTS } from "./store.js";
 import { MEMORY_TOOLS, OWN_TOOLS, TOOL_DEFS, executeTool, summarizeArgs } from "./tools.js";
@@ -203,10 +203,10 @@ export class Brain {
     this.sleeping = new Set();
   }
 
-  /** Channels whose archive an agent may search: the ones it listens to in the servers cora uses. */
   /** Channels whose archive an agent may search: the ones it listens to, on every transport, plus its panel rooms. */
   channelIdsFor(agent) {
-    const archived = this.store.archivedChannels().filter((id) => !isWebRoom(id));
+    // A private chat with another agent's own Telegram bot is that agent's alone.
+    const archived = this.store.archivedChannels().filter((id) => !isWebRoom(id) && [null, agent.id].includes(telegramBotAgent(id)));
     const visible = this.channels?.list() || [];
     const ids = [SALOTTO, privateRoom(agent.id)];
     for (const transport of TRANSPORTS) {
@@ -216,6 +216,7 @@ export class Brain {
         continue;
       }
       const wanted = new Set(chosen);
+      if (transport === "telegram") ids.push(...archived.filter((id) => telegramBotAgent(id) === agent.id));
       ids.push(...chosen, ...visible.filter((channel) => channel.parentId && wanted.has(channel.parentId)).map((channel) => channel.id));
     }
     return [...new Set(ids)];

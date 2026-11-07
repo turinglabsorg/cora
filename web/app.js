@@ -406,6 +406,17 @@ function modelLabel(model, { short = false } = {}) {
   return `${where} · ${known?.label || model.split("/").slice(1).join("/")}`;
 }
 
+/** The platforms switched on, the primary one (where Cora writes privately to the owner) first. */
+function platformsOn() {
+  const list = S.data?.transports?.length ? S.data.transports : [S.data?.transport || "discord"];
+  return [S.data?.transport, ...list].filter((kind, index, all) => kind && list.includes(kind) && all.indexOf(kind) === index);
+}
+
+/** The platforms an agent is on: switched on, and not switched off for it. */
+function agentPlatforms(agent) {
+  return platformsOn().filter((kind) => !(agent.platformsOff || []).includes(kind));
+}
+
 function transportInfo(kind = S.data.transport) {
   const status = (kind === "telegram" ? S.data.telegram : kind === "slack" ? S.data.slack : S.data.discord) || { state: "missing-token", error: "", user: null };
   let where;
@@ -550,7 +561,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
       h("a", { class: "brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "" }), h("span", {}, h("b", {}, "Cora"), h("small", {}, "agenti residenti"))),
       h("a", { class: "onair-card", href: "#/settings" },
         h("span", { class: "panel-ico" }, icon(info.icon)),
-        h("span", { class: "grow" }, h("b", {}, info.label), h("small", {}, info.where)),
+        h("span", { class: "grow" }, h("b", {}, S.data ? platformsOn().map((kind) => TRANSPORTS[kind].label).join(" · ") : info.label), h("small", {}, info.where)),
         lamp()),
       h("nav", { class: "side-nav" }, nav.map(([key, label, name, active, count]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "nav-count", title: tr("{count} da rivedere", { count }) }, raw(String(count))) : null))),
       h("div", { class: "side-agents" },
@@ -765,10 +776,20 @@ function statCard({ icon: name, value, label, sub, href }) {
     h("span", { class: "stat-text" }, h("b", {}, value), h("span", { class: "label" }, label), sub ? h("small", {}, sub) : null));
 }
 
-function agentAccount(agent) {
-  if (S.data.transport === "slack") return agent.slackBot?.user ? ["App sua", "on"] : ["App principale", ""];
-  if (S.data.transport === "telegram") return agent.telegramBot?.user ? ["Bot suo", "on"] : ["Bot principale", ""];
+function agentAccount(agent, kind = S.data.transport) {
+  if (kind === "slack") return agent.slackBot?.user ? ["App sua", "on"] : ["App principale", ""];
+  if (kind === "telegram") return agent.telegramBot?.user ? ["Bot suo", "on"] : ["Bot principale", ""];
   return agent.bot?.user ? ["Bot suo", "on"] : ["Webhook", ""];
+}
+
+/** One badge per platform the agent is on, or a single one when it is only in the panel. */
+function platformBadges(agent) {
+  const kinds = agentPlatforms(agent);
+  if (!kinds.length) return [badge("Solo pannello", "", "chat")];
+  return kinds.map((kind) => {
+    const [account, accountOn] = agentAccount(agent, kind);
+    return badge(kinds.length > 1 ? `${TRANSPORTS[kind].label} · ${tr(account)}` : account, accountOn, TRANSPORTS[kind].icon);
+  });
 }
 
 function agentCard(agent, index) {
@@ -780,7 +801,6 @@ function agentCard(agent, index) {
     monitor.append(img);
   } else monitor.append(h("span", { class: "dark" }, icon("monitor"), agent.tools ? "Desktop spento" : "Senza computer"));
   const routines = S.data.routines.filter((routine) => routine.agentId === agent.id && routine.enabled).length;
-  const [account, accountOn] = agentAccount(agent);
   return h("article", { class: `agent-card${agent.enabled ? "" : " off"}`, vars: { "--ring": agent.color || "#f2a93b", "--delay": `${index * 50}ms` } },
     monitor,
     h("a", { class: "agent-ident", href: `#/agent/${agent.id}/chat` },
@@ -790,7 +810,7 @@ function agentCard(agent, index) {
     h("div", { class: "badges" },
       badge(agent.enabled ? "In onda" : "Muto", agent.enabled ? "on" : "", "radio"),
       badge(running ? "Desktop" : "Spento", running ? "on" : "", "monitor"),
-      badge(account, accountOn, TRANSPORTS[S.data.transport].icon),
+      platformBadges(agent),
       badge(String(routines), routines ? "on" : "", "clock"),
       badge(String(agent.memoryCount), agent.memoryCount ? "on" : "", "book")),
     h("div", { class: "agent-actions" },
@@ -825,7 +845,7 @@ async function renderDashboard() {
   const recentSlot = h("div", {}, skeleton());
   const who = info.user ? (info.kind === "telegram" ? `@${info.user.username}` : info.user.username) : "";
   shell([
-    pageHead(h("span", {}, "Co", h("em", {}, "ra")), tr("Vive su {transport}: {where}.", { transport: info.label, where: tr(info.where) }), [btn("Archivio", { icon: "book", href: "#/archivio" }), btn("Salotto", { icon: "chat", href: "#/salotto" }), btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
+    pageHead(h("span", {}, "Co", h("em", {}, "ra")), platformsOn().length > 1 ? tr("Vive su {transports}.", { transports: platformsOn().map((kind) => TRANSPORTS[kind].label).join(", ") }) : tr("Vive su {transport}: {where}.", { transport: info.label, where: tr(info.where) }), [btn("Archivio", { icon: "book", href: "#/archivio" }), btn("Salotto", { icon: "chat", href: "#/salotto" }), btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
     banners(),
     requestsStrip(),
     h("div", { class: "stats" },
@@ -988,12 +1008,14 @@ function renderAgents() {
     panel({ icon: "chart", title: "Consumi globali", hint: "Tutti gli agenti, giorno per giorno.", actions: heatLegend() }, usage.global),
     panel({ icon: "users", title: "Gli agenti", hint: "Tocca un agente per aprire la chat; da lì profilo, memoria, routine e desktop." },
       agents.length ? h("div", { class: "rows" }, agents.map((agent) => {
-        const [account] = agentAccount(agent);
+        // One platform: how it writes there; several: where it is.
+        const kinds = agentPlatforms(agent);
+        const account = kinds.length === 1 ? tr(agentAccount(agent, kinds[0])[0]) : kinds.length ? kinds.map((kind) => TRANSPORTS[kind].label).join(" + ") : tr("Solo pannello");
         return h("a", { class: "row-link", href: `#/agent/${agent.id}/chat` },
           avatar(agent),
           h("span", { class: "grow" },
             h("span", { class: "row-title" }, raw(agent.name), agentDot(agent)),
-            h("span", { class: "row-meta" }, `${modelLabel(agent.model, { short: true })} · ${tr(agent.box?.running ? "desktop acceso" : "desktop spento")} · ${tr(account).toLowerCase()}`)),
+            h("span", { class: "row-meta" }, `${modelLabel(agent.model, { short: true })} · ${tr(agent.box?.running ? "desktop acceso" : "desktop spento")} · ${account.toLowerCase()}`)),
           icon("next", "chev"));
       })) : empty("users", "Ancora nessun agente.", btn("Crea il primo", { icon: "plus", href: "#/new", cls: "primary" }))),
     panel({ icon: "chart", title: "Consumi per agente", hint: "Quanti token spende ognuno, giorno per giorno.", actions: heatLegend() }, usage.individual),
@@ -1771,16 +1793,34 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   };
 }
 
-function channelChips(selected) {
+function channelChips(selected, kind = S.data.transport) {
   const chosen = new Set(selected);
   const wrap = h("div", { class: "chips", "data-channels": "" });
-  for (const channel of S.data.channels) {
+  const channels = S.data.channels.filter((channel) => (channel.kind || "discord") === kind);
+  for (const channel of channels) {
     const chip = h("button", { type: "button", class: `chip${chosen.has(channel.id) ? " on" : ""}`, "data-id": channel.id }, icon(channel.kind === "telegram" ? "send" : "hash"), raw(channelChipLabel(channel).replace(/^#/, "")));
     chip.addEventListener("click", () => chip.classList.toggle("on"));
     wrap.append(chip);
   }
-  if (!S.data.channels.length) wrap.append(h("small", {}, S.data.transport === "telegram" ? "Nessuna chat Telegram accesa: accendile nelle impostazioni." : "Nessun canale visibile (Discord non collegato?)."));
+  if (!channels.length) wrap.append(h("small", {}, kind === "telegram" ? "Nessuna chat Telegram accesa: accendile nelle impostazioni." : kind === "slack" ? "Nessun canale Slack acceso: accendili nelle impostazioni." : "Nessun canale visibile (Discord non collegato?)."));
   return wrap;
+}
+
+/**
+ * Whether an agent is on one platform, and in which of its channels. Off, it neither hears
+ * nor writes there; its private chat with its own Telegram bot counts as being there.
+ */
+function platformRow(agent, kind) {
+  const on = !(agent.platformsOff || []).includes(kind);
+  const chips = channelChips(agent.channelIds || [], kind);
+  const toggle = switchInput(`platform-${kind}`, "", on);
+  const body = h("div", { class: "stack-sm" }, chips);
+  body.hidden = !on;
+  toggle.querySelector("input").addEventListener("change", (event) => { body.hidden = !event.target.checked; });
+  const hint = kind === "telegram" && agent.telegramBot?.user
+    ? "Nessuna chat selezionata = le ascolta tutte. In privato col suo bot risponde sempre."
+    : kind === "telegram" ? "Nessuna chat selezionata = le ascolta tutte." : "Nessuno selezionato = li ascolta tutti.";
+  return setRow(tr("Su {transport}", { transport: TRANSPORTS[kind].label }), hint, h("div", { class: "stack-sm" }, toggle, body), { stack: true });
 }
 
 function armedButton(label, armedLabel, { icon: name = "trash", onconfirm, cls = "" }) {
@@ -1933,7 +1973,7 @@ function agentForm(agent, { only = "" } = {}) {
       h("textarea", { name: "personality", class: "tall", placeholder: "Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…" }, agent.personality || "")),
     panel({ icon: "radio", title: "Ascolto", hint: "Dove ascolta. Parla solo quando qualcuno lo chiama." },
       setRows(
-        setRow(tr("Canali {transport}", { transport: TRANSPORTS[S.data.transport].label }), "Nessuno selezionato = li ascolta tutti.", channelChips(agent.channelIds || []), { stack: true }),
+        platformsOn().map((kind) => platformRow(agent, kind)),
         setRow("In onda", "Spento non ascolta e non parla, da nessuna parte.", switchInput("enabled", "", agent.enabled ?? true)))),
     !isNew && S.data.currentUser?.role === "owner" ? agentOwnerPanel(agent) : null,
     voicePanel(agent, genderInput),
@@ -1956,6 +1996,8 @@ function agentForm(agent, { only = "" } = {}) {
       color: data.get("color"),
       gender: data.get("gender"),
       channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
+      // Platforms not switched on keep what the agent had there.
+      platformsOff: [...(agent.platformsOff || []).filter((kind) => !platformsOn().includes(kind)), ...platformsOn().filter((kind) => form.elements[`platform-${kind}`] && !form.elements[`platform-${kind}`].checked)],
       ...(form.elements.ownerId ? { ownerId: form.elements.ownerId.value } : {}),
       enabled: form.elements.enabled.checked,
       personality: data.get("personality"),
@@ -2300,13 +2342,23 @@ function discordAccount(agent) {
 
 function telegramAccount(agent) {
   const bot = agent.telegramBot || { configured: false, env: "" };
+  // Without a group turned on its bot lives in private chats, and that is fine.
+  const groups = S.data.settings.telegramChatIds?.length > 0;
+  const mainBot = Boolean(S.data.telegram?.user);
   const actions = bot.user
-    ? badge(bot.inChat ? "Nel gruppo" : "Fuori dal gruppo", bot.inChat ? "on" : "err", bot.inChat ? "check" : "alert")
-    : badge("Bot principale", bot.state === "error" ? "err" : "", "send");
+    ? groups ? badge(bot.inChat ? "Nel gruppo" : "Fuori dal gruppo", bot.inChat ? "on" : mainBot ? "err" : "warn", bot.inChat ? "check" : "alert") : badge("In privato", "on", "chat")
+    : bot.configured && bot.state === "off" ? badge("Spento qui", "", "power")
+      : badge("Bot principale", bot.state === "error" ? "err" : "", "send");
+  const where = !groups ? "Scrivigli in privato su Telegram: risponde lui. Per un gruppo, aggiungilo e accendi la chat nelle impostazioni."
+    : bot.inChat ? "Scrive nel gruppo con il suo account; in privato risponde lui."
+      : mainBot ? "Non è ancora nel gruppo: finché non lo aggiungi scrive tramite il bot principale."
+        : "Non è ancora nel gruppo: aggiungilo per sentirlo lì. In privato risponde già.";
   let body;
-  if (bot.user) {
+  if (bot.configured && !bot.user && bot.state === "off") {
+    body = setRows(setRow("Bot suo", h("span", {}, "Il suo bot c'è (", h("code", {}, bot.env), "), ma è spento su Telegram: accendilo nel suo Ascolto, qui sotto.")));
+  } else if (bot.user) {
     body = setRows(
-      setRow("Bot suo", h("span", {}, "Collegato come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", bot.inChat ? "Scrive nel gruppo con il suo account." : "Non è ancora nel gruppo: finché non lo aggiungi scrive tramite il bot principale."),
+      setRow("Bot suo", h("span", {}, "Collegato come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", where),
         h("div", { class: "row" },
           bot.inChat ? null : btn("Aggiungi al gruppo", { icon: "plus", href: `https://t.me/${bot.user.username}?startgroup=cora`, target: "_blank", cls: "primary" }),
           btn("Apri su Telegram", { icon: "external", href: bot.link, target: "_blank" }))),
@@ -2345,7 +2397,6 @@ async function renderAgent() {
     }
   } });
   const compact = tab === "chat";
-  const [account, accountOn] = agentAccount(agent);
   shell([
     h("section", { class: `hero${compact ? " compact" : ""}`, vars: { "--ring": agent.color || "#f2a93b" } },
       avatar(agent, compact ? "" : "lg"),
@@ -2355,7 +2406,7 @@ async function renderAgent() {
           badge(modelLabel(agent.model, { short: true }), "", "chip"),
           compact ? null : badge(agent.box?.running ? "Desktop acceso" : "Desktop spento", agent.box?.running ? "on" : "", "monitor"),
           compact || !agent.box?.outdated || !agent.box?.exists ? null : badge("Da aggiornare", "warn", "upgrade"),
-          compact ? null : badge(account, accountOn, TRANSPORTS[S.data.transport].icon))),
+          compact ? null : platformBadges(agent))),
       toggle),
     h("nav", { class: "tabs" }, TABS.map(([key, label, name]) => {
       const count = key === "memoria" ? agent.memoryCount : key === "routine" ? routines.length : null;
@@ -2373,7 +2424,7 @@ async function renderAgent() {
   else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent });
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
   else if (tab === "cervello") body = brainTab(agent);
-  else body = [S.data.transport === "slack" ? slackAccount(agent) : S.data.transport === "telegram" ? telegramAccount(agent) : discordAccount(agent), githubAccount(agent), agentForm(agent, { only: "profile" })].filter(Boolean);
+  else body = [...platformsOn().map((kind) => kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)), githubAccount(agent), agentForm(agent, { only: "profile" })].filter(Boolean);
   if (isCurrent()) slot.replaceChildren(...[body].flat().filter(Boolean));
 }
 
@@ -2518,7 +2569,7 @@ function routineForm(agent, routine = {}) {
     h("option", { value: "" }, "Scegli dove pubblicare…"),
     h("option", { value: "web", selected: routine.channelId === "web" }, "Salotto dell'app"),
     h("option", { value: `web-${agent.id}`, selected: routine.channelId === `web-${agent.id}` }, "Chat privata nell'app"),
-    S.data.channels.map((channel) => h("option", { value: channel.id, selected: channel.id === routine.channelId }, raw(channelChipLabel(channel)))));
+    S.data.channels.filter((channel) => agentPlatforms(agent).includes(channel.kind || "discord")).map((channel) => h("option", { value: channel.id, selected: channel.id === routine.channelId }, raw(platformsOn().length > 1 ? `${TRANSPORTS[channel.kind || "discord"].label} · ${channelChipLabel(channel)}` : channelChipLabel(channel)))));
   if (routine.channelId && !routine.channelId.startsWith("web") && !S.data.channels.some((channel) => channel.id === routine.channelId)) {
     channelSelect.append(h("option", { value: routine.channelId, selected: true }, tr("{channel} (non attivo)", { channel: channelName(routine.channelId) })));
   }
@@ -2527,7 +2578,7 @@ function routineForm(agent, routine = {}) {
       isNew ? setRow("Tipo", "Una routine si ripete; un reminder va una volta sola, poi in archivio.", kindPicker, { stack: true })
         : setRow("Tipo", null, badge(kind === "reminder" ? "Reminder" : "Routine", "", "clock")),
       setRow("Nome", "Come la ritrovi nell'elenco e nell'archivio.", h("input", { type: "text", name: "name", value: routine.name || "", required: true, placeholder: "es. Rassegna stampa" })),
-      setRow(S.data.transport === "telegram" ? "Chat" : "Canale", "Dove pubblica il risultato.", channelSelect),
+      setRow(platformsOn().length === 1 && S.data.transport === "telegram" ? "Chat" : "Canale", "Dove pubblica il risultato.", channelSelect),
       setRow("Quando", null, timing, { stack: true }),
       setRow("Compito", "Cosa deve fare, dove guardare, cosa riportare.", h("textarea", { name: "prompt", class: "tall", required: true, placeholder: "Cosa deve fare, dove guardare, cosa riportare. Se non c'è niente da dire può restare in silenzio." }, routine.prompt || ""), { stack: true }),
       setRow("Attiva", "Spenta resta in elenco ma non parte.", switchInput("enabled", "", routine.enabled ?? true))),
@@ -5975,38 +6026,44 @@ function idsInput(key, label) {
 /** Which transport a channel page is about, said the way the list says it. */
 function channelState(kind) {
   const info = transportInfo(kind);
-  const inUse = S.data.transport === kind;
+  const inUse = platformsOn().includes(kind);
+  // Telegram can live on the agents' own bots alone.
+  if (inUse && kind === "telegram" && info.state === "missing-token" && S.data.agents.some((agent) => agent.telegramBot?.user)) return ["on", tr("acceso · bot degli agenti")];
   if (info.state === "missing-token") return ["off", tr("senza token")];
   if (info.state === "error") return ["err", tr("errore")];
   if (inUse) return [info.state === "ready" ? "on" : "busy", tr("in uso · {state}", { state: tr(STATE_LABEL[info.state] || info.state) })];
   return ["off", tr("pronto, non in uso")];
 }
 
-/** Moves Cora to another transport: the first tap says what goes off, the second does it. */
-function transportButton(kind) {
-  const info = transportInfo(kind);
-  const label = tr("Usa {transport}", { transport: info.label });
-  const button = btn(label, { icon: info.icon, cls: "primary", disabled: info.state === "missing-token", title: info.state === "missing-token" ? tr("Prima collega il bot") : null });
-  let armed = false;
-  button.addEventListener("click", async () => {
-    if (!armed) {
-      armed = true;
-      button.classList.add("danger");
-      button.lastChild.textContent = tr("Conferma: {transport} si spegne", { transport: TRANSPORTS[S.data.transport].label });
-      setTimeout(() => {
-        armed = false;
-        button.classList.remove("danger");
-        button.lastChild.textContent = label;
-      }, 4000);
-      return;
-    }
-    button.disabled = true;
-    if (await guard(api("/api/settings", { method: "PUT", body: { transport: kind } }), tr("Cora ora vive su {transport}", { transport: info.label }))) {
-      await loadState();
-      renderSettings();
-    } else button.disabled = false;
-  });
-  return button;
+/** Switches platforms on and off together: the primary stays, or passes to the first one left. */
+async function savePlatforms(transports, transport, ok) {
+  const primary = transports.includes(transport) ? transport : transports[0];
+  if (await guard(api("/api/settings", { method: "PUT", body: { transports, transport: primary } }), ok)) {
+    await loadState();
+    renderSettings();
+    return true;
+  }
+  return false;
+}
+
+/** Whether Cora is on a platform, next to the others, and whether it is the primary one. */
+function platformControls(kind) {
+  const on = platformsOn();
+  const label = TRANSPORTS[kind].label;
+  if (!on.includes(kind)) {
+    const add = btn(tr("Accendi {transport}", { transport: label }), { icon: TRANSPORTS[kind].icon, cls: "primary", onclick: async () => {
+      add.disabled = true;
+      if (!await savePlatforms([...on, kind], S.data.transport, tr("{transport} acceso", { transport: label }))) add.disabled = false;
+    } });
+    return setRow("Spento", tr("Acceso resta insieme a {others}. Gli agenti ci arrivano spenti: ognuno lo accendi dalla sua pagina.", { others: on.map((item) => TRANSPORTS[item].label).join(", ") }), add);
+  }
+  if (on.length === 1) return setRow(tr("Cora vive su {transport}", { transport: label }), "Puoi accendere anche le altre piattaforme, insieme. Il salotto del pannello c'è sempre.");
+  const primary = S.data.transport === kind;
+  const off = armedButton("Spegni", "Conferma", { icon: "power", cls: "sm", onconfirm: () => savePlatforms(on.filter((item) => item !== kind), S.data.transport, tr("{transport} spento", { transport: label })) });
+  const lead = primary ? null : btn("Rendi principale", { icon: "pin", cls: "sm ghost", onclick: () => savePlatforms(on, kind, tr("{transport} è la principale", { transport: label })) });
+  return setRow(primary ? "Acceso · principale" : "Acceso",
+    primary ? "I messaggi privati di Cora per te arrivano qui." : tr("I messaggi privati di Cora per te arrivano su {transport}.", { transport: TRANSPORTS[S.data.transport].label }),
+    h("div", { class: "row" }, lead, off));
 }
 
 /** A provider's subscription accounts, as the list says them. */
@@ -6048,12 +6105,7 @@ function renderSettings() {
   const page = (id, ...content) => pages.set(id, h("div", { class: "stack" }, back(), content));
 
   /* ---------- Canali ---------- */
-  const listenRow = (kind) => {
-    const inUse = S.data.transport === kind;
-    return inUse
-      ? setRow(tr("Cora vive su {transport}", { transport: TRANSPORTS[kind].label }), "Gli altri canali sono spenti. Il salotto del pannello c'è sempre.")
-      : setRow("Canale di Cora", tr("Un canale alla volta: passando a {transport}, {current} si spegne.", { transport: TRANSPORTS[kind].label, current: TRANSPORTS[S.data.transport].label }), transportButton(kind));
-  };
+  const listenRow = (kind) => platformControls(kind);
   const ownersRow = (key, hint) => {
     const input = idsInput(key, tr("Proprietari"));
     const row = setRow("Proprietari", hint, input, { stack: true });
@@ -6093,8 +6145,9 @@ function renderSettings() {
       setRows(listenRow("telegram"),
         setRow("Bot",
           telegram.user ? h("span", {}, h("b", {}, raw(`@${telegram.user.username}`)), raw(` · ${tr(STATE_LABEL[telegram.state] || telegram.state)}${telegram.error ? ` (${telegram.error})` : ""}`))
-            : telegram.state === "idle" || telegram.state === "stopped" ? "Il token c'è: il bot si collega quando Cora passa su Telegram."
-              : telegram.state === "error" ? tr("Il token non funziona: {error}.", { error: telegram.error }) : "Serve un bot che ascolti.",
+            : telegram.state === "idle" || telegram.state === "stopped" ? "Il token c'è: il bot si collega quando accendi Telegram."
+              : telegram.state === "error" ? tr("Il token non funziona: {error}.", { error: telegram.error })
+                : S.data.agents.some((agent) => agent.telegramBot?.user) ? "Facoltativo: senza, ascoltano i bot degli agenti, nelle loro chat private e nei gruppi in cui sono." : "Serve un bot che ascolti.",
           h("div", { class: "stack-sm" },
             telegram.user || telegram.state === "idle" || telegram.state === "stopped" ? null : steps(
               h("span", {}, "apri ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener" }, "@BotFather"), " e scrivi /newbot (es. «Cora»);"),
@@ -6121,7 +6174,7 @@ function renderSettings() {
       setRows(listenRow("slack"),
         setRow("App principale",
           slack.user ? h("span", {}, h("b", {}, raw(`@${slack.user.username}`)), raw(`${slack.team ? ` · ${slack.team.name}` : ""} · ${tr(STATE_LABEL[slack.state] || slack.state)}${slack.error ? ` (${slack.error})` : ""}`))
-            : slack.state === "idle" || slack.state === "stopped" ? "I token ci sono: l'app si collega quando Cora passa su Slack."
+            : slack.state === "idle" || slack.state === "stopped" ? "I token ci sono: l'app si collega quando accendi Slack."
               : slack.state === "error" ? tr("I token non funzionano: {error}.", { error: slack.error }) : "Serve l'app principale: tiene l'elenco dei canali e scrive gli avvisi.",
           h("div", { class: "stack-sm" },
             slack.user || slack.state === "idle" || slack.state === "stopped" ? null : steps(

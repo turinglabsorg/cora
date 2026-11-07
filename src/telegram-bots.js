@@ -10,15 +10,21 @@ export function telegramBotEnvName(agent) {
 }
 
 /**
- * Agents' own Telegram bots. They only send: Telegram never shows a bot the
- * messages of other bots, and listening stays on the main bot anyway.
+ * Agents' own Telegram bots. Each one listens too: a private chat with an agent's bot is a
+ * conversation with that agent alone, and in a group without the main bot its own bot is
+ * the one that hears. Telegram never shows a bot the messages of other bots.
  */
 export class TelegramBots {
-  constructor({ store, apiBase, tokenFor = (name) => process.env[name] || "", log }) {
+  constructor({ store, apiBase, tokenFor = (name) => process.env[name] || "", log, pollTimeout }) {
     this.store = store;
     this.apiBase = apiBase;
     this.tokenFor = tokenFor;
     this.log = log;
+    this.pollTimeout = pollTimeout;
+    /** Called with (agentId, message) for every message one of the bots hears. */
+    this.onMessage = null;
+    /** Called with a group the bots joined or left, to offer it in Settings. */
+    this.onChat = null;
     this.clients = new Map();
     this.added = new Map();
     this.membership = new Map();
@@ -35,10 +41,12 @@ export class TelegramBots {
     const wanted = new Map();
     for (const agent of this.store.agents()) {
       const token = this.token(agent);
-      if (agent.enabled && token) wanted.set(agent.id, { agent, token });
+      if (agent.enabled && token && !(agent.platformsOff || []).includes("telegram")) wanted.set(agent.id, { agent, token });
     }
     for (const [agentId, entry] of this.clients) {
-      if (wanted.get(agentId)?.token !== entry.token) this.clients.delete(agentId);
+      if (wanted.get(agentId)?.token === entry.token) continue;
+      entry.client.stop();
+      this.clients.delete(agentId);
     }
     for (const [agentId, { agent, token }] of wanted) {
       const entry = this.clients.get(agentId);
@@ -46,20 +54,24 @@ export class TelegramBots {
         this.syncName(agent, entry);
         continue;
       }
-      const client = new Telegram({ token, apiBase: this.apiBase });
+      const client = new Telegram({ token, apiBase: this.apiBase, ...(this.pollTimeout === undefined ? {} : { pollTimeout: this.pollTimeout }) });
       const fresh = { client, token, user: null, error: "", named: "" };
       this.clients.set(agentId, fresh);
-      client.request("getMe")
-        .then((user) => {
-          if (this.clients.get(agentId) !== fresh) return;
-          fresh.user = user;
-          this.log?.({ type: "telegram", agentId, text: `bot Telegram collegato come @${user.username}` });
-          this.syncName(this.store.agent(agentId), fresh);
-        })
-        .catch((error) => {
-          fresh.error = error.status === 401 || error.status === 404 ? "Telegram rifiuta il token" : error.message;
-          this.log?.({ type: "error", agentId, text: `bot Telegram: ${fresh.error}` });
-        });
+      client.on("message", (message) => this.onMessage?.(agentId, message));
+      client.on("chat", (info) => this.onChat?.(info));
+      client.on("status", (status) => {
+        if (this.clients.get(agentId) !== fresh || status.state !== "error") return;
+        fresh.error = status.error;
+        this.log?.({ type: "error", agentId, text: `bot Telegram: ${status.error}` });
+      });
+      client.on("ready", (user) => {
+        if (this.clients.get(agentId) !== fresh) return;
+        fresh.user = user;
+        fresh.error = "";
+        this.log?.({ type: "telegram", agentId, text: `bot Telegram collegato come @${user.username}` });
+        this.syncName(this.store.agent(agentId), fresh);
+      });
+      client.start();
     }
   }
 
@@ -79,6 +91,7 @@ export class TelegramBots {
 
   stop() {
     this.active = false;
+    for (const entry of this.clients.values()) entry.client.stop();
     this.clients.clear();
   }
 
@@ -116,7 +129,7 @@ export class TelegramBots {
   /** Use a token stored while running and wait for the bot to answer. */
   async attach(agent, token, timeoutMs = 8000) {
     this.added.set(telegramBotEnvName(agent), token);
-    if (!this.active) return null;
+    if (!this.active || (agent.platformsOff || []).includes("telegram")) return null;
     this.sync();
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline && !this.client(agent.id) && !this.clients.get(agent.id)?.error) {

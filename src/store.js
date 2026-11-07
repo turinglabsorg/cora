@@ -35,6 +35,8 @@ const DEFAULT_SETTINGS = {
   useResidentSubscriptions: true,
   sleepHour: 4,
   transport: "discord",
+  // Every platform switched on; the one in `transport` is the primary. Empty: the primary alone.
+  transports: [],
   telegramChatIds: [],
   telegramOwnerIds: [],
   slackChannelIds: [],
@@ -61,6 +63,12 @@ const DEFAULT_SETTINGS = {
 const SSH_PORT_BASE = 2201;
 export const TRANSPORTS = ["discord", "telegram", "slack"];
 
+/** The platforms switched on, the primary always among them. */
+function cleanTransports(value, primary) {
+  const list = [...new Set((Array.isArray(value) ? value : []).filter((kind) => TRANSPORTS.includes(kind)))];
+  return list.includes(primary) ? list : [primary, ...list];
+}
+
 // A person in the chats, as Cora knows them: the platform and their user id there.
 const CHAT_PERSON = /^(discord|telegram|slack):[\w.-]{1,40}$/;
 
@@ -77,6 +85,8 @@ const AGENT_DEFAULTS = {
   ollamaHost: "",
   chattiness: 0.5,
   channelIds: [],
+  // The platforms switched on where this agent is off: it neither hears nor speaks there.
+  platformsOff: [],
   enabled: true,
   tools: true,
   think: false,
@@ -226,7 +236,7 @@ function cleanIds(value, pattern = /^\d{5,25}$/) {
 }
 
 /** A Discord channel id, a Telegram chat as tg:<chat id>, or a Slack conversation as sl:<channel>[:<thread ts>]. */
-const CHANNEL_ID = /^(\d{5,25}|tg:-?\d{1,20}|sl:[A-Z0-9]{5,}(:\d{10}\.\d{1,8})?|web(-[\w-]+)?)$/;
+const CHANNEL_ID = /^(\d{5,25}|tg:-?\d{1,20}(@ag_[a-z0-9]{1,40})?|sl:[A-Z0-9]{5,}(:\d{10}\.\d{1,8})?|web(-[\w-]+)?)$/;
 
 /** An http(s) address with nothing after it: empty when it is not one. */
 function cleanUrl(value) {
@@ -291,6 +301,7 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     ollamaHost: cleanUrl(merged.ollamaHost),
     chattiness: clampNumber(merged.chattiness, 0, 1, 0.5),
     channelIds: cleanIds(merged.channelIds, CHANNEL_ID),
+    platformsOff: [...new Set((Array.isArray(merged.platformsOff) ? merged.platformsOff : []).filter((kind) => TRANSPORTS.includes(kind)))],
     enabled: Boolean(merged.enabled),
     tools: Boolean(merged.tools),
     think: Boolean(merged.think),
@@ -338,6 +349,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     useResidentSubscriptions: Boolean(merged.useResidentSubscriptions),
     sleepHour: Math.round(clampNumber(merged.sleepHour, 0, 23, 4)),
     transport: TRANSPORTS.includes(merged.transport) ? merged.transport : "discord",
+    transports: cleanTransports(merged.transports, TRANSPORTS.includes(merged.transport) ? merged.transport : "discord"),
     telegramChatIds: cleanIds(merged.telegramChatIds, /^-?\d{1,20}$/),
     telegramOwnerIds: cleanIds(merged.telegramOwnerIds, /^\d{1,20}$/),
     slackChannelIds: cleanIds(merged.slackChannelIds, /^[A-Z0-9]{5,}$/),
@@ -557,6 +569,11 @@ export class Store {
   }
 
   updateSettings(input) {
+    // A new primary alone moves Cora when it lived on one platform, and joins the others when it lived on several.
+    if (input && input.transport !== undefined && input.transports === undefined) {
+      const before = this.cachedSettings?.transports || [];
+      input = { ...input, transports: before.length > 1 ? [...before, input.transport] : [input.transport] };
+    }
     this.cachedSettings = sanitizeSettings(input, this.cachedSettings);
     this.stmt("INSERT INTO settings(key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(JSON.stringify(this.cachedSettings));

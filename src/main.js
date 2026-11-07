@@ -90,7 +90,7 @@ export function startCora(overrides = {}) {
   const push = new Push({ store, secret: cfg.vapidKey, subject: cfg.publicUrl, log: activity });
   const tokenFor = cfg.botTokenFor || ((name) => process.env[name] || process.env[name.replace(/^CORA_/, "CORO_")] || "");
   const bots = new AgentBots({ store, apiBase: cfg.discordApi, gatewayUrl: cfg.discordGateway, tokenFor, log: activity });
-  const tgBots = new TelegramBots({ store, apiBase: cfg.telegramApi, tokenFor, log: activity });
+  const tgBots = new TelegramBots({ store, apiBase: cfg.telegramApi, pollTimeout: cfg.telegramPollTimeout, tokenFor, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
   const slackApps = new SlackApps({ store, apiBase: cfg.slackApi, refreshToken: cfg.slackConfigToken || tokenFor("CORA_SLACK_CONFIG_TOKEN"), storeSecret, log: activity });
   const skBots = new SlackBots({ store, apiBase: cfg.slackApi, tokenFor, log: activity, apps: slackApps });
@@ -101,7 +101,7 @@ export function startCora(overrides = {}) {
     if (listener?.token === discord.token || (!listener && !discord.token)) return;
     discord.useToken(listener?.token || "");
     activity({ type: "discord", text: listener ? `ascolto Discord con il bot di ${store.agent(listener.agentId)?.name}` : "nessun bot di agente con Message Content: Discord non è ascoltato" });
-    if (listener && channels.active === "discord") discord.start();
+    if (listener && channels.on("discord")) discord.start();
   };
   bots.onChange = pickListener;
   const doc = new Doc({ root: findDoc(cfg.docDir), key: cfg.typesafeKey, usageLog: join(cfg.home, "doc-usage.jsonl"), rulesFile: join(cfg.home, "doc-rules.json") });
@@ -224,6 +224,16 @@ export function startCora(overrides = {}) {
     store.setValue("telegramChats", [...telegram.chats.values()]);
     web.broadcast({ type: "telegram-chats" });
   });
+  // Agents' own bots listen as well: their private chats, and groups the main bot is not in.
+  tgBots.onMessage = (agentId, message) => {
+    orchestrator.onTelegramMessage(message, agentId).catch((error) => activity({ type: "error", agentId, text: `telegram: ${error.message}` }));
+  };
+  tgBots.onChat = (info) => {
+    if (info.type === "private" || JSON.stringify(telegram.chats.get(info.id)) === JSON.stringify(info)) return;
+    telegram.chats.set(info.id, info);
+    store.setValue("telegramChats", [...telegram.chats.values()]);
+    web.broadcast({ type: "telegram-chats" });
+  };
   discord.on("guild", (guild) => {
     if (!store.settings.ownerIds.length && store.settings.guildIds.includes(guild.id) && guild.ownerId) {
       store.updateSettings({ ownerIds: [guild.ownerId] });

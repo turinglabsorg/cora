@@ -3688,6 +3688,70 @@ describe("agents in Telegram", () => {
     assert.equal(app.telegram.state, "stopped");
     await call(`/api/agents/${tina.id}`, { method: "DELETE" });
   });
+
+  test("Discord and Telegram at once: each agent is on the platforms chosen for it, and its own bot holds its private chats", async () => {
+    const LEA_TG = "3333333:AAlealealealealealealealealealealealea";
+    const dino = (await call("/api/agents", { method: "POST", body: { name: "Dino", model: "ollama/test-model", chattiness: 0, tools: false } })).data;
+    const lea = (await call("/api/agents", { method: "POST", body: { name: "Lea", model: "ollama/test-model", chattiness: 0, tools: false } })).data;
+    assert.ok(dino.id && lea.id, "both agents are created");
+    try {
+      const both = await call("/api/settings", { method: "PUT", body: { transports: ["discord", "telegram"] } });
+      assert.deepEqual([both.data.transport, both.data.transports], ["discord", ["discord", "telegram"]]);
+      await waitFor(() => app.telegram.state === "ready", { what: "Telegram polling next to Discord" });
+      assert.equal(app.discord.state, "ready", "Discord stays on");
+      const state = (await call("/api/state")).data;
+      assert.deepEqual(state.transports, ["discord", "telegram"]);
+      assert.deepEqual([...new Set(state.channels.map((channel) => channel.kind))].sort(), ["discord", "telegram"], "the channels of both platforms are listed");
+      for (const agent of [dino, lea]) assert.deepEqual(app.store.agent(agent.id).platformsOff, ["telegram"], "agents start off on a platform switched on next to others");
+
+      await call(`/api/agents/${lea.id}`, { method: "PUT", body: { platformsOff: [] } });
+      telegram.addBot(LEA_TG, { id: 3333333, username: "lea_cora_bot", first_name: "Lea" });
+      const bot = await call(`/api/agents/${lea.id}/telegram-bot`, { method: "PUT", body: { token: LEA_TG } });
+      assert.equal(bot.data.telegramBot.user.username, "lea_cora_bot");
+      assert.deepEqual(app.channels.listFor(app.store.agent(dino.id)).map((channel) => channel.kind).filter((kind) => kind === "telegram"), [], "Dino is not on Telegram");
+      assert.ok(app.channels.listFor(app.store.agent(lea.id)).some((channel) => channel.kind === "telegram"), "Lea is");
+
+      telegram.state.sent.length = 0;
+      replies.set("Lea", (body) => ({ content: /Ciao Lea/.test(lastUserText(body)) ? "Ciao Seb, sono Lea su Telegram." : "Lea qui." }));
+      replies.set("Dino", () => ({ content: "Dino da Discord." }));
+      telegram.push({ chat: { id: Number(TG_OWNER), type: "private", first_name: "Seb" }, from: seb, text: "Ciao Lea, ci sei?" }, { to: [LEA_TG] });
+      const sent = await waitFor(() => telegram.state.sent.find((item) => item.text === "Ciao Seb, sono Lea su Telegram."), { what: "Lea's private reply" });
+      assert.deepEqual([sent.token, String(sent.chat_id)], [LEA_TG, TG_OWNER], "answered by Lea's own bot, in the private chat, without being called");
+      assert.equal(app.orchestrator.dmAgentId(`tg:${TG_OWNER}@${lea.id}`), lea.id);
+
+      // Anyone can write to an agent's bot: without a Telegram owner set, that does not make them one.
+      app.store.updateSettings({ telegramOwnerIds: [] });
+      let strangerPrompt = "";
+      replies.set("Lea", (body) => {
+        strangerPrompt = lastUserText(body);
+        return { content: "Chi sei?" };
+      });
+      telegram.push({ chat: { id: Number(TG_STRANGER), type: "private", first_name: "Ospite" }, from: { id: Number(TG_STRANGER), first_name: "Ospite", is_bot: false }, text: "Ciao Lea" }, { to: [LEA_TG] });
+      await waitFor(() => telegram.state.sent.some((item) => item.text === "Chi sei?" && String(item.chat_id) === TG_STRANGER), { what: "Lea answering a stranger" });
+      assert.match(strangerPrompt, /Ospite: Ciao Lea/);
+      assert.doesNotMatch(strangerPrompt, /Ospite ★/, "not the owner");
+      assert.deepEqual(app.store.settings.telegramOwnerIds, [], "and not made the owner");
+      app.store.updateSettings({ telegramOwnerIds: [TG_OWNER] });
+
+      telegram.push(group(seb, "@Dino, ci sei?"));
+      discord.say({ content: "@Dino, ci sei?" });
+      await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Dino" && item.content === "Dino da Discord."), { what: "Dino on Discord" });
+      const notice = await waitFor(() => telegram.state.sent.find((item) => /Dino/.test(item.text || "")), { what: "Cora's word about Dino on Telegram" });
+      assert.match(notice.text, /Dino\W{0,6} non è su Telegram\. Per farlo rispondere qui .*accendi Telegram in Ascolto/s, "Cora says Dino is not on Telegram at all");
+      assert.equal(notice.token, MAIN_TG);
+      await quiet();
+      assert.ok(!telegram.state.sent.some((item) => /Dino da Discord/.test(item.text || "")), "Dino, off on Telegram, does not answer there");
+
+      const primary = await call("/api/settings", { method: "PUT", body: { transport: "telegram" } });
+      assert.deepEqual([primary.data.transport, primary.data.transports], ["telegram", ["discord", "telegram"]], "a new primary keeps the other platforms on");
+    } finally {
+      // Discord alone again, whatever happened above: the Slack tests start from there.
+      await call("/api/settings", { method: "PUT", body: { transports: ["discord"], transport: "discord" } });
+      for (const agent of [dino, lea]) await call(`/api/agents/${agent.id}`, { method: "DELETE" });
+    }
+    await waitFor(() => app.telegram.state === "stopped", { what: "Telegram off" });
+    assert.equal(app.discord.state, "ready");
+  });
 });
 
 

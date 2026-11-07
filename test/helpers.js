@@ -882,8 +882,9 @@ export async function fakeTelegram() {
     switch (method) {
       case "getMe": return ok(res, { ...bot, is_bot: bot.is_bot ?? true });
       case "getUpdates": {
-        const pending = () => state.updates.filter((update) => update.update_id >= (params.offset || 0));
-        const deliver = () => ok(res, pending());
+        // Like Telegram, a bot gets only the updates meant for it: those pushed once it existed, or sent to it.
+        const pending = () => state.updates.filter((update) => update.update_id >= (params.offset || 0) && update.to.includes(token));
+        const deliver = () => ok(res, pending().map(({ to: _to, ...update }) => update));
         if (pending().length) return deliver();
         const waiter = { deliver, timer: null };
         waiter.timer = setTimeout(() => { state.waiting.delete(waiter); deliver(); }, (params.timeout || 0) * 1000);
@@ -917,8 +918,9 @@ export async function fakeTelegram() {
     addBot(token, user) { state.bots.set(token, user); },
     /** A file someone sends (a voice note, say): its file_id for a message. */
     file(id, data) { state.files.set(id, data); return id; },
-    push(message) {
-      state.updates.push({ update_id: state.nextUpdate++, message: { message_id: state.nextMessage++, date: Math.floor(Date.now() / 1000), ...message } });
+    /** A message in a chat, heard by every bot there is (a group), or only by `to` (a private chat with one bot). */
+    push(message, { to = [...state.bots.keys()] } = {}) {
+      state.updates.push({ update_id: state.nextUpdate++, to, message: { message_id: state.nextMessage++, date: Math.floor(Date.now() / 1000), ...message } });
       for (const waiter of state.waiting) {
         clearTimeout(waiter.timer);
         state.waiting.delete(waiter);

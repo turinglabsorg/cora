@@ -960,3 +960,40 @@ test("an agent's owner is one pick among the real people of the chats, by platfo
   ]);
   assert.equal(select.querySelectorAll("option").find((option) => option.selected)?.textContent, "Sncl");
 });
+
+test("platforms on together: each agent has a row per platform, and Settings offers turning one on, off or primary", async () => {
+  const puts = [];
+  const panel = panelHarness({ fetch: async (path, options = {}) => {
+    if (options.method === "PUT") puts.push({ path, body: JSON.parse(options.body) });
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  panel.run(`S.data = {
+    transport: "discord", transports: ["discord", "telegram"],
+    settings: { telegramChatIds: ["-100"], slackChannelIds: [], guildIds: ["g1"] },
+    discord: { state: "ready", guilds: [{ id: "g1", name: "Casa" }] }, telegram: { state: "missing-token", chats: [{ id: "-100", title: "La banda" }] }, slack: null,
+    channels: [{ id: "c1", name: "generale", kind: "discord", guildId: "g1" }, { id: "tg:-100", name: "La banda", kind: "telegram" }],
+    agents: [{ id: "ag_nico", name: "Nico", platformsOff: [], telegramBot: { user: { username: "nico_bot" } } }],
+  }`);
+  assert.deepEqual(panel.run(`JSON.stringify(platformsOn())`), JSON.stringify(["discord", "telegram"]));
+  assert.equal(panel.run(`JSON.stringify(agentPlatforms({ platformsOff: ["telegram"] }))`), JSON.stringify(["discord"]));
+  const row = panel.run(`platformRow(S.data.agents[0], "telegram")`);
+  assert.match(row.textContent, /Su Telegram/);
+  assert.match(row.textContent, /In privato col suo bot risponde sempre/);
+  assert.deepEqual(row.querySelectorAll(".chip").map((chip) => chip.textContent), ["La banda"], "only the chats of that platform");
+  const off = panel.run(`platformRow({ ...S.data.agents[0], platformsOff: ["telegram"] }, "telegram")`);
+  assert.ok(!off.querySelector("input").checked && !off.querySelector("input").attributes.checked, "switched off");
+  assert.equal(panel.run(`JSON.stringify(channelState("telegram"))`), JSON.stringify(["on", "acceso · bot degli agenti"]), "Telegram can live on the agents' own bots");
+
+  // Saving reloads the state and redraws Settings: not what this test looks at.
+  panel.run(`loadState = async () => {}; renderSettings = () => {}`);
+  const secondary = panel.run(`platformControls("telegram")`);
+  assert.match(secondary.textContent, /arrivano su Discord/);
+  secondary.querySelectorAll("button").find((button) => /Rendi principale/.test(button.textContent)).click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(puts[0], { path: "/api/settings", body: { transports: ["discord", "telegram"], transport: "telegram" } });
+  const slack = panel.run(`platformControls("slack")`);
+  assert.match(slack.textContent, /Accendi Slack/);
+  slack.querySelector("button").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(puts[1], { path: "/api/settings", body: { transports: ["discord", "telegram", "slack"], transport: "discord" } });
+});
