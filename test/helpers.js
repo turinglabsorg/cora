@@ -845,6 +845,8 @@ export async function fakeTelegram() {
     sent: [],
     names: [],
     members: new Set(),
+    memberStates: new Map(),
+    errors: new Map(),
     nextUpdate: 1,
     nextMessage: 5000,
     waiting: new Set(),
@@ -872,6 +874,8 @@ export async function fakeTelegram() {
     const [, token, method] = match;
     const bot = state.bots.get(token);
     if (!bot) return fail(res, 401, "Unauthorized");
+    const failure = state.errors.get(`${token}:${method}`);
+    if (failure) return fail(res, failure.status, failure.description);
     let params = {};
     if (String(req.headers["content-type"]).startsWith("multipart/")) {
       const text = body.toString("latin1");
@@ -903,7 +907,7 @@ export async function fakeTelegram() {
       case "sendChatAction": return ok(res, true);
       case "setMyName": state.names.push({ token, name: params.name }); return ok(res, true);
       case "getChatAdministrators": return ok(res, [{ status: "creator", user: { id: Number(TG_OWNER), first_name: "Seb" } }]);
-      case "getChatMember": return ok(res, { status: state.members.has(`${params.chat_id}:${params.user_id}`) ? "member" : "left" });
+      case "getChatMember": return ok(res, state.memberStates.get(`${params.chat_id}:${params.user_id}`) || { status: state.members.has(`${params.chat_id}:${params.user_id}`) ? "member" : "left" });
       case "getFile": {
         const sent = state.files.get(params.file_id);
         return ok(res, sent ? { file_id: params.file_id, file_path: `voice/${params.file_id}`, file_size: sent.length } : { file_id: params.file_id, file_path: "photos/1.jpg", file_size: 9 });

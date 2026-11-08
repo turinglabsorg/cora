@@ -3677,6 +3677,107 @@ describe("agents in Telegram", () => {
     assert.equal((await call(`/api/agents/${tina.id}`)).data.telegramBot.inChat, true);
   });
 
+  test("Telegram group setup checks live privacy, membership and listening, then requires a human probe and its delivered reply", async () => {
+    const path = `/api/agents/${tina.id}/telegram-setup`;
+    const groupPath = `${path}?chatId=${TG_GROUP}`;
+    const user = telegram.state.bots.get(TINA_TG);
+    const memberKey = `${TG_GROUP}:2222222`;
+    const original = { ...app.store.agent(tina.id) };
+    let release;
+    const replyGate = new Promise((resolve) => { release = resolve; });
+    try {
+      assert.equal((await call(groupPath, { auth: false })).status, 401);
+      assert.equal((await call("/api/agents/ag_missing/telegram-setup")).status, 404);
+      assert.equal((await call(`${path}?chatId=-987654321`)).status, 400, "unknown chats cannot be inspected through the bot");
+      assert.equal((await call(groupPath, { method: "POST" })).status, 405, "checking never writes or sends a message");
+      const unselected = (await call(path)).data;
+      assert.ok(unselected.groups.some((chat) => chat.id === TG_GROUP));
+      assert.equal(unselected.group, null);
+      assert.equal(unselected.probe.state, "not-started");
+
+      let checked = (await call(groupPath)).data;
+      assert.equal(checked.bot.state, "ready");
+      assert.equal(checked.bot.privacyDisabled, false);
+      assert.equal(checked.group.member, true);
+      assert.ok(Object.values(checked.listening).every(Boolean));
+      assert.doesNotMatch(JSON.stringify(checked), new RegExp(TINA_TG));
+
+      telegram.state.bots.set(TINA_TG, { ...user, can_read_all_group_messages: true });
+      assert.equal((await call(groupPath)).data.bot.privacyDisabled, true, "a BotFather change is read live, not from the ready event or membership cache");
+      telegram.state.memberStates.set(memberKey, { status: "administrator" });
+      assert.equal((await call(groupPath)).data.group.role, "administrator", "administrators are identified for the privacy alternative");
+      telegram.state.memberStates.set(memberKey, { status: "restricted", is_member: true, can_send_messages: false });
+      assert.equal((await call(groupPath)).data.group.canSend, false);
+      telegram.state.memberStates.set(memberKey, { status: "left" });
+      assert.equal((await call(groupPath)).data.group.member, false);
+      telegram.state.memberStates.delete(memberKey);
+
+      telegram.state.errors.set(`${TINA_TG}:getChatMember`, { status: 400, description: `provider body ${TINA_TG}` });
+      checked = (await call(groupPath)).data;
+      assert.equal(checked.group.member, null, "an unavailable check is not a successful membership check");
+      assert.doesNotMatch(JSON.stringify(checked), /provider body|AAtinatinatina/);
+      telegram.state.errors.delete(`${TINA_TG}:getChatMember`);
+      telegram.state.errors.set(`${TINA_TG}:getMe`, { status: 401, description: `provider body ${TINA_TG}` });
+      checked = (await call(groupPath)).data;
+      assert.equal(checked.bot.state, "invalid-token");
+      assert.equal(checked.bot.privacyDisabled, null);
+      assert.doesNotMatch(JSON.stringify(checked), /provider body|AAtinatinatina/);
+      telegram.state.errors.delete(`${TINA_TG}:getMe`);
+
+      const allowed = app.store.settings.telegramChatIds;
+      app.store.updateSettings({ telegramChatIds: [] });
+      assert.equal((await call(groupPath)).data.listening.chat, false);
+      app.store.updateSettings({ telegramChatIds: allowed });
+      app.store.updateAgent(tina.id, { platformsOff: ["telegram"] });
+      assert.equal((await call(groupPath)).data.listening.agent, false);
+      app.store.updateAgent(tina.id, { platformsOff: [], channelIds: [`tg:${TG_OTHER_GROUP}`] });
+      assert.equal((await call(groupPath)).data.listening.assigned, false);
+      app.store.updateAgent(tina.id, { platformsOff: original.platformsOff, channelIds: original.channelIds });
+
+      const probe = "cora-ab12cd34";
+      const since = Date.now() - 1000;
+      const probePath = `${groupPath}&probe=${probe}&since=${since}`;
+      app.store.appendArchive(`tg:${TG_GROUP}`, { id: "setup-bot-probe", at: Date.now(), authorName: "Grog", kind: "bot", content: `@Tina ${probe}` });
+      assert.equal((await call(probePath)).data.probe.state, "waiting-message", "a bot's test is not a human delivery test");
+      assert.equal((await call(`${groupPath}&probe=invalid&since=${since}`)).status, 400);
+      assert.equal((await call(`${groupPath}&probe=${probe}&since=${since - 3600000}`)).status, 400);
+
+      replies.set("Tina", async () => { await replyGate; return { content: "Prova ricevuta nel gruppo." }; });
+      telegram.push(group(seb, `@tina_cora_bot prova ${probe}`, { entities: [{ type: "mention", offset: 0, length: 14 }] }), { to: [TINA_TG] });
+      await waitFor(async () => (await call(probePath)).data.probe.state === "waiting-reply", { what: "the human probe received" });
+      const olderTrace = app.store.traces(tina.id).find((trace) => trace.status === "done");
+      app.store.appendArchive(`tg:${TG_GROUP}`, { id: "setup-unrelated-reply", at: Date.now(), authorName: "Tina", kind: "agent", agentId: tina.id, traceId: olderTrace.id, content: "Una risposta a un'altra richiesta." });
+      app.store.appendArchive(`tg:${TG_GROUP}`, { id: "setup-passive-reply", at: Date.now(), authorName: "Tina", kind: "agent", agentId: tina.id, passive: true, content: "Rapporto di routine." });
+      assert.equal((await call(probePath)).data.probe.state, "waiting-reply", "unrelated and passive posts cannot complete the test");
+      release();
+      const complete = await waitFor(async () => {
+        const state = (await call(probePath)).data;
+        return state.probe.state === "complete" && state;
+      }, { what: "Tina's correlated reply delivered to the group" });
+      assert.ok(complete.probe.replyAt >= complete.probe.messageAt);
+      assert.ok(telegram.state.sent.some((item) => item.token === TINA_TG && item.text === "Prova ricevuta nel gruppo." && item.chat_id === TG_GROUP));
+      await quiet();
+      const sayProbe = "cora-cd34ef56";
+      const saySince = Date.now() - 1000;
+      let said = false;
+      replies.set("Tina", () => {
+        if (said) return { content: "PASS" };
+        said = true;
+        return { tool_calls: [{ function: { name: "say", arguments: { text: "Risposta con say.", channel_id: `tg:${TG_GROUP}` } } }] };
+      });
+      telegram.push(group(seb, `@tina_cora_bot prova ${sayProbe}`, { entities: [{ type: "mention", offset: 0, length: 14 }] }), { to: [TINA_TG] });
+      await waitFor(async () => (await call(`${groupPath}&probe=${sayProbe}&since=${saySince}`)).data.probe.state === "complete", { what: "a tool-delivered reply confirmed by its exact Telegram message receipt" });
+      const toolReply = app.store.recentMessages(`tg:${TG_GROUP}`).find((item) => item.content === "Risposta con say.");
+      assert.ok(toolReply && !toolReply.traceId, "say delivery is correlated through its receipt even without an attached trace id");
+    } finally {
+      release();
+      telegram.state.bots.set(TINA_TG, user);
+      telegram.state.memberStates.delete(memberKey);
+      for (const method of ["getMe", "getChatMember"]) telegram.state.errors.delete(`${TINA_TG}:${method}`);
+      app.store.updateAgent(tina.id, { platformsOff: original.platformsOff, channelIds: original.channelIds });
+    }
+  });
+
   test("a routine on a Discord channel does not run while the cora lives on Telegram; switching back turns Discord on again", async () => {
     const routine = await call(`/api/agents/${tina.id}/routines`, { method: "POST", body: { name: "Discord", schedule: "0 9 * * *", channelId: CHANNEL, prompt: "Saluta." } });
     await call(`/api/routines/${routine.data.id}/run`, { method: "POST" });

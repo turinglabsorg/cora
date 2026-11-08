@@ -2340,6 +2340,117 @@ function discordAccount(agent) {
   return panel({ icon: "hash", title: "Account Discord", hint: "Il suo utente su Discord.", actions }, setRows(...rows));
 }
 
+function telegramGroupSetup(agent) {
+  S.telegramSetups ||= new Map();
+  const known = (S.data.telegram?.chats || []).filter((chat) => ["group", "supergroup"].includes(chat.type));
+  if (!S.telegramSetups.has(agent.id)) S.telegramSetups.set(agent.id, { chatId: known.length === 1 ? known[0].id : "", probe: "", since: 0, data: null, request: 0, loading: false, error: "" });
+  const state = S.telegramSetups.get(agent.id);
+  const root = h("div", { class: "telegram-setup" });
+  const load = async () => {
+    if (state.probe && Date.now() + (state.serverOffset || 0) - state.since >= 30 * 60000) { state.probe = ""; state.since = 0; }
+    const request = ++state.request;
+    const params = new URLSearchParams({ chatId: state.chatId });
+    if (state.probe) { params.set("probe", state.probe); params.set("since", state.since); }
+    state.loading = true;
+    state.error = "";
+    state.draw?.();
+    try {
+      const data = await api(`/api/agents/${agent.id}/telegram-setup?${params}`);
+      if (request !== state.request) return;
+      state.data = data;
+      state.serverOffset = data.checkedAt - Date.now();
+    } catch (error) {
+      if (request !== state.request) return;
+      state.data = null;
+      state.error = error.message;
+      if (error.message === "avvia una nuova prova Telegram") { state.probe = ""; state.since = 0; }
+    } finally {
+      if (request === state.request) { state.loading = false; state.draw?.(); }
+    }
+  };
+  const draw = () => {
+    const data = state.data;
+    const groups = data?.groups || known;
+    const user = data?.bot.user || agent.telegramBot?.user;
+    const handle = user?.username ? `@${user.username}` : "";
+    const member = data?.group?.member;
+    const privacy = data?.bot.state === "ready" ? data.bot.privacyDisabled ? true : data.group?.member === null ? null : ["administrator", "creator"].includes(data.group?.role) : null;
+    const listening = data ? Object.values(data.listening).every(Boolean) : null;
+    const verified = [data && data.bot.state !== "unavailable" ? data.bot.state === "ready" : null, privacy, member === true ? data.group.canSend : member ?? null, listening, data ? data.probe.state === "complete" : null];
+    const ready = verified.slice(0, 4).every((value) => value === true);
+    const group = h("select", { "aria-label": "Gruppo Telegram" },
+      h("option", { value: "", selected: !state.chatId }, "Scegli il gruppo"),
+      groups.map((item) => h("option", { value: item.id, selected: item.id === state.chatId }, raw(item.title))));
+    group.addEventListener("change", () => {
+      state.chatId = group.value;
+      state.probe = "";
+      state.since = 0;
+      state.data = null;
+      load();
+    });
+    const botfather = btn("Apri BotFather", { href: "https://t.me/BotFather", target: "_blank", icon: "external", cls: "sm" });
+    const settings = () => btn("Apri impostazioni Telegram", { href: "#/settings/telegram", icon: "settings", cls: "sm" });
+    const invite = handle ? btn("Aggiungi al gruppo", { href: `https://t.me/${user.username}?startgroup=cora`, target: "_blank", icon: "plus", cls: "sm" }) : null;
+    const listenHelp = !data ? "Verifica quali chat e piattaforme sono accese."
+      : !data.listening.platform ? "Accendi Telegram nelle impostazioni."
+        : !data.listening.chat ? "Accendi questo gruppo in Impostazioni → Telegram → Ascolto."
+          : !data.listening.agent ? "Accendi l'agente e Telegram nel suo Ascolto, poi salva."
+            : !data.listening.assigned ? "Aggiungi questo gruppo ai canali dell'agente nel suo Ascolto, poi salva."
+              : "Telegram, gruppo e ascolto dell'agente sono accesi.";
+    const sample = handle && state.probe ? `${handle} ${tr("Rispondi a questa prova:")} ${state.probe}` : "";
+    const testState = data?.probe.state;
+    const testHelp = testState === "complete" ? "Messaggio ricevuto e risposta dell'agente consegnata in questo gruppo."
+      : state.probe && !ready ? "Completa i passaggi precedenti, poi verifica di nuovo la risposta."
+      : testState === "waiting-reply" ? "Il tuo messaggio è arrivato. La risposta dell'agente non è ancora arrivata: verifica di nuovo."
+        : state.probe ? "Invia tu questo messaggio nel gruppo, poi verifica la risposta. La prova deve partire da una persona, non da un altro bot."
+          : ready ? "Avvia la prova, copia il messaggio e invialo tu nel gruppo."
+            : "Completa i primi quattro passaggi, poi avvia la prova con un tuo messaggio.";
+    const rows = [
+      ["Collega il bot", data?.bot.state === "ready" ? tr("Telegram riconosce {bot}.", { bot: handle })
+        : data?.bot.state === "invalid-token" ? "Telegram rifiuta il token: collegalo di nuovo."
+          : data?.bot.state === "unavailable" ? "Telegram non risponde: riprova la verifica."
+            : "Cora controlla il token con Telegram, senza mostrarlo.",
+      data && ["invalid-token", "missing-token"].includes(data.bot.state) ? tokenForm({ placeholder: "Token di BotFather (123456:ABC…)", path: `/api/agents/${agent.id}/telegram-bot`, ok: "Token salvato" }) : null],
+      ["Permetti la lettura nel gruppo", privacy ? data.bot.privacyDisabled ? "Telegram conferma che la privacy è disattivata." : "Telegram conferma che il bot è amministratore del gruppo."
+        : privacy === null && data?.bot.state === "ready" ? "Non riesco a verificare la privacy del gruppo: riprova."
+        : h("span", {}, tr("In BotFather invia /setprivacy → {bot} → Disable. In alternativa, rendi il bot amministratore del gruppo.", { bot: handle || tr("il tuo bot") })), botfather],
+      ["Invita il bot nel gruppo", member && data.group.canSend === false ? "Il bot è nel gruppo ma non può scrivere: controlla i suoi permessi su Telegram."
+        : member === null && data?.bot.state === "ready" ? "Non riesco a verificare la presenza nel gruppo: riprova."
+        : member ? testState === "complete" ? "Telegram conferma che il bot è nel gruppo." : "Telegram conferma che il bot è nel gruppo. Se hai cambiato la privacy mentre era già qui, rimuovilo e reinvitalo prima della prova."
+          : "Aggiungi il bot al gruppo. Se c'era già, rimuovilo e aggiungilo di nuovo per applicare il cambio di privacy.", invite],
+      ["Accendi l'ascolto in Cora", listenHelp, h("div", { class: "row" }, settings(), btn("Vai all'Ascolto", { cls: "sm ghost", icon: "radio", onclick: () => {
+        document.querySelector('input[name="platform-telegram"]')?.closest(".panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } }))],
+      ["Verifica una risposta", testHelp, h("div", { class: "stack-sm" }, sample ? codeLine(sample) : null,
+        h("div", { class: "row" }, btn(state.probe ? "Nuova prova" : "Avvia prova", { disabled: !ready || state.loading, cls: state.probe ? "sm ghost" : "sm primary", icon: "send", onclick: () => {
+          state.probe = `cora-${Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, "0")}`;
+          state.since = Date.now() + (state.serverOffset || 0) - 1000;
+          load();
+        } }), state.probe ? btn("Verifica risposta", { disabled: state.loading, cls: testState === "complete" ? "sm" : "sm primary", icon: "refresh", onclick: load }) : null))],
+    ];
+    const current = verified.findIndex((value) => value !== true);
+    root.setAttribute("aria-busy", String(state.loading));
+    root.replaceChildren(...[
+      h("div", { class: "telegram-setup-toolbar" }, field("Gruppo Telegram", group), btn("Verifica passaggi", { icon: "refresh", disabled: state.loading, cls: "sm", onclick: load })),
+      h("p", { class: `telegram-setup-progress${verified.every((value) => value === true) ? " complete" : ""}`, role: "status", "aria-live": "polite" }, state.loading ? "Verifica in corso…" : tr("{done} di {total} passaggi verificati", { done: verified.filter((value) => value === true).length, total: rows.length })),
+      state.error ? h("p", { class: "notice warn" }, state.error) : null,
+      h("ol", { class: "telegram-setup-steps" }, rows.map(([title, hint, action], index) => {
+        const ok = verified[index] === true;
+        return h("li", { class: `${ok ? "verified" : index === current ? "current" : ""}` },
+          h("span", { class: "telegram-setup-number", "aria-hidden": "true" }, ok ? icon("check") : index + 1),
+          h("div", { class: "telegram-setup-body" }, h("div", { class: "telegram-setup-title" }, h("b", {}, title), h("small", {}, ok ? "Verificato" : verified[index] === null ? "Da verificare" : "Da completare")),
+            h("p", {}, hint), h("div", { class: "telegram-setup-actions" },
+              !ok || index === 4 || (index === 2 && testState !== "complete") ? action : null,
+              !ok && index < 4 ? btn("Ho fatto, verifica", { icon: "refresh", disabled: state.loading, cls: "sm ghost", onclick: load }) : null)));
+      })),
+      !groups.length ? h("p", { class: "muted" }, "Dopo l'invito, premi Verifica passaggi: il gruppo comparirà nell'elenco.") : null].filter(Boolean));
+  };
+  state.draw = draw;
+  draw();
+  if (!state.data && !state.loading) load();
+  return root;
+}
+
 function telegramAccount(agent) {
   const bot = agent.telegramBot || { configured: false, env: "" };
   // Without a group turned on its bot lives in private chats, and that is fine.
@@ -2350,7 +2461,7 @@ function telegramAccount(agent) {
     : bot.configured && bot.state === "off" ? badge("Spento qui", "", "power")
       : badge("Bot principale", bot.state === "error" ? "err" : "", "send");
   const where = !groups ? "Scrivigli in privato su Telegram: risponde lui. Per un gruppo, aggiungilo e accendi la chat nelle impostazioni."
-    : bot.inChat ? "Scrive nel gruppo con il suo account; in privato risponde lui."
+    : bot.inChat ? "Il bot è nel gruppo. Verifica qui sotto che riceva i messaggi e risponda."
       : mainBot ? "Non è ancora nel gruppo: finché non lo aggiungi scrive tramite il bot principale."
         : "Non è ancora nel gruppo: aggiungilo per sentirlo lì. In privato risponde già.";
   let body;
@@ -2360,15 +2471,6 @@ function telegramAccount(agent) {
     body = setRows(
       setRow("Bot suo", h("span", {}, "Collegato come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", where),
         btn("Apri su Telegram", { icon: "external", href: bot.link, target: "_blank" })),
-      setRow("Invita a un gruppo", "L'invito da solo non basta: completa anche la configurazione su Telegram e in Cora.",
-        h("div", { class: "stack-sm" }, steps(
-          h("span", {}, "In ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener" }, "@BotFather"),
-            ", invia /setprivacy, scegli ", h("b", {}, raw(`@${bot.user.username}`)), " e seleziona Disable. In alternativa, rendi il bot amministratore del gruppo."),
-          "Aggiungi il bot al gruppo. Se c'era già, rimuovilo e aggiungilo di nuovo per applicare il cambio di privacy.",
-          h("span", {}, "In ", h("a", { href: "#/settings/telegram" }, "Impostazioni → Telegram"), ", accendi la chat nella sezione Ascolto."),
-          "Nell'Ascolto di questo agente, accendi Telegram e scegli il gruppo. Nessuna selezione = tutte le chat accese.",
-          h("span", {}, "Nel gruppo, menzionalo con ", h("code", {}, raw(`@${bot.user.username}`)), ".")),
-        btn("Aggiungi al gruppo", { icon: "plus", href: `https://t.me/${bot.user.username}?startgroup=cora`, target: "_blank", cls: bot.inChat ? "" : "primary" })), { stack: true }),
       setRow("Nome e foto", "Il nome segue il pannello; la foto si cambia da BotFather con /setuserpic."));
   } else {
     body = setRows(setRow("Bot suo", bot.state === "error" ? tr("Il token salvato non funziona ({error}): incollane uno nuovo.", { error: bot.error }) : "Ora scrive tramite il bot principale, col suo nome in grassetto. Con un bot tutto suo scrive col suo account ed è menzionabile.",
@@ -2379,7 +2481,8 @@ function telegramAccount(agent) {
         "poi tocca «Aggiungi al gruppo»."),
       tokenForm({ placeholder: "Token di BotFather (123456:ABC…)", path: `/api/agents/${agent.id}/telegram-bot`, ok: "Token salvato" })), { stack: true }));
   }
-  return panel({ icon: "send", title: "Account Telegram", hint: "Il suo bot su Telegram.", actions }, body);
+  return panel({ icon: "send", title: "Account Telegram", hint: "Il suo bot su Telegram.", actions }, body,
+    bot.configured ? setRows(setRow("Invita a un gruppo", "Segui i passaggi: Cora verifica la configurazione e una risposta reale nel gruppo.", telegramGroupSetup(agent), { stack: true })) : null);
 }
 
 function renderNew() {

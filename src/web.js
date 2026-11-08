@@ -14,6 +14,7 @@ import { TRANSPORT_LABELS, slackIds, telegramChatId } from "./channels.js";
 import { Slack } from "./slack.js";
 import { SLACK_CONFIG_SECRET } from "./slack-apps.js";
 import { Telegram } from "./telegram.js";
+import { telegramSetup } from "./telegram-setup.js";
 import { pullModel } from "./llm.js";
 import { telegramBotEnvName } from "./telegram-bots.js";
 import { isWebRoom, roomAgentId } from "./rooms.js";
@@ -1075,6 +1076,15 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const record = await skBots.syncApp(agent, { force: true });
       if (!record) throw new HttpError(409, "l'app Slack di questo agente non è collegata");
       return send(res, 200, await publicAgent(store.agent(agent.id)));
+    }
+
+    match = /^\/api\/agents\/([\w-]+)\/telegram-setup$/.exec(path);
+    if (match && tgBots) {
+      if (method !== "GET") throw new HttpError(405, "metodo non supportato");
+      const agent = store.agent(match[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      return send(res, 200, await telegramSetup({ agent, store, telegram, tgBots, channels, traces,
+        chatId: url.searchParams.get("chatId") || "", probe: url.searchParams.get("probe") || "", since: url.searchParams.get("since") || "" }));
     }
 
     match = /^\/api\/agents\/([\w-]+)\/telegram-bot$/.exec(path);
