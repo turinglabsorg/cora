@@ -541,7 +541,7 @@ describe("panel auth", () => {
     assert.ok(!run.tools.includes("shell"));
     assert.match(run.output, /tool shell is not available/);
     assert.equal(run.argv[run.argv.indexOf("-s") + 1], "read-only");
-    assert.match(run.stdin, /In questa conversazione non hai il tuo computer/);
+    assert.match(run.stdin, /gli strumenti per usarlo non sono disponibili in questo turno/);
   });
 
   test("the verifier requires connector evidence and preserves a real permission denial", async () => {
@@ -2906,13 +2906,19 @@ describe("talking with the agents", () => {
 
   test("an agent without its computer is told to ask the owner instead of passing when someone else wants work done", async () => {
     let system = "";
+    let request = "";
     replies.set("Olga", (body) => {
       system = String(body.messages[0].content);
+      request = lastUserText(body);
+      assert.ok(!body.tools.some(tool => tool.function.name === "shell"));
       return { content: "Serve il via libera di Sam: glielo chiedo." };
     });
     discord.say({ content: "@Olga, mi sistemi il sito?", author: STRANGER, username: "Ospite" });
     await waitFor(() => posts("Olga").includes("Serve il via libera di Sam: glielo chiedo."), { what: "Olga answering a guest" });
-    assert.match(system, /non hai il tuo computer[\s\S]*ask_owner/);
+    assert.match(system, /gli strumenti per usarlo non sono disponibili in questo turno[\s\S]*ask_owner/);
+    assert.match(system, /Non esiste un interruttore del computer per il singolo gruppo/);
+    assert.match(request, new RegExp(`Cora non ha autorizzato l'account discord:${STRANGER}`));
+    assert.match(request, /non lo stato acceso\/spento del desktop/);
     await quiet();
   });
 

@@ -951,7 +951,8 @@ export class Orchestrator {
       // An agent already working here receives steering, while a colleague gets its own worker.
       // Someone the owner authorized gets the computer the owner would: no "can I?" in between.
       const authorized = this.authorized(queued, agent, state);
-      const computer = agent.tools && (queued ? queued.kind === "owner" || authorized || queued.delegated : state.ownerOrigin) && !this.threadWork.has(state.id, agent.id);
+      const mayUseComputer = queued ? queued.kind === "owner" || authorized || queued.delegated : state.ownerOrigin;
+      const computer = Boolean(agent.tools && mayUseComputer && !this.threadWork.has(state.id, agent.id));
       this.acknowledge(state, agent.id, [...state.humanQueue.values()].filter((item) => item.id === queued?.id || snapshot.includes(item)).map((item) => item.id));
       const delegationAuthorized = queued ? queued.kind === "owner" || Boolean(queued.delegated) : state.ownerOrigin;
       const started = Date.now();
@@ -966,6 +967,7 @@ export class Orchestrator {
       try {
         result = await this.brain.chatTurn({
           agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, belongsTo: this.ownsAgent(queued, agent, state),
+          computerDenied: Boolean(agent.tools && !mayUseComputer),
           replyTo: queued,
           postFile: (file, caption, { replyTo = queued, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { ...this.replyDelivery(replyTo), delegationAuthorized }),
           say,
