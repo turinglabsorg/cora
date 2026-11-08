@@ -2359,9 +2359,16 @@ function telegramAccount(agent) {
   } else if (bot.user) {
     body = setRows(
       setRow("Bot suo", h("span", {}, "Collegato come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", where),
-        h("div", { class: "row" },
-          bot.inChat ? null : btn("Aggiungi al gruppo", { icon: "plus", href: `https://t.me/${bot.user.username}?startgroup=cora`, target: "_blank", cls: "primary" }),
-          btn("Apri su Telegram", { icon: "external", href: bot.link, target: "_blank" }))),
+        btn("Apri su Telegram", { icon: "external", href: bot.link, target: "_blank" })),
+      setRow("Invita a un gruppo", "L'invito da solo non basta: completa anche la configurazione su Telegram e in Cora.",
+        h("div", { class: "stack-sm" }, steps(
+          h("span", {}, "In ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener" }, "@BotFather"),
+            ", invia /setprivacy, scegli ", h("b", {}, raw(`@${bot.user.username}`)), " e seleziona Disable. In alternativa, rendi il bot amministratore del gruppo."),
+          "Aggiungi il bot al gruppo. Se c'era già, rimuovilo e aggiungilo di nuovo per applicare il cambio di privacy.",
+          h("span", {}, "In ", h("a", { href: "#/settings/telegram" }, "Impostazioni → Telegram"), ", accendi la chat nella sezione Ascolto."),
+          "Nell'Ascolto di questo agente, accendi Telegram e scegli il gruppo. Nessuna selezione = tutte le chat accese.",
+          h("span", {}, "Nel gruppo, menzionalo con ", h("code", {}, raw(`@${bot.user.username}`)), ".")),
+        btn("Aggiungi al gruppo", { icon: "plus", href: `https://t.me/${bot.user.username}?startgroup=cora`, target: "_blank", cls: bot.inChat ? "" : "primary" })), { stack: true }),
       setRow("Nome e foto", "Il nome segue il pannello; la foto si cambia da BotFather con /setuserpic."));
   } else {
     body = setRows(setRow("Bot suo", bot.state === "error" ? tr("Il token salvato non funziona ({error}): incollane uno nuovo.", { error: bot.error }) : "Ora scrive tramite il bot principale, col suo nome in grassetto. Con un bot tutto suo scrive col suo account ed è menzionabile.",
