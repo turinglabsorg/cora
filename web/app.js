@@ -2520,7 +2520,7 @@ async function agentEmailTab(agent, isCurrent = () => true) {
   const identity = panel({ icon: "mail", title: "La sua email", hint: "Puoi scrivere all'agente a questo indirizzo e chiedergli di usare la sua casella.", actions: ready ? tag("Attiva", "ok") : null }, address,
     ready ? h("p", { class: "muted" }, "L'agente usa questo indirizzo quando gli chiedi di inviare posta.") : null);
   if (!data.available) return [identity, panel({ icon: "info", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))];
-  const local = h("input", { type: "text", name: "local", required: true, minlength: 3, maxlength: 32, pattern: "[a-z0-9][a-z0-9-]{1,30}[a-z0-9]", autocomplete: "off", autocapitalize: "none", spellcheck: false, "aria-label": "Nome dell'indirizzo", value: ready ? mailbox.email.split("@")[0] : agent.name.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32), placeholder: "nico" });
+  const local = h("input", { type: "text", name: "local", required: true, minlength: 3, maxlength: 32, pattern: "[a-z0-9][a-z0-9\\-]{1,30}[a-z0-9]", autocomplete: "off", autocapitalize: "none", spellcheck: false, "aria-label": "Nome dell'indirizzo", value: ready ? mailbox.email.split("@")[0] : agent.name.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32), placeholder: "nico" });
   const usable = data.domains.filter((domain) => domain.ready);
   const domain = h("select", { name: "domain", required: true, "aria-label": "Dominio email" }, usable.map((item) => h("option", { value: item.name, selected: ready && mailbox.email.endsWith(`@${item.name}`) }, raw(item.name))));
   const feedback = h("p", { class: "mail-feedback", role: "status" });
