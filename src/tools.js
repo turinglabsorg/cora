@@ -95,7 +95,7 @@ export const TOOL_DEFS = [
       properties: {
         text: { type: "string" },
         channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" },
-        voice: { type: "boolean", description: "true: the same words also go out as a voice message in your own voice (Soniox), after the text. A voice message you received is already answered out loud: use this when someone asks for a voice message or when hearing it helps" },
+        voice: { type: "boolean", description: "true: also send these words as a voice message (Soniox) when someone asks for it. For replies to voice messages, Cora chooses voice-only by default and honors the person's explicit request for text or both; this flag never overrides that preference." },
       },
       required: ["text"],
     },
@@ -640,7 +640,7 @@ export async function executeTool(call, ctx) {
           message_ids: messages.map((item) => String(item.id || item.message_id || "")).filter(Boolean),
           mentions: [...new Set(messages.flatMap((item) => [...String(item.content || "").matchAll(/<@!?(\d+)>/g)].map((match) => match[1])))],
         };
-        if (args.voice === true) receipt.voice = sent?.voice?.messages ? "sent" : `not sent: ${sent?.voice?.error || "unavailable"}`;
+        if (sent?.voice || args.voice === true) receipt.voice = sent?.voice?.messages ? "sent" : `not sent: ${sent?.voice?.error || "unavailable"}`;
         const status = target === channelId ? "posted in this conversation. Your final reply is posted here too: if there is work left, keep working and write only what is new; if this message already says it all, end with just PASS" : `posted directly to ${target}; do not duplicate this report in your final reply`;
         return { text: `${status}\nCora delivery receipt: ${JSON.stringify(receipt)}` };
       }

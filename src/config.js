@@ -37,6 +37,7 @@ export const config = {
   mailDomain: setting("MAIL_DOMAIN") || "",
   mailNamespace: setting("MAIL_NAMESPACE") || "",
   mailRegistrationToken: setting("MAIL_REGISTRATION_TOKEN") || "",
+  resendApi: (setting("RESEND_API") || "https://api.resend.com").replace(/\/$/, ""),
   ollamaUrl: (env.OLLAMA_URL || "https://ollama.com").replace(/\/$/, ""),
   ollamaKey: env.OLLAMA_API_KEY || "",
   orcaUrl: (setting("ORCAROUTER_URL") || "https://api.orcarouter.ai/v1").replace(/\/$/, ""),

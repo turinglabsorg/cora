@@ -364,6 +364,32 @@ export class Boxes {
     return job;
   }
 
+  assignMailbox(agent, { local, domain }) {
+    const job = this.mailboxQueue.then(async () => {
+      if (!this.mailbox?.token || !agent.enabled || !agent.tools) throw new Error("mailbox is unavailable");
+      await this.ensureNow(agent);
+      const previous = this.mailbox.identity?.(agent);
+      const identity = await this.provisionMailbox(agent, local, domain);
+      const previousEmails = [...new Set([...(previous?.previousEmails || []), ...(previous?.email && previous.email !== identity.email ? [previous.email] : [])])].filter((email) => email !== identity.email);
+      const value = { ...identity, status: "ready", error: "", previousEmails };
+      this.mailbox.changed?.(agent, value);
+      this.mailboxChecks.set(agent.id, { at: Date.now(), ready: true });
+      return value;
+    });
+    this.mailboxQueue = job.catch(() => {});
+    return job;
+  }
+
+  async provisionMailbox(agent, local, domain) {
+    const result = await runProcess(this.docker, this.execArgs(agent.id, ["node", "--input-type=module", "-e", MAILBOX_SCRIPT]), {
+      input: JSON.stringify({ endpoint: this.mailbox.endpoint, domain, namespace: this.mailbox.namespace, token: this.mailbox.token, local, displayName: agent.name }), timeoutMs: 60000, maxBytes: 64 * 1024,
+    });
+    if (result.code !== 0) throw new Error(`mailbox provisioning failed${result.timedOut ? " (timed out)" : ""}: ${result.stderr.trim().slice(0, 200)}`);
+    const identity = JSON.parse(result.stdout.toString("utf8"));
+    if (identity.email !== `${local}@${domain}`) throw new Error("unexpected mailbox identity");
+    return identity;
+  }
+
   async ensureMailboxNow(agent) {
     if (!this.mailbox?.token || !this.mailbox.domain || !this.mailbox.namespace || !agent.tools || !agent.enabled) return;
     const previous = this.mailboxChecks.get(agent.id);
@@ -372,13 +398,9 @@ export class Boxes {
     try {
       const existing = this.mailbox.identity?.(agent);
       const suffix = slug(this.mailbox.namespace).slice(0, 14).replace(/-$/, "");
-      const local = existing?.email?.endsWith(`@${this.mailbox.domain}`) ? existing.email.split("@")[0] : `${slug(agent.name).slice(0, 31 - suffix.length).replace(/-$/, "")}-${suffix}`;
-      const result = await runProcess(this.docker, this.execArgs(agent.id, ["node", "--input-type=module", "-e", MAILBOX_SCRIPT]), {
-        input: JSON.stringify({ endpoint: this.mailbox.endpoint, domain: this.mailbox.domain, token: this.mailbox.token, local, displayName: agent.name }), timeoutMs: 60000, maxBytes: 64 * 1024,
-      });
-      if (result.code !== 0) throw new Error(`mailbox provisioning failed${result.timedOut ? " (timed out)" : ""}: ${result.stderr.trim().slice(0, 200)}`);
-      const identity = JSON.parse(result.stdout.toString("utf8"));
-      if (identity.email !== `${local}@${this.mailbox.domain}`) throw new Error("unexpected mailbox identity");
+      const [keptLocal, keptDomain] = String(existing?.email || "").split("@");
+      const local = keptLocal || `${slug(agent.name).slice(0, 31 - suffix.length).replace(/-$/, "")}-${suffix}`;
+      const identity = await this.provisionMailbox(agent, local, keptDomain || this.mailbox.domain);
       this.mailbox.changed?.(agent, { ...identity, status: "ready" });
       this.mailboxChecks.set(agent.id, { at: Date.now(), ready: true });
     } catch (error) {

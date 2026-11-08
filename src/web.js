@@ -176,7 +176,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, github = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, github = null, mailDomains = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -410,6 +410,38 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { ok: true }, { "Set-Cookie": clearedCookies() });
     }
 
+    if (path === "/api/mail/domains" && method === "GET") return send(res, 200, { ...mailDomains.view(), canManage: user.role === "owner" });
+    if (path === "/api/mail/accounts" && method === "POST") {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega account Resend.");
+      const account = await mailDomains.connect(await readJson(req, 4096));
+      activity({ type: "settings", text: `account email ${account.name} collegato` });
+      return send(res, 201, account);
+    }
+    const mailAccount = /^\/api\/mail\/accounts\/(ma_[a-f0-9]{16})(?:\/(check))?$/.exec(path);
+    if (mailAccount && ["POST", "PUT"].includes(method)) {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia gli account Resend.");
+      return send(res, 200, method === "PUT" ? await mailDomains.connect({ ...await readJson(req, 4096), id: mailAccount[1] }) : await mailDomains.checkAccount(mailAccount[1]));
+    }
+    if (path === "/api/mail/domains" && method === "POST") {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario aggiunge domini email.");
+      return send(res, 201, await mailDomains.addDomain(await readJson(req, 4096)));
+    }
+    const mailDomain = /^\/api\/mail\/domains\/(md_[a-f0-9]{16})\/(check|verify)$/.exec(path);
+    if (mailDomain && method === "POST") {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario verifica i domini email.");
+      return send(res, 200, await mailDomains.checkDomain(mailDomain[1], { verify: mailDomain[2] === "verify" }));
+    }
+    const agentMailbox = /^\/api\/agents\/([\w-]+)\/mailbox$/.exec(path);
+    if (agentMailbox) {
+      const agent = store.agent(agentMailbox[1]);
+      if (!agent) throw new HttpError(404, "Agente non trovato.");
+      if (method === "GET") return send(res, 200, { mailbox: store.value(`agentMailbox:${agent.id}`, null), ...mailDomains.view(), canCustomize: Boolean(agent.enabled && agent.tools) });
+      if (method === "PUT") {
+        const mailbox = await mailDomains.assign(agent, await readJson(req, 4096));
+        activity({ type: "settings", agentId: agent.id, text: `indirizzo email aggiornato: ${mailbox.email}` });
+        return send(res, 200, mailbox);
+      }
+    }
     if (path === "/api/context" && method === "GET") return send(res, 200, { ...contextSources({ config, store, subscriptions, brain }), canWriteFiles: user.role === "owner" });
     const contextFile = /^\/api\/context\/files\/([A-Za-z0-9._-]{1,80})$/.exec(path);
     if (contextFile && method === "PUT") {

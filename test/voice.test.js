@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { childEnv } from "../src/cli.js";
 import { startCora } from "../src/main.js";
 import { Store } from "../src/store.js";
-import { Voice, accentOf, speakable, wavShape } from "../src/voice.js";
+import { Voice, accentOf, speakable, speechParts, wavShape } from "../src/voice.js";
 import { CHANNEL, GUILD, MAIN_TOKEN, SLACK_CHANNEL, TG_GROUP, TG_OWNER, fakeDiscord, fakeDocker, fakeOllama, fakeSlack, fakeSoniox, fakeTelegram, sleep, tempHome, toneWav, waitFor } from "./helpers.js";
 
 async function fixture(t, { sonioxKey = "", stored = new Map() } = {}) {
@@ -43,7 +43,7 @@ test("a Soniox key is tried before it is kept, then the agents' voices can be ch
   const sample = await request("/api/voices/preview", { method: "POST", body: { voice: "Giulia", language: "it" } });
   assert.equal(sample.status, 200);
   assert.equal(sample.type, "audio/mpeg");
-  assert.deepEqual(soniox.state.speech.at(-1), { model: "tts-rt-v2", language: "it", voice: "Giulia", audio_format: "mp3", text: "Ciao, questa è la mia voce. Ti rispondo così quando mi parli." });
+  assert.deepEqual(soniox.state.speech.at(-1), { model: "tts-rt-v2", language: "it", voice: "Giulia", audio_format: "mp3", speed: 1.2, text: "Ciao, questa è la mia voce. Ti rispondo così quando mi parli." });
   const created = await request("/api/agents", { method: "POST", body: { name: "Ada", model: "ollama/test-model", voice: "Giulia", voiceLanguage: "it" } });
   assert.equal(created.status, 201);
   assert.deepEqual([created.data.voice, created.data.voiceLanguage], ["Giulia", "it"]);
@@ -130,11 +130,16 @@ async function world(t) {
   const soniox = await fakeSoniox();
   const replies = new Map();
   const prompts = [];
+  const delivery = { mode: "voice", calls: [] };
   const ollama = await fakeOllama(async (body) => {
     const system = String(body.messages[0]?.content || "");
+    if (/^Decidi come consegnare/.test(system)) {
+      delivery.calls.push(body);
+      return { content: JSON.stringify({ mode: delivery.mode }) };
+    }
     if (/^Scrivi la condizione di completamento/.test(system)) return { content: "NESSUNO" };
     if (/^Giudichi se un compito è finito/.test(system)) return { content: JSON.stringify({ met: true, reason: "" }) };
-    if (/^Valuti l'intenzione/.test(system)) return { content: JSON.stringify({ intent: "update" }) };
+    if (/^Valuti l'intenzione/.test(system)) return { content: JSON.stringify(delivery.intention || { intent: "update" }) };
     const name = /^Sei (\p{Lu}[^.]*)\./u.exec(system)?.[1];
     const users = body.messages.filter((message) => message.role === "user");
     prompts.push({ name, text: String(users.at(-1)?.content || ""), all: body.messages.map((message) => String(message.content || "")).join("\n") });
@@ -168,7 +173,7 @@ async function world(t) {
     return { status: response.status, data: await response.json() };
   };
   const quiet = () => waitFor(() => app.orchestrator.quiet(), { what: "agents to stop talking", timeout: 30000 });
-  return { app, discord, telegram, slack, soniox, replies, prompts, botTokens, call, quiet };
+  return { app, discord, telegram, slack, soniox, replies, prompts, botTokens, call, quiet, delivery };
 }
 
 // What a person's phone records: the stand-in Soniox only counts the bytes.
@@ -186,9 +191,7 @@ test("on Discord a voice message is heard as words and answered out loud: a voic
   const sent = discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("voice-message.ogg", RECORDING, "audio/ogg")] });
 
   const spoken = await waitFor(() => discord.state.botPosts.find((post) => post.token === "ada-token" && post.flags === 1 << 13), { what: "Ada's voice message" });
-  const written = discord.state.botPosts.find((post) => post.token === "ada-token" && !post.flags);
-  assert.equal(written.content, "Sì Sam, alle **nove** in sala grande: https://example.test/riunione", "the written answer goes out as always");
-  assert.ok(discord.state.botPosts.indexOf(written) < discord.state.botPosts.indexOf(spoken), "words first, then the voice");
+  assert.equal(discord.state.botPosts.filter((post) => post.token === "ada-token" && !post.flags).length, 0, "no written copy of a voice reply");
   assert.equal(spoken.file, "voice-message.ogg");
   assert.equal(spoken.fileType, "audio/ogg");
   assert.equal(spoken.fileBytes.subarray(0, 4).toString("ascii"), "OggS");
@@ -199,15 +202,25 @@ test("on Discord a voice message is heard as words and answered out loud: a voic
   assert.equal(soniox.state.uploads.at(-1).bytes > RECORDING.length, true, "the recording itself went to Soniox");
   assert.deepEqual(soniox.state.transcriptions.at(-1).language_hints, ["it"]);
   assert.equal(soniox.state.transcriptions.at(-1).client_reference_id, sent.id);
-  assert.deepEqual(soniox.state.speech.at(-1), { model: "tts-rt-v2", language: "it", voice: "Giulia", audio_format: "wav", sample_rate: 24000, text: "Sì Sam, alle nove in sala grande:" });
+  assert.deepEqual(soniox.state.speech.at(-1), { model: "tts-rt-v2", language: "it", voice: "Giulia", audio_format: "wav", speed: 1.2, sample_rate: 24000, text: "Sì Sam, alle nove in sala grande:" });
   const prompt = prompts.find((item) => item.name === "Ada").text;
   assert.match(prompt, /Sam ★: \[messaggio vocale: «Ada, domani alle nove c'è la riunione\?»\]/);
-  assert.match(prompt, /Sam ti ha mandato un messaggio vocale: la tua risposta finale gli arriva scritta e anche a voce/);
+  assert.match(prompt, /Cora consegna solo la tua voce, anche per say e ask_owner/);
   const archived = app.store.recentMessages(CHANNEL).find((item) => item.id === sent.id);
   assert.equal(archived.voice, true);
   assert.equal(archived.content, "[messaggio vocale: «Ada, domani alle nove c'è la riunione?»]");
   await waitFor(() => soniox.state.deleted.length >= 2, { what: "the recording deleted on Soniox" });
   await quiet();
+  const answer = app.store.recentMessages(CHANNEL).find((item) => item.agentId === ada.id && item.voiceOnly);
+  assert.equal(answer.voiceOnly, true);
+  assert.match(answer.content, /alle \*\*nove\*\*/);
+  assert.ok(answer.traceId, "the audio's actual message id retains the final trace evidence");
+  discord.state.history.get(CHANNEL).push({ id: answer.id, channel_id: CHANNEL, guild_id: GUILD, content: "", flags: 1 << 13, author: { id: ADA, username: "Ada", bot: true }, timestamp: new Date(answer.at).toISOString(), attachments: [] });
+  app.orchestrator.states.delete(CHANNEL);
+  const state = app.orchestrator.state(CHANNEL);
+  await app.orchestrator.ensureHistory(state);
+  assert.equal(state.history.find((item) => item.id === answer.id)?.content, answer.content, "history reload keeps the outgoing transcript");
+  assert.equal(state.history.find((item) => item.id === sent.id)?.replyMode, "voice");
 
   // Written to, it writes back: no voice.
   const before = discord.state.botPosts.length;
@@ -236,7 +249,7 @@ test("an agent with no bot of its own and no voice picked answers in the speaker
   soniox.state.transcripts.push("Bea, are you coming tomorrow?");
   discord.say({ content: "", attachments: [discord.attachment("memo.m4a", RECORDING, "audio/mp4")] });
   const clip = await waitFor(() => discord.state.webhookPosts.find((post) => post.username === "Bea" && post.file), { what: "Bea's audio" });
-  assert.equal(discord.state.webhookPosts.find((post) => post.username === "Bea" && !post.file).content, "Sure, I'll be there.");
+  assert.equal(discord.state.webhookPosts.filter((post) => post.username === "Bea" && !post.file).length, 0);
   assert.equal(clip.file, "messaggio-vocale.mp3");
   assert.equal(clip.fileType, "audio/mpeg");
   assert.equal(clip.content, "");
@@ -273,7 +286,7 @@ test("on Telegram a voice note is heard and answered with a voice note", async (
   const seb = { id: Number(TG_OWNER), first_name: "Seb", is_bot: false };
   telegram.push({ chat: { id: Number(TG_GROUP), type: "supergroup", title: "La banda" }, from: seb, voice: { file_id: telegram.file("voice-1", RECORDING), duration: 3, mime_type: "audio/ogg", file_size: RECORDING.length } });
   const note = await waitFor(() => telegram.state.sent.find((item) => item.method === "sendVoice"), { what: "Tina's voice note" });
-  assert.equal(telegram.state.sent.find((item) => item.method === "sendMessage").text, "<b>Tina</b>\nRicevuto, ci penso io.");
+  assert.equal(telegram.state.sent.filter((item) => item.method === "sendMessage").length, 0, "Telegram receives only the voice note");
   assert.deepEqual(note.file, ["voice", "voice.ogg"]);
   assert.equal(note.caption, "<b>Tina</b>", "the main bot says whose voice it is");
   assert.equal(note.duration, "1");
@@ -297,10 +310,174 @@ test("on Slack an audio clip is heard with the app's token and answered with an 
   slack.say({ text: "", files: [slack.file("audio_message.m4a", RECORDING, "audio/mp4", { subtype: "slack_audio" })] });
   const clip = await waitFor(() => slack.state.posts.find((post) => post.file), { what: "Silvia's audio clip" });
   assert.equal(clip.app, "silvia", "shared by her own app");
-  assert.equal(slack.state.posts.find((post) => !post.file).text, "Va bene, lo preparo.");
+  assert.equal(slack.state.posts.filter((post) => !post.file).length, 0, "Slack receives only the audio clip");
   assert.deepEqual([slack.state.slots.at(-1).filename, slack.state.slots.at(-1).app], ["messaggio-vocale.mp3", "silvia"]);
   assert.equal(slack.state.uploads.at(-1).type, "audio/mpeg");
   assert.equal(soniox.state.uploads.length, 1, "two apps heard it, it was transcribed once");
   assert.match(prompts.find((item) => item.name === "Silvia").text, /Sam ★: \[messaggio vocale: «Silvia, mi prepari il preventivo per domani\?»\]/);
   await quiet();
+});
+
+test("voice replies honor explicit text and both requests, including say, without a written default", async (t) => {
+  const { app, discord, soniox, replies, prompts, call, quiet, delivery } = await world(t);
+  const agent = (await call("/api/agents", { method: "POST", body: { name: "Dora", model: "ollama/test-model", tools: false } })).data;
+  for (const [index, scenario] of [
+    { mode: "voice", request: "Dora, scrivi una mail a Luca e dimmi come procede.", text: false, audio: true },
+    { mode: "text", request: "Dora, rispondimi solo per iscritto, niente audio.", text: true, audio: false },
+    { mode: "both", request: "Dora, rispondimi a voce e mandami anche il testo.", text: true, audio: true },
+    { mode: "unrecognized", request: "Dora, non voglio una risposta scritta.", text: false, audio: true },
+  ].entries()) {
+    delivery.mode = scenario.mode;
+    const progress = `Controllo la richiesta ${index}.`;
+    const answer = `Ecco la risposta ${index}.`;
+    let step = 0;
+    replies.set("Dora", () => ++step === 1
+      ? { tool_calls: [{ function: { name: "say", arguments: { text: progress, voice: true } } }] }
+      : { content: answer });
+    const before = discord.state.webhookPosts.length;
+    const spokenBefore = soniox.state.speech.length;
+    soniox.state.transcripts.push(scenario.request);
+    const message = discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment(`dora-${index}.ogg`, RECORDING, "audio/ogg")] });
+    await waitFor(() => app.store.recentMessages(CHANNEL).some((item) => item.agentId === agent.id && item.content === answer), { what: `Dora's ${scenario.mode} answer` });
+    await quiet();
+    const posts = discord.state.webhookPosts.slice(before).filter((post) => post.username === "Dora");
+    assert.deepEqual(posts.filter((post) => post.content).map((post) => post.content), scenario.text ? [progress, answer] : []);
+    assert.equal(posts.filter((post) => post.file).length, scenario.audio ? 2 : 0, "each progress/final response is delivered once");
+    assert.deepEqual(soniox.state.speech.slice(spokenBefore).map((item) => item.text), scenario.audio ? [progress, answer] : []);
+    assert.equal(app.store.recentMessages(CHANNEL).find((item) => item.id === message.id).replyMode, ["text", "both"].includes(scenario.mode) ? scenario.mode : "voice");
+    if (scenario.audio) assert.match(prompts.filter((item) => item.name === "Dora").at(-1).all, /"voice":"sent"/);
+  }
+  assert.equal(delivery.calls.length, 4, "one semantic decision per incoming voice, shared by progress and final replies");
+  assert.match(delivery.calls[0].messages[0].content, /scrivere un file, una mail, un documento/);
+  assert.match(delivery.calls[1].messages[1].content, /rispondimi solo per iscritto/);
+});
+
+test("tool-only voice answers retain receipts and owner questions also use voice-only delivery", async (t) => {
+  const { app, discord, replies, prompts, soniox, call, quiet } = await world(t);
+  const agent = (await call("/api/agents", { method: "POST", body: { name: "Eva", model: "ollama/test-model", tools: false } })).data;
+  let step = 0;
+  replies.set("Eva", () => ++step === 1
+    ? { tool_calls: [{ function: { name: "say", arguments: { text: "Certo, ti ascolto." } } }] }
+    : { content: "PASS" });
+  soniox.state.transcripts.push("Eva, mi senti?");
+  discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("eva.ogg", RECORDING, "audio/ogg")] });
+  await waitFor(() => app.store.recentMessages(CHANNEL).some((item) => item.agentId === agent.id));
+  await quiet();
+  const answer = app.store.recentMessages(CHANNEL).find((item) => item.agentId === agent.id);
+  const receipt = prompts.filter((item) => item.name === "Eva").at(-1).all;
+  assert.match(receipt, /"voice":"sent"/);
+  assert.ok(receipt.includes(answer.id), "the receipt identifies the archived audio, not an absent text message");
+  assert.equal(app.store.trace(answer.traceId).status, "pass", "a successful say followed by PASS needs no final duplicate");
+  assert.equal(discord.state.webhookPosts.length, 1);
+  assert.ok(discord.state.webhookPosts[0].file);
+
+  step = 0;
+  replies.set("Eva", () => ++step === 1
+    ? { tool_calls: [{ function: { name: "ask_owner", arguments: { question: "Preferisci domani o venerdì?", choices: ["Domani", "Venerdì"] } } }] }
+    : { content: "PASS" });
+  soniox.state.transcripts.push("Eva, chiedimi quale giorno preferisco.");
+  discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("eva-question.ogg", RECORDING, "audio/ogg")] });
+  await waitFor(() => app.orchestrator.state(CHANNEL).request);
+  await quiet();
+  assert.deepEqual(discord.state.webhookPosts.filter((post) => post.content).map((post) => post.content), []);
+  const question = app.store.recentMessages(CHANNEL).find((item) => item.request);
+  assert.equal(question.voiceOnly, true);
+  assert.deepEqual(question.request.choices, ["Domani", "Venerdì"]);
+  assert.match(soniox.state.speech.at(-1).text, /Preferisci domani o venerdì/);
+});
+
+test("long voice-only replies keep every spoken word and a synthesis failure never leaks the written answer", async (t) => {
+  const { app, discord, replies, soniox, call, quiet } = await world(t);
+  const agent = (await call("/api/agents", { method: "POST", body: { name: "Fia", model: "ollama/test-model", tools: false } })).data;
+  const answer = `${"Una frase da ascoltare. ".repeat(130)}Ultima parola.`;
+  replies.set("Fia", () => ({ content: answer }));
+  soniox.state.transcripts.push("Fia, leggimi il riepilogo intero.");
+  discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("fia.ogg", RECORDING, "audio/ogg")] });
+  await waitFor(() => soniox.state.speech.some((item) => item.text.includes("Ultima parola.")));
+  await quiet();
+  assert.equal(soniox.state.speech.map((item) => item.text).join(" "), answer);
+  assert.equal(discord.state.webhookPosts.filter((post) => !post.file).length, 0);
+  assert.equal(app.store.recentMessages(CHANNEL).filter((item) => item.agentId === agent.id).map((item) => item.content).join(" "), answer);
+  assert.deepEqual(speechParts(answer), soniox.state.speech.map((item) => item.text));
+
+  app.voice.voiceNote = async () => { throw new Error("fixture synthesis unavailable"); };
+  replies.set("Fia", () => ({ content: "Questa risposta deve restare solo vocale." }));
+  soniox.state.transcripts.push("Fia, rispondi di nuovo.");
+  discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("fia-failure.ogg", RECORDING, "audio/ogg")] });
+  await waitFor(() => discord.state.webhookPosts.some((post) => /Non riesco a inviare il vocale/.test(post.content)));
+  await quiet();
+  assert.equal(discord.state.webhookPosts.some((post) => post.content === "Questa risposta deve restare solo vocale."), false);
+  assert.equal(app.store.recentMessages(CHANNEL).some((item) => item.content === "Questa risposta deve restare solo vocale."), false, "failed audio never enters the archive as delivered");
+});
+
+test("an interrupted voice task resumes with the original delivery preference and language", async (t) => {
+  const { app, discord, replies, soniox, call, quiet } = await world(t);
+  const agent = (await call("/api/agents", { method: "POST", body: { name: "Gina", model: "ollama/test-model", tools: false } })).data;
+  let step = 0;
+  replies.set("Gina", () => ({ content: ++step === 1 ? "Here is the final report." : "DONE" }));
+  const trace = { id: "tr_voice_restart", agentId: agent.id, kind: "chat", channelId: CHANNEL, model: agent.model, startedAt: new Date().toISOString(), status: "running", system: "", prompt: "<chat>\nSam ★: [messaggio vocale: «Gina, prepare the report.»]\n</chat>", steps: [{ type: "note", text: "Reply delivery: voice", replyTo: { id: "original-voice", voice: true, replyMode: "voice", spokenIn: "en" } }] };
+  app.store.saveTrace(trace);
+  await app.orchestrator.resumeTask(agent, app.store.trace(trace.id));
+  await quiet();
+  const posts = discord.state.webhookPosts.filter((post) => post.username === "Gina");
+  assert.equal(posts.length, 2, "restart notice and final reply");
+  assert.ok(posts.every((post) => post.file && !post.content));
+  assert.deepEqual(soniox.state.speech.map((item) => item.language), ["en", "en"]);
+  assert.equal(soniox.state.speech.at(-1).text, "Here is the final report.");
+});
+
+test("history catch-up preserves a voice being transcribed and hears an offline voice before answering", async (t) => {
+  const { app, discord, replies, soniox, call, quiet } = await world(t);
+  await call("/api/agents", { method: "POST", body: { name: "Hana", model: "ollama/test-model", tools: false } });
+  replies.set("Hana", () => ({ content: "Sì, ti sento." }));
+  let release, started = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const transcribe = app.voice.transcribe.bind(app.voice);
+  app.voice.transcribe = async (...args) => { started = true; await gate; return transcribe(...args); };
+  soniox.state.transcripts.push("Hana, mi senti?");
+  const incoming = discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("hana.ogg", RECORDING, "audio/ogg")] });
+  await waitFor(() => started);
+  await app.orchestrator.catchUp();
+  assert.equal(app.store.hasMessage(incoming.id), false, "catch-up leaves the in-flight voice to the listener");
+  release();
+  await waitFor(() => discord.state.webhookPosts.some((item) => item.username === "Hana" && item.file));
+  await quiet();
+  assert.equal(app.store.recentMessages(CHANNEL).find((item) => item.id === incoming.id).voice, true);
+
+  discord.offline = true;
+  soniox.state.transcripts.push("Hana, mi senti anche adesso?");
+  const missed = discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("hana-offline.ogg", RECORDING, "audio/ogg")] });
+  const before = discord.state.webhookPosts.length;
+  await app.orchestrator.catchUp();
+  await waitFor(() => discord.state.webhookPosts.length > before);
+  await quiet();
+  assert.equal(app.store.recentMessages(CHANNEL).find((item) => item.id === missed.id).replyMode, "voice");
+  assert.equal(discord.state.webhookPosts.filter((item) => item.content).length, 0);
+  assert.equal(soniox.state.transcriptions.length, 2, "each voice is transcribed once, including the recovered one");
+});
+
+for (const routine of [false, true]) test(`a voice status question gets an audio answer while the original written ${routine ? "routine" : "task"} continues`, async (t) => {
+  const { app, discord, replies, soniox, call, quiet, delivery } = await world(t);
+  const agent = (await call("/api/agents", { method: "POST", body: { name: "Iris", model: "ollama/test-model", tools: true } })).data;
+  let release, started = false, calls = 0;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  replies.set("Iris", async () => { calls++; if (calls === 1) { started = true; await gate; return { content: "Il riepilogo è pronto." }; } return { content: "DONE" }; });
+  delivery.intention = { intent: "status", reply: "Sono ancora sul riepilogo, il lavoro continua." };
+  const task = routine ? app.store.createRoutine(agent.id, { name: "Riepilogo", prompt: "Controlla il riepilogo.", schedule: "0 9 * * *", channelId: CHANNEL }) : null;
+  const running = task ? app.orchestrator.runRoutine(task) : null;
+  if (!routine) discord.say({ content: "@Iris, controlliamo il riepilogo?" });
+  await waitFor(() => started);
+  soniox.state.transcripts.push("Iris, a che punto sei?");
+  discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("iris-status.ogg", RECORDING, "audio/ogg")] });
+  await waitFor(() => discord.state.webhookPosts.some((post) => post.username === "Iris" && post.file));
+  assert.equal(calls, 1);
+  assert.equal(app.orchestrator.threadWork.has(CHANNEL, agent.id), true);
+  assert.equal(discord.state.webhookPosts.some((post) => post.content?.includes("Sono ancora sul riepilogo")), false);
+  release();
+  await waitFor(() => discord.state.webhookPosts.some((post) => post.content === "Il riepilogo è pronto."));
+  if (running) await running;
+  await quiet();
+  assert.equal(discord.state.webhookPosts.filter((post) => post.file).length, 1, "the original task retains its written delivery");
 });

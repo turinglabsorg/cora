@@ -1037,6 +1037,9 @@ export class Store {
     if (item.request) meta.request = item.request;
     if (item.passive) meta.passive = true;
     if (item.voice) meta.voice = true;
+    if (item.voiceOnly) meta.voiceOnly = true;
+    if (item.replyMode) meta.replyMode = item.replyMode;
+    if (item.spokenIn) meta.spokenIn = item.spokenIn;
     this.stmt("INSERT OR IGNORE INTO messages(id, channel_id, at, author_id, author_name, kind, agent_id, content, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(String(item.id), String(channelId), Number(item.at) || Date.now(), item.authorId || null, String(item.authorName || "?"), String(item.kind || "human"), item.agentId || null, cleanText(item.content, 4000), Object.keys(meta).length ? JSON.stringify(meta) : null);
   }

@@ -29,6 +29,7 @@ import { SlackApps } from "./slack-apps.js";
 import { Store } from "./store.js";
 import { Subscriptions } from "./subscriptions.js";
 import { Voice } from "./voice.js";
+import { MailDomains } from "./mail-domains.js";
 import { createWeb } from "./web.js";
 
 export function startCora(overrides = {}) {
@@ -82,7 +83,13 @@ export function startCora(overrides = {}) {
   const boxes = new Boxes({ docker: cfg.docker, image: cfg.boxImage, timezone: cfg.timezone, access: (agent) => ({ sshPort: store.sshPort(agent.id), keys: sshKeys() }),
     gitAttribution: { enabled: cfg.gitAttribution, email: cfg.gitCoauthorEmail },
     mailbox: { endpoint: cfg.mailEndpoint, domain: cfg.mailDomain, namespace: cfg.mailNamespace, token: cfg.mailRegistrationToken, identity: mailboxFor,
-      changed: (agent, state) => { store.setValue(`agentMailbox:${agent.id}`, { ...mailboxFor(agent), ...state }); if (state.status === "blocked") activity({ type: "error", agentId: agent.id, text: state.error }); },
+      changed: (agent, state) => {
+        const previous = mailboxFor(agent);
+        const mailbox = { ...previous, ...state };
+        store.setValue(`agentMailbox:${agent.id}`, mailbox);
+        if (state.status === "blocked") activity({ type: "error", agentId: agent.id, text: state.error });
+        if (previous?.email !== mailbox.email || previous?.status !== mailbox.status) web?.broadcast({ type: "mailbox", agentId: agent.id, mailbox });
+      },
     },
   });
   const live = (event) => web?.broadcast(event);
@@ -92,6 +99,7 @@ export function startCora(overrides = {}) {
   const bots = new AgentBots({ store, apiBase: cfg.discordApi, gatewayUrl: cfg.discordGateway, tokenFor, log: activity });
   const tgBots = new TelegramBots({ store, apiBase: cfg.telegramApi, pollTimeout: cfg.telegramPollTimeout, tokenFor, log: activity });
   const storeSecret = cfg.storeSecret || ((name, value) => hushStore(name, value, { bin: cfg.hushBin }));
+  const mailDomains = new MailDomains({ store, boxes, endpoint: cfg.mailEndpoint, namespace: cfg.mailNamespace, token: cfg.mailRegistrationToken, defaultDomain: cfg.mailDomain, resendApi: cfg.resendApi, storeSecret, tokenFor });
   const slackApps = new SlackApps({ store, apiBase: cfg.slackApi, refreshToken: cfg.slackConfigToken || tokenFor("CORA_SLACK_CONFIG_TOKEN"), storeSecret, log: activity });
   const skBots = new SlackBots({ store, apiBase: cfg.slackApi, tokenFor, log: activity, apps: slackApps });
   const channels = new Channels({ store, discord, bots, telegram, tgBots, slack, skBots });
@@ -166,7 +174,7 @@ export function startCora(overrides = {}) {
   companyBrain.onNote = () => librarian.requestRun({ reason: "memoria" });
   // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
   const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, github });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, github, mailDomains });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -290,7 +298,7 @@ export function startCora(overrides = {}) {
     await companyBrain.close();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, github, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, github, mailDomains, server: web.server };
 }
 
 const isMain = (() => {

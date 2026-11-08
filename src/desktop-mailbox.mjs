@@ -9,7 +9,7 @@ async function provision() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  const { endpoint, domain, local, token, displayName } = request;
+  const { endpoint, domain, local, token, displayName, namespace } = request;
   if (!/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(local) || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) throw new MailboxError("invalid mailbox address");
   const root = join(homedir(), ".ambox");
   const directory = join(root, "agents", `${local}@${domain}`);
@@ -32,7 +32,7 @@ async function provision() {
   const publicKey = createPublicKey(privateKey).export({ type: "spki", format: "pem" });
   const response = await fetch(`${endpoint}/v1/domains/register`, {
     method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ agent_id: local, domain, display_name: displayName, public_key_pem: publicKey, recover: true }),
+    body: JSON.stringify({ agent_id: local, domain, namespace, display_name: displayName, public_key_pem: publicKey, recover: true }),
     signal: AbortSignal.timeout(30000),
   });
   if (!response.ok) throw new MailboxError(`mailbox registration refused (HTTP ${response.status})`);

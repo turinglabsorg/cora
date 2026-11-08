@@ -1,0 +1,83 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { MailDomains } from "../src/mail-domains.js";
+import { childEnv } from "../src/cli.js";
+import { mailWorld } from "./mail-fixtures.js";
+import { waitFor } from "./helpers.js";
+
+test("multiple Resend accounts keep their domains, webhooks, credentials and real agent mailboxes separate", async (t) => {
+  const { app, state, vault, keyA, keyB, call } = await mailWorld(t);
+  assert.equal((await call("/api/mail/domains", { auth: false })).status, 401);
+  assert.equal((await call("/api/mail/domains", { asMember: true })).data.canManage, false);
+  assert.equal((await call("/api/mail/accounts", { method: "POST", asMember: true, body: { name: "Denied", key: keyA } })).status, 403);
+  const alpha = (await call("/api/mail/accounts", { method: "POST", body: { name: "Azienda", key: keyA } })).data;
+  const beta = (await call("/api/mail/accounts", { method: "POST", body: { name: "Altro account", key: keyB } })).data;
+  assert.equal(alpha.ready, true);
+  assert.equal(beta.ready, true);
+  assert.equal((await call(`/api/mail/accounts/${alpha.id}/check`, { method: "POST", asMember: true })).status, 403);
+  assert.equal((await call("/api/mail/domains", { method: "POST", asMember: true, body: { name: "not-allowed.test", accountId: alpha.id } })).status, 403);
+  assert.equal(vault.get(app.mailDomains.keyName(alpha.id)), keyA);
+  assert.equal(state.accounts.get(keyA).hooks[0].endpoint.endsWith(`/v1/inbound/accounts/${alpha.id}`), true);
+  const first = (await call("/api/mail/domains", { method: "POST", body: { name: "posta.azienda.test", accountId: alpha.id } })).data;
+  const second = (await call("/api/mail/domains", { method: "POST", body: { name: "team.altro.test", accountId: beta.id } })).data;
+  assert.equal(first.ready, false);
+  assert.equal(first.records.length, 3);
+  const agent = (await call("/api/agents", { method: "POST", body: { name: "Nico", tools: true, model: "ollama/test-model" } })).data;
+  await waitFor(() => app.store.value(`agentMailbox:${agent.id}`, null)?.status === "ready");
+  const before = app.store.value(`agentMailbox:${agent.id}`).email;
+  const denied = await call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: "nico", domain: first.name } });
+  assert.equal(denied.status, 409, "an unverified domain cannot be assigned");
+  state.dnsReady.add(first.name);
+  const verified = await call(`/api/mail/domains/${first.id}/verify`, { method: "POST" });
+  assert.equal(verified.data.ready, true);
+  assert.equal((await call(`/api/mail/domains/${second.id}/check`, { method: "POST" })).data.ready, false);
+  const changed = await call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", asMember: true, body: { local: "nico", domain: first.name } });
+  assert.equal(changed.status, 200, JSON.stringify(changed.data));
+  assert.equal(changed.data.email, "nico@posta.azienda.test");
+  assert.deepEqual(changed.data.previousEmails, [before]);
+  assert.equal(state.routes.get(first.name).account_id, alpha.id);
+  assert.equal(state.routes.get(second.name).account_id, beta.id);
+  assert.equal(state.relayAccounts.get(alpha.id).api_key, keyA);
+  assert.equal(state.relayAccounts.get(beta.id).api_key, keyB);
+  const swapped = await call(`/api/mail/accounts/${alpha.id}`, { method: "PUT", body: { name: "Wrong account", key: keyB } });
+  assert.equal(swapped.status, 409, "a valid key from another account cannot replace the domain's account");
+  assert.equal(vault.get(app.mailDomains.keyName(alpha.id)), keyA);
+  assert.equal(state.relayAccounts.get(alpha.id).api_key, keyA);
+  const metadata = (await call("/api/mail/domains")).data;
+  assert.doesNotMatch(JSON.stringify(metadata), /re_fixture|whsec_|fixture-mail-registration|fixture-mailbox-client-key/);
+  assert.doesNotMatch(JSON.stringify(app.store.value("mailDomains")), /re_fixture|whsec_/);
+  const restarted = new MailDomains({ ...app.mailDomains, tokenFor: (name) => vault.get(name) || "" });
+  assert.equal((await restarted.checkAccount(alpha.id)).ready, true);
+  assert.equal(state.accounts.get(keyA).hooks.length, 1, "restart reuses the existing webhook");
+});
+
+test("refused credentials and service failures preserve working addresses and can recover", async (t) => {
+  const { app, state, vault, keyA, call } = await mailWorld(t);
+  assert.equal((await call("/api/mail/accounts", { method: "POST", body: { name: "Bad", key: "re_invalid_fixture" } })).status, 400);
+  assert.equal(vault.size, 0);
+  assert.equal(app.store.value("mailDomains", null), null);
+  const account = (await call("/api/mail/accounts", { method: "POST", body: { name: "Azienda", key: keyA } })).data;
+  assert.equal((await call("/api/mail/domains", { method: "POST", body: { name: "https://azienda.test", accountId: account.id } })).status, 400);
+  const domain = (await call("/api/mail/domains", { method: "POST", body: { name: "posta.azienda.test", accountId: account.id } })).data;
+  state.dnsReady.add(domain.name);
+  state.relayRefuse = true;
+  const failed = await call(`/api/mail/domains/${domain.id}/verify`, { method: "POST" });
+  assert.equal(failed.data.ready, false);
+  assert.doesNotMatch(JSON.stringify(failed.data), /fixture-provider-secret/);
+  state.relayRefuse = false;
+  assert.equal((await call(`/api/mail/domains/${domain.id}/check`, { method: "POST" })).data.ready, true);
+  state.refuse = true;
+  const old = vault.get(app.mailDomains.keyName(account.id));
+  const refused = await call(`/api/mail/accounts/${account.id}`, { method: "PUT", body: { name: "Replacement", key: "re_invalid_fixture" } });
+  assert.equal(refused.status, 400);
+  assert.equal(vault.get(app.mailDomains.keyName(account.id)), old);
+  assert.equal((await call("/api/mail/domains")).data.accounts[0].name, "Azienda");
+  state.refuse = false;
+  assert.equal((await call(`/api/mail/accounts/${account.id}/check`, { method: "POST" })).data.ready, true);
+});
+
+test("model CLIs do not inherit any Resend account key", () => {
+  const name = "CORA_MAIL_ACCOUNT_MA_FIXTURE";
+  process.env[name] = "fixture-only";
+  try { assert.equal(name in childEnv(), false); } finally { delete process.env[name]; }
+});

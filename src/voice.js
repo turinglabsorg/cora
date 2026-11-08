@@ -2,14 +2,14 @@ import { runProcess } from "./box.js";
 
 /**
  * Soniox: how agents hear voice messages (speech to text) and how they answer in a voice
- * of their own (text to speech). The rule is fixed: a voice message gets a spoken answer.
+ * of their own (text to speech). Voice messages get voice-only answers unless asked otherwise.
  * One key per instance; without it agents see a voice message as an attachment, as before.
  */
 export const VOICE_LANGUAGES = ["it", "en", "es", "fr", "de", "pt"];
 export const AUDIO_LIMIT_BYTES = 25 * 1024 * 1024;
 const STT_MODEL = "stt-async-v5";
 const TTS_MODEL = "tts-rt-v2";
-const SPEECH_LIMIT = 2000;
+const SPEECH_LIMIT = 1200;
 const CATALOG_MS = 60 * 60 * 1000;
 
 // Soniox's voices speak every language but say their accent only in words: the language a voice sounds native in.
@@ -41,8 +41,20 @@ export function speakable(text) {
     .replace(/^\s*[-*•]\s+/gm, "")
     .replace(/[*_~>|]+/g, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, SPEECH_LIMIT);
+    .trim();
+}
+
+export function speechParts(text) {
+  const parts = [];
+  let rest = speakable(text);
+  while (rest.length > SPEECH_LIMIT) {
+    const boundary = rest.lastIndexOf(" ", SPEECH_LIMIT);
+    const end = boundary > SPEECH_LIMIT / 2 ? boundary : SPEECH_LIMIT;
+    parts.push(rest.slice(0, end));
+    rest = rest.slice(end).trimStart();
+  }
+  if (rest) parts.push(rest);
+  return parts;
 }
 
 /** Length and a 0–255 loudness outline of a 16-bit PCM WAV, the shape Discord draws on a voice message. */
@@ -182,7 +194,7 @@ export class Voice {
     if (!voice) throw new VoiceError("nessuna voce scelta");
     const response = await this.request(this.ttsUrl, {
       method: "POST", headers: { "Content-Type": "application/json" }, timeoutMs: 120000,
-      body: JSON.stringify({ model: TTS_MODEL, language: language || "en", voice, audio_format: format, ...(format === "wav" ? { sample_rate: 24000 } : {}), text: spoken }),
+      body: JSON.stringify({ model: TTS_MODEL, language: language || "en", voice, audio_format: format, speed: 1.2, ...(format === "wav" ? { sample_rate: 24000 } : {}), text: spoken }),
     });
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length < 200) throw new VoiceError("audio vuoto da Soniox");

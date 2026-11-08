@@ -21,7 +21,7 @@ const CODEX_DISABLED_FEATURES = [
 /** Cora's environment without its secrets: what an agent's CLI starts with. */
 export function childEnv() {
   const env = { ...process.env };
-  for (const name of Object.keys(env)) if (SECRET_ENV.includes(name) || /^CORA_(BOT|TG_BOT|SK_BOT|SK_APP)_/.test(name)) delete env[name];
+  for (const name of Object.keys(env)) if (SECRET_ENV.includes(name) || /^COR[AO]_(BOT|TG_BOT|SK_BOT|SK_APP|MAIL_ACCOUNT)_/.test(name)) delete env[name];
   return env;
 }
 

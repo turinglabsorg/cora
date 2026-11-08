@@ -97,6 +97,7 @@ const TABS = [
   ["profilo", "Profilo", "user"],
   ["cervello", "Cervello", "chip"],
   ["chat", "Chat", "chat"],
+  ["email", "Email", "mail"],
   ["memoria", "Memoria", "book"],
   ["routine", "Routine e reminder", "clock"],
   ["desktop", "Desktop", "monitor"],
@@ -174,6 +175,7 @@ const ICONS = {
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   code: '<path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 6 9 7 9-7"/>',
   copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5V5a1.5 1.5 0 0 0-1.5-1.5H5A1.5 1.5 0 0 0 3.5 5v9A1.5 1.5 0 0 0 5 15.5h3.5"/>',
   terminal: '<rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="m7 9 3 3-3 3M12.5 15H17"/>',
   upgrade: '<circle cx="12" cy="12" r="9"/><path d="M12 16.5v-9M8 11l4-4 4 4"/>',
@@ -489,6 +491,21 @@ function connectEvents() {
       guard(loadState()).then(drawRequests);
       return;
     }
+    if (entry.type === "mailbox") {
+      const agent = S.data?.agents.find((item) => item.id === entry.agentId);
+      if (agent) agent.mailbox = entry.mailbox;
+      const [page, id, tab] = route();
+      if (agent && page === "agent" && id === agent.id) {
+        const hero = document.querySelector(".hero:not(.compact) .hero-text");
+        if (hero && entry.mailbox?.status === "ready") {
+          const link = h("a", { class: "agent-email", href: `#/agent/${agent.id}/email` }, icon("mail"), raw(entry.mailbox.email));
+          const previous = hero.querySelector(".agent-email");
+          if (previous) previous.replaceWith(link); else hero.append(link);
+        }
+        if (tab === "email" && !document.activeElement?.matches("input, textarea, select") && !document.querySelector('form[aria-busy="true"]')) renderAgent();
+      }
+      return;
+    }
     if (entry.type === "telegram-chats") {
       if (route()[0] === "settings" && !document.activeElement?.matches("input, textarea, select")) guard(loadState()).then(() => renderSettings());
       return;
@@ -552,6 +569,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     ["banco", "Banco", "grid", section === "banco" || section === "salotto"],
     ["brain", "Brain", "bulb", section === "brain"],
     ["artefatti", "Artefatti", "archive", section === "artefatti", S.data?.artifacts?.reviews || 0],
+    ["domini", "Domini", "globe", section === "domini"],
     // Contesto opens from Impostazioni: what the agents read is a setting of the space, not a place of its own.
     ["settings", "Impostazioni", "sliders", section === "settings" || section === "contesto"],
   ];
@@ -2085,7 +2103,7 @@ function voicePanel(agent, genderInput) {
     catalog = data.voices;
     fill();
   }).catch(() => { about.textContent = tr("Le voci di Soniox non rispondono: riprova tra poco."); });
-  return panel({ icon: "mic", title: "Voce", hint: "Ascolta i messaggi vocali: a un vocale risponde sempre a voce, con la sua." }, body);
+  return panel({ icon: "mic", title: "Voce", hint: "A un vocale risponde solo a voce. Per avere il testo, chiediglielo." }, body);
 }
 
 function tokenForm({ placeholder, path, ok }) {
@@ -2485,6 +2503,131 @@ function telegramAccount(agent) {
     bot.configured ? setRows(setRow("Invita a un gruppo", "Segui i passaggi: Cora verifica la configurazione e una risposta reale nel gruppo.", telegramGroupSetup(agent), { stack: true })) : null);
 }
 
+function emailCopy(value, label = "Copia indirizzo") {
+  return btn(label, { icon: "copy", cls: "sm ghost", onclick: () => navigator.clipboard?.writeText(value).then(() => toast("Copiato"), () => toast("Non riesco a copiare: selezionalo a mano", true)) });
+}
+
+async function agentEmailTab(agent, isCurrent = () => true) {
+  let data;
+  try { data = await api(`/api/agents/${agent.id}/mailbox`); }
+  catch (error) { return panel({ icon: "alert", title: "Email non disponibile" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: renderAgent })); }
+  if (!isCurrent()) return null;
+  const mailbox = data.mailbox;
+  const ready = mailbox?.status === "ready";
+  const address = ready ? h("div", { class: "mail-address" },
+    h("a", { href: `mailto:${mailbox.email}` }, raw(mailbox.email)), emailCopy(mailbox.email)) :
+    h("p", { class: "muted" }, mailbox?.status === "blocked" ? "La casella non è ancora pronta. Puoi riprovare assegnandole un indirizzo qui sotto." : "L'agente avrà una casella tutta sua, per inviare e ricevere email.");
+  const identity = panel({ icon: "mail", title: "La sua email", hint: "Puoi scrivere all'agente a questo indirizzo e chiedergli di usare la sua casella.", actions: ready ? tag("Attiva", "ok") : null }, address,
+    ready ? h("p", { class: "muted" }, "L'agente usa questo indirizzo quando gli chiedi di inviare posta.") : null);
+  if (!data.available) return [identity, panel({ icon: "info", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))];
+  const local = h("input", { type: "text", name: "local", required: true, minlength: 3, maxlength: 32, pattern: "[a-z0-9][a-z0-9-]{1,30}[a-z0-9]", autocomplete: "off", autocapitalize: "none", spellcheck: false, "aria-label": "Nome dell'indirizzo", value: ready ? mailbox.email.split("@")[0] : agent.name.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32), placeholder: "nico" });
+  const usable = data.domains.filter((domain) => domain.ready);
+  const domain = h("select", { name: "domain", required: true, "aria-label": "Dominio email" }, usable.map((item) => h("option", { value: item.name, selected: ready && mailbox.email.endsWith(`@${item.name}`) }, raw(item.name))));
+  const feedback = h("p", { class: "mail-feedback", role: "status" });
+  const submit = btn(ready ? "Cambia indirizzo" : "Attiva email", { icon: "check", type: "submit", cls: "primary", disabled: !data.canCustomize || !usable.length });
+  local.disabled = domain.disabled = !data.canCustomize || !usable.length;
+  const form = h("form", { class: "stack", onsubmit: async (event) => {
+    event.preventDefault();
+    feedback.textContent = tr("Attivazione dell'indirizzo…");
+    feedback.classList.remove("err-text");
+    submit.disabled = true;
+    event.currentTarget.setAttribute("aria-busy", "true");
+    try {
+      await api(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: local.value, domain: domain.value } });
+      await loadState();
+      if (isCurrent()) renderAgent();
+      toast("Indirizzo email aggiornato");
+    } catch (error) { feedback.textContent = tr(error.message); feedback.classList.add("err-text"); submit.disabled = false; form.setAttribute("aria-busy", "false"); }
+  } }, h("div", { class: "mail-address-form" }, field("Nome dell'indirizzo", local), h("span", { class: "mail-at", "aria-hidden": "true" }, raw("@")), field("Dominio", domain)),
+    h("p", { class: "muted" }, "Da 3 a 32 lettere minuscole, numeri o trattini. Il nuovo indirizzo diventa quello principale; la casella precedente resta accessibile all'agente."),
+    !data.canCustomize ? h("p", { class: "muted" }, "Accendi l'agente e abilita il suo computer per assegnargli un'email.") : null,
+    !usable.length ? h("p", { class: "muted" }, "Prima verifica un dominio nella pagina Domini.") : null,
+    feedback, h("div", { class: "row" }, btn("Gestisci domini", { icon: "globe", href: "#/domini", cls: "ghost" }), h("span", { class: "spacer" }), submit));
+  const previous = mailbox?.previousEmails?.length ? panel({ icon: "archive", title: "Indirizzi precedenti", hint: "Restano all'agente, insieme alla posta già ricevuta." },
+    mailbox.previousEmails.map((email) => h("div", { class: "mail-address previous" }, h("code", {}, raw(email)), emailCopy(email)))) : null;
+  return [identity, panel({ icon: "edit", title: "Personalizza indirizzo", hint: "Scegli il nome e uno dei domini pronti per inviare e ricevere." }, form), previous];
+}
+
+function mailDomainChecks(domain, account) {
+  const records = domain.records || [];
+  const sending = records.filter((item) => ["DKIM", "SPF"].includes(item.record));
+  const receiving = records.filter((item) => item.record === "Receiving");
+  const sent = domain.status === "verified" && sending.length && sending.every((item) => item.status === "verified");
+  const received = domain.capabilities?.receiving === "enabled" && receiving.length && receiving.every((item) => item.status === "verified");
+  const checks = [
+    [account?.ready, "Account Resend", "Collega e verifica l'account che gestisce il dominio."],
+    [sent, sent ? "Invio verificato" : "Verifica invio", "Aggiungi i record DKIM e SPF nel DNS, poi verifica."],
+    [received, received ? "Ricezione verificata" : "Verifica ricezione", "Aggiungi il record MX di ricezione nel DNS."],
+    [domain.ready && domain.relayReady, "Pronto per gli agenti", "Completa le verifiche per assegnare indirizzi su questo dominio."],
+  ];
+  let current = false;
+  return h("ol", { class: "mail-checks" }, checks.map(([done, title, hint], index) => {
+    const active = !done && !current;
+    if (active) current = true;
+    return h("li", { class: done ? "done" : active ? "current" : "" }, h("span", { class: "mail-step" }, done ? icon("check") : raw(String(index + 1))), h("div", {}, h("b", {}, title), !done ? h("p", {}, hint) : null));
+  }));
+}
+
+async function renderMailDomains() {
+  const view = location.hash;
+  const slot = h("div", { class: "stack", "aria-busy": "true" }, panel({}, skeleton("rows", 3)));
+  shell([pageHead("Domini", "Gli indirizzi degli agenti, sui tuoi domini. Collega gli account Resend e verifica invio e ricezione."), slot], { title: "Domini" });
+  const current = () => slot.isConnected && location.hash === view;
+  const load = async () => {
+    try {
+      const data = await api("/api/mail/domains");
+      if (!current()) return;
+      slot.setAttribute("aria-busy", "false");
+      if (!data.available) { slot.replaceChildren(panel({ icon: "mail", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))); return; }
+      const feedback = h("p", { class: "mail-feedback", role: "alert" });
+      const act = async (button, fn) => {
+        button.disabled = true;
+        feedback.textContent = "";
+        try { await fn(); if (current()) await load(); }
+        catch (error) { feedback.textContent = tr(error.message); button.disabled = false; feedback.scrollIntoView({ block: "center", behavior: "smooth" }); }
+      };
+      const accountForm = (account = null) => {
+        const name = h("input", { type: "text", required: true, maxlength: 80, value: account?.name || "", placeholder: "Per esempio: Azienda" });
+        const key = h("input", { type: "password", required: true, autocomplete: "new-password", placeholder: "re_…", maxlength: 1024 });
+        const submit = btn(account ? "Salva nuova chiave" : "Collega account", { icon: "link", cls: "primary", type: "submit" });
+        return h("form", { class: "mail-account-form stack", onsubmit: (event) => { event.preventDefault(); act(submit, async () => { await api(account ? `/api/mail/accounts/${account.id}` : "/api/mail/accounts", { method: account ? "PUT" : "POST", body: { name: name.value, key: key.value } }); key.value = ""; }); } },
+          field("Nome account", name), field("API key Resend", key), h("p", { class: "muted" }, "Usa una chiave con accesso completo: Cora verifica domini e ricezione. La chiave non viene mostrata agli agenti."),
+          h("div", { class: "row" }, btn("Apri Resend", { href: "https://resend.com/api-keys", target: "_blank", icon: "external", cls: "ghost" }), h("span", { class: "spacer" }), submit));
+      };
+      const accountRows = data.accounts.map((account) => h("article", { class: "mail-account" },
+        h("header", {}, h("div", { class: "grow" }, h("h3", {}, raw(account.name)), h("p", { class: "muted" }, "Resend")), tag(account.ready ? "Collegato" : account.error ? "Collegamento da verificare" : "Da verificare", account.ready ? "ok" : account.error ? "err" : "agent"),
+          data.canManage ? btn("Verifica account", { icon: "refresh", cls: "sm ghost", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/accounts/${account.id}/check`, { method: "POST" })) }) : null),
+        account.error ? h("p", { class: "err-text" }, raw(tr(account.error))) : null,
+        data.canManage ? h("details", {}, h("summary", {}, "Sostituisci chiave"), accountForm(account)) : null));
+      const accounts = panel({ icon: "key", title: "Account Resend", hint: "Ogni dominio usa l'account a cui appartiene. Puoi collegarne più di uno." },
+        accountRows.length ? accountRows : h("p", { class: "muted" }, "Collega il primo account Resend per aggiungere un tuo dominio."),
+        data.canManage ? h("details", { open: !accountRows.length, class: "mail-add-account" }, h("summary", {}, "Aggiungi account"), accountForm()) : h("p", { class: "muted" }, "Gli account e i domini vengono gestiti dal proprietario dello spazio."));
+      const domainCards = data.domains.map((domain) => panel({ icon: "globe", title: raw(domain.name), hint: raw(domain.accountName), actions: tag(domain.ready ? "Pronto" : "Da completare", domain.ready ? "ok" : "agent") },
+        domain.legacy ? h("p", { class: "muted" }, "Dominio di Cora, già disponibile per gli agenti.") : h("div", { class: "stack" },
+          mailDomainChecks(domain, data.accounts.find((account) => account.id === domain.accountId)),
+          domain.error ? h("p", { class: "err-text", role: "alert" }, raw(tr(domain.error))) : null,
+          domain.records?.length ? h("details", { class: "mail-dns", open: !domain.ready }, h("summary", {}, "Record DNS da configurare"), h("p", { class: "muted" }, "Copia questi valori nel pannello DNS del dominio. La verifica può richiedere la propagazione dei record."),
+            h("div", { class: "mail-records" }, domain.records.map((record) => h("article", { class: "mail-record" }, h("header", {}, h("b", {}, raw(`${record.record === "Receiving" ? tr("Ricezione") : record.record} · ${record.type}`)), tag(record.status === "verified" ? "Verificato" : "Da verificare", record.status === "verified" ? "ok" : "agent")),
+              h("dl", {}, h("dt", {}, "Nome"), h("dd", {}, h("code", {}, raw(record.name || "@")), emailCopy(record.name || "@", "Copia")), h("dt", {}, "Valore"), h("dd", {}, h("code", {}, raw(record.value)), emailCopy(record.value, "Copia")), record.priority !== undefined ? [h("dt", {}, "Priorità"), h("dd", {}, raw(String(record.priority)))] : null))))) : null,
+          data.canManage ? h("div", { class: "row" }, btn("Verifica DNS", { icon: "check", cls: "primary", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/domains/${domain.id}/verify`, { method: "POST" })) }), btn("Aggiorna", { icon: "refresh", cls: "ghost", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/domains/${domain.id}/check`, { method: "POST" })) })) : null)));
+      let addDomain = null;
+      if (data.canManage) {
+        const name = h("input", { type: "text", required: true, placeholder: "posta.azienda.it", maxlength: 253, autocapitalize: "none", spellcheck: false });
+        const account = h("select", { required: true }, data.accounts.filter((item) => item.ready).map((item) => h("option", { value: item.id }, raw(item.name))));
+        const submit = btn("Aggiungi dominio", { icon: "plus", cls: "primary", type: "submit", disabled: !data.accounts.some((item) => item.ready) });
+        addDomain = panel({ icon: "plus", title: "Aggiungi dominio", hint: "Scegli il dominio e l'account che lo gestisce." }, h("form", { class: "stack", onsubmit: (event) => { event.preventDefault(); act(submit, () => api("/api/mail/domains", { method: "POST", body: { name: name.value, accountId: account.value } })); } },
+          field("Dominio", name), field("Account Resend", account),
+          h("p", { class: "mail-domain-note" }, icon("info"), "Se il dominio riceve già posta altrove, usa un sottodominio dedicato: cambiare i record MX cambia dove arrivano le email."),
+          !data.accounts.some((item) => item.ready) ? h("p", { class: "muted" }, "Collega e verifica prima un account Resend.") : null, submit));
+      }
+      slot.replaceChildren(feedback, accounts, ...domainCards, ...(addDomain ? [addDomain] : []));
+    } catch (error) {
+      if (current()) { slot.setAttribute("aria-busy", "false"); slot.replaceChildren(panel({ icon: "alert", title: "Domini non disponibili" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
+    }
+  };
+  await load();
+}
+
 function renderNew() {
   shell([pageHead("Nuovo agente", "Dagli un nome, un cervello e un carattere."), agentForm({ enabled: true, tools: true })], { title: "Nuovo agente", back: "#/agenti" });
 }
@@ -2516,7 +2659,8 @@ async function renderAgent() {
           badge(modelLabel(agent.model, { short: true }), "", "chip"),
           compact ? null : badge(agent.box?.running ? "Desktop acceso" : "Desktop spento", agent.box?.running ? "on" : "", "monitor"),
           compact || !agent.box?.outdated || !agent.box?.exists ? null : badge("Da aggiornare", "warn", "upgrade"),
-          compact ? null : platformBadges(agent))),
+          compact ? null : platformBadges(agent)),
+        !compact && agent.mailbox?.status === "ready" ? h("a", { class: "agent-email", href: `#/agent/${agent.id}/email` }, icon("mail"), raw(agent.mailbox.email)) : null),
       toggle),
     h("nav", { class: "tabs" }, TABS.map(([key, label, name]) => {
       const count = key === "memoria" ? agent.memoryCount : key === "routine" ? routines.length : null;
@@ -2534,6 +2678,7 @@ async function renderAgent() {
   else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent });
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
   else if (tab === "cervello") body = brainTab(agent);
+  else if (tab === "email") body = await agentEmailTab(agent, isCurrent);
   else body = [...platformsOn().map((kind) => kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)), githubAccount(agent), agentForm(agent, { only: "profile" })].filter(Boolean);
   if (isCurrent()) slot.replaceChildren(...[body].flat().filter(Boolean));
 }
@@ -3099,7 +3244,7 @@ function markdown(text, { wiki = false } = {}) {
 function chatMessage(item, answer) {
   const agent = item.agentId ? S.data.agents.find((entry) => entry.id === item.agentId) : null;
   const mine = item.kind === "owner" && (!S.data.currentUser || item.authorId === S.data.currentUser.id || item.authorId === "panel");
-  const text = item.file ? item.content.replace(/\s*\[file: [^\]]*\]$/, "") : item.content;
+  const text = item.voiceOnly ? "" : item.file ? item.content.replace(/\s*\[file: [^\]]*\]$/, "") : item.content;
   const choices = item.request && answer
     ? h("div", { class: "choices-row" }, (item.request.choices.length ? item.request.choices : []).map((choice) => btn(raw(choice), { cls: "sm", onclick: () => answer(choice) })), h("span", { class: "label" }, item.request.choices.length ? "oppure scrivi" : "rispondi qui sotto"))
     : null;
@@ -6625,6 +6770,7 @@ async function render() {
   else if (page === "brain") renderBrain();
   else if (page === "artefatti") renderArtifacts();
   else if (page === "settings") renderSettings();
+  else if (page === "domini") renderMailDomains();
   else if (page === "salotto") renderSalotto();
   else renderAgents();
 }
@@ -6633,7 +6779,7 @@ document.documentElement.lang = LANG;
 document.title = "Cora · Computer-Operating Resident Agents";
 
 /** While the state loads, the page being opened in outline: its own name, not always the agents page. */
-const BOOT_TITLES = { agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", settings: "Impostazioni", archivio: "Archivio" };
+const BOOT_TITLES = { agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", domini: "Domini", settings: "Impostazioni", archivio: "Archivio" };
 
 function bootSkeleton() {
   const [section] = route();

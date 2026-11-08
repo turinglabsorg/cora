@@ -8,7 +8,7 @@ import { MEMORY_TOOLS } from "./tools.js";
 import { userName } from "./telegram.js";
 import { asksToStop } from "./brain.js";
 import { VOICE_MESSAGE } from "./discord.js";
-import { AUDIO_LIMIT_BYTES, VOICE_LANGUAGES, speakable } from "./voice.js";
+import { AUDIO_LIMIT_BYTES, VOICE_LANGUAGES, speechParts } from "./voice.js";
 
 const HUMAN_DEBOUNCE_MS = 1200;
 const INACTIVITY_MS = 30 * 60 * 1000;
@@ -318,13 +318,17 @@ export class Orchestrator {
           if (viaBot) return viaBot;
           throw error;
         })
-        .then((messages) => {
+        .then(async (messages) => {
           const archived = new Map(this.store.recentMessages(state.id, this.store.settings.historySize).map((item) => [item.id, item]));
           // A voice message comes back as the words it was heard as, not as its attachment.
-          const items = messages.filter((raw) => raw.id !== exclude).map((raw) => {
+          const items = [];
+          for (const raw of messages) {
+            if (raw.id === exclude || this.arriving.has(raw.id)) continue;
             const kept = archived.get(raw.id);
-            return { ...this.toItem(raw), ...(kept?.passive ? { passive: true } : {}), ...(kept?.voice ? { content: kept.content, voice: true } : {}) };
-          });
+            const item = { ...this.toItem(raw), ...(kept?.passive ? { passive: true } : {}), ...(kept?.voice || kept?.voiceOnly ? kept : {}) };
+            if (!kept && Date.now() - item.at < CATCH_UP_MS) await this.arrive(raw.id, () => this.hearDiscord(state, item, raw));
+            items.push(item);
+          }
           const existing = state.history;
           state.history = [];
           state.seen = new Set();
@@ -413,6 +417,7 @@ export class Orchestrator {
     }
     item.voice = true;
     item.content = item.content.includes(placeholder) ? item.content.replace(placeholder, () => line) : `${item.content} ${line}`.trim();
+    item.replyMode = await this.brain.voiceReplyMode(item.content);
   }
 
   /** A Discord voice message (or any audio file) in a message. */
@@ -522,7 +527,7 @@ export class Orchestrator {
     for (const id of leaving) {
       this.acknowledge(state, id, [...state.humanQueue.keys()]);
       const agent = this.store.agent(id);
-      if (agent) await this.postAs(agent, state, this.store.settings.language === "en" ? "I have stopped listening to this conversation." : "Ho smesso di ascoltare questa conversazione.", undefined, undefined, { passive: true }).catch((error) => this.log({ type: "error", agentId: id, channelId: state.id, text: `disingaggio: ${error.message}` }));
+      if (agent) await this.postAs(agent, state, this.store.settings.language === "en" ? "I have stopped listening to this conversation." : "Ho smesso di ascoltare questa conversazione.", undefined, undefined, { passive: true, ...this.replyDelivery(item) }).catch((error) => this.log({ type: "error", agentId: id, channelId: state.id, text: `disingaggio: ${error.message}` }));
     }
   }
 
@@ -951,14 +956,8 @@ export class Orchestrator {
       const delegationAuthorized = queued ? queued.kind === "owner" || Boolean(queued.delegated) : state.ownerOrigin;
       const started = Date.now();
       if (computer) this.threadWork.set(state.id, agent.id);
-      // A voice message gets a spoken answer: the final reply, or what was said here with say when that was all.
-      const spoken = Boolean(queued?.voice);
-      let saidHere = "";
-      const say = async (text, target = state.id, { voice = false } = {}) => {
-        const sent = await this.postDirect(agent, state, target, text, { voice, language: voice && spoken ? queued.spokenIn : "", delegationAuthorized });
-        if (target === state.id) saidHere = sent.voice ? "" : text;
-        return sent;
-      };
+      const say = (text, target = state.id, { voice = false, replyTo = queued, traceId } = {}) =>
+        this.postDirect(agent, state, target, text, { voice, traceId, ...(target === state.id ? this.replyDelivery(replyTo) : {}), delegationAuthorized });
       // An agent at work shows it the way a person does: the typing indicator, kept alive
       // for as long as the turn lasts. Where the platform has none — Slack gives bots
       // nothing — it marks the message it took instead. No line in the channel either way.
@@ -968,7 +967,7 @@ export class Orchestrator {
         result = await this.brain.chatTurn({
           agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, belongsTo: this.ownsAgent(queued, agent, state),
           replyTo: queued,
-          postFile: (file, caption) => this.postAs(agent, state, caption, file),
+          postFile: (file, caption, { replyTo = queued, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { ...this.replyDelivery(replyTo), delegationAuthorized }),
           say,
           // Everything already in the channel when the turn starts is old news, not just what the prompt shows.
           inbox: this.inbox(state, state.history.slice()),
@@ -983,7 +982,6 @@ export class Orchestrator {
         if (computer) this.threadWork.delete(state.id, agent.id);
       }
       if (!result.text) {
-        if (spoken && saidHere) await this.speak(agent, state, saidHere, queued.spokenIn);
         this.acknowledge(state, agent.id, result.handledMessageIds || []);
         this.log({ type: "pass", agentId: agent.id, channelId: state.id, ms: Date.now() - started, traceId: result.traceId });
         return;
@@ -994,7 +992,7 @@ export class Orchestrator {
         if (!isForced) postedOptional += 1;
         if (posted > 0) await sleep(700 + Math.random() * 1500);
         try {
-          await this.postAs(agent, state, result.text, undefined, result.traceId, { voice: spoken, language: queued?.spokenIn, delegationAuthorized });
+          await this.postAs(agent, state, result.text, undefined, result.traceId, { ...this.replyDelivery(result.replyTo || queued), delegationAuthorized });
           this.acknowledge(state, agent.id, result.handledMessageIds || []);
           posted += 1;
         } catch (error) {
@@ -1200,16 +1198,18 @@ export class Orchestrator {
     this.log({ type: "settings", agentId: agent.id, channelId: state.id, text: "riprende il lavoro interrotto dal riavvio" });
     try {
       await this.ensureHistory(state);
+      const replyTo = trace.steps?.findLast((step) => step.replyTo)?.replyTo
+        || state.history.findLast((item) => ["human", "owner"].includes(item.kind) && item.at <= Date.parse(trace.startedAt));
       const english = this.store.settings.language === "en";
-      await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.");
+      await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.", undefined, undefined, this.replyDelivery(replyTo));
       const result = await this.brain.resumeTurn({
-        agent, trace, channel: this.turnChannel(state.id),
-        postFile: (file, caption) => this.postAs(agent, state, caption, file),
-        say: (text, target = state.id, { voice = false } = {}) => this.postDirect(agent, state, target, text, { voice }),
+        agent, trace, channel: this.turnChannel(state.id), replyTo,
+        postFile: (file, caption, options = {}) => this.postAs(agent, state, caption, file, options.traceId, this.replyDelivery(options.replyTo || replyTo)),
+        say: (text, target = state.id, options = {}) => this.postDirect(agent, state, target, text, { ...options, ...(target === state.id ? this.replyDelivery(options.replyTo || replyTo) : {}) }),
         inbox: this.inbox(state, state.history), routine,
         onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
       });
-      if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId);
+      if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId, this.replyDelivery(result.replyTo || replyTo));
       this.acknowledge(state, agent.id, result.handledMessageIds || []);
     } finally {
       state.working.delete(agent.id);
@@ -1401,26 +1401,50 @@ export class Orchestrator {
     return parts.join("");
   }
 
-  /** Post as the agent; with `voice`, the same words follow in its voice (`sent.voice` says how that went). */
-  async postAs(agent, state, text, file, traceId, { voice = false, language = "", ...options } = {}) {
+  replyDelivery(item) {
+    return item?.voice ? { replyMode: ["text", "both"].includes(item.replyMode) ? item.replyMode : "voice", language: item.spokenIn || "" } : {};
+  }
+
+  async postAs(agent, state, text, file, traceId, { voice = false, replyMode, language = "", traceId: deliveryTraceId, ...options } = {}) {
+    traceId ||= replyMode === "voice" ? deliveryTraceId : undefined;
+    if (replyMode === "voice" && text) {
+      const files = file ? await this.deliver(agent, state, "", file, traceId, options) : [];
+      const spoken = await this.speak(agent, state, text, language, { ...options, archive: true, traceId });
+      if (spoken.error) {
+        state.voiceFailures ??= new Map();
+        if (Date.now() - (state.voiceFailures.get(agent.id) || 0) > 60000) {
+          state.voiceFailures.set(agent.id, Date.now());
+          await this.deliver(agent, state, this.store.settings.language === "en" ? "I couldn't send the voice message. Please retry or ask for a written reply." : "Non riesco a inviare il vocale. Riprova oppure chiedimi una risposta scritta.", undefined, traceId, { passive: true });
+        }
+        throw new Error(`voice message not delivered: ${spoken.error}`);
+      }
+      const sent = [...files, ...spoken.messages];
+      sent.voice = spoken;
+      return sent;
+    }
     const sent = await this.deliver(agent, state, text, file, traceId, options);
-    if (voice && text) sent.voice = await this.speak(agent, state, text, language);
+    if ((replyMode === "both" || (!replyMode && voice)) && text) sent.voice = await this.speak(agent, state, text, language);
     return sent;
   }
 
-  /**
-   * The agent's words in its own voice, after the written ones: a voice message on
-   * Discord and Telegram, an audio clip on Slack and in the panel. A voice that fails
-   * leaves the written reply as it is.
-   */
-  async speak(agent, state, text, language = "") {
+  async speak(agent, state, text, language = "", { archive = false, traceId, ...options } = {}) {
     if (!this.voice?.enabled) return { error: "Soniox is not connected: the owner adds its key in Settings → Connections" };
-    if (!speakable(text)) return { error: "nothing in this message can be said aloud" };
+    const parts = speechParts(text);
+    if (!parts.length) return { error: "nothing in this message can be said aloud" };
     try {
       const tongue = (VOICE_LANGUAGES.includes(language) && language) || agent.voiceLanguage || this.store.settings.language || "it";
-      const note = await this.voice.voiceNote(text, { voice: await this.voice.voiceFor(agent, tongue), language: tongue });
-      const messages = await this.postVoice(agent, state, note);
-      this.log({ type: "say", agentId: agent.id, channelId: state.id, text: `[vocale${note.duration ? ` ${Math.round(note.duration)}s` : ""}] ${text.slice(0, 200)}` });
+      const voice = await this.voice.voiceFor(agent, tongue);
+      const messages = [];
+      for (const [index, part] of parts.entries()) {
+        const note = await this.voice.voiceNote(part, { voice, language: tongue });
+        const content = parts.length === 1 ? text : part;
+        const metadata = { ...options, traceId, text: archive ? content : "", voiceOnly: archive, continuation: index > 0 };
+        const sent = await this.postVoice(agent, state, note, metadata);
+        if (!sent?.length) throw new Error("the platform returned no voice message");
+        if (archive && !isWebRoom(state.id)) this.recordReply(agent, state, content, undefined, traceId, sent, { ...metadata, voiceOnly: true });
+        messages.push(...sent);
+        this.log({ type: "say", agentId: agent.id, channelId: state.id, traceId, text: `[vocale${note.duration ? ` ${Math.round(note.duration)}s` : ""}] ${part.slice(0, 200)}` });
+      }
       return { messages };
     } catch (error) {
       this.log({ type: "error", agentId: agent.id, channelId: state.id, text: `voce: ${error.message}` });
@@ -1428,9 +1452,9 @@ export class Orchestrator {
     }
   }
 
-  async postVoice(agent, state, note) {
+  async postVoice(agent, state, note, { text = "", traceId, voiceOnly = false, ...options } = {}) {
     const clip = { name: this.store.settings.language === "en" ? "voice-message.mp3" : "messaggio-vocale.mp3", data: note.mp3, type: "audio/mpeg" };
-    if (isWebRoom(state.id)) return this.postWeb(agent, state, "", clip, undefined, { passive: true, silent: true });
+    if (isWebRoom(state.id)) return this.postWeb(agent, state, text, clip, traceId, voiceOnly ? { ...options, voiceOnly } : { passive: true, silent: true });
     const chatId = telegramChatId(state.id);
     if (chatId) {
       const own = this.telegramClientFor(state.id) || this.tgBots?.client(agent.id);
@@ -1488,7 +1512,15 @@ export class Orchestrator {
         }
       }
     }
-    const last = sent[sent.length - 1];
+    if (text) this.recordReply(agent, state, text, file, traceId, sent, { request, passive, delegationAuthorized });
+    this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
+    return sent;
+  }
+
+  recordReply(agent, state, text, file, traceId, sent, { request, passive = false, delegationAuthorized = false, voiceOnly = false, continuation = false } = {}) {
+    const last = sent.at(-1);
+    const chatId = telegramChatId(state.id);
+    const slack = slackIds(state.id);
     if (text) {
       const item = {
         id: chatId && last?.message_id ? `tg_${chatId}_${last.message_id}`
@@ -1503,16 +1535,15 @@ export class Orchestrator {
         traceId,
         request,
         passive,
+        ...(voiceOnly ? { voiceOnly: true } : {}),
       };
       this.push(state, item);
       this.store.appendArchive(state.id, item);
-      if (!passive) {
+      if (!passive && !continuation) {
         state.budget -= 1;
         this.queueColleagues(state, item, delegationAuthorized);
       }
     }
-    this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
-    return sent;
   }
 
   queueColleagues(state, item, authorized = false) {
@@ -1590,7 +1621,7 @@ export class Orchestrator {
   }
 
   /** A message in a panel room: archived like a Discord one and pushed live to the panel. */
-  postWeb(agent, state, text, file, traceId, { request, passive = false, silent = false, delegationAuthorized = false } = {}) {
+  postWeb(agent, state, text, file, traceId, { request, passive = false, silent = false, delegationAuthorized = false, voiceOnly = false, continuation = false } = {}) {
     const item = {
       id: `web_${randomBytes(8).toString("hex")}`,
       at: Date.now(),
@@ -1603,10 +1634,11 @@ export class Orchestrator {
       file: file ? this.saveWebFile(file) : undefined,
       request,
       passive,
+      ...(voiceOnly ? { voiceOnly: true } : {}),
     };
     this.push(state, item);
     this.store.appendArchive(state.id, item);
-    if (text && !passive) {
+    if (text && !passive && !continuation) {
       state.budget -= 1;
       this.queueColleagues(state, item, delegationAuthorized);
     }
@@ -1615,7 +1647,7 @@ export class Orchestrator {
     // Nobody has the panel open: the reply reaches the owner's phone.
     if (this.notifier?.enabled && !this.watching() && !item.request && !silent) {
       const url = state.id === "web" ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
-      this.notifier.notify({ title: agent.name, body: text || `📎 ${file?.name}`, url, tag: state.id }).catch(() => {});
+      this.notifier.notify({ title: agent.name, body: voiceOnly ? `🎙 ${file?.name}` : text || `📎 ${file?.name}`, url, tag: state.id }).catch(() => {});
     }
     return [item];
   }
@@ -1628,7 +1660,7 @@ export class Orchestrator {
    * conversation it goes to the agent's private room. The owner's next message
    * there, typed or tapped, is the answer and goes to this agent.
    */
-  async askOwner(agent, { question, choices = [] }, { channelId } = {}) {
+  async askOwner(agent, { question, choices = [] }, { channelId, replyTo, traceId } = {}) {
     const text = String(question || "").trim().slice(0, 1500);
     if (!text) throw new Error("empty question");
     const now = Date.now();
@@ -1645,11 +1677,11 @@ export class Orchestrator {
     const english = this.store.settings.language === "en";
     let item;
     if (isWebRoom(state.id)) {
-      [item] = this.postWeb(agent, state, text, undefined, undefined, { request });
+      [item] = await this.postAs(agent, state, text, undefined, traceId, { request, ...this.replyDelivery(replyTo) });
       this.emit({ type: "request", agentId: agent.id });
       if (this.notifier?.enabled) {
         const url = state.id === SALOTTO ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
-        this.notifier.notify({ title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: text, url, tag: `request-${agent.id}` }).catch(() => {});
+        this.notifier.notify({ title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: replyTo?.voice && replyTo.replyMode !== "text" && replyTo.replyMode !== "both" ? (english ? "Voice message" : "Messaggio vocale") : text, url, tag: `request-${agent.id}` }).catch(() => {});
       }
     } else {
       const slack = slackIds(state.id);
@@ -1658,7 +1690,7 @@ export class Orchestrator {
       const own = this.store.agentOwnerChats(agent).find((id) => id.startsWith(`${transport}:`))?.slice(transport.length + 1);
       const owner = own || (slack ? this.store.settings.slackOwnerIds[0] : !telegramChatId(state.id) && this.store.settings.ownerIds[0]);
       const body = clean.length ? `${text}\n${english ? "Answers" : "Risposte"}: ${clean.join(" · ")}` : text;
-      await this.postAs(agent, state, body, undefined, undefined, { ping: owner ? `<@${owner}>` : "", request });
+      await this.postAs(agent, state, body, undefined, traceId, { ping: owner ? `<@${owner}>` : "", request, ...this.replyDelivery(replyTo) });
       item = state.history.findLast((entry) => entry.agentId === agent.id && entry.request === request);
     }
     state.request = { agentId: agent.id, at: Date.now() };
@@ -1757,14 +1789,15 @@ export class Orchestrator {
       await this.ensureHistory(state);
       const result = await this.brain[resumeTrace ? "resumeTurn" : "routineTurn"]({
         agent, routine: snapshot, history: state.history, channel, trace: resumeTrace,
-        postFile: (file, caption) => this.postAs(agent, state, caption, file, undefined, { passive: true }),
-        say: (text, target = state.id, { voice = false } = {}) => this.postDirect(agent, state, target, text, { passive: true, voice }),
+        replyTo: resumeTrace?.steps?.findLast((step) => step.replyTo)?.replyTo,
+        postFile: (file, caption, { replyTo, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { passive: true, ...this.replyDelivery(replyTo) }),
+        say: (text, target = state.id, { voice = false, replyTo, traceId } = {}) => this.postDirect(agent, state, target, text, { passive: true, voice, traceId, ...(target === state.id ? this.replyDelivery(replyTo) : {}) }),
         inbox: this.inbox(state, state.history),
         onTrace: (traceId) => this.store.attachRoutineTrace(run.id, traceId),
         onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
       });
       if (result.text) {
-        await this.postAs(agent, state, result.text, undefined, result.traceId, { passive: true });
+        await this.postAs(agent, state, result.text, undefined, result.traceId, { passive: true, ...this.replyDelivery(result.replyTo) });
       }
       this.acknowledge(state, agent.id, result.handledMessageIds || []);
       const current = this.store.routine(routine.id);

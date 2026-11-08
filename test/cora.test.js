@@ -17,12 +17,13 @@ import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
 import { Boxes } from "../src/box.js";
+import { Voice } from "../src/voice.js";
 import { gitLauncherFixture, gitSetupFixture } from "./git-launcher-fixtures.js";
 import { executeTool } from "../src/tools.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDoc, fakeDocker, fakeOllama, fakeSlack, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
+import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDoc, fakeDocker, fakeOllama, fakeSlack, fakeSoniox, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
 
 const PASSWORD = "correct horse battery staple";
 let discord;
@@ -237,6 +238,32 @@ beforeEach(async () => {
   departures = null;
   discord.state.webhookPosts.length = 0;
   discord.state.botPosts.length = 0;
+});
+
+test("voice reply delivery sends progress and final audio without text and preserves trace evidence", async (t) => {
+  const soniox = await fakeSoniox();
+  const previousVoice = app.orchestrator.voice;
+  const previousTransport = { transport: app.store.settings.transport, transports: app.store.settings.transports, guildIds: app.store.settings.guildIds };
+  app.orchestrator.voice = new Voice({ key: soniox.key, api: soniox.url, ttsUrl: soniox.ttsUrl });
+  app.store.updateSettings({ transport: "discord", transports: { discord: true, telegram: false, slack: false }, guildIds: [GUILD] });
+  const agent = app.store.createAgent({ name: "Vera", model: "ollama/test-model", tools: false });
+  t.after(async () => { app.orchestrator.voice = previousVoice; app.store.updateSettings(previousTransport); app.store.deleteAgent(agent.id); await soniox.close(); });
+  let step = 0;
+  replies.set("Vera", () => ++step === 1
+    ? { tool_calls: [{ function: { name: "say", arguments: { text: "Ti ascolto." } } }] }
+    : { content: "Va bene, ci sentiamo domani." });
+  soniox.state.transcripts.push("Vera, mi rispondi?");
+  discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment("vera.ogg", Buffer.concat([Buffer.from("OggS"), Buffer.alloc(1000)]), "audio/ogg")] });
+  await waitFor(() => app.store.recentMessages(CHANNEL).some((item) => item.agentId === agent.id && item.content === "Va bene, ci sentiamo domani."));
+  await quiet();
+  const posts = discord.state.webhookPosts.filter((post) => post.username === "Vera");
+  assert.equal(posts.length, 2);
+  assert.ok(posts.every((post) => post.file && !post.content));
+  const archived = app.store.recentMessages(CHANNEL).filter((item) => item.agentId === agent.id);
+  assert.ok(archived.every((item) => item.voiceOnly && item.traceId));
+  const trace = app.store.trace(archived.at(-1).traceId);
+  assert.ok(trace.steps.find((item) => item.type === "tool" && item.name === "say").result.includes(archived[0].id));
+  assert.match(trace.prompt, /Cora consegna solo la tua voce/);
 });
 
 describe("per-agent subscription authentication", () => {
@@ -4885,6 +4912,35 @@ describe("agent mailboxes", () => {
     assert.equal(f.calls.length, 1);
     assert.equal(app.store.value(`agentMailbox:${f.agent.id}`).email, identity.email);
     assert.equal(readFileSync(keyPath, "utf8"), key);
+  });
+
+  test("the agent email API customizes its real address while preserving the old mailbox and restart identity", async (t) => {
+    const f = await fixture(t, "MailboxPersonal");
+    await f.boxes.ensure(f.agent);
+    const before = app.store.value(`agentMailbox:${f.agent.id}`);
+    const previous = { boxes: app.mailDomains.boxes, token: app.mailDomains.token, namespace: app.mailDomains.namespace, defaultDomain: app.mailDomains.defaultDomain };
+    Object.assign(app.mailDomains, { boxes: f.boxes, token: "fixture-domain-registration-token", namespace: "team", defaultDomain: "usecora.space" });
+    t.after(() => Object.assign(app.mailDomains, previous));
+    const metadata = await call(`/api/agents/${f.agent.id}/mailbox`);
+    assert.equal(metadata.status, 200);
+    assert.equal(metadata.data.mailbox.email, before.email);
+    assert.equal(metadata.data.domains[0].name, "usecora.space");
+    const changed = await call(`/api/agents/${f.agent.id}/mailbox`, { method: "PUT", body: { local: "nico-personal", domain: "usecora.space" } });
+    assert.equal(changed.status, 200, JSON.stringify(changed.data));
+    assert.equal(changed.data.email, "nico-personal@usecora.space");
+    assert.deepEqual(changed.data.previousEmails, [before.email]);
+    assert.ok(existsSync(join(f.directory, ".ambox", "agents", before.email, "private.pem")));
+    assert.equal(readFileSync(join(f.directory, ".ambox", "default"), "utf8"), changed.data.email);
+    await f.makeBoxes().ensure({ ...f.agent, name: "New display name" });
+    assert.equal(f.calls.length, 2, "restart does not create or revert an address");
+    assert.equal(app.store.value(`agentMailbox:${f.agent.id}`).email, changed.data.email);
+    assert.ok(app.brain.systemPrompt(f.agent, { computer: true }).includes(before.email));
+    f.state.status = 409;
+    const refused = await call(`/api/agents/${f.agent.id}/mailbox`, { method: "PUT", body: { local: "already-taken", domain: "usecora.space" } });
+    assert.equal(refused.status, 409);
+    assert.equal(app.store.value(`agentMailbox:${f.agent.id}`).email, changed.data.email);
+    assert.equal(readFileSync(join(f.directory, ".ambox", "default"), "utf8"), changed.data.email);
+    assert.equal((await call(`/api/agents/${f.agent.id}/mailbox`, { method: "PUT", body: { local: "../../bad", domain: "usecora.space" } })).status, 400);
   });
 
   test("a refused registration leaves the desktop available, hides provider data and retries with the same encryption key", async (t) => {
