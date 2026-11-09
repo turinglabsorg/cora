@@ -45,7 +45,7 @@ const SELF = {
 const PRONOUNS = { male: "lui", female: "lei", neutral: "neutro" };
 const BRAIN_KIND_LABELS = { client: "cliente", project: "progetto", person: "persona", decision: "decisione", procedure: "procedura", topic: "tema" };
 /** A task's goal: one line, and how many times the agent may be sent back to meet it. */
-const GOAL_CHARS = 300;
+const GOAL_CHARS = 4000;
 const GOAL_ROUNDS = 12;
 /** The same tool call with the same arguments this many times in a short window is a loop. */
 const LOOP_REPEATS = 4;
@@ -983,7 +983,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
         if (next && next !== goal) {
           trace.goal = next;
           trace.add({ type: "note", text: `Obiettivo aggiornato su quello che hanno detto: ${next}` });
-          if (sayTracked) await sayTracked(`Cambio obiettivo: ${next}`).catch(() => {});
+          if (sayTracked) await sayTracked("Ricevuto, aggiorno il compito con le nuove indicazioni e proseguo.").catch(() => {});
           goal = next;
           this.channelGoals.set(channel.id, agent.id, next);
         } else if (!next) {
