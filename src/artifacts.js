@@ -294,10 +294,36 @@ export class Artifacts {
   }
 
   canReview(folder, user) {
-    return Boolean(user && (user.role === "owner" || (folder.reviewers || []).includes(user.id)));
+    return Boolean(folder && user && !user.blocked && !this.store.panelUser(user.id)?.blocked && (user.role === "owner" || (folder.reviewers || []).includes(user.id)));
   }
 
-  createFolder({ path, title = "", description = "", kind = "files", policy = "review", writers = ["*"], reviewers = [], createdBy, requestedBy = null }) {
+  memberPermission(folder, user) {
+    if (!folder || !user || user.blocked || this.store.panelUser(user.id)?.blocked) return "none";
+    if (this.canReview(folder, user)) return "write";
+    return folder.memberAccess?.users && Object.hasOwn(folder.memberAccess.users, user.id) ? folder.memberAccess.users[user.id] : folder.memberAccess?.default ?? "write";
+  }
+
+  canReadMember(folder, user) {
+    return ["read", "write"].includes(this.memberPermission(folder, user));
+  }
+
+  canUpload(folder, user) {
+    return this.memberPermission(folder, user) === "write";
+  }
+
+  checkMember(folder, userId, write = false) {
+    if (userId && !(write ? this.canUpload(folder, this.store.panelUser(userId)) : this.canReadMember(folder, this.store.panelUser(userId)))) throw new ArtifactError(write ? "non puoi caricare o modificare file in questa cartella" : "non hai accesso a questa cartella", 403);
+  }
+
+  cleanMemberAccess(value = { default: "write", users: {} }) {
+    const levels = ["none", "read", "write"];
+    if (!value || typeof value !== "object" || Array.isArray(value) || !levels.includes(value.default) || !value.users || typeof value.users !== "object" || Array.isArray(value.users)) throw new ArtifactError("scegli l'accesso del team: nessun accesso, lettura o caricamento");
+    const users = Object.entries(value.users);
+    if (users.length > 500 || users.some(([id, level]) => !this.store.panelUser(id) || !levels.includes(level))) throw new ArtifactError("scegli membri dello spazio e permessi validi");
+    return { default: value.default, users: Object.fromEntries(users) };
+  }
+
+  createFolder({ path, title = "", description = "", kind = "files", policy = "review", writers = ["*"], reviewers = [], memberAccess, createdBy, requestedBy = null }) {
     const clean = String(path || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
     if (!validFolderPath(clean)) throw new ArtifactError("il percorso di una cartella è fatto di parole minuscole e trattini separate da /, fino a sei livelli: clienti/acme/report-q3");
     for (const other of this.store.artifactFolders()) {
@@ -314,6 +340,7 @@ export class Artifacts {
       policy: createdBy?.kind === "agent" ? "review" : policy === "direct" ? "direct" : "review",
       writers: this.cleanWriters(writers),
       reviewers: this.cleanReviewers(reviewers),
+      memberAccess: this.cleanMemberAccess(memberAccess),
       createdBy: createdBy || null,
       requestedBy,
       createdAt: now,
@@ -353,18 +380,21 @@ export class Artifacts {
    * A folder's settings changed by an agent for the person talking to it: who may push, its
    * title and what goes there; publishing without review only on the owner's own word.
    */
-  configureFolder(folderRef, { agent, requester, title, description, writers, policy }) {
+  configureFolder(folderRef, { agent, requester, memberUserId = "", title, description, writers, policy }) {
     const folder = this.findFolder(folderRef);
     if (!folder) throw new ArtifactError("no such folder: list them with artifact_folders", 404);
     if (!requester) throw new ArtifactError("a folder's settings change only while a person is asking you directly", 403);
-    if (policy !== undefined && policy !== null && requester.kind !== "owner") throw new ArtifactError("only the owner of the space decides whether a folder publishes without review: they switch it in the panel, in the folder's Permessi", 403);
+    const member = this.store.panelUser(memberUserId || requester.id);
+    if ((memberUserId || member) && !this.canReview(folder, member)) throw new ArtifactError("cambiano una cartella solo il proprietario e i suoi revisori", 403);
+    const owner = member ? member.role === "owner" : requester.kind === "owner";
+    if (policy !== undefined && policy !== null && !owner) throw new ArtifactError("only the owner of the space decides whether a folder publishes without review: they switch it in the panel, in the folder's Permessi", 403);
     const changes = {};
     if (title) changes.title = title;
     if (description) changes.description = description;
     if (writers !== undefined && writers !== null) changes.writers = this.writersFrom(writers);
     if (policy !== undefined && policy !== null) changes.policy = policy === "direct" ? "direct" : "review";
     if (!Object.keys(changes).length) throw new ArtifactError("nothing to change: give writers, title, description or policy");
-    const next = this.updateFolder(folder.id, changes, { role: requester.kind === "owner" ? "owner" : "member", name: requester.name });
+    const next = this.updateFolder(folder.id, changes, { role: owner ? "owner" : "member", name: requester.name });
     const said = [changes.writers ? `possono caricare ${next.writers.includes("*") ? "tutti gli agenti" : this.writersText(next)}` : "", changes.policy ? (next.policy === "direct" ? "si pubblica subito" : "ogni caricamento aspetta una revisione") : "", changes.title || changes.description ? "titolo e descrizione" : ""].filter(Boolean).join("; ");
     this.log({ type: "artifact", agentId: agent.id, text: `${agent.name} ha cambiato ${folder.path} per ${requester.name || "chi l'ha chiesto"}: ${said}` });
     return `${folder.path} updated. Who may push: ${this.writersText(next)}. Publishing: ${next.policy === "direct" ? "published at once" : "each push waits for a reviewer"}. Title: ${next.title}.`;
@@ -386,6 +416,9 @@ export class Artifacts {
     if (user?.role === "owner") {
       if (changes.policy !== undefined) next.policy = changes.policy === "direct" ? "direct" : "review";
       if (changes.reviewers !== undefined) next.reviewers = this.cleanReviewers(changes.reviewers);
+      if (changes.memberAccess !== undefined) next.memberAccess = this.cleanMemberAccess(changes.memberAccess);
+    } else if (changes.memberAccess !== undefined) {
+      throw new ArtifactError("solo il proprietario cambia l'accesso del team", 403);
     } else if (changes.policy !== undefined || changes.reviewers !== undefined) {
       throw new ArtifactError("solo il proprietario decide chi rivede una cartella e se pubblica subito", 403);
     }
@@ -414,6 +447,7 @@ export class Artifacts {
     return {
       id: folder.id, path: folder.path, title: folder.title, description: folder.description, kind: folder.kind, policy: folder.policy,
       writers: folder.writers, reviewers: folder.reviewers, createdBy: folder.createdBy, requestedBy: folder.requestedBy,
+      memberAccess: folder.memberAccess || { default: "write", users: {} },
       createdAt: folder.createdAt, updatedAt: folder.updatedAt, head: folder.head || "",
       headCommit: head ? this.commitSummary(head) : null,
       files: head?.files || 0, bytes: head?.bytes || 0,
@@ -430,9 +464,10 @@ export class Artifacts {
   }
 
   /** The folder list as an agent sees it: where things go and what it may do there. */
-  foldersFor(agent, query = "") {
+  foldersFor(agent, query = "", memberUserId = "") {
     const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
     return this.folders()
+      .filter((folder) => !memberUserId || this.canReadMember(folder, this.store.panelUser(memberUserId)))
       .filter((folder) => !words.length || words.some((word) => `${folder.path} ${folder.title} ${folder.description}`.toLowerCase().includes(word)))
       .map((folder) => ({
         folder: folder.path, title: folder.title, what_goes_here: folder.description, kind: folder.kind,
@@ -510,7 +545,7 @@ export class Artifacts {
    * folder does not hold yet, and record a commit — proposed, or published at once
    * where the folder says so.
    */
-  async push({ agent, folder: folderRef, path, to = "", message = "", mirror = false, create = null, requester = null, channelId = "", traceId = "" }) {
+  async push({ agent, folder: folderRef, path, to = "", message = "", mirror = false, create = null, requester = null, memberUserId = "", channelId = "", traceId = "" }) {
     if (!this.boxes) throw new ArtifactError("there are no desktops here");
     const wanted = String(folderRef || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
     if (!validFolderPath(wanted)) throw new ArtifactError("folder must be a path like clienti/acme/report-q3: lowercase words and dashes, up to six levels");
@@ -536,6 +571,7 @@ export class Artifacts {
       created = true;
     }
     if (!this.canWrite(folder, agent)) throw new ArtifactError(`you may not push to ${folder.path}: ask the owner to add you in the folder's permissions`, 403);
+    this.checkMember(folder, memberUserId, true);
 
     const manifest = await this.boxes.artifactManifest(agent.id, String(path || ""), { maxFiles: LIMITS.files });
     if (manifest.tooMany) throw new ArtifactError(`more than ${LIMITS.files} files: push a smaller folder`, 413);
@@ -590,6 +626,7 @@ export class Artifacts {
     }
 
     return this.withLock(folder.id, async () => {
+      this.checkMember(this.store.artifactFolder(folder.id), memberUserId, true);
       folder = this.store.artifactFolder(folder.id);
       const pending = this.store.artifactCommits(folder.id, { limit: 50, status: "proposed" })
         .find((commit) => commit.author?.kind === "agent" && commit.author.id === agent.id && (commit.to || "") === prefix);
@@ -646,6 +683,7 @@ export class Artifacts {
   async receive(folderId, user, body, size) {
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
+    if (!this.canUpload(folder, user)) throw new ArtifactError("non puoi caricare o modificare file in questa cartella", 403);
     if (!Number.isSafeInteger(size) || size < 0) throw new ArtifactError("serve la dimensione del file (Content-Length)", 411);
     if (size > LIMITS.fileBytes) throw new ArtifactError(`un file può essere al massimo di ${LIMITS.fileBytes / 1024 / 1024} MB`, 413);
     this.roomFor(size);
@@ -661,6 +699,7 @@ export class Artifacts {
         writeSync(fd, chunk);
       }
       if (written !== size) throw new ArtifactError("il file è arrivato a metà: riprova", 400);
+      if (!this.canUpload(this.store.artifactFolder(folder.id), user)) throw new ArtifactError("il permesso di caricamento è stato revocato", 403);
       fsyncSync(fd);
     } catch (error) {
       closeSync(fd);
@@ -687,6 +726,7 @@ export class Artifacts {
   async commitUpload(folderId, { user, dir = "", base, files, message = "" }) {
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
+    if (!this.canUpload(folder, user)) throw new ArtifactError("non puoi caricare o modificare file in questa cartella", 403);
     const prefix = String(dir || "").trim().replace(/^\/+|\/+$/g, "");
     if (prefix) cleanTreePath(prefix);
     if (!Array.isArray(files) || !files.length) throw new ArtifactError("nessun file da caricare");
@@ -719,6 +759,7 @@ export class Artifacts {
   async removeFiles(folderId, { user, base, paths, message = "" }) {
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
+    if (!this.canUpload(folder, user)) throw new ArtifactError("non puoi caricare o modificare file in questa cartella", 403);
     if (!Array.isArray(paths) || !paths.length || paths.length > LIMITS.files) throw new ArtifactError("scegli cosa eliminare");
     const wanted = [...new Set(paths.map((path) => cleanTreePath(String(path || "").trim().replace(/^\/+|\/+$/g, ""))))];
     let dirs = 0;
@@ -743,9 +784,10 @@ export class Artifacts {
   /** A change made from the panel, as a commit on the version it started from: published at once by a reviewer, proposed otherwise. */
   panelCommit(folder, user, { base, to = "", sent = 0, uploaded = false, change, unchanged, message, said }) {
     const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
-    const review = this.canReview(folder, user);
     return this.withLock(folder.id, async () => {
       const current = this.store.artifactFolder(folder.id);
+      if (!this.canUpload(current, user)) throw new ArtifactError("non puoi caricare o modificare file in questa cartella", 403);
+      const review = this.canReview(current, user);
       const known = base === undefined || base === null ? current.head || "" : String(base);
       if (known && this.store.artifactCommit(known)?.folderId !== folder.id) throw new ArtifactError("versione di partenza sconosciuta", 409);
       const start = this.treeOf(known);
@@ -866,6 +908,7 @@ export class Artifacts {
       const commit = this.store.artifactCommit(commitId);
       if (!["proposed", "conflict"].includes(commit.status)) throw new ArtifactError(`questo commit è già ${({ published: "pubblicato", rejected: "rifiutato", superseded: "sostituito", ignored: "ignorato" })[commit.status] || commit.status}`, 409);
       const current = this.store.artifactFolder(folder.id);
+      if (!this.canReview(current, user)) throw new ArtifactError("decidono sui commit solo il proprietario e i revisori di questa cartella", 403);
       if (decision === "reject") {
         this.store.writeArtifactCommit({ ...commit, status: "rejected", review: { by, at: Date.now(), note: String(note || "").slice(0, 500), decision } });
         return { rejected: true };
@@ -893,6 +936,7 @@ export class Artifacts {
     const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
     return this.withLock(folderId, async () => {
       const current = this.store.artifactFolder(folderId);
+      if (!this.canReview(current, user)) throw new ArtifactError("ripristinano una versione solo il proprietario e i revisori della cartella", 403);
       const head = current.head || "";
       if (head === target.id) throw new ArtifactError("questa versione è già quella servita", 409);
       const tree = this.readTree(target.tree);
@@ -913,10 +957,11 @@ export class Artifacts {
   }
 
   /** Brings a folder's served version (or a given commit) onto an agent's desktop. */
-  async pull({ agent, folder: folderRef, commit: commitRef = "", overwrite = false }) {
+  async pull({ agent, folder: folderRef, commit: commitRef = "", overwrite = false, memberUserId = "" }) {
     if (!this.boxes) throw new ArtifactError("there are no desktops here");
     const folder = this.findFolder(folderRef);
     if (!folder) throw new ArtifactError("no such folder: list them with artifact_folders", 404);
+    this.checkMember(folder, memberUserId);
     const wanted = commitRef ? this.store.artifactCommit(String(commitRef).startsWith("ac_") ? commitRef : `ac_${commitRef}`) || this.store.artifactCommits(folder.id).find((item) => item.id.startsWith(`ac_${commitRef}`)) : null;
     const commit = commitRef ? wanted : folder.head ? this.store.artifactCommit(folder.head) : null;
     if (!commit || commit.folderId !== folder.id) throw new ArtifactError(commitRef ? "no such commit in this folder" : `${folder.path} has nothing published yet`, 404);
@@ -1213,7 +1258,7 @@ export class Artifacts {
    */
   syncBrain() {
     if (!this.companyBrain?.enabled) return Promise.resolve();
-    const folders = this.store.artifactFolders();
+    const folders = this.store.artifactFolders().filter((folder) => (folder.memberAccess?.default || "write") !== "none" && !Object.values(folder.memberAccess?.users || {}).includes("none"));
     const body = folders.length
       ? folders.map((folder) => [
         `- **${folder.path}** — ${folder.title}${folder.kind === "site" ? " (sito)" : ""}`,

@@ -1966,4 +1966,18 @@ a.share-stats:hover { color: var(--amber); }
 }
 .email-workspace .rail-item { grid-template-columns: 30px minmax(0, 1fr) 16px; }
 
-@media (max-width: 480px) { .mode-email .tabs { margin: 0 -12px; padding: 2px 12px; } }
+@media (max-width: 480px) { .mode-email .tabs, .mode-artifacts .tabs { margin: 0 -12px; padding: 2px 12px; } }
+
+.artifact-team-default { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 270px); gap: 16px; align-items: center; }
+.artifact-team-default small, .artifact-team-identity small { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.artifact-team-default select, .artifact-team-person select { width: 100%; min-width: 0; }
+.artifact-team-list { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); }
+.artifact-team-person { display: grid; grid-template-columns: 36px minmax(0, 1fr) minmax(180px, 270px); gap: 12px; align-items: center; padding: 14px; }
+.artifact-team-person + .artifact-team-person { border-top: 1px solid var(--line); }
+.artifact-team-identity { min-width: 0; overflow-wrap: anywhere; }
+.artifact-team-reviewer { color: var(--amber); }
+@media (max-width: 600px) {
+  .artifact-team-default { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .artifact-team-person { grid-template-columns: 36px minmax(0, 1fr); }
+  .artifact-team-person select { grid-column: 1 / -1; }
+}

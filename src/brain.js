@@ -697,7 +697,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const ctx = {
       agent, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile: postFile ? (file, caption) => postFile(file, caption, { replyTo, traceId: trace.id }) : null, log: this.log, push: this.push, companyBrain: this.companyBrain, gitAttribution: this.gitAttribution,
       // Who asked, when a person did: only then may an agent open a new artifact folder.
-      artifacts: this.artifacts, vault: this.vault, requester, mailAuthorized: Boolean(computer), email: this.email, emailInvocation: channel.emailInvocation || null, traceId: trace.id, messageOwner: this.messageOwner,
+      artifacts: this.artifacts, artifactUserId: transportOf(channel.id) === "web" ? replyTo?.authorId || requester?.id || "" : "", vault: this.vault, requester, mailAuthorized: Boolean(computer), email: this.email, emailInvocation: channel.emailInvocation || null, traceId: trace.id, messageOwner: this.messageOwner,
       openThread: this.openThread ? (options) => this.openThread(agent, channel.id, options) : null,
       threadFor: this.threadFor ? (threadId) => this.threadFor(agent, threadId) : null,
       // The question goes where this conversation is, not to a separate place.

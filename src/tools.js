@@ -427,6 +427,14 @@ export async function executeTool(call, ctx) {
   const { agent, boxes, store, channelId, postFile } = ctx;
   const args = call.args || {};
   try {
+    const artifactUserId = ctx.artifactUserId || (call.name.startsWith("artifact_") && store?.panelUser?.(ctx.requester?.id) ? ctx.requester.id : "");
+    if (call.name.startsWith("artifact_") && call.name !== "artifact_folders" && ctx.artifacts && artifactUserId) {
+      const folder = ctx.artifacts.findFolder(args.folder);
+      if (folder) {
+        ctx.artifacts.checkMember(folder, artifactUserId, call.name === "artifact_push");
+        if (["artifact_share", "artifact_folder_update"].includes(call.name) && !ctx.artifacts.canReview(folder, store.panelUser(artifactUserId))) return { text: "error: cambiano una cartella o i suoi link solo il proprietario e i revisori" };
+      }
+    }
     if (call.name.startsWith("email_") && !ctx.mailAuthorized && !["owner", "authorized"].includes(ctx.requester?.kind) && !ctx.emailInvocation) return { text: "error: mailbox access requires an authorized user request" };
     switch (call.name) {
       case "git_commit": {
@@ -700,7 +708,7 @@ export async function executeTool(call, ctx) {
       }
       case "artifact_folders": {
         if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
-        const folders = ctx.artifacts.foldersFor(agent, args.query);
+        const folders = ctx.artifacts.foldersFor(agent, args.query, artifactUserId);
         return { text: JSON.stringify(folders.length ? { folders } : { folders, note: "no folder yet: ask the person which folder to use before pushing" }) };
       }
       case "artifact_log": {
@@ -712,18 +720,18 @@ export async function executeTool(call, ctx) {
         await boxes.ensure(agent);
         const result = await ctx.artifacts.push({
           agent, folder: args.folder, path: String(args.path || ""), to: args.to, message: args.message, mirror: args.mirror === true,
-          create: args.create && typeof args.create === "object" ? args.create : null, requester: ctx.requester || null, channelId, traceId: ctx.traceId || "",
+          create: args.create && typeof args.create === "object" ? args.create : null, requester: ctx.requester || null, memberUserId: artifactUserId, channelId, traceId: ctx.traceId || "",
         });
         return { text: ctx.artifacts.pushReceipt(result) };
       }
       case "artifact_pull": {
         if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
         await boxes.ensure(agent);
-        return { text: await ctx.artifacts.pull({ agent, folder: args.folder, commit: args.commit, overwrite: args.overwrite === true }) };
+        return { text: await ctx.artifacts.pull({ agent, folder: args.folder, commit: args.commit, overwrite: args.overwrite === true, memberUserId: artifactUserId }) };
       }
       case "artifact_folder_update": {
         if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
-        return { text: ctx.artifacts.configureFolder(args.folder, { agent, requester: ctx.requester || null, title: args.title, description: args.description, writers: args.writers, policy: args.policy }) };
+        return { text: ctx.artifacts.configureFolder(args.folder, { agent, requester: ctx.requester || null, memberUserId: artifactUserId, title: args.title, description: args.description, writers: args.writers, policy: args.policy }) };
       }
       case "artifact_share": {
         if (!ctx.artifacts) return { text: "error: artifacts are not available here" };

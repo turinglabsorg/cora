@@ -2,7 +2,7 @@ import { googleConnectorFixture } from "./google-connector-fixtures.js";
 import { EmailChannel } from "../src/email-channel.js";
 import { mailWorld } from "./mail-fixtures.js";
 import assert from "node:assert/strict";
-import { createECDH, createDecipheriv, createPublicKey, createHmac, hkdfSync, randomBytes, verify } from "node:crypto";
+import { createECDH, createDecipheriv, createPublicKey, createHmac, createHash, hkdfSync, randomBytes, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
@@ -267,6 +267,110 @@ test("voice reply delivery sends progress and final audio without text and prese
   const trace = app.store.trace(archived.at(-1).traceId);
   assert.ok(trace.steps.find((item) => item.type === "tool" && item.name === "say").result.includes(archived[0].id));
   assert.match(trace.prompt, /Cora consegna solo la tua voce/);
+});
+
+test("artifact team permissions enforce private, read and upload access for actual member sessions", async (t) => {
+  const signedIn = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+  const ownerHeaders = { Cookie: signedIn.headers.get("set-cookie").split(";")[0] };
+  const previous = app.store.accessPolicy();
+  app.store.updateAccessPolicy({ emails: [...previous.emails, "reader@artifact.test", "writer@artifact.test", "later@artifact.test"] });
+  const members = ["reader", "writer", "later"].map((name) => {
+    const user = app.store.registerPanelUser({ id: `artifact-${name}`, name, email: `${name}@artifact.test`, emailVerified: true, role: "member" });
+    const token = randomBytes(32).toString("base64url");
+    const hash = createHash("sha256").update(token).digest("hex");
+    app.store.createPanelSession(hash, user.id, Date.now() + 3600000);
+    const signature = createHmac("sha256", "test-session-key").update(`session.v2.${token}`).digest("base64url");
+    return { user, hash, headers: { Cookie: `cora_session=v2.${token}.${signature}` } };
+  });
+  const [reader, writer, later] = members;
+  const agent = app.store.createAgent({ name: "Artifact Test", tools: false });
+  let folder;
+  t.after(() => {
+    if (folder) app.artifacts.deleteFolder(folder.id);
+    app.store.deleteAgent(agent.id);
+    for (const { user, hash } of members) {
+      app.store.deletePanelSession(hash);
+      app.store.stmt("DELETE FROM panel_users WHERE id = ?").run(user.id);
+    }
+    app.store.updateAccessPolicy(previous);
+  });
+  const owner = (path, options = {}) => call(path, { ...options, headers: ownerHeaders });
+  const as = (member, path, options = {}) => call(path, { ...options, headers: member.headers });
+  const created = await owner("/api/artifacts/folders", { method: "POST", body: {
+    path: "team/permissions-test", policy: "direct", writers: [agent.id], memberAccess: { default: "none", users: { [reader.user.id]: "read", [writer.user.id]: "write" } },
+  } });
+  assert.equal(created.status, 201);
+  folder = created.data;
+  const endpoint = `/api/artifacts/folders/${folder.id}`;
+  const upload = async (headers, text) => {
+    const response = await fetch(`${base}${endpoint}/blobs`, { method: "POST", headers: { ...headers, "X-Cora": "1" }, body: text });
+    return { status: response.status, data: await response.json() };
+  };
+  const blob = await upload(ownerHeaders, "Visible to authorized team members.");
+  const published = await owner(`${endpoint}/upload`, { method: "POST", body: { files: [{ path: "readme.md", sha: blob.data.sha }] } });
+  assert.equal(published.data.commit.status, "published");
+  const commit = published.data.commit;
+  assert.equal((await as(reader, endpoint)).data.canUpload, false);
+  assert.equal((await as(writer, endpoint)).data.canUpload, true);
+  assert.deepEqual((await owner(endpoint)).data.people.map((person) => person.id).filter((id) => id.startsWith("artifact-")).sort(), members.map(({ user }) => user.id).sort());
+  assert.equal((await as(reader, `/api/artifacts/commits/${commit.id}/files/readme.md`)).status, 200);
+  assert.equal((await upload(reader.headers, "Denied write")).status, 403);
+  assert.equal((await as(reader, `${endpoint}/upload`, { method: "POST", body: { files: [{ path: "copy.md", sha: blob.data.sha }] } })).status, 403);
+  assert.equal((await as(reader, `${endpoint}/remove`, { method: "POST", body: { paths: ["readme.md"] } })).status, 403);
+  assert.equal((await as(writer, endpoint, { method: "PUT", body: { memberAccess: { default: "write", users: {} } } })).status, 403);
+  assert.equal((await as(later, "/api/artifacts")).data.folders.some((item) => item.id === folder.id), false);
+  const deniedContext = { store: app.store, artifacts: app.artifacts, agent, artifactUserId: later.user.id, requester: { kind: "owner", id: later.user.id } };
+  assert.match((await executeTool({ name: "artifact_log", args: { folder: folder.path } }, deniedContext)).text, /non hai accesso/);
+  assert.ok(!JSON.parse((await executeTool({ name: "artifact_folders", args: {} }, deniedContext)).text).folders.some((item) => item.folder === folder.path));
+  for (const path of [endpoint, `/api/artifacts/commits/${commit.id}`, `/api/artifacts/commits/${commit.id}/files/readme.md`, `/api/artifacts/commits/${commit.id}/objects/${blob.data.sha}`, `/api/artifacts/commits/${commit.id}/view?path=readme.md`]) assert.equal((await as(later, path)).status, 403, path);
+  assert.equal(app.artifacts.canWrite(app.store.artifactFolder(folder.id), agent), true, "member rules do not change the assigned agent's permission");
+  const priorBrain = app.artifacts.companyBrain;
+  const catalog = [];
+  app.artifacts.companyBrain = { enabled: true, write: async (page) => catalog.push(page) };
+  try { await app.artifacts.syncBrain(); assert.ok(!catalog.at(-1).body.includes(folder.path), "restricted folder metadata does not enter the shared Brain catalog"); }
+  finally { app.artifacts.companyBrain = priorBrain; }
+  const nextBlob = await upload(writer.headers, "A member's proposed update.");
+  const proposal = await as(writer, `${endpoint}/upload`, { method: "POST", body: { files: [{ path: "update.md", sha: nextBlob.data.sha }] } });
+  assert.equal(proposal.status, 201);
+  assert.equal(proposal.data.commit.status, "proposed", "upload rights do not confer reviewer rights");
+  assert.equal((await as(writer, `/api/artifacts/commits/${proposal.data.commit.id}/review`, { method: "POST", body: { decision: "approve" } })).status, 403);
+  const access = { default: "read", users: { [writer.user.id]: "none" } };
+  assert.equal((await owner(endpoint, { method: "PUT", body: { memberAccess: access, reviewers: [reader.user.id] } })).status, 200);
+  assert.equal((await as(later, endpoint)).data.canUpload, false, "default access covers other admitted members");
+  assert.equal((await as(writer, endpoint)).status, 403);
+  assert.equal((await as(reader, endpoint)).data.canReview, true);
+  assert.equal((await as(reader, endpoint, { method: "PUT", body: { memberAccess: { default: "write", users: {} } } })).status, 403, "reviewers cannot grant team access");
+  assert.throws(() => app.artifacts.configureFolder(folder.path, { agent, requester: { kind: "owner", id: later.user.id }, policy: "direct" }), /proprietario e i suoi revisori/, "panel members cannot gain owner rights by asking an agent");
+  const reopened = new Store(home);
+  assert.deepEqual(reopened.artifactFolder(folder.id).memberAccess, access);
+  reopened.close();
+  const detail = (await as(later, endpoint)).data;
+  const panel = panelHarness({ language: "en" });
+  panel.run(`S.data={agents:[]};document.getElementById("app").replaceChildren(artifactFiles(${JSON.stringify(detail)},${JSON.stringify(commit)}));`);
+  assert.equal(panel.run(`document.getElementById("app").querySelector(".art-drop")`), null);
+  assert.match(panel.app.textContent, /read access/);
+});
+
+test("artifact upload permissions are rechecked after streaming and while a commit waits for its folder lock", async (t) => {
+  const previous = app.store.accessPolicy();
+  app.store.updateAccessPolicy({ emails: [...previous.emails, "stream@artifact.test"] });
+  const user = app.store.registerPanelUser({ id: "artifact-stream", name: "Stream", email: "stream@artifact.test", emailVerified: true, role: "member" });
+  const owner = { id: "local-owner", role: "owner" };
+  const folder = app.artifacts.createFolder({ path: "team/stream-permission" });
+  let release = () => {};
+  t.after(() => { release(); app.artifacts.deleteFolder(folder.id); app.store.stmt("DELETE FROM panel_users WHERE id = ?").run(user.id); app.store.updateAccessPolicy(previous); });
+  const deny = () => app.artifacts.updateFolder(folder.id, { memberAccess: { default: "none", users: {} } }, owner);
+  async function* chunks() { yield Buffer.from("first"); deny(); yield Buffer.from("second"); }
+  await assert.rejects(app.artifacts.receive(folder.id, user, chunks(), 11), /revocato/);
+  assert.equal(app.store.artifactUploads(folder.id, `user:${user.id}`, 0).size, 0);
+  app.artifacts.updateFolder(folder.id, { memberAccess: { default: "write", users: {} } }, owner);
+  const blob = await app.artifacts.receive(folder.id, user, [Buffer.from("A valid upload")], 14);
+  const barrier = new Promise((resolve) => { release = resolve; });
+  const held = app.artifacts.withLock(folder.id, () => barrier);
+  const queued = app.artifacts.commitUpload(folder.id, { user, files: [{ path: "queued.txt", sha: blob.sha }] });
+  deny(); release(); await held;
+  await assert.rejects(queued, /non puoi caricare/);
+  assert.equal(app.store.artifactCommits(folder.id).length, 0);
 });
 
 describe("per-agent subscription authentication", () => {
@@ -1478,7 +1582,7 @@ describe("agents in Discord", () => {
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
     // Its own routines travel with it: they are the agent's own, not the owner's computer.
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__email_inbox", "mcp__cora__email_read", "mcp__cora__email_settings", "mcp__cora__email_draft", "mcp__cora__email_send", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);

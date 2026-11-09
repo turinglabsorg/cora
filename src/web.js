@@ -1284,7 +1284,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
     if (path === "/api/artifacts" && method === "GET") {
       return send(res, 200, {
-        folders: artifacts.folders(),
+        folders: store.artifactFolders().filter((folder) => artifacts.canReadMember(folder, user)).map((folder) => artifacts.folderView(folder)),
         reviews: artifacts.reviewsFor(user).map((commit) => artifacts.commitSummary(commit)),
         quota: artifacts.space(),
         people: store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })),
@@ -1294,9 +1294,10 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (path === "/api/artifacts/folders" && method === "POST") {
       const body = await readJson(req, 16384);
       const owner = user.role === "owner";
+      if (!owner && body.memberAccess !== undefined) throw new HttpError(403, "solo il proprietario cambia l'accesso del team");
       const folder = artifacts.createFolder({
         path: body.path, title: body.title, description: body.description, kind: body.kind, writers: body.writers,
-        policy: owner ? body.policy : "review", reviewers: owner ? body.reviewers : [], createdBy: by,
+        policy: owner ? body.policy : "review", reviewers: owner ? body.reviewers : [], memberAccess: owner ? body.memberAccess : undefined, createdBy: by,
       });
       return send(res, 201, artifacts.folderView(folder));
     }
@@ -1304,6 +1305,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (match) {
       const folder = store.artifactFolder(match[1]);
       if (!folder) throw new HttpError(404, "cartella non trovata");
+      if (!artifacts.canReadMember(folder, user)) throw new HttpError(403, "non hai accesso a questa cartella");
       // Uploads from the panel: each file on its own as raw bytes, then one commit that places them.
       if (match[2] === "blobs" && method === "POST") {
         const length = req.headers["content-length"] === undefined ? NaN : Number(req.headers["content-length"]);
@@ -1339,7 +1341,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 200, {
           folder: artifacts.folderView(folder),
           canReview: artifacts.canReview(folder, user),
+          canUpload: artifacts.canUpload(folder, user),
           canManage: user.role === "owner",
+          people: user.role === "owner" ? store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })) : [],
           shareHosting: Boolean(artifacts.shareSuffix),
           shareSuffix: artifacts.shareSuffix,
           shares: store.artifactShares(folder.id).map((share) => artifacts.shareView(share)),
@@ -1366,6 +1370,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const commit = store.artifactCommit(match[1]);
       if (!commit) throw new HttpError(404, "commit non trovato");
       const folder = store.artifactFolder(commit.folderId);
+      if (!folder) throw new HttpError(404, "cartella non trovata");
+      if (!artifacts.canReadMember(folder, user)) throw new HttpError(403, "non hai accesso a questa cartella");
       if (!match[2] && method === "GET") {
         const canReview = artifacts.canReview(folder, user);
         return send(res, 200, { ...artifacts.commitView(commit.id), canReview, previewUrl: canReview ? artifacts.previewUrl(commit.id) : "" });

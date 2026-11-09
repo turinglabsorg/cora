@@ -5079,7 +5079,7 @@ async function uploadArtifactFiles(folder, { dir, base, items, onProgress = () =
 async function renderArtifactFolder(id, tab, dir = "") {
   const view = location.hash;
   const slot = h("div", { class: "stack" }, panel({}, skeleton("rows", 4)));
-  shell([slot], { title: "Artefatti", back: "#/artefatti" });
+  shell([slot], { title: "Artefatti", back: "#/artefatti", mode: "artifacts" });
   let data;
   try { data = await api(`/api/artifacts/folders/${id}`); }
   catch (error) { slot.replaceChildren(empty("archive", error.message, btn("Torna agli artefatti", { icon: "back", href: "#/artefatti" }))); return; }
@@ -5111,7 +5111,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
       return h("a", { href: levelHref(key), class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, raw(String(count))) : null);
     })),
     content,
-  ], { title: folder.title, back: "#/artefatti" });
+  ], { title: folder.title, back: "#/artefatti", mode: "artifacts" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
   const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
   content.replaceChildren(...[shown].flat().filter(Boolean));
@@ -5149,7 +5149,7 @@ function artifactFiles(data, head, dir = "") {
     chosen = file.path;
     for (const item of list.querySelectorAll(".art-file")) item.classList.toggle("on", item === row);
     preview.replaceChildren(skeleton("rows", 2));
-    const shown = await artifactPreview(`/api/artifacts/commits/${head.id}/files/${artifactPath(file.path)}`, file.path, file.size, {
+    const shown = await artifactPreview(`/api/artifacts/commits/${head.id}/files/${artifactPath(file.path)}`, file.path, file.size, data.canUpload === false ? null : {
       folder, head, canReview: data.canReview,
       onSaved: (commit) => {
         if (commit.status !== "published") { location.hash = `#/artefatti/${folder.id}/c/${commit.id}`; return; }
@@ -5185,7 +5185,7 @@ function artifactFiles(data, head, dir = "") {
   const pickDir = h("input", { type: "file", multiple: true, webkitdirectory: true, hidden: true });
   const verb = data.canReview ? "Carica qui" : "Proponi qui";
   const send = async (items) => {
-    if (!items.length || drop.classList.contains("busy")) return;
+    if (data.canUpload === false || !items.length || drop.classList.contains("busy")) return;
     drop.classList.add("busy");
     try {
       const done = await uploadArtifactFiles(folder, { dir, base: head?.id || "", items, onProgress: ({ done: count, count: all, sent, total }) => {
@@ -5231,20 +5231,21 @@ function artifactFiles(data, head, dir = "") {
       name.focus?.();
     } }),
     pick, pickDir);
-  const zone = h("div", { class: "stack-sm art-zone" }, drop, head || dir ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, crumbs, list), head ? preview : null) : null);
+  const zone = h("div", { class: "stack-sm art-zone" }, data.canUpload === false ? h("p", { class: "notice" }, icon("info"), "Hai accesso in lettura: puoi vedere e scaricare i file.") : drop, head || dir ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, crumbs, list), head ? preview : null) : null);
   let depth = 0;
-  zone.addEventListener("dragenter", (event) => { if (![...(event.dataTransfer?.types || [])].includes("Files")) return; event.preventDefault(); depth += 1; zone.classList.add("over"); });
+  zone.addEventListener("dragenter", (event) => { if (data.canUpload === false || ![...(event.dataTransfer?.types || [])].includes("Files")) return; event.preventDefault(); depth += 1; zone.classList.add("over"); });
   zone.addEventListener("dragover", (event) => { if ([...(event.dataTransfer?.types || [])].includes("Files")) event.preventDefault(); });
   zone.addEventListener("dragleave", () => { depth = Math.max(0, depth - 1); if (!depth) zone.classList.remove("over"); });
   zone.addEventListener("drop", async (event) => {
     event.preventDefault();
+    if (data.canUpload === false) return;
     depth = 0;
     zone.classList.remove("over");
     send(await droppedFiles(event.dataTransfer));
   });
 
   if (!head) {
-    return panel({ icon: "file", title: "File", hint: data.commits.length ? "Nessuna versione è ancora in onda: approva un commit, o carica i primi file." : "Ancora nessun file: caricali da qui, o chiedi a un agente di farlo." }, zone);
+    return panel({ icon: "file", title: "File", hint: data.canUpload === false ? "Nessuna versione è ancora in onda." : data.commits.length ? "Nessuna versione è ancora in onda: approva un commit, o carica i primi file." : "Ancora nessun file: caricali da qui, o chiedi a un agente di farlo." }, zone);
   }
   const total = data.tree.reduce((sum, file) => sum + file.size, 0);
   const again = S.reopenFile ? files.find((file) => file.path === S.reopenFile) : null;
@@ -5593,17 +5594,48 @@ function artifactPermissions(data) {
     await save({ writers: chosen }, writersRow);
   });
   const people = (data.people || []).filter((person) => person.role !== "owner");
+  const memberAccess = h("div", { class: "artifact-team-access stack-sm" });
+  const accessLevels = [["none", "Nessun accesso"], ["read", "Lettura"], ["write", "Caricamento e modifica"]];
+  const drawMemberAccess = () => {
+    const policy = folder.memberAccess || { default: "write", users: {} };
+    const defaults = h("select", { "aria-label": "Accesso predefinito del team" }, accessLevels.map(([value, label]) => h("option", { value, selected: value === policy.default }, label)));
+    const choose = async (changes) => {
+      for (const control of memberAccess.querySelectorAll("select")) control.disabled = true;
+      await save({ memberAccess: changes }, memberAccessRow);
+      drawMemberAccess();
+    };
+    defaults.addEventListener("change", () => choose({ ...policy, default: defaults.value }));
+    memberAccess.replaceChildren(
+      h("div", { class: "artifact-team-default" }, h("div", {}, h("b", {}, "Accesso predefinito"), h("small", { class: "muted" }, "Vale anche per i nuovi membri del team.")), defaults),
+      people.length ? h("div", { class: "artifact-team-list" }, people.map((person) => {
+        const reviewer = folder.reviewers.includes(person.id);
+        const selected = reviewer ? "write" : Object.hasOwn(policy.users, person.id) ? policy.users[person.id] : "inherit";
+        const control = h("select", { disabled: reviewer, "aria-label": tr("Accesso di {name}", { name: person.name }) },
+          h("option", { value: "inherit", selected: selected === "inherit" }, "Eredita accesso predefinito"),
+          accessLevels.map(([value, label]) => h("option", { value, selected: value === selected }, label)));
+        control.addEventListener("change", () => {
+          const users = { ...policy.users };
+          if (control.value === "inherit") delete users[person.id]; else users[person.id] = control.value;
+          choose({ ...policy, users });
+        });
+        return h("div", { class: "artifact-team-person" }, userMark(person), h("div", { class: "artifact-team-identity" }, h("b", {}, raw(person.name)), h("small", { class: "muted" }, raw(person.email || "")), reviewer ? h("small", { class: "artifact-team-reviewer" }, "Revisore: può anche approvare i commit.") : null), control);
+      })) : h("p", { class: "muted small" }, "Nessun altro membro del team è ancora entrato."));
+  };
+  const memberAccessRow = data.canManage ? setRow("Membri del team", "Scegli chi può vedere, scaricare o modificare i file. Tu e i revisori avete sempre accesso completo.", memberAccess, { stack: true }) : null;
+  if (data.canManage) drawMemberAccess();
   const reviewers = !data.canManage ? null : people.length ? h("div", { class: "set-switches" }, people.map((person) => h("label", { class: "switch" },
     h("input", { type: "checkbox", value: person.id, checked: folder.reviewers.includes(person.id) }), h("span", { class: "rocker" }),
     h("span", { class: "switch-text" }, raw(person.name), h("small", { class: "mono" }, raw(person.email || "")))))) : h("p", { class: "muted small" }, "Nessun altro entra in questo spazio: per ora rivedi solo tu.");
   const reviewersRow = data.canManage ? setRow("Revisori", "Oltre a te, chi può approvare o rifiutare i commit di questa cartella.", reviewers, { stack: true }) : null;
-  if (people.length) reviewers?.addEventListener("change", () => save({ reviewers: [...reviewers.querySelectorAll("input")].filter((input) => input.checked).map((input) => input.value) }, reviewersRow));
+  if (people.length) reviewers?.addEventListener("change", async () => {
+    if (await save({ reviewers: [...reviewers.querySelectorAll("input")].filter((input) => input.checked).map((input) => input.value) }, reviewersRow)) drawMemberAccess();
+  });
   const removeRow = data.canManage ? setRow("Elimina la cartella", "Con tutte le versioni e i link. I file restano solo nei backup della notte.", armedButton("Elimina", "Conferma: elimina tutto", { onconfirm: async () => {
     if (await guard(api(`/api/artifacts/folders/${folder.id}`, { method: "DELETE" }), "Cartella eliminata")) location.hash = "#/artefatti";
   } })) : null;
   return [
     panel({ icon: "edit", title: "La cartella" }, setRows(titleRow, descriptionRow)),
-    panel({ icon: "shield", title: "Permessi", hint: editable ? null : "Li cambiano il proprietario e i revisori della cartella." }, setRows(directRow, writersRow, reviewersRow, removeRow)),
+    panel({ icon: "shield", title: "Permessi", hint: editable ? null : "Li cambiano il proprietario e i revisori della cartella." }, setRows(directRow, writersRow, memberAccessRow, reviewersRow, removeRow)),
   ];
 }
 
