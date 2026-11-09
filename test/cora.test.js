@@ -344,6 +344,71 @@ test("router image messages use the actual JPEG and GIF MIME types for incoming 
   assert.equal(sent.messages[2].content[1].image_url.url, "data:image/gif;base64," + gif);
 });
 
+test("Discord images reach Gemini through Cora attachment tools without a false vision denial", async (t) => {
+  const network = await fakeDiscord(), native = fakeCli();
+  const f = await knowledgeWorld({ discordToken: "fixture-discord-vision", discordApi: network.url, geminiBin: native.gemini });
+  t.after(async () => { await f.close(); await network.close(); });
+  f.app.store.updateSettings({ transport: "discord", transports: ["discord"], guildIds: [GUILD], ownerIds: [OWNER] });
+  f.app.subscriptions.geminiModels = async () => [{ name: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }];
+  const account = f.app.store.createSubscription({ provider: "gemini", label: "Vision", connectedBy: { id: f.alice.user.id, name: "Alice" } });
+  f.app.store.updateSubscription(account.id, { status: "ready" });
+  const agent = f.app.store.createAgent({ name: "GeminiPixel", model: "gemini/gemini-4-argon-high", subscriptionId: account.id, tools: false, brainOwnerId: f.alice.user.id, ownerId: "discord:" + OWNER, channelIds: [CHANNEL], chattiness: 0 });
+  const caps = await f.app.llm.capabilities(agent.model);
+  assert.equal(caps.vision, true, "the discovered Gemini catalog must expose vision");
+  const image = encodePng(2, 2, Buffer.from([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]));
+  const file = network.attachment("vision.png", image, "image/png");
+  native.set({ tool: "read_attachment", args: { attachment_id: "img-1" }, reply: "GEMINI_DISCORD_IMAGE_OK" });
+  await waitFor(() => f.app.discord.state === "ready");
+  network.say({ content: "@GeminiPixel, descrivi questa immagine.", attachments: [file] });
+  const call = await waitFor(() => native.calls().find(entry => entry.flavor === "gemini" && entry.content?.some(part => part.type === "image")), { what: "Gemini receiving Discord pixels over MCP" });
+  assert.ok(call.tools.includes("read_attachment"));
+  assert.ok(!call.tools.includes("shell"), "vision does not grant desktop or host tools");
+  assert.match(call.stdin, /img-1:/);
+  assert.doesNotMatch(call.stdin, /modello selezionato non supporta la visione/);
+  assert.equal(call.content.find(part => part.type === "image").mimeType, "image/png");
+  assert.equal(call.content.find(part => part.type === "image").data, image.toString("base64"));
+  await waitFor(() => network.state.webhookPosts.some(post => post.username === agent.name && post.content.includes("GEMINI_DISCORD_IMAGE_OK")));
+});
+
+test("Discord thread creation and empty system entries never wake an agent during history recovery", async (t) => {
+  const network = await fakeDiscord();
+  const f = await knowledgeWorld({ discordToken: "fixture-discord-thread-events", discordApi: network.url });
+  t.after(async () => { await f.close(); await network.close(); });
+  f.app.store.updateSettings({ transport: "discord", transports: ["discord"], guildIds: [GUILD], ownerIds: [OWNER] });
+  const agent = f.app.store.createAgent({ name: "ThreadGuard", model: "ollama/test-model", tools: false, brainOwnerId: f.alice.user.id, ownerId: "discord:" + OWNER, channelIds: [CHANNEL], chattiness: 0 });
+  const requests = [];
+  f.state.answer = body => { requests.push(body); return { content: JSON.stringify(body).includes("FIRST_THREAD_CONTENT") ? "FIRST_THREAD_OK" : "PARENT_READY" }; };
+  await waitFor(() => f.app.discord.state === "ready");
+  network.say({ content: "@ThreadGuard, rispondi per confermare che ascolti." });
+  await waitFor(() => network.state.webhookPosts.some(post => post.username === agent.name && post.content === "PARENT_READY"));
+  await waitFor(() => f.app.orchestrator.quiet());
+  const count = requests.length;
+  const thread = { id: "800000000000000051", type: 11, parent_id: CHANNEL, guild_id: GUILD, name: "Thread lifecycle QA", thread_metadata: { archived: false } };
+  network.state.threads.set(thread.id, thread);
+  network.dispatch("THREAD_CREATE", thread);
+  const created = network.say({ type: 18, content: "" });
+  created.thread = thread;
+  created.message_reference = { type: 0, channel_id: thread.id };
+  const starter = network.say({ type: 21, content: "", channel: thread.id });
+  const empty = network.say({ content: "   " });
+  await waitFor(() => f.app.channels.list().some(channel => channel.id === thread.id));
+  await f.app.orchestrator.catchUp();
+  assert.equal(requests.length, count, "system events must not start a model request");
+  for (const event of [created, starter, empty]) {
+    assert.equal(f.app.store.hasMessage(event.id), false, "system and empty events never enter the conversation archive");
+    assert.ok(!f.app.orchestrator.state(event.channel_id).history.some(item => item.id === event.id));
+    assert.equal(f.app.orchestrator.state(event.channel_id).nextRoundAt || 0, 0, "catch-up must not schedule an empty-message reply");
+  }
+  network.say({ content: "@ThreadGuard, FIRST_THREAD_CONTENT", channel: thread.id });
+  await waitFor(() => network.state.webhookPosts.some(post => post.channelId === thread.id && post.content === "FIRST_THREAD_OK"));
+  assert.doesNotMatch(JSON.stringify(requests.at(-1)), /messaggio vuoto/);
+  await waitFor(() => f.app.orchestrator.quiet());
+  const answered = network.state.webhookPosts.length;
+  await f.app.orchestrator.catchUp();
+  assert.equal(f.app.orchestrator.state(thread.id).nextRoundAt || 0, 0);
+  assert.equal(network.state.webhookPosts.length, answered, "the real first message is answered exactly once");
+});
+
 test("Telegram photos and image documents reach vision CLIs as scoped MCP image content without desktop access", async (t) => {
   const telegram = await fakeTelegram(), native = fakeCli();
   const token = "fixture-image-main";
@@ -2396,7 +2461,7 @@ describe("agents in Discord", () => {
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
     // Its own routines travel with it: they are the agent's own, not the owner's computer.
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__email_inbox", "mcp__cora__email_read", "mcp__cora__email_settings", "mcp__cora__email_draft", "mcp__cora__email_send", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__read_attachment", "mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__email_inbox", "mcp__cora__email_read", "mcp__cora__email_settings", "mcp__cora__email_draft", "mcp__cora__email_send", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);
@@ -3517,14 +3582,15 @@ describe("talking with the agents", () => {
     assert.ok(calls < 6, `it stopped instead of going on (${calls} calls)`);
   });
 
-  test("the owner's next words rewrite the goal instead of being argued with", async (t) => {
+  test("the owner's next words preserve the full revised goal without publishing it as completed work", async (t) => {
     await call("/api/settings", { method: "PUT", body: { goalMode: true } });
     t.after(() => call("/api/settings", { method: "PUT", body: { goalMode: false } }));
+    const revisedGoal = "Il report è su Telegram per tutti i destinatari già autorizzati, con gli allegati approvati, i dati aggiornati e verificati, i collegamenti pubblici funzionanti e il riepilogo delle modifiche richieste. Gli invii già riusciti non sono ripetuti, gli accessi privati restano riservati e ogni eventuale errore viene recuperato prima della chiusura, con la conferma finale di ricezione da tutti i destinatari.";
     const asked = [];
     goals = (body) => {
       const text = String(body.messages[1].content);
       asked.push(text);
-      return /Poi il proprietario ha detto/.test(text) ? "il report è su Telegram" : "il report è via email";
+      return /Poi il proprietario ha detto/.test(text) ? revisedGoal : "il report è via email";
     };
     const judged = [];
     checks = (body) => {
@@ -3544,8 +3610,9 @@ describe("talking with the agents", () => {
     await waitFor(() => posts("Olga").includes("Mandato su Telegram."), { what: "Olga's answer", timeout: 25000 });
     await quiet();
     assert.ok(asked.some((text) => /Poi il proprietario ha detto[\s\S]*Telegram/.test(text)), "the goal is rewritten from what they said next");
-    assert.ok(posts("Olga").some((text) => /Cambio obiettivo: il report è su Telegram/.test(text)), "and it says so out loud");
-    assert.ok(judged.some((text) => /Telegram/.test(text)), "the check judges the new goal, not the old one");
+    assert.ok(posts("Olga").includes("Ricevuto, aggiorno il compito con le nuove indicazioni e proseguo."), "the acknowledgement is complete and does not claim the revised goal is already met");
+    assert.ok(!posts("Olga").some((text) => text.startsWith("Cambio obiettivo:") || text.includes(revisedGoal)), "internal completion criteria are not published as progress");
+    assert.ok(judged.some((text) => text.includes(revisedGoal)), "the verifier retains the entire goal, including requirements after character 300");
   });
 
   test("with goal mode off nobody writes a goal and nobody checks one", async () => {

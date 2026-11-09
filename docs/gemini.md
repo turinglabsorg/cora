@@ -14,6 +14,8 @@ Each managed account uses a private home under `$CORA_HOME/subscriptions/<id>` a
 
 A turn gets its own workspace, custom `cora` agent, system instructions and MCP configuration. The custom agent has an empty native tool list; Cora's authorized MCP tools are registered eagerly so the model does not need host filesystem tools to discover their schemas. Native shell, file, browser and scheduling tools are unavailable, with additional deny rules for host reads, writes, commands and URLs. Cora's verifier, authorization boundaries and cancellation still govern the work.
 
+Gemini models advertise image understanding. Conversation images are exposed through Cora's scoped `read_attachment` tool as MCP image blocks, including when the agent's desktop is disabled. The model does not need host file access to inspect a chat attachment.
+
 Streaming output supplies the final response, intermediate text and token usage. A non-success result, missing final event, nonzero exit or cancellation fails the turn. The workspace and per-turn bridge configuration are removed afterward. Managed account state remains in its private profile and system keyring.
 
 API keys and cloud-provider overrides are excluded from the subscription environment. API-key mode and automatic use of purchased AI credits are disabled. Subscription capacity remains subject to Google's plan limits.

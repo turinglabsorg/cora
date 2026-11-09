@@ -71,6 +71,12 @@ export function spokenTo(text, name) {
   return Boolean(heard) && new RegExp(`(^|[^\\p{L}\\p{N}_@])${escaped}\\s*[,:!?]|^\\s*${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(normalize(heard));
 }
 
+function discordConversationMessage(raw, archived = null) {
+  return (raw.type === undefined || raw.type === 0 || raw.type === 19)
+    && Boolean(raw.content?.trim() || raw.attachments?.length || raw.embeds?.length || raw.sticker_items?.length
+      || (archived?.voice || archived?.voiceOnly) && archived.content?.trim());
+}
+
 function describeMessage(raw, nameFor = () => null) {
   const parts = [];
   if (raw.content) {
@@ -344,8 +350,9 @@ export class Orchestrator {
           // A voice message comes back as the words it was heard as, not as its attachment.
           const items = [];
           for (const raw of messages) {
-            if (raw.id === exclude || this.arriving.has(raw.id)) continue;
             const kept = archived.get(raw.id);
+            if (!discordConversationMessage(raw, kept)) continue;
+            if (raw.id === exclude || this.arriving.has(raw.id)) continue;
             const item = { ...this.toItem(raw), ...(kept?.passive ? { passive: true } : {}), ...(kept?.voice || kept?.voiceOnly ? kept : {}) };
             if (!kept && Date.now() - item.at < CATCH_UP_MS) await this.arrive(raw.id, () => this.hearDiscord(state, item, raw));
             items.push(item);
@@ -379,8 +386,7 @@ export class Orchestrator {
     const guildId = raw.guild_id || this.channels.discordInfo(raw.channel_id)?.guildId;
     if (!guildId || !this.allowedGuild(guildId)) return;
     // Only real messages and replies: joins, pins, boosts and the like have no text for the agents.
-    if (raw.type !== undefined && raw.type !== 0 && raw.type !== 19) return;
-    if (!raw.content && !raw.attachments?.length && !raw.embeds?.length && !raw.sticker_items?.length) return;
+    if (!discordConversationMessage(raw)) return;
     if (this.discord.isOwnMessage(raw) || this.bots?.isOwnMessage(raw)) return;
     // What an agent's own bot posts is already in the history (Cora posted it); the gateway echo can arrive first.
     if (raw.author?.id && this.bots?.agentIdForUser(raw.author.id)) return;
@@ -463,8 +469,7 @@ export class Orchestrator {
   async onDirectMessage(agentId, raw) {
     const agent = this.store.agent(agentId);
     if (!agent?.enabled) return;
-    if (raw.type !== undefined && raw.type !== 0 && raw.type !== 19) return;
-    if (!raw.content && !raw.attachments?.length && !raw.embeds?.length && !raw.sticker_items?.length) return;
+    if (!discordConversationMessage(raw)) return;
     // Ignore bots and anything our own agents posted (the DM echoes the agent's own reply back).
     if (raw.author?.bot || this.bots?.agentIdForUser(raw.author?.id) || this.discord.isOwnMessage(raw)) return;
     this.dmAgent.set(raw.channel_id, agentId);
