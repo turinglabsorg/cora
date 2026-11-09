@@ -319,6 +319,43 @@ test("owner memory isolates facts, clients, projects, archives and reviews until
   assert.match(f.app.brain.memoryContext(replacement, "orbit"), /ORBIT_BOB_PERSISTENT/);
 });
 
+test("owner isolation preserves explicit chat permissions without granting private panel access", async (t) => {
+  const telegram = await fakeTelegram();
+  telegram.addBot("owner-permission-fixture", { id: 89001, username: "fixture_cora_bot", first_name: "Cora" });
+  const f = await knowledgeWorld({ telegramToken: "owner-permission-fixture", telegramApi: telegram.url });
+  t.after(async () => { await f.close(); await telegram.close(); });
+  await f.request(f.admin, "/api/settings", { method: "PUT", body: { transport: "telegram", transports: ["telegram"], telegramChatIds: [TG_GROUP], telegramOwnerIds: [TG_OWNER] } });
+  const nico = (await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Nico", model: "ollama/test-model", tools: false } })).data;
+  const vera = (await f.request(f.bob, "/api/agents", { method: "POST", body: { name: "Vera", model: "ollama/test-model", tools: false } })).data;
+  const caller = { id: "permission-chat-call", kind: "human", authorId: TG_STRANGER, authorName: "Virginia", content: "Nico, rispondi a questa richiesta autorizzata.", at: Date.now(), addressed: [nico.id] };
+  const agent = f.app.store.agent(nico.id), channelId = "tg:" + TG_GROUP;
+  assert.equal(f.app.knowledge.acceptsMessage(agent, caller, channelId), false);
+  assert.equal(f.app.knowledge.acceptsMessage(agent, { ...caller, authorId: TG_OWNER, kind: "owner" }, channelId), false, "the space owner has no implicit access to another owner's bot");
+  f.app.store.updateSettings({ permissions: [{ id: "telegram:" + TG_STRANGER, name: "Virginia", agents: [nico.id] }] });
+  const state = f.app.orchestrator.state(channelId);
+  assert.equal(f.app.orchestrator.authorized(caller, agent, state), true);
+  assert.equal(f.app.knowledge.acceptsMessage(agent, caller, channelId), true);
+  assert.equal(f.app.knowledge.acceptsMessage(agent, caller, "sl:C_PERMISSION_FIXTURE"), false, "a Telegram grant does not authorize a different transport identity");
+  assert.equal(f.app.knowledge.acceptsMessage(f.app.store.agent(vera.id), caller, channelId), false);
+  assert.equal(f.app.knowledge.acceptsMessage(agent, { ...caller, kind: "bot" }, channelId), false);
+  const prompts = [];
+  f.state.answer = (body) => { prompts.push(body); return { content: "PERMISSION_CHAT_REPLY" }; };
+  f.app.orchestrator.push(state, caller);
+  state.humanQueue.set(caller.id, caller);
+  await f.app.orchestrator.round(state);
+  assert.ok(telegram.state.sent.some((item) => item.method === "sendMessage" && item.text.includes("PERMISSION_CHAT_REPLY")));
+  assert.match(JSON.stringify(prompts), /richiesta autorizzata/);
+  assert.equal((await f.request(f.bob, "/api/agents/" + nico.id + "/memories")).status, 403);
+  assert.equal((await f.request(f.admin, "/api/agents/" + nico.id)).status, 403);
+  f.app.store.updateSettings({ permissions: [] });
+  const count = prompts.length;
+  const revoked = { ...caller, id: "permission-chat-revoked", at: Date.now(), handledBy: [] };
+  f.app.orchestrator.push(state, revoked);
+  state.humanQueue.set(revoked.id, revoked);
+  await f.app.orchestrator.round(state);
+  assert.equal(prompts.length, count, "revocation prevents a new model turn");
+});
+
 test("owner isolation hides private platform resources from other members and the space administrator", async (t) => {
   const f = await knowledgeWorld(); t.after(f.close);
   const created = await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Alice private assistant", core: "PRIVATE_CORE", tools: false } });

@@ -10,6 +10,8 @@ The space administrator manages infrastructure and admission, but does not recei
 
 Common server instructions, configured transport channels and instance infrastructure remain space settings. A conversation deliberately held in a shared Discord, Slack or Telegram channel is visible to that channel's participants; moving private material there is a separate publication action. Bind an agent's chat owner explicitly in its profile. An ambiguous chat identity is not mapped to another panel owner.
 
+Explicit operational permissions for a person's Discord, Slack or Telegram identity also let that person invoke the selected agents in their configured conversations. They do not change the agent's owner or grant access to the panel, private Brain pages, files, email, desktops or traces through the panel API. The space administrator receives no implicit cross-owner chat permission; revoked and other-agent grants remain refused, as do bot messages that impersonate a human permission.
+
 ## Explicit sharing
 
 Every Brain page starts private. The Sharing section offers only the owner and their agents, the whole team, or selected admitted people. Recipients see the shared page through an opaque alias and can read it with their agents. They receive no source transcript, revision history, write permission or authority to re-share it. Unshared linked pages are not made accessible. Revocation removes subsequent access, listing and retrieval; it cannot erase content already read or copied.

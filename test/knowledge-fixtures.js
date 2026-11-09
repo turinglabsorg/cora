@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { startCora } from "../src/main.js";
 import { fakeDocker, fakeOllama, tempHome } from "./helpers.js";
 
-export async function knowledgeWorld() {
+export async function knowledgeWorld(overrides = {}) {
   const previousReply = fakeOllama.current;
   const state = { answer: () => ({ content: "PASS" }) };
   const ollama = await fakeOllama((body) => {
@@ -16,7 +16,7 @@ export async function knowledgeWorld() {
     ownerMemory: true, brainDatabaseUrl: "pglite:memory", brainEmbedUrl: ollama.url, vapidKey: "fixture-owner-vapid",
     discordToken: "", telegramToken: "", slackToken: "", slackAppToken: "", ollamaUrl: ollama.url, ollamaKey: "", orcaKey: "", deepseekKey: "", sonioxKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "", mailDomain: "", mailRegistrationToken: "",
     claudeBin: "/missing/claude", codexBin: "/missing/codex", grokBin: "/missing/grok", museBin: "/missing/muse", hermesBin: "/missing/hermes", deepseekBin: "/missing/dsh", useResidentSubscriptions: false,
-    botTokenFor: () => "", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys", storeSecret: async () => {} });
+    botTokenFor: () => "", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys", storeSecret: async () => {}, ...overrides });
   await app.ready; await app.companyBrain.ready;
   app.librarian.requestRun = () => false;
   const base = "http://127.0.0.1:" + app.server.address().port;
