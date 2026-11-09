@@ -15,6 +15,8 @@ class Element {
   }
   get className() { return this.attributes.class || ""; }
   set className(value) { this.attributes.class = value; }
+  get id() { return this.attributes.id || ""; }
+  set id(value) { this.attributes.id = String(value); }
   get classList() {
     const names = () => this.className.split(" ").filter(Boolean);
     const write = (list) => { this.className = [...new Set(list)].join(" "); };
@@ -32,6 +34,7 @@ class Element {
   get textContent() { return this.text + this.children.map((child) => child.textContent).join(""); }
   set textContent(value) { this.text = value; this.replaceChildren(); }
   get lastChild() { return this.children.at(-1); }
+  get lastElementChild() { return this.children.filter((child) => child.tagName !== "text").at(-1) || null; }
   get isConnected() { return this.tagName === "document" || Boolean(this.parent?.isConnected); }
   setAttribute(key, value) { this.attributes[key] = String(value); }
   getAttribute(key) { return this.attributes[key] ?? null; }
@@ -73,7 +76,10 @@ class Element {
     this.append(...children);
   }
   querySelectorAll(selector) {
-    const matches = (node) => selector.startsWith(".") ? node.className.split(" ").includes(selector.slice(1)) : node.tagName === selector;
+    const matches = (node) => selector.split(",").some((value) => {
+      const part = value.trim();
+      return part.startsWith(".") ? node.className.split(" ").includes(part.slice(1)) : node.tagName === part;
+    });
     return this.children.flatMap((child) => [...(matches(child) ? [child] : []), ...child.querySelectorAll(selector)]);
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
@@ -114,9 +120,11 @@ export function panelHarness({ source, fetch, hash = "", language = "it" }) {
   document.createElementNS = (_, tag) => new Element(tag);
   document.createTextNode = (text) => new Element("text", String(text));
   document.getElementById = () => app;
+  const location = { hash };
   const context = createContext({
     EN, Node: Element, document, fetch, FormData,
-    navigator: { language }, location: { hash },
+    navigator: { language }, location,
+    history: { replaceState(_state, _title, url) { location.hash = String(url); } },
     localStorage: { getItem: () => language },
     window: { addEventListener() {} },
     requestAnimationFrame: (fn) => fn(),

@@ -1,6 +1,12 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Tocca un agente per aprire la chat; da lì impostazioni, memoria, routine e desktop.": "Tap an agent to open its chat; from there, settings, memory, routines and desktop.",
+  "In uso: prima scegli un altro account nel Cervello dell'agente": "In use: first choose another account in the agent's Brain",
+  "Collegane quanti vuoi, dal browser: nel Cervello di ogni agente scegli quale usa.": "Connect as many as you like, from your browser: choose which account each agent uses in its Brain.",
+  "Gli agenti ascoltano i messaggi vocali e rispondono con una voce loro. La voce si sceglie in Impostazioni → Voce dell'agente.": "Agents listen to voice messages and answer in their own voice. Choose it in the agent's Settings → Voice.",
+  "), ma è spento su Telegram: accendilo in Impostazioni → Ascolto.": "), but it is off on Telegram: turn it on in Settings → Listening.",
+  "Ogni agente può avere la sua app GitHub: si crea dalla sua pagina, Impostazioni → GitHub, con due clic su GitHub.": "Each agent can have its own GitHub app: create it from the agent's Settings → GitHub page, with two clicks on GitHub.",
   "Nome, immagine e colore": "Name, picture and color",
   "Personalità e modo di parlare": "Personality and tone",
   "Canali e presenza": "Channels and presence",

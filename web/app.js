@@ -1037,7 +1037,7 @@ function renderAgents() {
     pageHead("Agenti", tr("{on} in onda su {total}.", { on: agents.filter((agent) => agent.enabled).length, total: agents.length }), [btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
     requestsStrip(),
     panel({ icon: "chart", title: "Consumi globali", hint: "Tutti gli agenti, giorno per giorno.", actions: heatLegend() }, usage.global),
-    panel({ icon: "users", title: "Gli agenti", hint: "Tocca un agente per aprire la chat; da lì profilo, memoria, routine e desktop." },
+    panel({ icon: "users", title: "Gli agenti", hint: "Tocca un agente per aprire la chat; da lì impostazioni, memoria, routine e desktop." },
       agents.length ? h("div", { class: "rows" }, agents.map((agent) => {
         // One platform: how it writes there; several: where it is.
         const kinds = agentPlatforms(agent);
@@ -1588,7 +1588,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
     const rows = records.map((record) => {
       const used = (S.data.agents || []).filter((agent) => agent.subscriptionId === record.id).length;
       if (!codes.has(record.id)) codes.set(record.id, h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Codice di autorizzazione", placeholder: "Incolla il codice di Claude" }));
-      const remove = btn("", { icon: "trash", cls: "sm ghost danger", title: used ? "In uso: prima scegli un altro account nel profilo dell'agente" : "Rimuovi account", disabled: Boolean(used) || busy,
+      const remove = btn("", { icon: "trash", cls: "sm ghost danger", title: used ? "In uso: prima scegli un altro account nel Cervello dell'agente" : "Rimuovi account", disabled: Boolean(used) || busy,
         onclick: () => act(() => api(`/api/subscriptions/${record.id}`, { method: "DELETE" })) });
       return h("div", { class: `account ${record.status}` },
         h("div", { class: "account-row" },
@@ -2474,6 +2474,7 @@ function telegramGroupSetup(agent) {
         : member ? testState === "complete" ? "Telegram conferma che il bot è nel gruppo." : "Telegram conferma che il bot è nel gruppo. Se hai cambiato la privacy mentre era già qui, rimuovilo e reinvitalo prima della prova."
           : "Aggiungi il bot al gruppo. Se c'era già, rimuovilo e aggiungilo di nuovo per applicare il cambio di privacy.", invite],
       ["Accendi l'ascolto in Cora", listenHelp, h("div", { class: "row" }, settings(), btn("Vai all'Ascolto", { cls: "sm ghost", icon: "radio", onclick: () => {
+        document.getElementById("section-tab-ascolto")?.click();
         document.querySelector('input[name="platform-telegram"]')?.closest(".panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
       } }))],
       ["Verifica una risposta", testHelp, h("div", { class: "stack-sm" }, sample ? codeLine(sample) : null,
@@ -2521,7 +2522,7 @@ function telegramAccount(agent) {
         : "Non è ancora nel gruppo: aggiungilo per sentirlo lì. In privato risponde già.";
   let body;
   if (bot.configured && !bot.user && bot.state === "off") {
-    body = setRows(setRow("Bot suo", h("span", {}, "Il suo bot c'è (", h("code", {}, bot.env), "), ma è spento su Telegram: accendilo nel suo Ascolto, qui sotto.")));
+    body = setRows(setRow("Bot suo", h("span", {}, "Il suo bot c'è (", h("code", {}, bot.env), "), ma è spento su Telegram: accendilo in Impostazioni → Ascolto.")));
   } else if (bot.user) {
     body = setRows(
       setRow("Bot suo", h("span", {}, "Collegato come ", h("b", {}, raw(`@${bot.user.username}`)), ". ", where),
@@ -6904,7 +6905,7 @@ function renderSettings() {
       panel({ icon: SUBSCRIPTION_ICONS[provider], title: SUBSCRIPTION_NAMES[provider], hint: tr("Lo usa {cli}, per gli agenti che lo scelgono nel loro Cervello.", { cli: CLI_NAMES[provider] }), actions: (() => { const [led, line] = providerState(provider); return badge(raw(line), led === "on" ? "on" : led === "busy" ? "warn" : "", led === "on" ? "check" : "user"); })() },
         h("div", { class: "set-section" }, h("span", { class: "label" }, "Su questo server"), residentSlots.get(provider)),
         h("div", { class: "set-section" }, h("span", { class: "label" }, "Altri account"),
-          h("p", { class: "muted" }, "Collegane quanti vuoi, dal browser: nel profilo di ogni agente scegli quale usa."),
+          h("p", { class: "muted" }, "Collegane quanti vuoi, dal browser: nel Cervello di ogni agente scegli quale usa."),
           subscriptionAccounts(provider, { onChange: () => drawNav() }))));
   }
   // doc runs on this machine or it does not: the page says which, and proves it on demand.
@@ -6955,7 +6956,7 @@ function renderSettings() {
     key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
     const cloud = S.data.ollamaCloud || {};
     const about = provider === "typesafe" ? docStatus()
-      : provider === "soniox" ? h("p", {}, "Gli agenti ascoltano i messaggi vocali e rispondono con una voce loro. La voce di ogni agente si sceglie nel suo profilo.")
+      : provider === "soniox" ? h("p", {}, "Gli agenti ascoltano i messaggi vocali e rispondono con una voce loro. La voce si sceglie in Impostazioni → Voce dell'agente.")
         : provider === "deepseek" ? h("p", {}, S.data.providers?.deepseekInstalled ? "La usa DeepSeek Harness, per gli agenti che scelgono quell'harness nel loro Cervello." : "La usa DeepSeek Harness, che su questa macchina non è ancora installato.")
           : provider !== "ollama" ? h("p", {}, "La chiave vale per tutti gli agenti di questa istanza.")
             : h("div", { class: "stack-sm" },
@@ -7022,7 +7023,7 @@ function renderSettings() {
   const githubOrg = h("input", { type: "text", class: "mono", value: settings.githubOrg || "", placeholder: tr("nome-organizzazione"), autocomplete: "off", spellcheck: "false", "aria-label": tr("Organizzazione GitHub"), disabled: !manage });
   const githubRow = setRow("Organizzazione", "Il nome dell'organizzazione GitHub dove nascono le app degli agenti, come appare in github.com/nome. Vuoto: nel tuo account. Si salva quando esci dal campo.", githubOrg);
   githubOrg.addEventListener("change", () => saveSettings({ githubOrg: githubOrg.value.trim() }, githubRow).then(() => { githubOrg.value = S.data.settings.githubOrg || ""; drawNav(); }));
-  page("github", panel({ icon: "github", title: "GitHub", hint: "Ogni agente può avere la sua app GitHub: si crea dalla sua pagina, Profilo → Account GitHub, con due clic su GitHub." }, setRows(githubRow)));
+  page("github", panel({ icon: "github", title: "GitHub", hint: "Ogni agente può avere la sua app GitHub: si crea dalla sua pagina, Impostazioni → GitHub, con due clic su GitHub." }, setRows(githubRow)));
   page("domini", mailDomainsPane());
 
   /* ---------- Persone ---------- */
