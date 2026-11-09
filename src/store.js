@@ -75,6 +75,8 @@ const CHAT_PERSON = /^(discord|telegram|slack):[\w.-]{1,40}$/;
 const AGENT_DEFAULTS = {
   // Who the agent answers to: a real person in the chats ("discord:<user id>"); empty means the owner of the space.
   ownerId: "",
+  ownerIds: [],
+  coOwnerIds: [],
   brainSource: "internal",
   brainOwnerId: "",
   // What Cora draws the picture from: empty means the agent's id.
@@ -288,6 +290,8 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
   const name = cleanText(merged.name, 32).replace(/[\r\n]/g, " ").trim();
   if (!name) throw new ValidationError("name is required");
   if (/discord|clyde/i.test(name)) throw new ValidationError("Discord does not allow 'discord' or 'clyde' in a webhook name");
+  const requestedOwners = input.ownerIds !== undefined ? input.ownerIds : input.ownerId !== undefined ? [input.ownerId] : [merged.ownerId, ...(merged.ownerIds || [])];
+  const owners = [...new Set((Array.isArray(requestedOwners) ? requestedOwners : []).filter(id => CHAT_PERSON.test(String(id))).map(String))].slice(0, 20);
   const agent = {
     id: previous.id || input.id || newId("ag"),
     name,
@@ -299,7 +303,9 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     core: cleanText(merged.core, 4000),
     model: checkModel(merged.model),
     subscriptionId: cleanText(merged.subscriptionId, 80).trim(),
-    ownerId: CHAT_PERSON.test(String(merged.ownerId || "")) ? String(merged.ownerId) : "",
+    ownerId: owners[0] || "",
+    ownerIds: owners,
+    coOwnerIds: [...new Set((Array.isArray(merged.coOwnerIds) ? merged.coOwnerIds : []).map(id => cleanText(id, 160).trim()).filter(id => id && id !== merged.brainOwnerId))].slice(0, 20),
     brainSource: merged.brainSource === "external" ? "external" : "internal",
     brainOwnerId: cleanText(merged.brainOwnerId, 160).trim(),
     // Ollama decides the card when it starts, so one server per card is how an agent picks one.
@@ -764,9 +770,10 @@ export class Store {
 
   /** Who an agent's owner is in the chats, as "transport:user id": empty when the owner of the space is. */
   agentOwnerChats(agent) {
-    const owner = this.agentOwner(agent);
-    return owner ? [owner.id] : [];
+    return [...new Set([agent?.ownerId, ...(agent?.ownerIds || [])].filter(id => CHAT_PERSON.test(String(id))))];
   }
+
+  agentOwners(agent) { return this.agentOwnerChats(agent).map(ownerId => this.agentOwner({ ownerId })); }
 
   subscription(id) {
     const row = this.stmt("SELECT data FROM subscriptions WHERE id = ?").get(id);

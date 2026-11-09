@@ -201,3 +201,10 @@ Use the Settings rail pattern for groups of controls that would otherwise make a
 The agent's **Memory** workspace has Source, Owner memories, Core and Diary sections. In external-source mode only Source remains: a password URL field, saved public host, explicit read-only source label, connection check and save action. Never show the saved link value. Owner memories explain that facts are shared only among that owner's internal agents.
 
 A **Brain page** has Page, Sharing and History sections; a page shared by another owner exposes only Page and a read-only notice. Sharing defaults to Only me and my agents, with Whole team and Selected people choices. Selected people use existing 44px rocker rows, followed by the primary Save sharing action. Foreign pages have no edit, archive or revision controls. Keep page content out of the Sharing pane so permissions remain compact. Long model labels in agent headers truncate within their badge and never overlap the power action on phones.
+
+
+## Shared proprietors
+
+Settings → Authorizations separates **Owners** from chat-only conversation permissions. Reuse the existing 44px rocker rows, dark wells and restrained panel headers. List admitted panel people with name/email and keep the original Brain owner's selected rocker disabled. Explain explicitly that sharing exposes the Brain and the owner memories used by the agent. Chat owner contacts are a separate group with their platform; this grants authority in chat without panel access. Owners have their own Save owners and Reload actions; omit the profile save bar in this pane, preserve other profile drafts and keep unsaved owner choices during background updates. Show progress while saving and a concrete conflict message for a stale version.
+
+Brain has a compact selected-Brain dropdown when the viewer can manage more than one owner scope. The agent's Memory source pane links directly to its Brain. Preserve that scope through page links, map/list, create/edit/review and back navigation. A revoked view clears its private content and shows the refusal; all other agent/Brain scopes retain their previous isolation.

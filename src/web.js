@@ -403,12 +403,18 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const agent = id && store.agent(id);
     return agent ? knowledge.ownerId(agent) : "";
   };
-  const ownsEntry = (entry, viewer) => !knowledge?.ownerMemory || privateOwner(entry) === viewer?.id || (!privateOwner(entry) && !entry.text && !entry.item && !entry.trace && !entry.agentId && !entry.id);
+  const ownsEntry = (entry, viewer) => {
+    if (!knowledge?.ownerMemory) return true;
+    const personalRoom = isSalotto(entry.room) || isSalotto(entry.channelId) || isSalotto(entry.trace?.channelId);
+    const agentId = entry.agentId || entry.trace?.agentId || (entry.room?.startsWith("web-ag_") ? entry.room.slice(4) : "");
+    if (!personalRoom && agentId && knowledge.canManage(store.agent(agentId), viewer)) return true;
+    return privateOwner(entry) === viewer?.id || (!privateOwner(entry) && !entry.text && !entry.item && !entry.trace && !entry.agentId && !entry.id);
+  };
   const quotaAgentsFor = (viewer) => knowledge?.agentsFor(viewer) || store.agents();
   const usesQuotaAccount = (agent, record) => String(agent.model || store.settings.defaultModel || "").startsWith(`${record.provider}/`)
     && (record.server || agent.subscriptionId === record.id || (record.resident && store.settings.useResidentSubscriptions && !agent.subscriptionId));
   const canReadQuota = (record, viewer) => Boolean(record && (!knowledge?.ownerMemory || quotaAgentsFor(viewer).some((agent) => usesQuotaAccount(agent, record)
-    && (record.server || (record.connectedBy?.id && knowledge.ownerId(agent) === record.connectedBy.id)))));
+    && (record.server || (record.connectedBy?.id && knowledge.proprietorIds(agent).includes(record.connectedBy.id))))));
   const quotaAccountsFor = (viewer) => subscriptions.list().filter((record) => canReadQuota(record, viewer)).map(({ id, provider, label, email, plan, status, resident, installed }) =>
     ({ id, provider, label, email, plan, status, resident, installed, usage: subscriptions.usage.get(id) }));
   const providerQuotasFor = (viewer) => viewer.role === "owner" ? subscriptions.usage.connections().filter((record) => canReadQuota(record, viewer)) : [];
@@ -555,8 +561,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     if (path === "/api/brain" || path.startsWith("/api/brain/")) {
       const canManage = Boolean(knowledge?.ownerMemory || user.role === "owner");
-      const userBrain = knowledge?.forUser(user) || companyBrain;
-      const userLibrarian = knowledge?.ownerMemory ? librarian?.forOwner(user.id) : librarian;
+      const brainOwnerId = knowledge?.ownerMemory ? url.searchParams.get("ownerId") || user.id : user.id;
+      const userBrain = knowledge?.forUser(user, brainOwnerId) || companyBrain;
+      const userLibrarian = knowledge?.ownerMemory ? librarian?.forOwner(brainOwnerId) : librarian;
       if (!userBrain?.enabled) {
         if (path === "/api/brain" && method === "GET") return send(res, 200, { enabled: false, canManage, kinds: BRAIN_KINDS });
         throw new HttpError(409, "il brain non è collegato: serve CORA_BRAIN_DATABASE_URL in hush");
@@ -564,7 +571,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const manage = () => { if (!canManage) throw new HttpError(403, "solo l'owner cambia il brain"); };
       const author = `owner:${user.name || user.email || "Owner"}`;
       if (path === "/api/brain" && method === "GET") {
-        return send(res, 200, { enabled: true, canManage, canConfigure: user.role === "owner", ownerMemory: Boolean(knowledge?.ownerMemory), kinds: BRAIN_KINDS, stats: await userBrain.stats(), lastRun: await userBrain.state("lastRun"), running: Boolean(userLibrarian?.running || userLibrarian?.pending) });
+        return send(res, 200, { enabled: true, canManage, canConfigure: user.role === "owner", ownerMemory: Boolean(knowledge?.ownerMemory), ownerId: brainOwnerId, scopes: knowledge?.ownerMemory ? knowledge.brainScopes(user) : [], canShare: brainOwnerId === user.id, kinds: BRAIN_KINDS, stats: await userBrain.stats(), lastRun: await userBrain.state("lastRun"), running: Boolean(userLibrarian?.running || userLibrarian?.pending) });
       }
       if (path === "/api/brain/graph" && method === "GET") return send(res, 200, await userBrain.graph());
       if (path === "/api/brain/sharing" && method === "GET" && knowledge?.ownerMemory) return send(res, 200, {
@@ -585,6 +592,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       const brainShare = /^\/api\/brain\/pages\/([a-z0-9-]{2,60})\/sharing$/.exec(path);
       if (brainShare && method === "PUT" && knowledge?.ownerMemory) {
+        if (brainOwnerId !== user.id) throw new HttpError(403, "Solo il proprietario originale condivide la pagina con altre persone.");
         if (brainShare[1].startsWith("shared-")) throw new HttpError(403, "Solo il proprietario condivide la pagina.");
         return send(res, 200, await knowledge.share(user.id, brainShare[1], await readJson(req, 12000)));
       }
@@ -617,6 +625,30 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 202, { started: true, running: true });
       }
       throw new HttpError(404, "not found");
+    }
+    const agentOwners = /^\/api\/agents\/([\w-]+)\/owners$/.exec(path);
+    if (agentOwners) {
+      const agent = store.agent(agentOwners[1]);
+      if (!agent) throw new HttpError(404, "Agente non trovato.");
+      if (!knowledge?.canManage(agent, user)) throw new HttpError(403, "Agente privato.");
+      const people = [...store.sharingPeople(user), { id: user.id, name: user.name || user.email, email: user.email }];
+      const contacts = (await agentPermissionsView(agent, user)).people;
+      for (const person of store.agentOwners(agent)) if (!contacts.some(contact => contact.id === person.id)) contacts.push(person);
+      const primaryId = agent.brainOwnerId || user.id;
+      const version = JSON.stringify([primaryId, agent.coOwnerIds || [], store.agentOwnerChats(agent)]);
+      if (method === "GET") return send(res, 200, { version, primaryId, users: knowledge.proprietorIds(agent), contacts: store.agentOwnerChats(agent), people, chatPeople: contacts });
+      if (method === "PUT") {
+        const body = await readJson(req, 12000);
+        if (body.version !== undefined && body.version !== version) throw new HttpError(409, "I proprietari sono cambiati. Ricarica prima di salvare.");
+        if (!Array.isArray(body.users) || body.users.length > 20 || !body.users.includes(primaryId) || body.users.some(id => !people.some(person => person.id === id))) throw new HttpError(400, "Scegli i proprietari dello spazio e mantieni il proprietario originale.");
+        if (!Array.isArray(body.contacts) || body.contacts.length > 20 || body.contacts.some(id => !contacts.some(person => person.id === id))) throw new HttpError(400, "Scegli persone conosciute nei canali dell'agente.");
+        const selectedAccount = store.subscription(agent.subscriptionId || "");
+        if (selectedAccount?.connectedBy?.id && knowledge.proprietorIds(agent).includes(selectedAccount.connectedBy.id) && !body.users.includes(selectedAccount.connectedBy.id)) throw new HttpError(409, "L’agente usa l’account di questa persona. Cambia account prima di rimuoverla.");
+        const updated = store.updateAgent(agent.id, { brainOwnerId: primaryId, coOwnerIds: body.users.filter(id => id !== primaryId), ownerIds: body.contacts });
+        broadcast({ type: "agent-owners" });
+        return send(res, 200, { ...await publicAgent(updated), ownersVersion: JSON.stringify([primaryId, updated.coOwnerIds || [], store.agentOwnerChats(updated)]) });
+      }
+      throw new HttpError(405, "Metodo non supportato.");
     }
     const agentPermissions = /^\/api\/agents\/([\w-]+)\/permissions$/.exec(path);
     if (agentPermissions) {
@@ -1033,6 +1065,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       // Whom an agent answers to is the owner of the space's choice.
       if (user?.role !== "owner") delete body.ownerId;
       delete body.brainSource;
+      delete body.coOwnerIds; delete body.ownerIds;
       body.brainOwnerId = user.id;
       if (knowledge?.ownerMemory && body.subscriptionId && store.subscription(body.subscriptionId)?.connectedBy?.id !== user.id) throw new HttpError(403, "Subscription privata.");
       const agent = store.createAgent(body);
@@ -1054,8 +1087,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (user?.role !== "owner") delete body.ownerId;
         delete body.brainSource;
         delete body.brainOwnerId;
+        delete body.coOwnerIds; delete body.ownerIds;
         if (body.core !== undefined) checkAgentMemory(agent.id, user);
-        if (knowledge?.ownerMemory && body.subscriptionId && store.subscription(body.subscriptionId)?.connectedBy?.id !== user.id) throw new HttpError(403, "Subscription privata.");
+        if (knowledge?.ownerMemory && body.subscriptionId && body.subscriptionId !== agent.subscriptionId && store.subscription(body.subscriptionId)?.connectedBy?.id !== user.id) throw new HttpError(403, "Subscription privata.");
         if (agent.brainSource === "external") delete body.core;
         const updated = store.updateAgent(agent.id, body);
         bots?.envName(agent);
@@ -1087,6 +1121,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!match[2] && method === "PUT") {
         const updated = await knowledge.configure(agent, await readJson(req, 12000), user);
         broadcast({ type: "agents" });
+        broadcast({ type: "agent-owners" });
         return send(res, 200, knowledge.view(updated, user));
       }
       if (match[2] && method === "POST") {
@@ -1231,7 +1266,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const file = join(config.filesDir, match[1]);
       if (!existsSync(file)) throw new HttpError(404, "file non trovato");
       const meta = JSON.parse(readFileSync(`${file}.json`, "utf8"));
-      if (knowledge?.ownerMemory && meta.ownerId !== user.id) throw new HttpError(404, "file non trovato");
+      if (knowledge?.ownerMemory && meta.ownerId !== user.id) {
+        const direct = meta.agentId && knowledge.canManage(store.agent(meta.agentId), user);
+        const rooms = knowledge.agentsFor(user).map(agent => `web-${agent.id}`);
+        const legacy = !meta.agentId && rooms.length && store.stmt(`SELECT 1 FROM messages WHERE channel_id IN (${rooms.map(() => "?").join(",")}) AND json_extract(meta, '$.file.id') = ? LIMIT 1`).get(...rooms, match[1]);
+        if (!direct && !legacy) throw new HttpError(404, "file non trovato");
+      }
       // Pictures and the agents' voice messages play in the page; everything else downloads.
       const inline = /^(image\/(png|jpeg|gif|webp)|audio\/(mpeg|ogg))$/.test(meta.type);
       return send(res, 200, readFileSync(file), {

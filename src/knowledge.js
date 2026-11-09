@@ -136,7 +136,16 @@ export class KnowledgeSources {
     if (!known.includes(ownerId)) this.store.setValue("brainOwnerScopes", [...known, ownerId]);
     return this.internal?.forOwner(ownerId);
   }
-  forUser(user) { return this.ownerMemory ? new OwnerBrain({ sources: this, ownerId: user.id }) : this.internal; }
+  proprietorIds(agent) { return [...new Set([agent?.brainOwnerId, ...(agent?.coOwnerIds || [])].filter(Boolean))]; }
+  brainScopes(user) {
+    const ids = [...new Set([user.id, ...this.agentsFor(user).filter(agent => !this.isExternal(agent)).map(agent => this.ownerId(agent))])];
+    return ids.map(id => { const person = this.store.panelUser(id); return { id, name: person?.name || person?.email || id }; });
+  }
+  forUser(user, ownerId = user.id) {
+    if (!this.ownerMemory) return this.internal;
+    if (!this.brainScopes(user).some(scope => scope.id === ownerId)) throw new KnowledgeError("Brain privato.", 403);
+    return new OwnerBrain({ sources: this, ownerId });
+  }
   messageOwner(message) {
     if (!this.afterReset(message)) return "";
     const agent = message.agentId ? this.store.agent(message.agentId) : message.channelId?.startsWith("web-ag_") ? this.store.agent(message.channelId.slice(4)) : null;
@@ -145,7 +154,7 @@ export class KnowledgeSources {
     const person = this.store.panelUser(message.authorId);
     if (person && !person.blocked) return person.id;
     const id = `${transportOf(message.channelId)}:${message.authorId}`;
-    const owners = [...new Set(this.store.agents().filter((agent) => !this.isExternal(agent) && agent.ownerId === id).map((agent) => this.ownerId(agent)))];
+    const owners = [...new Set(this.store.agents().filter((agent) => !this.isExternal(agent) && this.store.agentOwnerChats(agent).includes(id)).map((agent) => this.ownerId(agent)))];
     if (owners.length === 1) return owners[0];
     const ownerIds = this.store.settings[({ discord: "ownerIds", slack: "slackOwnerIds", telegram: "telegramOwnerIds" })[transportOf(message.channelId)]] || [];
     const admins = this.store.panelUsers().filter((user) => !user.blocked && user.role === "owner");
@@ -155,12 +164,13 @@ export class KnowledgeSources {
   acceptsMessage(agent, message, channelId) {
     if (!this.ownerMemory) return true;
     const sender = message.agentId && this.store.agent(message.agentId);
-    if (!sender && agent.ownerId === `${transportOf(channelId)}:${message.authorId}`) return true;
+    if (!sender && this.store.agentOwnerChats(agent).includes(`${transportOf(channelId)}:${message.authorId}`)) return true;
     if (!sender && ["owner", "human"].includes(message.kind) && transportOf(channelId) !== "web") {
       const contact = `${transportOf(channelId)}:${message.authorId}`;
       if (this.store.hasAgentPermission(contact, agent.id)) return true;
     }
     const person = !sender && this.store.panelUser(message.authorId);
+    if (person && !person.blocked && this.proprietorIds(agent).includes(person.id)) return true;
     const owner = sender ? this.ownerId(sender) : person && !person.blocked ? person.id : this.messageOwner({ ...message, channelId });
     return owner === this.ownerId(agent);
   }
@@ -170,7 +180,7 @@ export class KnowledgeSources {
     const conditions = ["(kind IN ('owner','human') AND author_id = ?)"];
     const params = [ownerId];
     for (const [column, values] of [["agent_id", ids], ["channel_id", rooms]]) if (values.length) { conditions.push(`${column} IN (${values.map(() => "?").join(",")})`); params.push(...values); }
-    for (const contact of new Set(agents.map((agent) => agent.ownerId).filter(Boolean))) {
+    for (const contact of new Set(agents.flatMap(agent => this.store.agentOwnerChats(agent)))) {
       const match = /^(discord|slack|telegram):(.+)$/.exec(contact); if (!match) continue;
       const [, transport, id] = match;
       conditions.push(`(kind IN ('owner','human') AND author_id = ? AND ${transport === "slack" ? "channel_id LIKE 'sl:%'" : transport === "telegram" ? "channel_id LIKE 'tg:%'" : "channel_id NOT LIKE 'sl:%' AND channel_id NOT LIKE 'tg:%' AND channel_id NOT LIKE 'web%'"})`); params.push(id);
@@ -191,14 +201,14 @@ export class KnowledgeSources {
     this.store.setValue("brainPageShares", [...records.filter((item) => item.id !== share.id), share]);
     return { visibility: share.team ? "team" : share.users.length ? "people" : "private", users: share.users };
   }
-  canManage(agent, user) { return Boolean(agent && user && !user.blocked && (this.ownerMemory ? this.ownerId(agent) === user.id : user.role === "owner" || agent.brainOwnerId === user.id)); }
+  canManage(agent, user) { return Boolean(agent && user && !user.blocked && (this.ownerMemory ? this.proprietorIds(agent).includes(user.id) : user.role === "owner" || this.proprietorIds(agent).includes(user.id))); }
   agentsFor(user) { return this.store.agents().filter((agent) => !this.ownerMemory || this.canManage(agent, user)); }
   roomFor(user) { return this.ownerMemory ? ownerRoom(user.id) : "web"; }
   view(agent, user) {
     const link = this.store.value(`agentBrainLink:${agent.id}`, null);
     const owner = agent.brainOwnerId ? this.store.panelUser(agent.brainOwnerId) : null;
     return { source: this.isExternal(agent) ? "external" : "internal", external: link ? { host: link.host, configured: true } : { host: "", configured: false }, canManage: this.canManage(agent, user), readonly: this.isExternal(agent), owner: owner ? { id: owner.id, name: owner.name || owner.email } : null,
-      ...(user?.role === "owner" ? { owners: this.store.panelUsers().filter((person) => !person.blocked).map(({ id, name, email }) => ({ id, name: name || email })) } : {}) };
+      ...(user?.role === "owner" && (!this.ownerMemory || agent.brainOwnerId === user.id) ? { owners: this.store.panelUsers().filter((person) => !person.blocked).map(({ id, name, email }) => ({ id, name: name || email })) } : {}) };
   }
   assertCurrent(agent) {
     if (this.changes.has(agent.id)) throw new KnowledgeError("La configurazione del Brain è in aggiornamento. Riprova tra poco.");
@@ -225,11 +235,13 @@ export class KnowledgeSources {
     if (!["internal", "external"].includes(source)) throw new KnowledgeError("Scegli Brain interno o esterno.", 400);
     const patch = { brainSource: source };
     if (input.ownerId !== undefined) {
-      if (user.role !== "owner") throw new KnowledgeError("Solo il proprietario dello spazio assegna il revisore del Brain.", 403);
+      if (user.role !== "owner" || (this.ownerMemory && agent.brainOwnerId !== user.id)) throw new KnowledgeError("Solo il proprietario originale può riassegnare il Brain.", 403);
       const owner = input.ownerId ? this.store.panelUser(String(input.ownerId)) : null;
       if (input.ownerId && (!owner || owner.blocked)) throw new KnowledgeError("Scegli una persona dello spazio.", 400);
       patch.brainOwnerId = owner?.id || "";
-      if (this.ownerMemory && patch.brainOwnerId !== agent.brainOwnerId) patch.ownerId = "";
+      const account = this.store.subscription(agent.subscriptionId || "");
+      if (this.ownerMemory && patch.brainOwnerId !== agent.brainOwnerId && account?.connectedBy?.id && account.connectedBy.id !== patch.brainOwnerId) throw new KnowledgeError("Scegli un account del nuovo proprietario prima di trasferire il Brain.");
+      if (this.ownerMemory && patch.brainOwnerId !== agent.brainOwnerId) Object.assign(patch, { ownerId: "", ownerIds: [], coOwnerIds: [] });
     }
     if (this.isBusy(agent)) throw new KnowledgeError("L'agente sta lavorando: termina o ferma il compito prima di cambiare il Brain.");
     let linked = null;

@@ -617,6 +617,138 @@ beforeEach(async () => {
   discord.state.botPosts.length = 0;
 });
 
+test("shared agent owners gain its Brain, memories, conversation and quotas without other private agents, and revocation closes every API", async (t) => {
+  const f = await knowledgeWorld({ subscriptionUsageIntervalMs: 0, subscriptionUsageReader: async () => ({ five_hour: { utilization: 20 } }) }); t.after(f.close);
+  const record = f.app.store.createSubscription({ provider: "claude", label: "Alice account", connectedBy: { id: f.alice.user.id } });
+  f.app.store.updateSubscription(record.id, { status: "ready" });
+  const agent = f.app.store.createAgent({ name: "Shared", model: "claude/test", subscriptionId: record.id, brainOwnerId: f.alice.user.id, enabled: false, tools: false });
+  const other = f.app.store.createAgent({ name: "Private", model: "ollama/test-model", brainOwnerId: f.alice.user.id, enabled: false, tools: false });
+  f.app.store.addMemory(agent.id, "SHARED_OWNER_FACT", "manual", { pinned: true });
+  f.app.store.appendArchive(`web-${agent.id}`, { id: "shared-history", kind: "owner", authorId: f.alice.user.id, at: Date.now(), content: "SHARED_CONVERSATION" });
+  for (const [item, tokens] of [[agent, 100], [other, 9000]]) {
+    const trace = f.app.traces.start({ agentId: item.id, kind: "chat", channelId: `web-${item.id}`, model: item.model }); trace.spent({ in: tokens, out: 0 }); trace.finish({ status: "done" });
+  }
+  await f.request(f.alice, "/api/brain/pages", { method: "POST", body: { slug: "joint-owner-brain", title: "Shared Brain", body: "SHARED_BRAIN_CONTENT" } });
+  const scope = `?ownerId=${encodeURIComponent(f.alice.user.id)}`;
+  assert.equal((await f.request(f.bob, "/api/brain" + scope)).status, 403);
+  assert.equal((await f.request(f.bob, `/api/agents/${agent.id}/owners`)).status, 403);
+  assert.equal((await f.request(f.alice, `/api/agents/${agent.id}/owners`, { method: "PUT", body: { users: [f.alice.user.id, "unknown-person"], contacts: [] } })).status, 400);
+  const sharedFile = f.app.orchestrator.saveWebFile({ name: "shared.txt", type: "text/plain", data: Buffer.from("shared file") }, agent);
+  const privateFile = f.app.orchestrator.saveWebFile({ name: "private.txt", type: "text/plain", data: Buffer.from("private file") }, other);
+  const legacyFile = f.app.orchestrator.saveWebFile({ name: "legacy.txt", type: "text/plain", data: Buffer.from("legacy file") }, agent);
+  const legacyMetaPath = join(f.app.orchestrator.filesDir, legacyFile.id + ".json");
+  const legacyMeta = JSON.parse(readFileSync(legacyMetaPath, "utf8")); delete legacyMeta.agentId; writeFileSync(legacyMetaPath, JSON.stringify(legacyMeta));
+  f.app.store.appendArchive(`web-${agent.id}`, { id: "shared-legacy-file", kind: "agent", agentId: agent.id, at: Date.now(), content: "Legacy attachment", file: legacyFile });
+  const oldOwners = (await f.request(f.alice, `/api/agents/${agent.id}/owners`)).data;
+  const grant = await f.request(f.alice, `/api/agents/${agent.id}/owners`, { method: "PUT", body: { users: [f.alice.user.id, f.bob.user.id], contacts: [] } });
+  assert.equal(grant.status, 200);
+  assert.equal((await f.request(f.alice, `/api/agents/${agent.id}/owners`, { method: "PUT", body: { users: [f.alice.user.id], contacts: [], version: oldOwners.version } })).status, 409);
+  for (const file of [sharedFile, legacyFile]) assert.equal((await fetch(f.base + "/api/files/" + file.id, { headers: f.bob.headers })).status, 200);
+  assert.equal((await fetch(f.base + "/api/files/" + privateFile.id, { headers: f.bob.headers })).status, 404);
+  const notifications = [];
+  f.app.orchestrator.notifier = { enabled: true, notify: async message => { notifications.push(message.userId); } };
+  await f.app.orchestrator.askOwner(f.app.store.agent(agent.id), { question: "Shared question", choices: ["Yes", "No"] }, { channelId: `web-${agent.id}` });
+  assert.deepEqual(notifications.sort(), [f.alice.user.id, f.bob.user.id].sort());
+  const state = (await f.request(f.bob, "/api/state")).data;
+  assert.deepEqual(state.agents.map(item => item.id), [agent.id]);
+  assert.equal((await f.request(f.bob, `/api/agents/${other.id}`)).status, 403);
+  assert.equal((await f.request(f.bob, `/api/agents/${agent.id}`, { method: "PUT", body: { personality: "Shared personality", subscriptionId: record.id } })).status, 200, "the existing account remains usable without granting credential control");
+  assert.match(JSON.stringify((await f.request(f.bob, `/api/agents/${agent.id}/memories`)).data), /SHARED_OWNER_FACT/);
+  assert.match(JSON.stringify((await f.request(f.bob, `/api/rooms/web-${agent.id}/messages`)).data), /SHARED_CONVERSATION/);
+  const brain = await f.request(f.bob, "/api/brain/pages/joint-owner-brain" + scope);
+  assert.equal(brain.status, 200); assert.match(brain.data.body, /SHARED_BRAIN_CONTENT/);
+  assert.equal((await f.request(f.bob, "/api/brain/pages/joint-owner-brain" + scope, { method: "PUT", body: { body: "EDITED_BY_COOWNER" } })).status, 200);
+  assert.match((await f.app.knowledge.ownerBrain(f.alice.user.id).page("joint-owner-brain")).body, /EDITED_BY_COOWNER/);
+  await f.app.subscriptions.usage.refreshAll();
+  assert.equal((await f.request(f.bob, `/api/subscriptions/${record.id}/usage`)).status, 200);
+  assert.equal((await f.request(f.bob, `/api/subscriptions/${record.id}/check`, { method: "POST" })).status, 404);
+  const bobAccount = f.app.store.createSubscription({ provider: "claude", label: "Bob account", connectedBy: { id: f.bob.user.id } });
+  f.app.store.updateSubscription(bobAccount.id, { status: "ready" });
+  assert.equal((await f.request(f.bob, `/api/agents/${agent.id}`, { method: "PUT", body: { subscriptionId: bobAccount.id } })).status, 200);
+  await f.app.subscriptions.usage.refreshAll();
+  for (const actor of [f.alice, f.bob]) assert.equal((await f.request(actor, `/api/subscriptions/${bobAccount.id}/usage`)).status, 200, "a co-owner may contribute their own account to the shared agent");
+  assert.equal((await f.request(f.alice, `/api/agents/${agent.id}/owners`, { method: "PUT", body: { users: [f.alice.user.id], contacts: [] } })).status, 409, "removing an owner cannot silently retain use of their private account");
+  assert.equal((await f.request(f.alice, `/api/agents/${agent.id}`, { method: "PUT", body: { subscriptionId: record.id } })).status, 200);
+  const totals = (await f.request(f.bob, "/api/usage")).data.usage;
+  assert.deepEqual(totals.map(item => item.agentId), [agent.id]); assert.equal(totals[0].tokensIn, 100);
+  assert.equal((await f.request(f.bob, `/api/agents/${agent.id}/owners`, { method: "PUT", body: { users: [f.bob.user.id], contacts: [] } })).status, 400, "the original Brain owner cannot be removed");
+  await f.request(f.alice, `/api/agents/${agent.id}/owners`, { method: "PUT", body: { users: [f.alice.user.id], contacts: [] } });
+  for (const path of [`/api/agents/${agent.id}`, `/api/agents/${agent.id}/memories`, `/api/rooms/web-${agent.id}/messages`, "/api/brain" + scope]) assert.equal((await f.request(f.bob, path)).status, 403);
+  assert.equal((await f.request(f.bob, `/api/subscriptions/${record.id}/usage`)).status, 404);
+  assert.deepEqual((await f.request(f.bob, "/api/usage")).data.usage, []);
+  for (const file of [sharedFile, legacyFile]) assert.equal((await fetch(f.base + "/api/files/" + file.id, { headers: f.bob.headers })).status, 404);
+  notifications.length = 0; f.app.orchestrator.requestsByAgent.set(agent.id, [Date.now() - 60001]);
+  await f.app.orchestrator.askOwner(f.app.store.agent(agent.id), { question: "Private again", choices: ["Yes", "No"] }, { channelId: `web-${agent.id}` });
+  assert.deepEqual(notifications, [f.alice.user.id]);
+  f.app.store.updateAgent(agent.id, { brainSource: "external", coOwnerIds: [f.bob.user.id] });
+  assert.equal((await f.request(f.bob, `/api/agents/${agent.id}`)).status, 200);
+  assert.equal((await f.request(f.bob, "/api/brain" + scope)).status, 403, "sharing an external Brain cannot open its owner's unrelated internal Brain");
+});
+
+test("shared owner controls preserve drafts and the selected shared account, and Brain links keep their owner scope", async (t) => {
+  const f = await knowledgeWorld({ subscriptionUsageIntervalMs: 0 }); t.after(f.close);
+  const account = f.app.store.createSubscription({ provider: "claude", label: "Alice Claude", connectedBy: { id: f.alice.user.id } });
+  f.app.store.updateSubscription(account.id, { status: "ready", email: "alice@owner.test" });
+  const agent = f.app.store.createAgent({ name: "Shared UI", model: "claude/test", subscriptionId: account.id, brainOwnerId: f.alice.user.id, enabled: false, tools: false });
+  await f.request(f.alice, "/api/brain/pages", { method: "POST", body: { slug: "joint-ui", title: "Joint UI", body: "UI_SHARED_BRAIN" } });
+  const fetchAs = actor => async (path, options = {}) => {
+    const response = await f.request(actor, path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  };
+  const panel = panelHarness({ fetch: fetchAs(f.alice), hash: `#/agent/${agent.id}/settings` });
+  panel.run(`S.data = ${JSON.stringify((await f.request(f.alice, "/api/state")).data)}`);
+  const owners = panel.run(`(() => {const node = agentOwnerPanel(S.data.agents[0]); app.append(node); return node;})()`);
+  await owners.readyOwners;
+  const bob = owners.querySelectorAll("input").find(input => input.value === f.bob.user.id);
+  assert.ok(bob); bob.checked = true; bob.dispatch("change");
+  const save = owners.querySelectorAll("button").find(button => /Salva proprietari/.test(button.textContent)); save.click();
+  await waitFor(() => f.app.store.agent(agent.id).coOwnerIds.includes(f.bob.user.id));
+  await waitFor(() => /Proprietari aggiornati/.test(owners.textContent));
+  bob.checked = false; bob.dispatch("change"); save.click();
+  await waitFor(() => !f.app.store.agent(agent.id).coOwnerIds.includes(f.bob.user.id));
+  await waitFor(() => /Proprietari aggiornati/.test(owners.textContent));
+  bob.checked = true; bob.dispatch("change"); save.click();
+  await waitFor(() => f.app.store.agent(agent.id).coOwnerIds.includes(f.bob.user.id));
+  await waitFor(() => /Proprietari aggiornati/.test(owners.textContent));
+  await owners.refreshOwners();
+  assert.equal(owners.querySelectorAll("input").find(input => input.value === f.bob.user.id), bob, "a background ownership event preserves the saved fields");
+  assert.match(owners.textContent, /Proprietari aggiornati/);
+  bob.checked = false; bob.dispatch("change"); await owners.refreshOwners();
+  assert.equal(bob.checked, false, "background refresh preserves unsaved ownership choices");
+  owners.querySelectorAll("button").find(button => /Ricarica/.test(button.textContent)).click();
+  await waitFor(() => owners.querySelectorAll("input").find(input => input.value === f.bob.user.id)?.checked === true);
+  const shared = panelHarness({ fetch: fetchAs(f.bob), hash: `#/brain/p/joint-ui?ownerId=${f.alice.user.id}` });
+  shared.run(`S.data = ${JSON.stringify((await f.request(f.bob, "/api/state")).data)}`);
+  const picker = shared.run(`(() => {const p = subscriptionPicker(${JSON.stringify(account.id)}); p.setProvider("claude"); return p;})()`);
+  assert.equal(picker.value(), account.id); assert.equal(picker.validate(), true);
+  assert.ok(!picker.node.querySelectorAll("button").some(button => button.getAttribute("title") === "Verifica collegamento"), "shared use never grants native account controls");
+  await shared.run('renderBrainPage("joint-ui")');
+  assert.match(shared.app.textContent, /UI_SHARED_BRAIN/);
+  assert.ok(shared.app.querySelectorAll("a").filter(link => link.getAttribute("href")?.startsWith("#/brain")).every(link => link.getAttribute("href").includes("ownerId=")));
+  f.app.store.updateAgent(agent.id, { coOwnerIds: [] });
+  const ownBrain = panelHarness({ fetch: fetchAs(f.bob), hash: "#/brain" });
+  ownBrain.run(`S.data = ${JSON.stringify((await f.request(f.bob, "/api/state")).data)}; renderBrain()`);
+  await waitFor(() => /Ancora nessuna pagina/.test(ownBrain.app.textContent));
+  assert.doesNotMatch(ownBrain.app.textContent, /\bnull\b|undefined/, "the one-scope recovery view must not render a missing selector as text");
+});
+
+test("multiple chat owners are authoritative only for their agent and survive an unrelated settings save", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const agent = f.app.store.createAgent({ name: "Two chat owners", model: "ollama/test-model", brainOwnerId: f.alice.user.id, tools: false, ownerIds: [`discord:${OWNER}`, `discord:${STRANGER}`] });
+  const state = f.app.orchestrator.state(CHANNEL);
+  for (const id of [OWNER, STRANGER]) {
+    assert.equal(f.app.orchestrator.authorized({ kind: "human", authorId: id }, agent, state), true);
+    assert.equal(f.app.knowledge.acceptsMessage(agent, { kind: "human", authorId: id }, CHANNEL), true);
+    assert.equal(f.app.knowledge.messageOwner({ kind: "human", authorId: id, channelId: CHANNEL }), f.alice.user.id);
+  }
+  assert.equal(f.app.orchestrator.authorized({ kind: "human", authorId: "123" }, agent, state), false);
+  f.app.store.updateAgent(agent.id, { personality: "Updated" });
+  assert.deepEqual(f.app.store.agentOwnerChats(f.app.store.agent(agent.id)), [`discord:${OWNER}`, `discord:${STRANGER}`]);
+  assert.match(f.app.brain.systemPrompt(f.app.store.agent(agent.id), { place: "", computer: false }), /queste persone/);
+  f.app.store.updateAgent(agent.id, { ownerIds: [`discord:${OWNER}`] });
+  assert.equal(f.app.orchestrator.authorized({ kind: "human", authorId: STRANGER }, f.app.store.agent(agent.id), state), false);
+});
+
 test("owner memory isolates facts, clients, projects, archives and reviews until a page is explicitly shared", async (t) => {
   const f = await knowledgeWorld(); t.after(f.close);
   const create = async (actor, name) => {

@@ -223,6 +223,7 @@ function h(tag, attrs, ...kids) {
     else if (key === "vars") for (const [name, v] of Object.entries(value)) el.style.setProperty(name, v);
     else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
     else if (key === "placeholder" || key === "title" || key === "aria-label") el.setAttribute(key, tr(value));
+    else if (key === "href" && String(value).startsWith("#/brain")) el.setAttribute(key, brainHref(value));
     else if (key === "value") el.value = value;
     else if (key === "checked") el.checked = Boolean(value);
     else if (key === "selected") el.selected = Boolean(value);
@@ -329,7 +330,13 @@ function skeleton(kind = "rows", count = 3) {
 }
 
 /* ---------- api ---------- */
+function selectedBrainOwner() { return new URLSearchParams(location.hash.split("?")[1] || "").get("ownerId") || ""; }
+function brainHref(href) {
+  const ownerId = route()[0] === "brain" ? selectedBrainOwner() : "";
+  return ownerId && !href.includes("ownerId=") ? href + (href.includes("?") ? "&" : "?") + new URLSearchParams({ ownerId }) : href;
+}
 async function api(path, { method = "GET", body } = {}) {
+  if (path.startsWith("/api/brain") && route()[0] === "brain" && selectedBrainOwner()) path += (path.includes("?") ? "&" : "?") + new URLSearchParams({ ownerId: selectedBrainOwner() });
   const headers = { "X-Cora": "1" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
@@ -499,6 +506,18 @@ function connectEvents() {
     }
     if (entry.type === "ollama-pull") {
       S.onPull?.(entry);
+      return;
+    }
+    if (entry.type === "agent-owners") {
+      const view = location.hash;
+      guard(loadState()).then(() => {
+        if (location.hash !== view || !S.data) return;
+        const [page, id] = route();
+        if (page === "agent" && !S.data.agents.some(agent => agent.id === id)) { location.hash = "#/agenti"; renderAgents(); }
+        else if (page === "brain") renderBrain();
+        else if (page === "agenti") renderAgents();
+        else document.querySelector(".agent-owner-panel")?.refreshOwners();
+      });
       return;
     }
     if (entry.type === "subscriptions") return;
@@ -1832,6 +1851,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
 }
 
 function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
+  const accounts = () => [...new Map([...(S.data.quotaAccounts || []).filter(item => item.id === currentId), ...(S.data.subscriptions || [])].map(item => [item.id, item])).values()];
   let provider = "";
   let selectedId = currentId || "";
   let choosing = !selectedId;
@@ -1887,7 +1907,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   }
 
   function draw(force = false) {
-    const all = (S.data.subscriptions || []).filter((record) => record.provider === provider);
+    const all = accounts().filter((record) => record.provider === provider);
     const records = all.filter((record) => !record.resident);
     const resident = !manage && S.data.settings.useResidentSubscriptions && all.find((record) => record.resident);
     const record = all.find((item) => item.id === selectedId) || (!selectedId && !choosing ? resident : null);
@@ -1958,7 +1978,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
           h("p", {}, uses))));
       content.append(h("div", { class: "subscription-footer" },
         btn("Cambia account", { cls: "ghost", onclick: changeAccount }),
-        btn("", { icon: "refresh", cls: "ghost", title: "Verifica collegamento", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) })));
+        (S.data.subscriptions || []).some(item => item.id === record.id) ? btn("", { icon: "refresh", cls: "ghost", title: "Verifica collegamento", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) }) : null));
     } else if (record?.status === "connecting") {
       content.append(...subscriptionLoginSteps(record, name, { authCode, act: action, busy: requestBusy }));
     } else {
@@ -2011,8 +2031,8 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       input.disabled = !needs;
       if (previous !== provider) {
         // A new agent starts on the account its creator signed in themselves, when there is one.
-        const own = isNew ? (S.data.subscriptions || []).find((item) => item.provider === provider && item.status === "ready" && isOwnAccount(item)) : null;
-        selectedId = selections.has(provider) ? selections.get(provider) : ((S.data.subscriptions || []).find((item) => item.id === currentId && item.provider === provider)?.id) || own?.id || "";
+        const own = isNew ? accounts().find((item) => item.provider === provider && item.status === "ready" && isOwnAccount(item)) : null;
+        selectedId = selections.has(provider) ? selections.get(provider) : (accounts().find((item) => item.id === currentId && item.provider === provider)?.id) || own?.id || "";
         choosing = !selectedId && (manage || !S.data.settings.useResidentSubscriptions);
         actionError = "";
         authCode.value = "";
@@ -2021,7 +2041,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
     },
     validate() {
       if (root.hidden) return true;
-      const record = (S.data.subscriptions || []).find((item) => item.provider === provider && (input.value ? item.id === input.value : item.resident && S.data.settings.useResidentSubscriptions));
+      const record = accounts().find((item) => item.provider === provider && (input.value ? item.id === input.value : item.resident && S.data.settings.useResidentSubscriptions));
       if (record && (record.status === "ready" || record.id === currentId)) return true;
       choosing = !record;
       actionError = "Collega un account per continuare.";
@@ -2147,17 +2167,44 @@ function avatarPicker(agent, colorInput) {
  * by platform. Nobody picked, it answers to the owner of the space.
  */
 function agentOwnerPanel(agent) {
-  const nobody = h("option", { value: "", selected: !agent.ownerId }, tr("Te, il proprietario dello spazio"));
-  const current = agent.owner ? h("option", { value: agent.owner.id, selected: true }, raw(agent.owner.name)) : null;
-  const select = h("select", { name: "ownerId", class: "owner-pick", "aria-label": tr("A chi risponde") }, nobody, current);
-  api("/api/permissions").then(({ people }) => {
-    const groups = Object.entries(TRANSPORTS).map(([key, info]) => [info.label, people.filter((person) => person.transport === key)]).filter(([, list]) => list.length);
-    const known = people.some((person) => person.id === agent.ownerId);
-    select.replaceChildren(...[nobody, ...groups.map(([label, list]) => h("optgroup", { label }, list.map((person) => h("option", { value: person.id, selected: person.id === agent.ownerId }, raw(person.name))))),
-      current && !known ? current : null].filter(Boolean));
-  }).catch(() => {});
-  return panel({ icon: "user", title: "Proprietario", hint: "A chi risponde: chiede a questa persona i permessi, e le sue richieste valgono come le tue." },
-    setRows(setRow("Risponde a", "Una persona che scrive nei canali, su Discord, Slack o Telegram.", select)));
+  const content = h("div", { class: "stack-sm" }, subscriptionProgress("Caricamento…"));
+  const root = panel({ icon: "users", title: "Proprietari", cls: "agent-owner-panel", hint: "Condividi agente, conversazioni, quote, Brain e memorie con le persone scelte." }, content);
+  let saving = false, dirty = false;
+  const load = async (force = false) => {
+    if (saving || dirty) return;
+    try {
+      const data = await api(`/api/agents/${agent.id}/owners`);
+      if (!force && root.ownersVersion === data.version) return;
+      root.ownersVersion = data.version;
+      const chosen = new Set([...data.users, data.primaryId]), contacts = new Set(data.contacts);
+      const primary = data.people.find(person => person.id === data.primaryId);
+      const choices = (people, selected, field) => h("div", { class: "set-switches" }, people.map(person => {
+        const row = switchInput(field, raw(person.name), selected.has(person.id), person.email || person.transport);
+        const input = row.querySelector("input"); input.value = person.id;
+        input.disabled = field === "proprietor" && person.id === data.primaryId;
+        input.addEventListener("change", () => { dirty = true; if (input.checked) selected.add(person.id); else selected.delete(person.id); });
+        return row;
+      }));
+      const feedback = h("p", { class: "muted", role: "status" });
+      const save = btn("Salva proprietari", { icon: "check", cls: "primary", onclick: async () => {
+        if (saving) return; saving = true; save.disabled = true; root.setAttribute("aria-busy", "true");
+        save.textContent = tr("Salvataggio…"); feedback.textContent = "";
+        try {
+          const updated = await api(`/api/agents/${agent.id}/owners`, { method: "PUT", body: { users: [...chosen], contacts: [...contacts], version: data.version } });
+          data.version = updated.ownersVersion; root.ownersVersion = updated.ownersVersion; dirty = false; Object.assign(agent, updated); S.data.agents = S.data.agents.map(item => item.id === agent.id ? updated : item);
+          if (updated.brainOwnerId !== S.data.currentUser?.id && !updated.coOwnerIds.includes(S.data.currentUser?.id)) { await loadState(); location.hash = "#/agenti"; renderAgents(); }
+          else feedback.textContent = tr("Proprietari aggiornati.");
+        } catch (error) { feedback.textContent = tr(error.message); }
+        finally { saving = false; save.disabled = false; save.textContent = tr("Salva proprietari"); root.setAttribute("aria-busy", "false"); }
+      } });
+      content.replaceChildren(
+        h("p", { class: "muted" }, agent.brainSource === "external" ? tr("L’agente usa un Brain esterno in sola lettura: i comproprietari condividono questa fonte, senza aprire il Brain interno.") : tr("Il Brain di {name} e i ricordi condivisi dai suoi agenti saranno accessibili ai comproprietari.", { name: primary?.name || data.primaryId })),
+        setRows(setRow("Persone dello spazio", "Possono gestire questo agente e il suo Brain.", choices(data.people, chosen, "proprietor"), { stack: true }),
+          setRow("Proprietari in chat", "Le richieste di ciascuno valgono come quelle del proprietario. Non apre il pannello.", data.chatPeople.length ? choices(data.chatPeople, contacts, "chatProprietor") : h("p", { class: "muted" }, "Le persone compaiono dopo aver scritto nei canali dell'agente."), { stack: true })),
+        h("div", { class: "row end" }, btn("Ricarica", { icon: "refresh", cls: "ghost", onclick: async () => { dirty = false; await load(true); } }), save), feedback);
+    } catch (error) { content.replaceChildren(h("p", { class: "notice warn", role: "status" }, raw(error.message))); }
+  };
+  root.refreshOwners = load; root.readyOwners = load(); return root;
 }
 
 /**
@@ -2206,7 +2253,7 @@ function agentForm(agent, { only = "" } = {}) {
   const listening = panel({ icon: "radio", title: "Ascolto", hint: "Dove ascolta. Parla solo quando qualcuno lo chiama." },
     setRows(platformsOn().map((kind) => platformRow(agent, kind)),
       setRow("In onda", "Spento non ascolta e non parla, da nessuna parte.", switchInput("enabled", "", agent.enabled ?? true))));
-  const owner = !isNew && S.data.currentUser?.role === "owner" ? agentOwnerPanel(agent) : null;
+  const owner = !isNew ? agentOwnerPanel(agent) : null;
   const voice = voicePanel(agent, genderInput);
   const form = h("form", { class: "stack", ...(isNew ? {} : { id: `agent-settings-${agent.id}` }) }, identity,
     wantsBrain ? panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
@@ -2275,7 +2322,7 @@ function agentForm(agent, { only = "" } = {}) {
     ["github", "GitHub", "github", "App e repository", [githubAccount(agent)]],
   ];
   controls = sectionWorkspace({ title: "Impostazioni", base: `#/agent/${agent.id}/impostazioni`, current: route()[3], entries,
-    onSelect: (id) => { form.hidden = !["identita", "carattere", "ascolto", "voce"].includes(id) && !(id === "autorizzazioni" && owner); } });
+    onSelect: (id) => { form.hidden = !["identita", "carattere", "ascolto", "voce"].includes(id); } });
   controls.querySelector(".email-workspace-detail").append(form);
   return controls;
 }
@@ -3244,7 +3291,7 @@ async function memoryTab(agent) {
     : empty("moon", "Il diario si scrive di notte, quando dorme.");
   return sectionWorkspace({ title: "Memoria", base: `#/agent/${agent.id}/memoria`, current: route()[3], entries: [
     ["fonte", "Fonte", "book", "Memoria e knowledge", [source]],
-    ["ricordi", data.ownerMemory ? "Ricordi del proprietario" : "Ricordi", "book", "Fatti e preferenze", [panel({ icon: "book", title: data.ownerMemory ? "Ricordi del proprietario" : "Ricordi", hint: `${data.ownerMemory ? tr("{count} ricordi disponibili solo a questo proprietario e ai suoi agenti interni.", { count: all.length }) : data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length })} ${tr("A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.")}` },
+    ["ricordi", data.ownerMemory ? "Ricordi del proprietario" : "Ricordi", "book", "Fatti e preferenze", [panel({ icon: "book", title: data.ownerMemory ? "Ricordi del proprietario" : "Ricordi", hint: `${data.ownerMemory ? (all.length === 1 ? tr("1 ricordo del Brain, disponibile ai proprietari autorizzati e agli agenti che lo usano.") : tr("{count} ricordi del Brain, disponibili ai proprietari autorizzati e agli agenti che lo usano.", { count: all.length })) : data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length })} ${tr("A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.")}` },
       add, h("label", { class: "search" }, icon("search"), search), list)]],
     ["scheda", "Scheda", "layers", "Sempre a mente", [corePanel]],
     ["diario", "Diario", "moon", "Consolidamento e diario", [panel({ icon: "moon", title: "Diario", hint: "Le ultime due pagine gli tornano in mente ogni giorno." }, diary)]],
@@ -3269,7 +3316,7 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
     root.classList.toggle("open", Boolean(current));
     for (const [key, pane] of panes) pane.hidden = key !== (current || first);
     for (const [key, tab] of tabs) { tab.classList.toggle("active", key === (current || first)); tab.setAttribute("aria-selected", String(key === (current || first))); tab.tabIndex = key === (current || first) ? 0 : -1; }
-    if (update) { history.replaceState(null, "", base + (current ? "/" + current : "")); app.querySelector(".appbar a.icon-btn")?.setAttribute("href", current ? base : base.startsWith("#/brain/") ? "#/brain" : "#/agenti"); }
+    if (update) { history.replaceState(null, "", base.startsWith("#/brain") ? brainHref(base + (current ? "/" + current : "")) : base + (current ? "/" + current : "")); app.querySelector(".appbar a.icon-btn")?.setAttribute("href", base.startsWith("#/brain") ? brainHref(current ? base : "#/brain") : current ? base : "#/agenti"); }
     detail.scrollTop = 0;
     onSelect(current || first);
   }
@@ -3315,7 +3362,7 @@ function agentKnowledgePane(agent, data) {
   return panel({ icon: "book", title: "Memoria e knowledge", hint: "La fonte che l'agente usa per ricordare e recuperare informazioni." },
     setRows(setRow("Fonte", null, source), externalRow,
       owner ? setRow("Proprietario del Brain", "Gestisce questa memoria.", owner) : null),
-    h("div", { class: "row end" }, check, save), feedback);
+    h("div", { class: "row end" }, data.source === "internal" && data.owner ? btn("Apri Brain", { icon: "book", cls: "ghost", href: "#/brain?" + new URLSearchParams({ ownerId: data.owner.id }) }) : null, check, save), feedback);
 }
 
 function memoryItem(agent, memory, brain = false) {
@@ -4609,7 +4656,7 @@ function renderBrain() {
         map = brainMap(graph);
         mapBox.replaceChildren(map.element);
         map.filter({ kind, query: search.value.trim() });
-      } catch (error) { mapBox.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+      } catch (error) { mapBox.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr(error.message))))); }
       return;
     }
     list.replaceChildren(skeleton("rows", 3));
@@ -4619,12 +4666,12 @@ function renderBrain() {
         h("div", { class: "grow" }, h("b", {}, raw(page.title)), page.summary ? h("small", {}, raw(page.summary)) : null),
         h("div", { class: "brain-row-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.shared ? badge("Condivisa con te", "", "share") : null, page.pending ? badge("Da rivedere", "warn") : null))) :
         [empty("bulb", query ? "Niente nel brain su questo." : "Ancora nessuna pagina. Aggiungine una o lascia una nota al bibliotecario.")]));
-    } catch (error) { list.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+    } catch (error) { list.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr(error.message))))); }
   }
   let timer = null;
   search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(pages, mapView ? 120 : 300); });
   const views = h("div", { class: "segmented", role: "tablist", "aria-label": tr("Come vedere il brain") },
-    [["", "Elenco", "list"], ["mappa", "Mappa", "graph"]].map(([key, label, name]) => h("button", { type: "button", role: "tab", class: (key === "mappa") === mapView ? "on" : "", "aria-selected": String((key === "mappa") === mapView), onclick: () => { location.hash = key ? `#/brain/${key}` : "#/brain"; } }, icon(name), label)));
+    [["", "Elenco", "list"], ["mappa", "Mappa", "graph"]].map(([key, label, name]) => h("button", { type: "button", role: "tab", class: (key === "mappa") === mapView ? "on" : "", "aria-selected": String((key === "mappa") === mapView), onclick: () => { location.hash = brainHref(key ? `#/brain/${key}` : "#/brain"); } }, icon(name), label)));
   // The librarian's settings, in the rows of Settings: each saved as it changes.
   const settingsPanel = () => {
     const settings = S.data.settings;
@@ -4654,16 +4701,19 @@ function renderBrain() {
         h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Questa Cora non ha ancora il suo database del brain: serve un Postgres con pgvector, in hush come CORA_BRAIN_DATABASE_URL."))));
       return;
     }
+    const scopeSelect = state.scopes?.length > 1 ? h("select", { "aria-label": tr("Brain aperto"), onchange: event => { location.hash = "#/brain?" + new URLSearchParams({ ownerId: event.target.value }); } },
+      state.scopes.map(scope => h("option", { value: scope.id, selected: scope.id === state.ownerId }, scope.id === S.data.currentUser?.id ? tr("Il mio Brain") : raw(scope.name)))) : null;
     const { stats, lastRun } = state;
     addButton.hidden = !state.canManage;
     runButton.hidden = !state.canManage;
-    addButton.href = `#/brain/nuova${kind ? `/${kind}` : ""}`;
+    addButton.href = brainHref(`#/brain/nuova${kind ? `/${kind}` : ""}`);
     addButton.querySelector("span").textContent = tr(BRAIN_ADD_LABEL[kind] || "Aggiungi pagina");
     reviewButton.querySelector("span").textContent = stats.pending + stats.flagged ? tr("Rivedi ({count})", { count: stats.pending + stats.flagged }) : tr("Rivedi");
     reviewButton.className = `btn${stats.pending + stats.flagged ? " primary" : " ghost"}`;
     const chips = h("div", { class: "chips", role: "group", "aria-label": tr("Tipo di pagina") },
       [["", "Tutte"], ...Object.entries(BRAIN_KINDS_PLURAL)].map(([key, label]) => h("button", { type: "button", class: `chip${kind === key ? " on" : ""}`, "aria-pressed": String(kind === key), onclick: () => { kind = key; search.value = ""; draw(); pages(); } }, label)));
     body.replaceChildren(
+      ...(scopeSelect ? [field("Brain aperto", scopeSelect)] : []),
       h("div", { class: "stats" },
         statCard({ icon: "book", value: String(stats.pages), label: "pagine" }),
         statCard({ icon: "check", value: String(stats.pending + stats.flagged), label: "da rivedere", href: stats.pending + stats.flagged ? "#/brain/revisione" : null }),
@@ -4679,7 +4729,7 @@ function renderBrain() {
       if (!body.isConnected) return;
       draw();
       if (state.enabled) pages();
-    } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
+    } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr(error.message))))); }
   }
   shell([pageHead("Brain", "Quello che sa l'azienda: clienti, progetti, persone, decisioni e procedure, con le fonti.", [reviewButton, runButton, addButton]), body], { title: "Brain" });
   load();
@@ -4708,7 +4758,7 @@ async function renderBrainCreate(kind = "topic") {
     submit.disabled = true;
     const saved = await guard(api("/api/brain/pages", { method: "POST", body: Object.fromEntries(new FormData(form)) }), "Pagina aggiunta");
     submit.disabled = false;
-    if (saved) location.hash = `#/brain/p/${saved.slug}`;
+    if (saved) location.hash = brainHref(`#/brain/p/${saved.slug}`);
   });
   body.replaceChildren(pageHead(BRAIN_ADD_LABEL[selected], "Quello che aggiungi è subito disponibile agli agenti. Il bibliotecario consolida le memorie in attesa."), panel({ icon: "edit", title: "Nuova pagina" }, form));
 }
@@ -4750,7 +4800,7 @@ async function renderBrainPage(slug) {
     const entries = [["pagina", "Pagina", "book", "Contenuto della pagina", [panel({ cls: "brain-page" }, content)]]];
     if (page.readonly) entries[0][4].push(panel({ icon: "share", title: "Condivisa con te", hint: "Sola lettura: il proprietario gestisce contenuti e accesso." }));
     else {
-      if (state.ownerMemory) entries.push(["condivisione", "Condivisione", "share", "Persone e permessi", [brainSharingPane(page)]]);
+      if (state.ownerMemory && state.canShare !== false) entries.push(["condivisione", "Condivisione", "share", "Persone e permessi", [brainSharingPane(page)]]);
       entries.push(["storia", "Storia", "clock", "Modifiche e fonti", [panel({ icon: "clock", title: "Storia", hint: "Ogni modifica, chi l'ha fatta e da dove viene." },
         h("ol", { class: "brain-history" }, page.revisions.map((revision) => h("li", {},
           h("div", { class: "row" }, h("b", {}, BRAIN_ACTIONS[revision.action] || raw(revision.action)), badge(BRAIN_REVIEWS[revision.review] || raw(revision.review), revision.review === "approved" ? "on" : revision.review === "reverted" ? "" : "warn"),
@@ -4759,7 +4809,7 @@ async function renderBrainPage(slug) {
           revision.conflict ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(revision.conflict))) : null,
           brainSources(revision.sources)))))]]);
     }
-    body.replaceChildren(pageHead(raw(page.title), h("span", { class: "brain-head-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.status === "archived" ? badge("Archiviata") : null, page.pending ? badge("Da rivedere", "warn") : null,
+    body.replaceChildren(pageHead(raw(page.title), h("span", { class: "brain-head-meta" }, state.ownerId && state.ownerId !== S.data.currentUser?.id ? badge(tr("Brain di {name}", { name: state.scopes?.find(scope => scope.id === state.ownerId)?.name || state.ownerId })) : null, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.status === "archived" ? badge("Archiviata") : null, page.pending ? badge("Da rivedere", "warn") : null,
         h("small", {}, tr("aggiornata {when}", { when: fmtTime(page.updatedAt, true) }))), actions), sectionWorkspace({ title: "Brain", base: `#/brain/p/${page.slug}`, current: editing.on ? "pagina" : route()[3], entries }));
   };
   draw();

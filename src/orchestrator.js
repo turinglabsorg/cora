@@ -1721,13 +1721,15 @@ export class Orchestrator {
       this.emit({ type: "request", agentId: agent.id });
       if (this.notifier?.enabled) {
         const url = isSalotto(state.id) ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
-        this.notifier.notify({ userId: this.memoryOwner?.(agent) || "", title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: replyTo?.voice && replyTo.replyMode !== "text" && replyTo.replyMode !== "both" ? (english ? "Voice message" : "Messaggio vocale") : text, url, tag: `request-${agent.id}` }).catch(() => {});
+        const recipients = this.brain.knowledge?.ownerMemory && state.id === privateRoom(agent.id) ? this.brain.knowledge.proprietorIds(agent).filter(id => { const person = this.store.panelUser(id); return person && !person.blocked && this.store.allowsPanelUser({ ...person, emailVerified: true }); }) : [this.memoryOwner?.(agent) || ""];
+        for (const userId of recipients) this.notifier.notify({ userId, title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: replyTo?.voice && replyTo.replyMode !== "text" && replyTo.replyMode !== "both" ? (english ? "Voice message" : "Messaggio vocale") : text, url, tag: `request-${agent.id}` }).catch(() => {});
       }
     } else {
       const slack = slackIds(state.id);
       // An agent asks the person it belongs to when they are in this chat, the owner otherwise.
       const transport = transportOf(state.id);
-      const own = this.store.agentOwnerChats(agent).find((id) => id.startsWith(`${transport}:`))?.slice(transport.length + 1);
+      const contacts = this.store.agentOwnerChats(agent).filter(id => id.startsWith(`${transport}:`)).map(id => id.slice(transport.length + 1));
+      const own = contacts.includes(replyTo?.authorId) ? replyTo.authorId : contacts[0];
       const owner = own || (slack ? this.store.settings.slackOwnerIds[0] : !telegramChatId(state.id) && this.store.settings.ownerIds[0]);
       const body = clean.length ? `${text}\n${english ? "Answers" : "Risposte"}: ${clean.join(" · ")}` : text;
       await this.postAs(agent, state, body, undefined, traceId, { ping: owner ? `<@${owner}>` : "", request, ...this.replyDelivery(replyTo) });
@@ -1744,7 +1746,7 @@ export class Orchestrator {
     const id = randomBytes(12).toString("hex");
     const name = String(file.name || "file").replace(/[^\w.\- ]+/g, "_").slice(0, 120);
     writeFileSync(join(this.filesDir, id), file.data, { mode: 0o600 });
-    writeFileSync(join(this.filesDir, `${id}.json`), JSON.stringify({ name, type: file.type || "application/octet-stream", ...(this.memoryOwner && agent ? { ownerId: this.memoryOwner(agent) } : {}) }), { mode: 0o600 });
+    writeFileSync(join(this.filesDir, `${id}.json`), JSON.stringify({ name, type: file.type || "application/octet-stream", ...(this.memoryOwner && agent ? { ownerId: this.memoryOwner(agent), agentId: agent.id } : {}) }), { mode: 0o600 });
     return { id, name, type: file.type || "application/octet-stream" };
   }
 
