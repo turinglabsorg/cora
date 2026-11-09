@@ -196,7 +196,8 @@ export class Subscriptions {
     return {
       ...record,
       installed: this.installed(record.provider),
-      ...(login ? { login: { url: login.url, userCode: login.userCode, manualCode: ["claude", "gemini"].includes(record.provider), expiresAt: login.expiresAt } } : {}),
+      ...(login ? { login: { url: login.url, userCode: login.userCode, manualCode: ["claude", "gemini"].includes(record.provider), expiresAt: login.expiresAt,
+        phase: login.codeSubmitted ? "verifying" : login.url ? "authorizing" : "preparing" } } : {}),
     };
   }
 
@@ -369,6 +370,8 @@ export class Subscriptions {
     const code = String(value || "").trim();
     if (!login?.child || !login.url) throw new ValidationError("nessun accesso in attesa");
     if (!code || code.length > 4096 || /[\x00-\x20\x7f-\x9f]/.test(code)) throw new ValidationError("codice di autorizzazione non valido");
+    if (login.codeSubmitted) return this.view(id);
+    login.codeSubmitted = true;
     login.child.stdin.write(`${code}\n`);
     login.check?.();
     return this.view(id);

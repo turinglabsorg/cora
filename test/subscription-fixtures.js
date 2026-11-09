@@ -37,7 +37,7 @@ if (provider === "gemini" && argv.includes("/usage")) {
   readline.createInterface({ input: process.stdin }).on("line", (code) => {
     if (!selected) { selected = true; process.stdout.write((state().evilUrl || "https://accounts.google.com/o/oauth2/auth?response_type=code&state=fixture") + "\\nAfter authenticating, paste the authorization code:\\n"); return; }
     if (code !== "fixture-authorization-code") process.exit(1);
-    save(); process.stdout.write("Signed in.\\n");
+    setTimeout(() => { save(); process.stdout.write("Signed in.\\n"); }, state().codeDelayMs || 0);
   });
 } else if (argv.includes("app-server")) {
   const input = readline.createInterface({ input: process.stdin });
@@ -72,7 +72,7 @@ if (provider === "gemini" && argv.includes("/usage")) {
   process.stdout.write("https://claude.com/cai/oauth/authorize?code=true&state=fixture\\nPaste code here > ");
   readline.createInterface({ input: process.stdin }).on("line", (code) => {
     if (code !== "fixture-authorization-code") process.exit(1);
-    save(); process.exit(0);
+    setTimeout(() => { save(); process.exit(0); }, state().codeDelayMs || 0);
   });
 } else {
   const input = [];

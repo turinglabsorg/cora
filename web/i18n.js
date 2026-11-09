@@ -1,6 +1,10 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Verifica dell'autorizzazione…": "Verifying authorization…",
+  "Verifica del collegamento…": "Checking connection…",
+  "Annullamento dell'accesso…": "Cancelling sign-in…",
+  "Rimozione dell'account…": "Removing account…",
   "Tocca un agente per aprire la chat; da lì impostazioni, memoria, routine e desktop.": "Tap an agent to open its chat; from there, settings, memory, routines and desktop.",
   "In uso: prima scegli un altro account nel Cervello dell'agente": "In use: first choose another account in the agent's Brain",
   "Collegane quanti vuoi, dal browser: nel Cervello di ogni agente scegli quale usa.": "Connect as many as you like, from your browser: choose which account each agent uses in its Brain.",

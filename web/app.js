@@ -463,7 +463,7 @@ function scheduleRefresh() {
 }
 
 function subscriptionLoginActive() {
-  return [...document.querySelectorAll(".account"), ...document.querySelectorAll(".subscription-picker")].some((node) => node.classList.contains("connecting") || node.getAttribute("data-state") === "connecting");
+  return [...document.querySelectorAll(".accounts"), ...document.querySelectorAll(".account"), ...document.querySelectorAll(".subscription-picker")].some((node) => node.getAttribute("aria-busy") === "true" || node.classList.contains("connecting") || node.getAttribute("data-state") === "connecting" || (node.classList.contains("subscription-picker") && !node.hidden));
 }
 
 function refreshSubscriptionViews() {
@@ -1534,9 +1534,16 @@ function subscriptionDeviceHelp() {
     h("a", { href: "https://learn.chatgpt.com/docs/auth#preferred-device-code-authentication-beta", target: "_blank", rel: "noopener" }, "Guida ufficiale OpenAI", icon("external")));
 }
 
-/** A sign-in under way: the official page to open, the device code to copy or confirm, Claude's code to paste back. */
-function subscriptionLoginSteps(record, name, { authCode, act }) {
+function subscriptionProgress(message) {
+  return h("div", { class: "subscription-progress", role: "status", "aria-live": "polite" },
+    h("span", { class: "subscription-spinner", "aria-hidden": "true" }), h("span", {}, message));
+}
+
+/** A sign-in under way: the official page to open, the device code to confirm, or an authorization to verify. */
+function subscriptionLoginSteps(record, name, { authCode, act, busy = false }) {
   const out = [];
+  const verifying = record.login?.phase === "verifying";
+  authCode.disabled = busy || verifying;
   const step = (number, title, ...children) => h("li", {}, h("span", { class: "subscription-step", "aria-hidden": "true" }, number), h("div", { class: "subscription-step-body" }, h("b", {}, title), ...children));
   if (record.login?.url) {
     const open = btn(tr("Apri {provider}", { provider: name }), { icon: "external", cls: "primary", href: record.login.url, target: "_blank" });
@@ -1556,18 +1563,17 @@ function subscriptionLoginSteps(record, name, { authCode, act }) {
     } else {
       steps.append(step("1", tr("Accedi a {provider}", { provider: name }), h("p", {}, "Apri la pagina ufficiale e autorizza il collegamento."), open));
       if (record.login.manualCode) steps.append(step("2", "Torna qui con il codice", field("Codice di autorizzazione", authCode),
-        btn("Completa collegamento", { icon: "check", cls: "subscription-complete", onclick: () => {
+        btn(verifying ? "Verifica dell'autorizzazione…" : "Completa collegamento", { icon: "check", cls: "subscription-complete", disabled: busy || verifying, onclick: () => {
           if (!authCode.value.trim()) { authCode.focus(); return; }
           const code = authCode.value;
-          authCode.value = "";
-          act(() => api(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code } }));
+          act(() => api(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code } }), "Verifica dell'autorizzazione…");
         } })));
     }
     out.push(steps);
-  } else out.push(h("p", { class: "subscription-description" }, "Preparazione dell'accesso…"));
+  }
   out.push(h("div", { class: "subscription-footer" },
-    h("span", { class: "subscription-wait" }, icon("clock"), "In attesa di autorizzazione"),
-    btn("Annulla", { cls: "ghost", onclick: () => act(() => api(`/api/subscriptions/${record.id}/cancel`, { method: "POST" })) })));
+    subscriptionProgress(verifying ? "Verifica dell'autorizzazione…" : record.login?.url ? "In attesa di autorizzazione" : "Preparazione dell'accesso…"),
+    btn("Annulla", { cls: "ghost", disabled: busy, onclick: () => act(() => api(`/api/subscriptions/${record.id}/cancel`, { method: "POST" }), "Annullamento dell'accesso…") })));
   if (record.provider === "codex") out.push(subscriptionDeviceHelp());
   return out;
 }
@@ -1580,14 +1586,16 @@ function subscriptionLoginSteps(record, name, { authCode, act }) {
  */
 function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
   const name = PROVIDER_SHORT[provider];
-  const root = h("div", { class: "accounts" });
+  const root = h("div", { class: "accounts", "data-provider": provider });
   const codes = new Map();
   let busy = false;
+  let progress = "";
   let error = "";
   let snapshot = "";
-  async function act(fn) {
+  async function act(fn, message = "Verifica del collegamento…") {
     if (busy) return;
     busy = true;
+    progress = message;
     error = "";
     draw(true);
     try { await fn(); }
@@ -1600,18 +1608,24 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
   const add = () => act(async () => {
     const record = await api("/api/subscriptions", { method: "POST", body: { provider, label: name } });
     await api(`/api/subscriptions/${record.id}/login`, { method: "POST" });
-  });
+  }, "Preparazione dell'accesso…");
   function draw(force = false) {
     const records = (S.data.subscriptions || []).filter((item) => item.provider === provider && !item.resident);
-    const next = JSON.stringify({ records: records.map(subscriptionDisplay), busy, error, usage: (S.data.agents || []).map((agent) => [agent.id, agent.subscriptionId]) });
+    for (const [id, code] of codes) {
+      const record = records.find((item) => item.id === id);
+      if (!record || record.status === "ready" || record.status === "disconnected") code.value = "";
+      if (!record) codes.delete(id);
+    }
+    const next = JSON.stringify({ records: records.map(subscriptionDisplay), busy, progress, error, usage: (S.data.agents || []).map((agent) => [agent.id, agent.subscriptionId]) });
     if (!force && next === snapshot) return;
     snapshot = next;
+    root.setAttribute("aria-busy", String(busy || records.some((record) => record.login?.phase === "verifying")));
     const installed = Boolean(S.data.providers?.[provider]);
     const rows = records.map((record) => {
       const used = (S.data.agents || []).filter((agent) => agent.subscriptionId === record.id).length;
       if (!codes.has(record.id)) codes.set(record.id, h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Codice di autorizzazione", placeholder: "Incolla il codice di autorizzazione" }));
       const remove = btn("", { icon: "trash", cls: "sm ghost danger", title: used ? "In uso: prima scegli un altro account nel Cervello dell'agente" : "Rimuovi account", disabled: Boolean(used) || busy,
-        onclick: () => act(() => api(`/api/subscriptions/${record.id}`, { method: "DELETE" })) });
+        onclick: () => act(() => api(`/api/subscriptions/${record.id}`, { method: "DELETE" }), "Rimozione dell'account…") });
       return h("div", { class: `account ${record.status}` },
         h("div", { class: "account-row" },
           h("span", { class: `subscription-option-dot ${record.status}`, "aria-hidden": "true" }),
@@ -1621,19 +1635,20 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
           h("div", { class: "account-actions" },
             record.status === "ready" ? btn("", { icon: "refresh", cls: "sm ghost", title: "Verifica collegamento", disabled: busy, onclick: () => act(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) }) : null,
             record.status === "disconnected" || record.status === "error"
-              ? btn("Ricollega", { icon: "external", cls: "sm", title: "Ricollega", disabled: busy, onclick: () => act(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) }) : null,
+              ? btn("Ricollega", { icon: "external", cls: "sm", title: "Ricollega", disabled: busy, onclick: () => act(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" }), "Preparazione dell'accesso…") }) : null,
             remove)),
         record.status === "error" ? h("p", { class: "subscription-error", role: "alert" }, icon("alert"), record.issue === "isolation"
           ? "Questa istanza non supporta ancora il collegamento. Aggiorna Claude Code sul server e riprova."
           : "L'accesso non è stato completato. Riprova quando vuoi.") : null,
-        record.status === "connecting" ? h("div", { class: "account-login" }, subscriptionLoginSteps(record, name, { authCode: codes.get(record.id), act })) : null);
+        record.status === "connecting" ? h("div", { class: "account-login" }, subscriptionLoginSteps(record, name, { authCode: codes.get(record.id), act, busy })) : null);
     });
     root.replaceChildren(...[
       error ? h("p", { class: "subscription-error", role: "alert" }, icon("alert"), tr(error)) : null,
+      busy ? subscriptionProgress(progress) : null,
       rows.length ? h("div", { class: "account-list" }, rows)
         : h("p", { class: "accounts-empty" }, installed ? tr("Nessun altro account {provider} collegato.", { provider: name })
           : tr("{cli} non è installato su questa macchina, quindi non c'è ancora niente da collegare. Installalo sul server con l'utente di Cora e questa scheda si accende da sola.", { cli: CLI_NAMES[provider] || name })),
-      installed ? h("div", { class: "accounts-add" }, btn(busy ? "Preparazione dell'accesso…" : "Aggiungi account", { icon: busy ? "refresh" : "plus", cls: rows.length ? "" : "primary", disabled: busy, onclick: add })) : null,
+      installed ? h("div", { class: "accounts-add" }, btn("Aggiungi account", { icon: "plus", cls: rows.length ? "" : "primary", disabled: busy, onclick: add })) : null,
     ].filter(Boolean));
     onChange();
   }
@@ -1658,6 +1673,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   let selectedId = currentId || "";
   let choosing = !selectedId;
   let requestBusy = false;
+  let progress = "";
   let actionError = "";
   let snapshot = "";
   const selections = new Map();
@@ -1672,9 +1688,10 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
     }
   });
 
-  async function action(fn) {
+  async function action(fn, message = "Verifica del collegamento…") {
     if (requestBusy) return;
     requestBusy = true;
+    progress = message;
     actionError = "";
     draw();
     try { await fn(); }
@@ -1697,7 +1714,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       selections.set(nextProvider, record.id);
       if (provider === nextProvider) { selectedId = record.id; choosing = false; }
       await api(`/api/subscriptions/${record.id}/login`, { method: "POST" });
-    });
+    }, "Preparazione dell'accesso…");
   }
 
   function changeAccount() {
@@ -1715,7 +1732,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
     if (!force && next === snapshot) return;
     snapshot = next;
     input.value = record?.resident ? "" : record?.id || "";
-    root.setAttribute("aria-busy", String(requestBusy));
+    root.setAttribute("aria-busy", String(requestBusy || record?.login?.phase === "verifying"));
     root.setAttribute("data-state", record?.status || "empty");
     content.replaceChildren();
     if (root.hidden) return;
@@ -1727,6 +1744,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       h("div", { class: "grow" }, h("span", { class: "label" }, "Abbonamento"), h("h3", {}, raw(name))),
       record && !choosing ? status : null));
     if (actionError) content.append(h("p", { class: "subscription-error", role: "alert" }, icon("alert"), tr(actionError)));
+    if (requestBusy) content.append(subscriptionProgress(progress));
 
     // Without the CLI on the server there is nothing to log in to: offering the
     // device code anyway only ever ends in "Accesso non riuscito".
@@ -1779,7 +1797,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
         btn("Cambia account", { cls: "ghost", onclick: changeAccount }),
         btn("", { icon: "refresh", cls: "ghost", title: "Verifica collegamento", onclick: () => action(() => api(`/api/subscriptions/${record.id}/check`, { method: "POST" })) })));
     } else if (record?.status === "connecting") {
-      content.append(...subscriptionLoginSteps(record, name, { authCode, act: action }));
+      content.append(...subscriptionLoginSteps(record, name, { authCode, act: action, busy: requestBusy }));
     } else {
       authCode.value = "";
       content.append(h("div", { class: "subscription-intro" }, h("h4", {}, tr("Collega il tuo account {provider}", { provider: name })),
@@ -1793,7 +1811,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
             btn("Impostazioni", { cls: "ghost", href: `#/settings/${provider}` })));
       } else content.append(h("div", { class: "subscription-footer" },
         btn(requestBusy ? "Preparazione dell'accesso…" : tr("Collega {provider}", { provider: name }), { icon: requestBusy ? "refresh" : "external", cls: "primary", onclick: record
-          ? () => action(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" })) : connectNew }),
+          ? () => action(() => api(`/api/subscriptions/${record.id}/login`, { method: "POST" }), "Preparazione dell'accesso…") : connectNew }),
         records.length ? btn("Cambia account", { cls: "ghost", onclick: changeAccount }) : null));
       if (provider === "codex") content.append(subscriptionDeviceHelp());
     }
@@ -1803,9 +1821,9 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
         selectedId = "";
         selections.delete(provider);
         choosing = true;
-      }) }));
+      }, "Rimozione dell'account…") }));
     }
-    for (const button of content.querySelectorAll("button")) button.disabled = requestBusy;
+    for (const button of content.querySelectorAll("button")) if (requestBusy) button.disabled = true;
   }
 
   const poll = async () => {

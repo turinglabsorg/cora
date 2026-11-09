@@ -496,6 +496,10 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .subscription-code .btn { min-width: 44px; min-height: 44px; }
 .subscription-wait { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
 .subscription-wait .ico { width: 14px; height: 14px; }
+.subscription-progress { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.subscription-spinner { flex: none; width: 16px; height: 16px; border: 2px solid var(--line-strong); border-top-color: var(--text); border-radius: 50%; animation: subscription-spin .8s linear infinite; }
+@keyframes subscription-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .subscription-spinner { animation: none; } }
 .subscription-help { border-top: 1px solid var(--line); padding-top: 14px; color: var(--muted); font-size: 12px; line-height: 1.65; }
 .subscription-help summary { display: flex; align-items: center; gap: 7px; min-height: 32px; cursor: pointer; list-style: none; }
 .subscription-help summary::-webkit-details-marker { display: none; }

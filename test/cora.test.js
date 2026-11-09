@@ -58,7 +58,7 @@ async function subscriptionApp(t, existing) {
   const directory = existing?.home || tempHome();
   const instance = startCora({ home: directory, host: "127.0.0.1", port: 0, insecureCookies: true,
     adminPassword: PASSWORD, sessionKey: "subscription-fixture-session", useResidentSubscriptions: false, discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
-    claudeBin: identity.claude, codexBin: identity.codex, grokBin: identity.grok, museBin: identity.muse, hermesBin: "/not-installed/hermes", botTokenFor: () => "",
+    claudeBin: identity.claude, codexBin: identity.codex, grokBin: identity.grok, museBin: identity.muse, geminiBin: identity.gemini, hermesBin: "/not-installed/hermes", botTokenFor: () => "",
     docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/not-installed/AGENTS.md", sshAuthorizedKeys: "/not-installed/keys",
   });
   await instance.ready;
@@ -977,6 +977,98 @@ test("device-code flows keep their mounted steps when returning to Cora", async 
     assert.equal(panel.run(`document.getElementById("app").querySelector('.account-login')`), before, provider);
     assert.match(before.textContent, /TEST-ONLY/);
     await fixture.request(`/api/subscriptions/${created.data.id}/cancel`, { method: "POST" });
+  }
+});
+
+test("subscription preparation shows progress and keeps Settings and agent drafts mounted for every provider", async (t) => {
+  const fixture = await subscriptionApp(t);
+  for (const provider of ["claude", "codex", "grok", "muse", "gemini"]) {
+    for (const context of ["settings", "agent"]) {
+      const gate = Promise.withResolvers();
+      let entered = false;
+      let creations = 0;
+      const panel = panelHarness({ language: "en", hash: `#/settings/${provider}`, fetch: async (path, init = {}) => {
+        if (path === "/api/subscriptions" && init.method === "POST") creations++;
+        if (path.endsWith("/login")) { entered = true; await gate.promise; }
+        const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+        return { ok: response.status < 400, status: response.status, json: async () => response.data };
+      } });
+      await panel.run("boot()");
+      if (context === "agent") panel.run(`(() => { location.hash="#/new"; const p=subscriptionPicker("");p.setProvider(${JSON.stringify(provider)});document.getElementById("app").replaceChildren(h("form",{},h("input",{name:"name",value:"Keep my draft"}),p.node));})()`);
+      const currentRoot = () => context === "settings" ? panel.app.querySelectorAll(".accounts").find(node => node.getAttribute("data-provider") === provider) : panel.app.querySelector(".subscription-picker");
+      const root = currentRoot();
+      const button = root.querySelectorAll("button").find(node => /Add account|Connect (?:another account|Claude|Gemini|ChatGPT|Grok|Meta)/.test(node.textContent));
+      assert.ok(button, `${provider} ${context}`);
+      try {
+        button.click();
+        await waitFor(() => entered);
+        assert.equal(root.getAttribute("aria-busy"), "true");
+        assert.match(root.querySelector(".subscription-progress").textContent, /Preparing sign-in/);
+        assert.ok(root.querySelector(".subscription-spinner"));
+        assert.ok(root.querySelectorAll("button").every(node => node.disabled || node.getAttribute("disabled") !== null));
+        await panel.run("document.hidden=false;document.listeners.visibilitychange[0]()");
+        assert.equal(currentRoot(), root);
+        if (context === "agent") assert.equal(panel.app.querySelector("form").elements.name.value, "Keep my draft");
+        panel.run('S.events.onmessage({data:JSON.stringify({type:"telegram-chats"})})');
+        await sleep(50);
+        assert.equal(currentRoot(), root);
+        gate.resolve();
+        await waitFor(() => root.querySelector(".subscription-steps"));
+        assert.match(root.textContent, /Waiting for authorization/);
+        assert.equal(creations, 1, "one request creates exactly one account");
+        root.querySelectorAll("button").find(node => node.textContent === "Cancel").click();
+        await waitFor(() => !root.querySelector(".subscription-steps"));
+        assert.equal(root.getAttribute("aria-busy"), "false");
+      } finally { gate.resolve(); }
+    }
+  }
+});
+
+test("manual subscription codes survive a failed request and show progress until the provider confirms authorization", async (t) => {
+  const fixture = await subscriptionApp(t);
+  for (const provider of ["claude", "gemini"]) {
+    for (const context of ["settings", "agent"]) {
+      fixture.identity.set({ codeDelayMs: 1200 });
+      const created = (await fixture.request("/api/subscriptions", { method: "POST", body: { provider, label: provider } })).data;
+      await fixture.request(`/api/subscriptions/${created.id}/login`, { method: "POST" });
+      let refuse = true;
+      const panel = panelHarness({ language: "en", hash: `#/settings/${provider}`, fetch: async (path, init = {}) => {
+        if (path.endsWith("/code") && refuse) { refuse = false; return { ok:false, status:502, json:async()=>({error:"Temporary connection error"}) }; }
+        const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+        return { ok: response.status < 400, status: response.status, json: async () => response.data };
+      } });
+      await panel.run("boot()");
+      if (context === "agent") panel.run(`(() => {location.hash="#/new";const p=subscriptionPicker(${JSON.stringify(created.id)});p.setProvider(${JSON.stringify(provider)});document.getElementById("app").replaceChildren(h("form",{},h("input",{name:"name",value:"Unchanged draft"}),p.node));})()`);
+      const currentRoot = () => context === "settings" ? panel.app.querySelectorAll(".accounts").find(node => node.getAttribute("data-provider") === provider) : panel.app.querySelector(".subscription-picker");
+      const root = currentRoot();
+      const codeInput = root.querySelectorAll("input").find(node => node.getAttribute("type") === "password");
+      assert.ok(codeInput, `${provider}/${context}: ${root.textContent}`);
+      codeInput.value = "fixture-authorization-code";
+      root.querySelector(".subscription-complete").click();
+      await waitFor(() => root.textContent.includes("Temporary connection error") && root.getAttribute("aria-busy") === "false");
+      assert.equal(codeInput.value, "fixture-authorization-code", "a refused request must retain the entered code");
+      root.querySelector(".subscription-complete").click();
+      await waitFor(() => fixture.app.subscriptions.view(created.id).login?.phase === "verifying");
+      await waitFor(() => root.querySelector(".subscription-complete")?.getAttribute("disabled") !== null);
+      await panel.run("document.hidden=false;document.listeners.visibilitychange[0]()");
+      assert.equal(currentRoot(), root);
+      assert.match(root.textContent, /Verifying authorization/);
+      assert.equal(codeInput.value, "fixture-authorization-code");
+      assert.equal(codeInput.disabled, true);
+      assert.equal(root.getAttribute("aria-busy"), "true");
+      if (context === "agent") assert.equal(panel.app.querySelector("form").elements.name.value, "Unchanged draft");
+      await waitFor(() => fixture.app.store.subscription(created.id).status === "ready", {timeout:10000});
+      await panel.run("document.listeners.visibilitychange[0]()");
+      assert.equal(root.getAttribute("aria-busy"), "false");
+      assert.equal(root.querySelector(".subscription-complete"), null);
+      assert.doesNotMatch(root.textContent, /Verifying authorization|Waiting for authorization|Temporary connection error/);
+      if (context === "agent") {
+        await panel.run("document.listeners.visibilitychange[0]()");
+        assert.equal(currentRoot(), root, "returning after confirmation must keep the unsaved agent form");
+        assert.equal(panel.app.querySelector("form").elements.name.value, "Unchanged draft");
+      }
+      await fixture.request(`/api/subscriptions/${created.id}`, {method:"DELETE"});
+    }
   }
 });
 
