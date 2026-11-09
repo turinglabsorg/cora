@@ -7228,6 +7228,80 @@ describe("email channel", () => {
     assert.equal(f.state.sent.length, 0);
   });
 
+  test("connector catalog searches accounts, preserves navigation and manages existing Google senders while new connections are gated", async (t) => {
+    const f = await emailWorld(t), google = await googleConnectorFixture(t, f);
+    const flow = await google.connect();
+    assert.match(await flow.response.text(), /#\/settings\/connettori\/google/);
+    const connection = (await f.call("/api/connectors")).data.connections[0];
+    f.app.googleConnector.enabled = false;
+    let rejected = true;
+    const panel = panelHarness({ hash: "#/settings/connettori", fetch: async (path, options = {}) => {
+      const response = await f.call(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined, asMember: rejected && options.method === "PUT" });
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
+    const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
+    await node.readyConnectors;
+    const search = node.querySelector("input");
+    search.value = "missing-service"; search.dispatch("input");
+    assert.equal(node.querySelectorAll(".connector-card").length, 0);
+    assert.match(node.textContent, /Nessun connettore trovato/);
+    node.querySelectorAll("button").find(button => /Azzera filtri/.test(button.textContent)).click();
+    assert.equal(search.value, "");
+    search.value = connection.email; search.dispatch("input");
+    node.querySelectorAll("button").find(button => button.textContent === "Collegati").click();
+    node.querySelector(".connector-card").click();
+    assert.equal(panel.run("location.hash"), "#/settings/connettori/google");
+    assert.equal(node.querySelector(".connector-catalog").hidden, true);
+    assert.equal(node.querySelectorAll("button").find(button => /Collega un altro/.test(button.textContent)).getAttribute("disabled"), "");
+    const input = node.querySelectorAll("input").find(input => input.getAttribute("type") === "checkbox");
+    input.checked = true; input.dispatch("change");
+    assert.equal(input.disabled, true);
+    await waitFor(() => /Connettore privato/.test(node.textContent));
+    assert.equal(input.checked, false); assert.equal(input.disabled, false);
+    assert.deepEqual(f.app.googleConnector.records()[0].agents, []);
+    rejected = false; input.checked = true; input.dispatch("change");
+    await waitFor(() => /Agenti autorizzati aggiornati/.test(node.textContent));
+    assert.deepEqual(f.app.googleConnector.records()[0].agents, [f.agent.id]);
+    assert.ok(node.querySelectorAll("a").some(link => link.getAttribute("href") === `#/agent/${f.agent.id}/email/invio`));
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email`, { method: "PUT", body: { senderId: connection.id } })).status, 200);
+    node.querySelector(".connector-back").click();
+    assert.equal(search.value, connection.email);
+    assert.equal(node.querySelectorAll("button").find(button => button.textContent === "Collegati").getAttribute("aria-pressed"), "true");
+    node.querySelector(".connector-card").click();
+    const disconnect = node.querySelectorAll("button").find(button => button.textContent === "Scollega");
+    disconnect.click();
+    assert.equal(f.app.googleConnector.records()[0].disconnected, false);
+    disconnect.click();
+    await waitFor(() => f.app.googleConnector.records()[0].disconnected);
+    await waitFor(() => !node.querySelector(".connector-detail").textContent.includes(connection.email));
+    node.querySelector(".connector-back").click();
+    assert.match(node.querySelector(".connector-catalog").textContent, /Nessun connettore trovato/);
+  });
+
+  test("connector catalog recovers a failed load, filters empty connections and keeps member controls read-only", async (t) => {
+    const f = await emailWorld(t);
+    let fail = true;
+    const panel = panelHarness({ hash: "#/settings/connettori/google", language: "en", fetch: async (path, options = {}) => {
+      if (fail) { fail = false; return { ok: false, status: 503, json: async () => ({ error: "Fixture connector load failed" }) }; }
+      const response = await f.call(path, { method: options.method || "GET", asMember: true });
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
+    const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
+    await node.readyConnectors;
+    assert.match(node.textContent, /Fixture connector load failed/);
+    node.querySelectorAll("button").find(button => button.textContent === "Try again").click();
+    await waitFor(() => /1. Connect your account/.test(node.textContent));
+    assert.equal(node.querySelector(".connector-catalog").hidden, true);
+    assert.equal(node.querySelectorAll("button").find(button => button.textContent === "Connect Google account").getAttribute("disabled"), "");
+    assert.match(node.textContent, /Only the owner can change connectors/);
+    node.querySelector(".connector-back").click();
+    node.querySelectorAll("button").find(button => button.textContent === "Connected").click();
+    assert.match(node.querySelector(".connector-catalog").textContent, /No connected services/);
+    node.querySelectorAll("button").find(button => button.textContent === "Reset filters").click();
+    assert.equal(node.querySelectorAll(".connector-card").length, 1);
+    assert.equal((await f.call("/api/connectors/google", { method: "POST", asMember: true })).status, 403);
+  });
+
   test("Google review gate blocks new connections while existing authorized senders keep working", async (t) => {
     const f = await emailWorld(t);
     assert.equal(f.app.googleConnector.enabled, false);

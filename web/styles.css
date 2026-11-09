@@ -2010,6 +2010,44 @@ a.share-stats:hover { color: var(--amber); }
 .email-workspace .rail-name b, .email-workspace .rail-name small { white-space: normal; overflow-wrap: anywhere; }
 .email-workspace-detail, .email-section { min-width: 0; }
 .email-section[hidden], .email-section > [hidden], .email-settings-tabs ~ [hidden] { display: none; }
+
+.connector-catalog[hidden], .connector-detail[hidden] { display: none; }
+.connector-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.connector-search { position: relative; flex: 1; min-width: 220px; }
+.connector-search > .ico { position: absolute; top: 13px; left: 13px; color: var(--muted); pointer-events: none; }
+.connector-search input { width: 100%; min-height: 44px; padding-left: 40px; }
+.connector-toolbar .segmented { flex: none; }
+.connector-toolbar .segmented button { min-height: 38px; }
+.connector-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 16px; }
+.connector-card { display: grid; gap: 12px; width: 100%; min-width: 0; padding: 20px; text-align: left; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--panel-2); cursor: pointer; transition: border-color .15s, background .15s; }
+.connector-card:hover { border-color: var(--amber-line); background: var(--amber-wash); }
+.connector-card:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
+.connector-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.connector-mark { display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--amber-line); border-radius: var(--r-md); background: var(--well); color: var(--amber); }
+.connector-mark .ico { width: 24px; height: 24px; }
+.connector-card-name { font: 600 24px/1.15 var(--display); letter-spacing: -.02em; }
+.connector-card-description { color: var(--muted); font-size: 14px; line-height: 1.6; }
+.connector-card-meta { font: 400 10px/1.5 var(--mono); color: var(--muted); }
+.connector-card-action { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line-strong); font-size: 13px; color: var(--amber); }
+.connector-empty { grid-column: 1 / -1; display: grid; justify-items: start; gap: 12px; padding: 28px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); background: var(--well); }
+.connector-empty > .ico { color: var(--amber); }
+.connector-empty h3, .connector-empty p { margin: 0; }
+.connector-empty p { color: var(--muted); }
+.connector-back { align-self: flex-start; }
+.connector-senders { padding-top: 18px; border-top: 1px solid var(--line); }
+.connector-senders p { margin: 0; }
+.connector-detail .panel-title { overflow-wrap: anywhere; }
+.connector-detail .panel-body > p { margin: 0; }
+.connector-detail .muted { color: var(--muted); }
+.connector-detail [role="status"]:empty { display: none; }
+@media (max-width: 600px) {
+  .connector-toolbar { align-items: stretch; }
+  .connector-search { min-width: 0; flex-basis: 100%; }
+  .connector-toolbar .segmented { width: 100%; }
+  .connector-card { padding: 18px; }
+  .connector-empty { padding: 20px; }
+}
+@media (prefers-reduced-motion: reduce) { .connector-card { transition: none; } }
 .email-section-back { display: none; }
 .email-settings-tabs { display: flex; flex-wrap: wrap; align-self: flex-start; max-width: 100%; }
 .email-settings-tabs .btn { min-width: 0; }

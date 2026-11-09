@@ -2936,47 +2936,107 @@ function emailSettingsTabs(controls, agentsPanel, feedback) {
 }
 
 function connectorsPane() {
-  const slot = h("div", { class: "stack connectors-pane" }, panel({ icon: "link", title: "Connettori" }, h("p", { role: "status", class: "muted" }, "Carico i connettori…")));
+  const slot = h("div", { class: "stack connectors-pane" });
+  const catalog = h("div", { class: "stack connector-catalog" });
+  const detail = h("div", { class: "stack connector-detail", hidden: true });
+  const results = h("div", { class: "connector-grid", "aria-live": "polite" });
+  const search = h("input", { type: "search", "aria-label": "Cerca connettori", placeholder: "Cerca per nome, servizio o account", autocomplete: "off", maxlength: 200 });
+  const filters = h("div", { class: "segmented", role: "group", "aria-label": "Filtra connettori" });
+  const filterButtons = new Map();
+  let data = null, filter = "all", current = route()[2] === "google" ? "google" : "";
+  const show = (id, update = true) => {
+    current = id === "google" ? id : "";
+    catalog.hidden = Boolean(current); detail.hidden = !current;
+    if (update) history.replaceState(null, "", current ? `#/settings/connettori/${current}` : "#/settings/connettori");
+  };
+  const drawCatalog = () => {
+    for (const [key, button] of filterButtons) { button.classList.toggle("on", key === filter); button.setAttribute("aria-pressed", String(key === filter)); }
+    if (!data) { results.replaceChildren(h("p", { role: "status", class: "muted" }, "Carico i connettori…")); return; }
+    const query = search.value.trim().toLocaleLowerCase();
+    const matches = `Google Gmail Workspace email posta ${data.connections.map(item => item.email).join(" ")}`.toLocaleLowerCase().includes(query);
+    if (!matches || (filter === "connected" && !data.connections.length)) {
+      results.replaceChildren(h("div", { class: "connector-empty" }, icon("search"),
+        h("h3", {}, filter === "connected" && !query ? "Nessun connettore collegato" : "Nessun connettore trovato"),
+        h("p", {}, filter === "connected" && !query ? "Apri un connettore dal catalogo per collegare il primo account." : "Prova un altro nome o azzera i filtri."),
+        btn("Azzera filtri", { cls: "ghost", onclick: () => { search.value = ""; filter = "all"; drawCatalog(); search.focus(); } })));
+      return;
+    }
+    const connected = data.connections.length;
+    const status = connected ? connected === 1 ? tr("1 account collegato") : tr("{count} account collegati", { count: connected }) : tr(data.available ? "Da collegare" : "In preparazione");
+    results.replaceChildren(h("button", { type: "button", class: "connector-card", "aria-label": tr("Apri connettore Google"), onclick: () => { show("google"); detail.querySelector(".connector-back")?.focus(); } },
+      h("span", { class: "connector-card-head" }, h("span", { class: "connector-mark", "aria-hidden": "true" }, icon("mail")), tag(status, connected ? "ok" : "agent")),
+      h("span", { class: "connector-card-name" }, "Google"),
+      h("span", { class: "connector-card-description" }, "Invia email dal tuo account Gmail o Google Workspace con gli agenti che scegli."),
+      h("span", { class: "connector-card-meta" }, "Gmail · Google Workspace"),
+      h("span", { class: "connector-card-action" }, "Apri connettore", icon("next"))));
+  };
+  for (const [id, label] of [["all", "Tutti"], ["connected", "Collegati"]]) {
+    const button = btn(label, { onclick: () => { filter = id; drawCatalog(); } });
+    filterButtons.set(id, button); filters.append(button);
+  }
+  search.addEventListener("input", drawCatalog);
+  catalog.append(panel({ icon: "link", title: "Connettori", hint: "Scegli un servizio, collega il tuo account e decidi quali agenti possono usarlo." },
+    h("div", { class: "connector-toolbar" }, h("div", { class: "connector-search" }, icon("search"), search), filters), results));
+  slot.append(catalog, detail); drawCatalog(); show(current, false);
   async function load() {
     try {
-      const data = await api("/api/connectors");
+      const response = await api("/api/connectors");
       if (!slot.isConnected) return;
-      const connect = btn("Collega account Google", { icon: "plus", cls: "primary", disabled: !data.canManage || !data.available, onclick: async (event) => {
+      data = response;
+      const connect = btn(data.connections.length ? "Collega un altro account Google" : "Collega account Google", { icon: "plus", cls: "primary", disabled: !data.canManage || !data.available, onclick: async (event) => {
         const button = event.currentTarget; button.disabled = true;
         try { const result = await api("/api/connectors/google", { method: "POST" }); window.location.assign(result.url); }
-        catch (error) { toast(error.message, true); button.disabled = false; }
+        catch (error) { toast(error.message, true); button.disabled = !data.canManage || !data.available; }
       } });
-      slot.replaceChildren(panel({ icon: "link", title: "Connettori", hint: "Gli account esterni che scegli di mettere a disposizione degli agenti." },
-        h("div", { class: "stack" }, h("h3", {}, "Google"), h("p", {}, "Collega Gmail o Google Workspace con Fluxkit per inviare email dal tuo indirizzo."),
+      const accountNodes = data.connections.map((connection) => {
+        const choices = data.agents.map((agent) => {
+          const input = h("input", { type: "checkbox", checked: connection.agents.includes(agent.id), disabled: !data.canManage, "aria-label": tr("Autorizza {name}", { name: agent.name }) });
+          return { id: agent.id, input, node: h("label", { class: "email-folder" }, input, raw(agent.name)) };
+        });
+        const feedback = h("p", { role: "status", class: "muted" });
+        const senders = h("div", { class: "stack-sm connector-senders" });
+        const drawSenders = () => {
+          const selected = choices.filter(item => item.input.checked);
+          senders.replaceChildren(h("p", { class: "label" }, "3. Scegli il mittente"),
+            h("p", { class: "muted" }, "Nella pagina Email dell'agente scegli questo account come mittente."),
+            selected.length ? h("div", { class: "row wrap" }, selected.map(item => btn(raw(tr("Email di {name}", { name: data.agents.find(agent => agent.id === item.id).name })), { icon: "mail", cls: "ghost sm", href: `#/agent/${item.id}/email/invio` }))) : h("p", { class: "muted" }, "Autorizza almeno un agente per scegliere il mittente."));
+        };
+        drawSenders();
+        for (const item of choices) item.input.addEventListener("change", async () => {
+          for (const other of choices) other.input.disabled = true;
+          try {
+            await api(`/api/connectors/${connection.id}`, { method: "PUT", body: { agents: choices.filter(other => other.input.checked).map(other => other.id) } });
+            connection.agents = choices.filter(other => other.input.checked).map(other => other.id);
+            feedback.className = "muted"; feedback.textContent = tr("Agenti autorizzati aggiornati"); drawSenders();
+          } catch (error) { item.input.checked = !item.input.checked; feedback.className = "err-text"; feedback.textContent = tr(error.message); }
+          finally { for (const other of choices) other.input.disabled = !data.canManage; }
+        });
+        let armed = false;
+        const disconnect = btn("Scollega", { icon: "unlink", cls: "ghost danger", disabled: !data.canManage, onclick: async () => {
+          if (!armed) { armed = true; disconnect.textContent = tr("Conferma scollegamento"); return; }
+          disconnect.disabled = true;
+          try { await api(`/api/connectors/${connection.id}`, { method: "DELETE" }); await load(); }
+          catch (error) { toast(error.message, true); disconnect.disabled = !data.canManage; }
+        } });
+        return panel({ icon: "mail", title: raw(connection.email), hint: "Account Google collegato", actions: disconnect },
+          h("p", { class: "label" }, "2. Autorizza gli agenti"),
+          choices.length ? h("div", { class: "email-folders" }, choices.map(item => item.node)) : h("p", { class: "muted" }, "Crea un agente per assegnargli questo account."), feedback, senders);
+      });
+      detail.replaceChildren(btn("Catalogo connettori", { icon: "back", cls: "ghost connector-back", onclick: () => { show(""); results.querySelector(".connector-card")?.focus(); } }),
+        panel({ icon: "mail", title: "Google", hint: "Gmail e Google Workspace", actions: tag(data.connections.length ? "Collegato" : "Da collegare", data.connections.length ? "ok" : "agent") },
+          h("p", {}, "Collega Gmail o Google Workspace con Fluxkit per inviare email dal tuo indirizzo."),
           h("p", { class: "muted" }, "Scegli quali agenti possono usare ogni account. La posta in arrivo di Google resta nel tuo account."),
           data.notice ? h("p", { role: "status" }, raw(tr(data.notice))) : null,
-          !data.available ? h("p", { class: "muted" }, "Collegamento Google in preparazione.") : null, h("div", { class: "row" }, connect))),
-        ...data.connections.map((connection) => {
-          const choices = data.agents.map((agent) => {
-            const input = h("input", { type: "checkbox", checked: connection.agents.includes(agent.id), disabled: !data.canManage });
-            return { id: agent.id, input, node: h("label", { class: "email-folder" }, input, raw(agent.name)) };
-          });
-          const feedback = h("p", { role: "status", class: "muted" });
-          for (const item of choices) item.input.addEventListener("change", async () => {
-            item.input.disabled = true;
-            try { await api(`/api/connectors/${connection.id}`, { method: "PUT", body: { agents: choices.filter((other) => other.input.checked).map((other) => other.id) } }); feedback.textContent = tr("Agenti autorizzati aggiornati"); }
-            catch (error) { item.input.checked = !item.input.checked; feedback.textContent = tr(error.message); }
-            finally { item.input.disabled = false; }
-          });
-          let armed = false;
-          const disconnect = btn("Scollega", { icon: "unlink", cls: "ghost danger", disabled: !data.canManage, onclick: async () => {
-            if (!armed) { armed = true; disconnect.textContent = tr("Conferma scollegamento"); return; }
-            disconnect.disabled = true;
-            try { await api(`/api/connectors/${connection.id}`, { method: "DELETE" }); await load(); }
-            catch (error) { toast(error.message, true); disconnect.disabled = false; }
-          } });
-          return panel({ icon: "mail", title: raw(connection.email), hint: "Account Google collegato", actions: disconnect },
-            h("p", { class: "label" }, "Agenti autorizzati"), h("div", { class: "email-folders" }, choices.map((item) => item.node)),
-            h("p", { class: "muted" }, "Nella pagina Email dell'agente scegli questo account come mittente."), feedback);
-        }));
+          setRows(setRow("1. Collega il tuo account", "Accedi su Google e conferma il permesso di invio. Puoi collegare più account.", h("div", { class: "stack-sm" },
+            !data.available ? h("p", { role: "status", class: "notice warn" }, "Il collegamento di nuovi account Google non è disponibile in questo spazio. Puoi continuare a usare e gestire gli account già collegati.") : null,
+            !data.canManage ? h("p", { class: "muted" }, "Solo il proprietario cambia i connettori.") : null,
+            h("div", { class: "row" }, connect)), { stack: true }))),
+        ...accountNodes);
+      slot.replaceChildren(catalog, detail); drawCatalog(); show(current, false);
     } catch (error) { slot.replaceChildren(panel({ icon: "alert", title: "Connettori non disponibili" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
   }
-  Promise.resolve().then(load);
+  slot.openCatalog = () => show("");
+  slot.readyConnectors = Promise.resolve().then(load);
   return slot;
 }
 
@@ -7455,6 +7515,7 @@ function renderSettings() {
     root.classList.toggle("open", Boolean(current));
     drawNav();
     if (updateRoute) history.replaceState(null, "", current ? `#/settings/${current}` : "#/settings");
+    if (updateRoute && current === "connettori") pages.get(current).querySelector(".connectors-pane")?.openCatalog?.();
   }
   // The addresses before the list: a tab, or Collegamenti and one of its entries.
   const [, first = "", second = ""] = route();
