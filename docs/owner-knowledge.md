@@ -42,6 +42,8 @@ The full link is stored in hush, never returned to the panel or a model. The pan
 
 External-source agents read only that source for memory and knowledge. Internal facts, core, diary, chat archives and context documents are excluded. `remember`, `forget`, `update_core`, `brain_note`, nightly consolidation and internal-memory API mutations are unavailable. The current conversation, personality and owner instructions still describe the current task. An unavailable source produces an explicit failure and never falls back to internal knowledge. Returning to internal mode restores the original internal data.
 
+After a deliberate reset, an operator may set the existing settings value `knowledgeResetAt` to its ISO timestamp. Older transport history is refused before admission, and older archived messages stay outside prompts, recall and consolidation. This also prevents a transport reconnect from rebuilding discarded memory from its server-side history.
+
 ## API and persistence
 
 - `GET|PUT /api/agents/:id/knowledge`: source, saved-host status and owner; writes accept `source`, an optional `url`, and an authorized ownership assignment.

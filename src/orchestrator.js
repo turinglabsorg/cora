@@ -305,6 +305,7 @@ export class Orchestrator {
   }
 
   push(state, item) {
+    if (this.brain.knowledge?.afterReset(item) === false) return false;
     if (state.seen.has(item.id)) return false;
     state.seen.add(item.id);
     state.history.push(item);

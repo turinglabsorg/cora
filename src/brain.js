@@ -407,6 +407,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
   }
 
   async chatTurn({ agent, history, channel, forced, computer, authorized = false, belongsTo = false, computerDenied = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
+    if (this.knowledge?.resetAt) history = history.filter((message) => this.knowledge.afterReset(message));
     const transcript = formatTranscript(history, agent, this.timezone);
     const last = replyTo || history[history.length - 1];
     const query = history.slice(-6).map((item) => item.content).join(" ");
@@ -457,6 +458,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
   }
 
   async routineTurn({ agent, routine, history, channel, postFile, say, inbox, onTrace, onMessageHandled }) {
+    if (this.knowledge?.resetAt) history = history.filter((message) => this.knowledge.afterReset(message));
     const transcript = formatTranscript(history.slice(-12), agent, this.timezone);
     const user = [
       this.memoryContext(agent, `${routine.name} ${routine.prompt}`),

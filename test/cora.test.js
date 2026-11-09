@@ -411,6 +411,36 @@ test("owner isolation hides private platform resources from other members and th
   assert.deepEqual(f.app.store.artifactShare(link.id).access, linkPolicy, "internal revocation does not alter link permissions");
 });
 
+test("a fresh memory boundary refuses old Slack reconnect history, archive retrieval and prompt context", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const agent = (await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Epoch assistant", tools: false } })).data;
+  const cutoff = Date.now() - 30000;
+  f.app.store.setValue("knowledgeResetAt", new Date(cutoff).toISOString());
+  const old = { id: "epoch-old", at: cutoff - 1000, kind: "human", authorId: f.alice.user.id, authorName: "alice", content: "RESET_OLD_CANARY" };
+  const fresh = { ...old, id: "epoch-new", at: Date.now(), content: "RESET_NEW_CANARY" };
+  const channelId = "sl:C0RESETFIXTURE";
+  f.app.channels.list = () => [{ id: channelId, kind: "slack" }];
+  f.app.channels.info = (id) => ({ id, kind: "slack", name: "QA", channelId: "C0RESETFIXTURE" });
+  f.app.orchestrator.slackHistory = async () => [{ ts: String(old.at / 1000), item: old }, { ts: String(fresh.at / 1000), item: fresh }];
+  f.app.orchestrator.slackItem = async (event) => event.item;
+  await f.app.orchestrator.catchUpSlack();
+  assert.deepEqual(f.app.store.recentMessages(channelId, 20).map((item) => item.id), [fresh.id]);
+  assert.deepEqual(f.app.orchestrator.state(channelId).history.map((item) => item.id), [fresh.id]);
+  f.app.store.appendArchive("web-" + agent.id, old);
+  await f.app.librarian.run();
+  const archive = await f.app.knowledge.ownerBrain(f.alice.user.id).searchArchive("CANARY");
+  assert.match(JSON.stringify(archive), /RESET_NEW_CANARY/);
+  assert.doesNotMatch(JSON.stringify(archive), /RESET_OLD_CANARY/);
+  const prompts = []; f.state.answer = (body) => { prompts.push(body); return { content: "Nuova risposta." }; };
+  await f.app.brain.chatTurn({ agent: f.app.store.agent(agent.id), forced: true, computer: false, history: [old, fresh], channel: { id: "web-" + agent.id, name: "QA" } });
+  assert.match(JSON.stringify(prompts), /RESET_NEW_CANARY/);
+  assert.doesNotMatch(JSON.stringify(prompts), /RESET_OLD_CANARY/);
+  const recalled = await executeTool({ name: "recall", args: { query: "CANARY" } }, { agent: f.app.store.agent(agent.id), store: f.app.store, knowledge: f.app.knowledge, memory: f.app.brain.memory, channelIds: [channelId, "web-" + agent.id], formatWhen: String, channelLabel: String });
+  assert.match(recalled.text, /RESET_NEW_CANARY/); assert.doesNotMatch(recalled.text, /RESET_OLD_CANARY/);
+  f.app.knowledge.ownerMemory = false;
+  assert.equal(f.app.knowledge.afterReset(old), true, "legacy shared-space behavior is preserved");
+});
+
 test("an agent CLI cannot inherit owner Brain links, database access or other agents' GitHub credentials", async (t) => {
   const agent = app.store.createAgent({ name: "Owner env guard", model: "hermes/test-model", tools: false });
   t.after(() => app.store.deleteAgent(agent.id));

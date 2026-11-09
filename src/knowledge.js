@@ -118,6 +118,8 @@ export class KnowledgeSources {
   keyName(agent) { return this.store.value(`agentBrainLink:${agent.id}`, null)?.secretName || `CORA_KNOWLEDGE_${agent.id.toUpperCase()}`; }
   isExternal(agent) { return agent.brainSource === "external"; }
   ownerId(agent) { return agent.brainOwnerId || `agent:${agent.id}`; }
+  get resetAt() { return this.ownerMemory ? Date.parse(this.store.value("knowledgeResetAt", "")) || 0 : 0; }
+  afterReset(message) { const cutoff = this.resetAt; return !cutoff || message.at == null || (Number(message.at) || Date.parse(message.at)) >= cutoff; }
   memoryKey(agent) { return "owner:" + this.ownerId(agent); }
   ownerKeys(agentId) {
     const agent = this.store.agent(agentId);
@@ -136,6 +138,7 @@ export class KnowledgeSources {
   }
   forUser(user) { return this.ownerMemory ? new OwnerBrain({ sources: this, ownerId: user.id }) : this.internal; }
   messageOwner(message) {
+    if (!this.afterReset(message)) return "";
     const agent = message.agentId ? this.store.agent(message.agentId) : message.channelId?.startsWith("web-ag_") ? this.store.agent(message.channelId.slice(4)) : null;
     if (agent) return this.isExternal(agent) ? "" : this.ownerId(agent);
     if (message.kind === "agent") return "";
@@ -168,7 +171,7 @@ export class KnowledgeSources {
       const [, transport, id] = match;
       conditions.push(`(kind IN ('owner','human') AND author_id = ? AND ${transport === "slack" ? "channel_id LIKE 'sl:%'" : transport === "telegram" ? "channel_id LIKE 'tg:%'" : "channel_id NOT LIKE 'sl:%' AND channel_id NOT LIKE 'tg:%' AND channel_id NOT LIKE 'web%'"})`); params.push(id);
     }
-    const rows = this.store.db.prepare(`SELECT * FROM messages WHERE at > ? AND (${conditions.join(" OR ")}) ORDER BY at LIMIT ?`).all(since, ...params, limit);
+    const rows = this.store.db.prepare(`SELECT * FROM messages WHERE at > ? AND (${conditions.join(" OR ")}) ORDER BY at LIMIT ?`).all(Math.max(since, this.resetAt), ...params, limit);
     return rows.map((row) => ({ id: row.id, channelId: row.channel_id, at: row.at, authorId: row.author_id, authorName: row.author_name, kind: row.kind, agentId: row.agent_id, content: row.content }));
   }
   shares() { return this.store.value("brainPageShares", []); }
