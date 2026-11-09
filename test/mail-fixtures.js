@@ -1,12 +1,12 @@
 import http from "node:http";
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { constants, createCipheriv, createHash, createHmac, publicEncrypt, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startCora } from "../src/main.js";
 import { fakeDocker, fakeOllama, tempHome } from "./helpers.js";
 
 export async function mailWorld(t = null) {
-  const state = { requests: [], accounts: new Map(), routes: new Map(), relayAccounts: new Map(), mailboxes: new Map(), dnsReady: new Set(), refuse: false, relayRefuse: false };
+  const state = { requests: [], messages: new Map(), clientKeys: new Map(), webhooks: new Map(), sent: [], accounts: new Map(), routes: new Map(), relayAccounts: new Map(), mailboxes: new Map(), dnsReady: new Set(), refuse: false, relayRefuse: false };
   const keyA = "re_fixture_account_alpha", keyB = "re_fixture_account_beta";
   for (const key of [keyA, keyB]) state.accounts.set(key, { domains: [], hooks: [] });
   let serial = 0;
@@ -19,6 +19,35 @@ export async function mailWorld(t = null) {
     state.requests.push({ path: url.pathname, method: req.method, token, body });
     const send = (status, value) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     let match;
+    const mailbox = state.clientKeys.get(token);
+    if (mailbox && url.pathname.startsWith("/v1/")) {
+      if (state.relayRefuse) return send(503, { error: "fixture-provider-secret-do-not-expose" });
+      if (url.pathname === "/v1/webhook") {
+        if (body.url) {
+          const ping = await fetch(body.url, { method: "POST", body: JSON.stringify({ type: "ping" }), headers: { "Content-Type": "application/json" } });
+          if (!ping.ok) return send(422, {});
+        }
+        state.webhooks.set(mailbox, body); return send(200, { status: "ok" });
+      }
+      if (url.pathname === "/v1/inbox") {
+        let emails = (state.messages.get(mailbox) || []).filter((email) => email.folder === url.searchParams.get("folder") && (!url.searchParams.get("since") || email.received_at >= url.searchParams.get("since")))
+          .sort((a,b) => b.received_at.localeCompare(a.received_at) || b.id.localeCompare(a.id));
+        if (url.searchParams.get("cursor")) emails = emails.slice(emails.findIndex((email) => email.id === url.searchParams.get("cursor")) + 1);
+        const limit = Number(url.searchParams.get("limit")) || 50, has_more = emails.length > limit;
+        emails = emails.slice(0,limit);
+        return send(200, { emails, has_more, ...(state.legacy ? {} : { next_cursor: has_more ? emails.at(-1).id : "" }) });
+      }
+      if (url.pathname.startsWith("/v1/emails/")) {
+        const email = (state.messages.get(mailbox) || []).find((item) => item.id === decodeURIComponent(url.pathname.slice(11)));
+        return send(email ? 200 : 404, email || {});
+      }
+      if (url.pathname === "/v1/send") {
+        state.sent.push({ mailbox, ...body });
+        const email = deliver(mailbox, { from: mailbox, subject: body.subject, body: body.body_html || body.body_text, folder: "sent" });
+        return send(200, { message_id: email.id, resend_id: `provider-${email.id}`, email: mailbox });
+      }
+      return send(404, {});
+    }
     if (url.pathname.startsWith("/v1/")) {
       if (token !== "fixture-mail-registration") return send(403, { error: "denied" });
       if (state.relayRefuse) return send(503, { error: "fixture-provider-secret-do-not-expose" });
@@ -37,7 +66,8 @@ export async function mailWorld(t = null) {
         const email = `${body.agent_id}@${body.domain}`, existing = state.mailboxes.get(email);
         if (existing && existing !== body.public_key_pem) return send(409, { error: "taken" });
         state.mailboxes.set(email, body.public_key_pem);
-        return send(200, { email, agent_id: email, api_key: "fixture-mailbox-client-key" });
+        const key = `fixture-mailbox-client-key:${email}`; state.clientKeys.set(key,email);
+        return send(200, { email, agent_id: email, api_key: key });
       }
       return send(404, {});
     }
@@ -72,6 +102,15 @@ export async function mailWorld(t = null) {
     }
     return send(404, {});
   });
+  const deliver = (mailbox, { from = "robin+sender@ambox.dev", to = [mailbox], subject = "Fixture subject", body = "Fixture body", folder = "inbox", at = new Date().toISOString(), autoSubmitted = "", messageId = "" } = {}) => {
+    const key = randomBytes(32);
+    const seal = (text, index) => { const iv = Buffer.alloc(12); iv[11] = index; const cipher = createCipheriv("aes-256-gcm", key, iv); return Buffer.concat([cipher.update(text, "utf8"),cipher.final(),cipher.getAuthTag()]).toString("base64"); };
+    const email = { id: `msg_${(++serial).toString(16).padStart(8,"0")}`, from, to, folder, received_at: at, message_id: messageId, auto_submitted: autoSubmitted,
+      subject_encrypted: seal(subject,1), body_encrypted: seal(body,2), wrapped_key: publicEncrypt({ key: state.mailboxes.get(mailbox), padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },key).toString("base64") };
+    if (!state.messages.has(mailbox)) state.messages.set(mailbox,[]);
+    state.messages.get(mailbox).push(email);
+    return email;
+  };
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const endpoint = `http://127.0.0.1:${server.address().port}`;
   const home = tempHome();
@@ -92,6 +131,7 @@ export async function mailWorld(t = null) {
   app.boxes.ensureNow = async () => ({ exists: true, running: true });
   app.boxes.inspect = async () => ({ exists: true, running: true });
   app.boxes.ensureGitAttribution = async () => {};
+  app.boxes.ensureMailRenderer = async () => {};
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const login = await fetch(`${base}/api/login`, { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" }, body: JSON.stringify({ password: "fixture-password" }) });
   const cookie = login.headers.get("set-cookie").split(";")[0];
@@ -103,9 +143,9 @@ export async function mailWorld(t = null) {
   const memberCookie = `cora_session=v2.${session}.${signature}`;
   const call = async (path, { method = "GET", body, auth = true, asMember = false } = {}) => {
     const response = await fetch(`${base}${path}`, { method, headers: { ...(auth ? { Cookie: asMember ? memberCookie : cookie } : {}), "X-Cora": "1", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    return { status: response.status, data: await response.json() };
+    return { status: response.status, data: await response.json(), headers: response.headers };
   };
   const close = async () => { await app.stop(); await ollama.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); };
   t?.after(close);
-  return { app, state, vault, keyA, keyB, call, base, home, close };
+  return { app, state, vault, keyA, keyB, call, base, home, close, deliver };
 }

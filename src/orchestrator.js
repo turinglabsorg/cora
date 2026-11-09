@@ -1731,6 +1731,33 @@ export class Orchestrator {
     return item;
   }
 
+  async runEmail(agent, email, channel) {
+    if (this.threadWork.has(channel.id)) return "busy";
+    this.threadWork.set(channel.id, agent.id);
+    const state = this.state(channel.id);
+    state.working ??= new Set();
+    state.working.add(agent.id);
+    this.email.status(agent, email, "working", channel.id);
+    try {
+      const result = await this.brain.emailTurn({ agent, email, channel,
+        say: (text, target = channel.id, options = {}) => this.postDirect(agent, state, target, text, { ...options, passive: true }),
+        inbox: this.inbox(state, state.history),
+        onMessageHandled: (ids) => this.acknowledge(state, agent.id, ids),
+      });
+      if (result.text && result.text !== "PASS") await this.postAs(agent, state, result.text, undefined, result.traceId, { passive: true });
+      this.email.status(agent, email, result.stopped ? "stopped" : "processed", channel.id);
+      return "processed";
+    } catch (error) {
+      this.email.status(agent, email, "error", channel.id);
+      this.log({ type: "error", agentId: agent.id, channelId: channel.id, text: "Email processing failed." });
+      return "error";
+    } finally {
+      state.working.delete(agent.id);
+      this.threadWork.delete(channel.id, agent.id);
+      if (state.humanQueue.size) this.schedule(state, 300);
+    }
+  }
+
   async runRoutine(routine, { manual = false, resumeTrace = null, resumeRunId = "" } = {}) {
     routine = this.store.routine(routine.id);
     if (!routine) return { status: "archived" };

@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 NODE="${CORA_NODE:-$(command -v node)}"
 set -- "$NODE" --disable-warning=ExperimentalWarning server.js
 for pair in \
+  FLUXKIT_GOOGLE_CLIENT_SECRET:FLUXKIT_GOOGLE_CLIENT_SECRET \
   CORA_CLOUD_SEED:CORA_CLOUD_SEED \
   CORA_CLOUD_GOOGLE_SECRET:GOOGLE_CLIENT_SECRET \
   CORA_CLOUD_GITHUB_SECRET:GITHUB_CLIENT_SECRET \

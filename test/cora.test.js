@@ -1,5 +1,8 @@
+import { googleConnectorFixture } from "./google-connector-fixtures.js";
+import { EmailChannel } from "../src/email-channel.js";
+import { mailWorld } from "./mail-fixtures.js";
 import assert from "node:assert/strict";
-import { createECDH, createDecipheriv, createPublicKey, hkdfSync, randomBytes, verify } from "node:crypto";
+import { createECDH, createDecipheriv, createPublicKey, createHmac, hkdfSync, randomBytes, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
@@ -5380,4 +5383,231 @@ const result=spawnSync(${JSON.stringify(join(fixture.bin, "git"))},args.slice(at
     if (choice === "enabled") assert.match(message, /Co-authored-by: Cora <custom@example.test>/);
     else assert.doesNotMatch(message, /Co-authored-by/);
   }
+});
+
+describe("email channel", () => {
+  async function emailWorld(t) {
+    const f = await mailWorld(t);
+    clearInterval(f.app.email.timer); clearTimeout(f.app.email.initial);
+    const created = await f.call("/api/agents", { method: "POST", body: { name: "Email agent", tools: true, model: "ollama/test-model" } });
+    const agent = f.app.store.agent(created.data.id);
+    await waitFor(() => f.app.store.value(`agentMailbox:${agent.id}`, null)?.status === "ready", { timeout: 20000 });
+    const mailbox = f.app.store.value(`agentMailbox:${agent.id}`).email;
+    const channels = [{ id: CHANNEL, name: "general", kind: "discord", guildId: GUILD }, { id: OTHER_CHANNEL, name: "email-reports", kind: "discord", guildId: GUILD }];
+    f.app.channels.list = () => channels;
+    f.app.channels.listFor = () => channels;
+    f.app.orchestrator.bots.canRead = async () => true;
+    f.app.email.instanceUrl = f.base;
+    const posts = [];
+    f.app.orchestrator.postDirect = async (who, state, target, text, options) => { posts.push({ agentId: who.id, target, text, options }); return [{ id: `post-${posts.length}` }]; };
+    f.app.orchestrator.postAs = async (who, state, text, file, trace, options) => { posts.push({ agentId: who.id, target: state.id, text, options }); return [{ id: `post-${posts.length}` }]; };
+    return { ...f, agent, mailbox, posts };
+  }
+
+  test("automatic configuration, sender rules, encrypted reads, recap and duplicate delivery", async (t) => {
+    const f = await emailWorld(t), { app, agent, mailbox } = f;
+    assert.equal((await f.call("/api/mail/channel", { auth: false })).status, 401);
+    assert.equal((await f.call("/api/mail/channel", { method: "PUT", asMember: true, body: { enabled: true } })).status, 403);
+    assert.equal((await f.call("/api/mail/channel", { method: "PUT", body: { enabled: true, senders: ["@ambox.dev"] } })).status, 200);
+    f.deliver(mailbox, { at: new Date(Date.now() - 86400000).toISOString(), subject: "Old email" });
+    const email = f.deliver(mailbox, { subject: "Please review", body: "Encrypted fixture message" });
+    f.deliver(mailbox, { subject: "Spam", folder: "spam" });
+    f.deliver(mailbox, { from: "noreply@ambox.dev", subject: "Automatic" });
+    f.deliver(mailbox, { from: "person@other.test", subject: "Filtered out" });
+    await app.email.poll(agent); await app.email.processing.get(agent.id);
+    assert.equal(f.posts.length, 1);
+    assert.match(f.posts[0].text, /Please review/);
+    assert.equal(f.posts[0].target, CHANNEL);
+    assert.equal(f.posts[0].options.passive, true);
+    assert.match(f.state.webhooks.get(mailbox).url, new RegExp(`/mail/events/${agent.id}/`));
+    await app.email.poll(agent); await app.email.processing.get(agent.id);
+    assert.equal(f.posts.length, 1);
+    const recap = await f.call(`/api/agents/${agent.id}/email`);
+    assert.equal(recap.data.summary.received, 5);
+    assert.equal(recap.data.recent.find((item) => item.id === email.id).status, "notified");
+    assert.doesNotMatch(JSON.stringify(recap.data), /fixture-mailbox-client-key|BEGIN PRIVATE|Encrypted fixture message/);
+    assert.match((await executeTool({ name: "email_read", args: { id: email.id } }, { agent, email: app.email })).text, /authorized user/);
+    const read = await executeTool({ name: "email_read", args: { id: email.id } }, { agent, email: app.email, requester: { kind: "owner" } });
+    assert.match(read.text, /Encrypted fixture message/);
+    assert.equal((await f.call(`/api/agents/${agent.id}/email`, { method: "PUT", asMember: true, body: { mode: "auto" } })).status, 403);
+    const refused = await executeTool({ name: "email_read", args: { id: email.id } }, { agent: { ...agent, id: "ag_other" }, email: app.email });
+    assert.match(refused.text, /error:/);
+    await f.call("/api/mail/channel", { method: "PUT", body: { enabled: false } });
+    f.deliver(mailbox, { subject: "While disabled" });
+    await app.email.poll(agent); await app.email.processing.get(agent.id);
+    assert.equal(f.posts.length, 1);
+    assert.equal(f.state.webhooks.get(mailbox).url, "");
+  });
+
+  test("signed push wakes the correct mailbox and rejects forged events", async (t) => {
+    const f = await emailWorld(t);
+    await f.call("/api/mail/channel", { method: "PUT", body: { enabled: true } });
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    const hook = f.state.webhooks.get(f.mailbox);
+    const email = f.deliver(f.mailbox, { subject: "Push notification" });
+    const body = JSON.stringify({ type: "email.received", email_id: email.id, from: email.from, folder: "inbox", received_at: email.received_at });
+    const bad = await fetch(hook.url, { method: "POST", body, headers: { "Content-Type": "application/json", "X-Ambox-Signature": "sha256=invalid" } });
+    assert.equal(bad.status, 401);
+    assert.equal(f.posts.length, 0);
+    const signature = `sha256=${createHmac("sha256", hook.secret).update(body).digest("hex")}`;
+    assert.equal((await fetch(hook.url, { method: "POST", body, headers: { "Content-Type": "application/json", "X-Ambox-Signature": signature } })).status, 200);
+    await waitFor(() => f.posts.length === 1, { timeout: 20000 });
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    assert.match(f.posts[0].text, /Push notification/);
+    assert.equal((await fetch(hook.url, { method: "POST", body, headers: { "X-Ambox-Signature": signature } })).status, 200);
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    assert.equal(f.posts.length, 1);
+  });
+
+  test("an authorized agent persists its report destination and cannot choose an inaccessible channel", async (t) => {
+    const f = await emailWorld(t);
+    const ctx = { agent: f.agent, email: f.app.email, postingChannels: f.app.channels.listFor(f.agent) };
+    const call = { name: "email_settings", args: { channel_id: OTHER_CHANNEL } };
+    assert.match((await executeTool(call, ctx)).text, /error:/);
+    assert.match((await executeTool(call, { ...ctx, requester: { kind: "owner" }, emailInvocation: { id: "untrusted" } })).text, /error:/);
+    assert.equal(JSON.parse((await executeTool(call, { ...ctx, requester: { kind: "authorized" } })).text).saved, true);
+    assert.equal(f.app.email.destination(f.agent).id, OTHER_CHANNEL);
+    f.app.orchestrator.bots.canRead = async () => false;
+    assert.match((await executeTool({ name: "email_settings", args: { channel_id: CHANNEL } }, { ...ctx, requester: { kind: "owner" } })).text, /error:/);
+    assert.equal(f.app.email.destination(f.agent).id, OTHER_CHANNEL);
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email`, { method: "PUT", body: { reportChannelId: "not-listed" } })).status, 400);
+    assert.equal(f.app.email.destination({ ...f.agent, name: "Renamed" }).id, OTHER_CHANNEL);
+  });
+
+  test("automatic handling reads and drafts with the actual tool loop without granting desktop access", async (t) => {
+    const f = await emailWorld(t);
+    await f.call("/api/mail/channel", { method: "PUT", body: { enabled: true, mode: "auto", reportChannelId: OTHER_CHANNEL } });
+    const email = f.deliver(f.mailbox, { subject: "Question", body: "Can you prepare a response?" });
+    let failure;
+    const actualTurn = f.app.brain.emailTurn.bind(f.app.brain);
+    f.app.brain.emailTurn = async (options) => { try { return await actualTurn(options); } catch (error) { failure = error; throw error; } };
+    let step = 0;
+    f.app.llm.capabilities = async () => ({ tools: true });
+    f.app.llm.chat = async ({ tools, messages }) => {
+      if (tools?.length) {
+        assert.equal(tools.some((tool) => tool.name === "shell"), false);
+        if (step++ === 0) return { text: "", toolCalls: [{ id: "read", name: "email_read", args: { id: email.id } }] };
+        if (step === 2) {
+          assert.match(messages.at(-1).content, /Can you prepare a response/);
+          return { text: "", toolCalls: [{ id: "draft", name: "email_draft", args: { to: ["robin+sender@ambox.dev"], subject: "Re: Question", body_text: "Here is a draft." } }] };
+        }
+      }
+      return { text: "Ho preparato una bozza per la nuova email.", toolCalls: [] };
+    };
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    assert.ifError(failure);
+    assert.equal(f.state.sent.length, 0);
+    assert.equal(f.app.email.summary(f.agent).draft, 1);
+    assert.equal(f.posts.at(-1).target, OTHER_CHANNEL);
+    assert.equal(f.posts.at(-1).options.passive, true);
+    assert.equal(f.app.email.recent(f.agent).find((item) => item.id === email.id).status, "processed");
+    const draft = f.app.email.recent(f.agent).find((item) => item.direction === "draft");
+    assert.match(JSON.stringify(await f.app.email.read(f.agent, draft.id)), /Here is a draft/);
+    assert.equal(f.app.orchestrator.threadWork.has(OTHER_CHANNEL), false);
+    assert.match((await executeTool({ name: "email_send", args: { to: ["robin+sender@ambox.dev"], subject: "No", body_text: "Not authorized" } }, { agent: f.agent, email: f.app.email, emailInvocation: { id: email.id } })).text, /error:/);
+  });
+
+  test("Google OAuth uses Fluxkit through the broker and restricts external sending to assigned agents", async (t) => {
+    const f = await emailWorld(t), google = await googleConnectorFixture(t, f);
+    assert.equal((await f.call("/api/connectors/google", { method: "POST", asMember: true })).status, 403);
+    const flow = await google.connect();
+    assert.equal(flow.response.status, 200);
+    assert.equal(flow.authorize.searchParams.get("scope"), "openid email https://www.googleapis.com/auth/gmail.send");
+    assert.equal(flow.authorize.searchParams.get("include_granted_scopes"), null);
+    assert.equal(flow.authorize.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(flow.target.origin, "https://fixture.usecora.test");
+    const view = await f.call("/api/connectors"), connection = view.data.connections[0];
+    assert.equal(connection.email, "robin+google@ambox.dev");
+    assert.deepEqual(connection.agents, []);
+    assert.doesNotMatch(JSON.stringify(view.data), /fixture-google-refresh|fixture-google-access|fixture-google-client-secret|\"grant\"/);
+    assert.equal([...f.vault.keys()].some((name) => name.startsWith("CORA_GOOGLE_GC_")), true);
+    const replay = await fetch(`${f.base}${flow.target.pathname}${flow.target.search}`, { headers: { Cookie: flow.cookie } });
+    assert.equal(replay.status, 400);
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email`, { method: "PUT", body: { senderId: connection.id } })).status, 403);
+    assert.equal((await f.call(`/api/connectors/${connection.id}`, { method: "PUT", body: { agents: [f.agent.id] } })).status, 200);
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email`, { method: "PUT", body: { senderId: connection.id } })).status, 200);
+    const result = await f.app.email.send(f.agent, { to: ["robin+google-recipient@ambox.dev"], subject: "External sender", body_text: "Google fixture email", body_html: "<p>Google fixture email</p>" }, { requester: { kind: "owner" } });
+    assert.equal(result.status, "sent");
+    assert.equal(google.sent.length, 1);
+    assert.match(google.sent[0], /From: .*<robin\+google@ambox.dev>/);
+    assert.match(google.sent[0], /multipart\/alternative/);
+    assert.equal(f.state.sent.length, 0);
+    assert.equal(f.app.email.summary(f.agent).sent, 1);
+    assert.equal(f.app.email.recent(f.agent)[0].mailbox, "robin+google@ambox.dev");
+    assert.equal((await f.call(`/api/connectors/${connection.id}`, { method: "DELETE", asMember: true })).status, 403);
+    assert.equal((await f.call(`/api/connectors/${connection.id}`, { method: "DELETE" })).status, 200);
+    await assert.rejects(() => f.app.email.send(f.agent, { to: ["robin+google-recipient@ambox.dev"], subject: "No", body_text: "No" }, { requester: { kind: "owner" } }), /autorizzato/);
+    assert.equal(google.sent.length, 1);
+  });
+
+  test("backlogs paginate without duplicates and persisted work is not blindly repeated after a restart", async (t) => {
+    const f = await emailWorld(t);
+    await f.call("/api/mail/channel", { method: "PUT", body: { enabled: true } });
+    for (let i = 0; i < 61; i++) f.deliver(f.mailbox, { subject: `Backlog ${i}` });
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    assert.equal(f.app.email.summary(f.agent).received, 61);
+    assert.equal(f.posts.length, 10);
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    assert.equal(f.app.email.summary(f.agent).received, 61);
+    assert.equal(f.posts.length, 20);
+    const email = f.app.email.recent(f.agent).find((item) => item.status === "pending");
+    f.app.email.status(f.agent, email, "working", CHANNEL);
+    const store = new Store(f.home);
+    t.after(() => store.close());
+    const restarted = new EmailChannel({ store, boxes: f.app.boxes, channels: f.app.channels, orchestrator: f.app.orchestrator, instanceUrl: f.base, key: "fixture-key" });
+    assert.equal(restarted.recent(f.agent).find((item) => item.id === email.id).status, "interrupted");
+    assert.equal(restarted.summary(f.agent).received, 61);
+  });
+
+  test("an older mail service shows the recent recap and keeps its recovery boundary for a later upgrade", async (t) => {
+    const f = await emailWorld(t);
+    f.state.legacy = true;
+    for (let i = 0; i < 61; i++) f.deliver(f.mailbox, { subject: `Older service ${i}` });
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    assert.equal(f.app.email.summary(f.agent).received, 50);
+    assert.equal(f.app.email.view(f.agent).status.state, "ready");
+    assert.equal(f.app.email.view(f.agent).status.partial, true);
+    f.state.legacy = false;
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    assert.equal(f.app.email.summary(f.agent).received, 61);
+    assert.equal(f.app.email.view(f.agent).status.partial, false);
+  });
+
+  test("Milo HTML, image signatures and open tracking distinguish preview from external fetch", async (t) => {
+    const f = await emailWorld(t);
+    await f.call(`/api/agents/${f.agent.id}/email`, { method: "PUT", body: { signature: "Nico\nCora team\nhttps://github.com/turinglabsorg" } });
+    const message = { to: ["robin+email-channel@ambox.dev"], subject: "HTML example", body_text: "Hello\n\nSecond line", body_html: "<p><b>Hello</b></p>" };
+    const sent = await f.app.email.send(f.agent, message, { requester: { kind: "owner" } });
+    assert.equal(sent.status, "sent");
+    assert.match(f.state.sent[0].body_html, /<b>Hello<\/b>/);
+    assert.match(f.state.sent[0].body_html, /width="\d+" height="\d+" alt="Nico · Cora team"/);
+    assert.match(f.state.sent[0].body_html, /github.com\/turinglabsorg/);
+    assert.match(f.state.sent[0].body_text, /Nico\nCora team/);
+    const image = f.state.sent[0].body_html.match(/src="([^"]+\.png)"/)[1];
+    assert.equal(f.app.email.recent(f.agent)[0].opened, null);
+    const preview = await fetch(`${f.base}/api/agents/${f.agent.id}/email/signature`, { headers: { Cookie: (await fetch(`${f.base}/api/login`, { method: "POST", headers: { "Content-Type": "application/json", "X-Cora": "1" }, body: JSON.stringify({ password: "fixture-password" }) })).headers.get("set-cookie").split(";")[0] } });
+    assert.equal(preview.status, 200);
+    assert.deepEqual([...Buffer.from(await preview.arrayBuffer()).subarray(0,4)], [137,80,78,71]);
+    assert.equal(f.app.email.recent(f.agent)[0].opens, 0);
+    await fetch(image, { method: "HEAD" });
+    assert.equal(f.app.email.recent(f.agent)[0].opens, 0);
+    const opened = await fetch(image);
+    assert.equal(opened.status, 200);
+    assert.equal(opened.headers.get("cache-control"), "no-store");
+    assert.equal(f.app.email.recent(f.agent)[0].opens, 1);
+    const first = f.app.email.recent(f.agent)[0].opened;
+    await fetch(image);
+    assert.equal(f.app.email.recent(f.agent)[0].opened, first);
+    assert.equal(f.app.email.recent(f.agent)[0].opens, 2);
+    await f.app.email.send(f.agent, { ...message, track: false }, { requester: { kind: "authorized" } });
+    const untracked = f.state.sent[1].body_html.match(/src="([^"]+\.png)"/)[1];
+    await fetch(untracked);
+    assert.equal(f.app.email.recent(f.agent).find((item) => item.id !== sent.id).opens, 0);
+    const template = '<html><body><p>Branded template</p></body></html>';
+    await f.app.email.send(f.agent, { ...message, body_html: template }, { requester: { kind: "owner" } });
+    assert.match(f.state.sent[2].body_html, /\.gif"[^>]+><\/body>/);
+    assert.doesNotMatch(f.state.sent[2].body_html, /\.png/);
+    await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
+    assert.equal(f.app.email.summary(f.agent).sent, 3);
+  });
 });

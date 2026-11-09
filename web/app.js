@@ -2518,7 +2518,7 @@ async function agentEmailTab(agent, isCurrent = () => true) {
     h("p", { class: "muted" }, mailbox?.status === "blocked" ? "La casella non è ancora pronta. Puoi riprovare assegnandole un indirizzo qui sotto." : "L'agente avrà una casella tutta sua, per inviare e ricevere email.");
   const identity = panel({ icon: "mail", title: "La sua email", hint: "Puoi scrivere all'agente a questo indirizzo e chiedergli di usare la sua casella.", actions: ready ? tag("Attiva", "ok") : null }, address,
     ready ? h("p", { class: "muted" }, "L'agente usa questo indirizzo quando gli chiedi di inviare posta.") : null);
-  if (!data.available) return [identity, panel({ icon: "info", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))];
+  if (!data.available) return [identity, emailChannelPane(agent), panel({ icon: "info", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))];
   const local = h("input", { type: "text", name: "local", required: true, minlength: 3, maxlength: 32, pattern: "[a-z0-9][a-z0-9\\-]{1,30}[a-z0-9]", autocomplete: "off", autocapitalize: "none", spellcheck: false, "aria-label": "Nome dell'indirizzo", value: ready ? mailbox.email.split("@")[0] : agent.name.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32), placeholder: "nico" });
   const usable = data.domains.filter((domain) => domain.ready);
   const domain = h("select", { name: "domain", required: true, "aria-label": "Dominio email" }, usable.map((item) => h("option", { value: item.name, selected: ready && mailbox.email.endsWith(`@${item.name}`) }, raw(item.name))));
@@ -2544,7 +2544,184 @@ async function agentEmailTab(agent, isCurrent = () => true) {
     feedback, h("div", { class: "row" }, btn("Gestisci domini", { icon: "globe", href: "#/settings/domini", cls: "ghost" }), h("span", { class: "spacer" }), submit));
   const previous = mailbox?.previousEmails?.length ? panel({ icon: "archive", title: "Indirizzi precedenti", hint: "Restano all'agente, insieme alla posta già ricevuta." },
     mailbox.previousEmails.map((email) => h("div", { class: "mail-address previous" }, h("code", {}, raw(email)), emailCopy(email)))) : null;
-  return [identity, panel({ icon: "edit", title: "Personalizza indirizzo", hint: "Scegli il nome e uno dei domini pronti per inviare e ricevere." }, form), previous];
+  return [identity, emailChannelPane(agent), panel({ icon: "edit", title: "Personalizza indirizzo", hint: "Scegli il nome e uno dei domini pronti per inviare e ricevere." }, form), previous];
+}
+
+function connectorsPane() {
+  const slot = h("div", { class: "stack connectors-pane" }, panel({ icon: "link", title: "Connettori" }, h("p", { role: "status", class: "muted" }, "Carico i connettori…")));
+  async function load() {
+    try {
+      const data = await api("/api/connectors");
+      if (!slot.isConnected) return;
+      const connect = btn("Collega account Google", { icon: "plus", cls: "primary", disabled: !data.canManage || !data.available, onclick: async (event) => {
+        const button = event.currentTarget; button.disabled = true;
+        try { const result = await api("/api/connectors/google", { method: "POST" }); window.location.assign(result.url); }
+        catch (error) { toast(error.message, true); button.disabled = false; }
+      } });
+      slot.replaceChildren(panel({ icon: "link", title: "Connettori", hint: "Gli account esterni che scegli di mettere a disposizione degli agenti." },
+        h("div", { class: "stack" }, h("h3", {}, "Google"), h("p", {}, "Collega Gmail o Google Workspace con Fluxkit per inviare email dal tuo indirizzo."),
+          h("p", { class: "muted" }, "Scegli quali agenti possono usare ogni account. La posta in arrivo di Google resta nel tuo account."),
+          data.notice ? h("p", { role: "status" }, raw(tr(data.notice))) : null,
+          !data.available ? h("p", { class: "muted" }, "Collegamento Google in preparazione.") : null, h("div", { class: "row" }, connect))),
+        ...data.connections.map((connection) => {
+          const choices = data.agents.map((agent) => {
+            const input = h("input", { type: "checkbox", checked: connection.agents.includes(agent.id), disabled: !data.canManage });
+            return { id: agent.id, input, node: h("label", { class: "email-folder" }, input, raw(agent.name)) };
+          });
+          const feedback = h("p", { role: "status", class: "muted" });
+          for (const item of choices) item.input.addEventListener("change", async () => {
+            item.input.disabled = true;
+            try { await api(`/api/connectors/${connection.id}`, { method: "PUT", body: { agents: choices.filter((other) => other.input.checked).map((other) => other.id) } }); feedback.textContent = tr("Agenti autorizzati aggiornati"); }
+            catch (error) { item.input.checked = !item.input.checked; feedback.textContent = tr(error.message); }
+            finally { item.input.disabled = false; }
+          });
+          let armed = false;
+          const disconnect = btn("Scollega", { icon: "unlink", cls: "ghost danger", disabled: !data.canManage, onclick: async () => {
+            if (!armed) { armed = true; disconnect.textContent = tr("Conferma scollegamento"); return; }
+            disconnect.disabled = true;
+            try { await api(`/api/connectors/${connection.id}`, { method: "DELETE" }); await load(); }
+            catch (error) { toast(error.message, true); disconnect.disabled = false; }
+          } });
+          return panel({ icon: "mail", title: raw(connection.email), hint: "Account Google collegato", actions: disconnect },
+            h("p", { class: "label" }, "Agenti autorizzati"), h("div", { class: "email-folders" }, choices.map((item) => item.node)),
+            h("p", { class: "muted" }, "Nella pagina Email dell'agente scegli questo account come mittente."), feedback);
+        }));
+    } catch (error) { slot.replaceChildren(panel({ icon: "alert", title: "Connettori non disponibili" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
+  }
+  Promise.resolve().then(load);
+  return slot;
+}
+
+function emailChannelPane(agent = null) {
+  const endpoint = agent ? `/api/agents/${agent.id}/email` : "/api/mail/channel";
+  const slot = h("div", { class: "stack email-channel", "aria-busy": "true" }, panel({ icon: "mail", title: agent ? "Ricezione e regole" : "E-mail" }, h("p", { role: "status", class: "muted" }, "Carico la posta…")));
+  const select = (label, options, value, save) => {
+    const input = h("select", { "aria-label": label }, options.map(([id, name]) => h("option", { value: id, selected: String(value) === id }, name)));
+    input.addEventListener("change", () => save(input.value, input));
+    return input;
+  };
+  async function load() {
+    slot.setAttribute("aria-busy", "true");
+    try {
+      let data = await api(endpoint);
+      if (!slot.isConnected) return;
+      const rules = agent ? data.overrides : data.settings, effective = agent ? data.effective : data.settings;
+      const feedback = h("p", { role: "status", class: "mail-feedback" });
+      const controls = [];
+      const save = async (patch, input) => {
+        const before = agent ? data.overrides : data.settings;
+        if (input) input.disabled = true;
+        feedback.textContent = tr("Salvo…"); feedback.classList.remove("err-text");
+        try {
+          data = await api(endpoint, { method: "PUT", body: patch });
+          feedback.textContent = tr("Regole email aggiornate");
+          toast("Regole email aggiornate");
+          if (agent) destination.textContent = tr("Resoconti: {channel}", { channel: data.destination?.name || tr("Scegli un canale") });
+        } catch (error) {
+          feedback.textContent = tr(error.message); feedback.classList.add("err-text"); toast(error.message, true);
+          if (input) {
+            const key = Object.keys(patch)[0], previous = before[key];
+            if (key === "folders") input.checked = before.folders.includes(input.value);
+            else if (input.type === "checkbox") input.checked = Boolean(previous);
+            else input.value = key === "senders" ? (previous || []).join(", ") : key === "track" ? previous == null && agent ? "inherit" : String(previous ?? true) : previous ?? (["mode", "replyMode"].includes(key) ? "inherit" : "");
+          }
+        }
+        finally { if (input) input.disabled = false; }
+      };
+      if (!agent) {
+        const enabled = h("input", { type: "checkbox", checked: rules.enabled, "aria-label": "Attiva canale E-mail" });
+        enabled.addEventListener("change", () => save({ enabled: enabled.checked }, enabled));
+        controls.push(setRow("Attiva canale E-mail", "Cora collega le caselle e recupera la posta automaticamente.", enabled));
+      }
+      const modes = [...(agent ? [["inherit", "Eredita regole generali"]] : []), ["manual", "Manuale"], ["notify", "Solo notifica"], ["auto", "Gestione automatica"]];
+      const mode = select("Quando arriva un'email", modes, rules.mode || "inherit", (value, input) => save({ mode: value }, input));
+      controls.push(setRow("Quando arriva un'email", "Manuale: controlla su richiesta. Notifica: avvisa nel canale. Automatico: legge e gestisce secondo le regole.", mode, { stack: true }));
+      const channels = h("select", { "aria-label": "Canale dei resoconti email" }, h("option", { value: "" }, agent ? "Eredita destinazione generale" : "General, se accessibile"),
+        data.channels.map((item) => h("option", { value: item.id, selected: rules.reportChannelId === item.id }, raw(`${item.name} · ${item.guildName || item.kind}`))));
+      channels.value = rules.reportChannelId || "";
+      channels.addEventListener("change", () => save({ reportChannelId: channels.value }, channels));
+      const destination = h("p", { class: "muted" }, agent ? tr("Resoconti: {channel}", { channel: data.destination?.name || tr("Scegli un canale") }) : "Ogni agente scrive solo nei canali a cui può accedere.");
+      controls.push(setRow("Canale dei resoconti email", "L'agente può cambiarlo se glielo chiede un utente autorizzato.", h("div", { class: "stack-sm" }, channels, destination), { stack: true }));
+      const senders = h("input", { type: "text", value: (rules.senders || []).join(", "), placeholder: "persona@azienda.it, @azienda.it", "aria-label": "Mittenti da ascoltare", autocapitalize: "none", spellcheck: false });
+      senders.addEventListener("change", () => save({ senders: senders.value }, senders));
+      controls.push(setRow("Mittenti da ascoltare", agent ? "Vuoto: tutti quelli ammessi dalle regole generali. Puoi restringere con indirizzi o domini." : "Vuoto: tutti i mittenti. Spam, messaggi automatici e risposte a sé stesso non svegliano l'agente.", senders, { stack: true }));
+      if (!agent) {
+        const folders = [ ["inbox", "Posta in arrivo"], ["important", "Importanti"], ["transactional", "Transazionali"], ["notification", "Notifiche"] ].map(([id, label]) => {
+          const input = h("input", { type: "checkbox", value: id, checked: rules.folders.includes(id) });
+          return { id, input, node: h("label", { class: "email-folder" }, input, label) };
+        });
+        for (const item of folders) item.input.addEventListener("change", () => save({ folders: folders.filter((other) => other.input.checked).map((other) => other.id) }, item.input));
+        controls.push(setRow("Cartelle da ascoltare", "Il recap include anche la posta che non avvia un'attività.", h("div", { class: "email-folders" }, folders.map((item) => item.node)), { stack: true }));
+      }
+      const replies = select("Risposte via email", [...(agent ? [["inherit", "Eredita regole generali"]] : []), ["draft", "Prepara una bozza"], ["auto", "Consenti risposta automatica"]], rules.replyMode || "inherit", (value, input) => save({ replyMode: value }, input));
+      controls.push(setRow("Risposte via email", "La risposta automatica vale durante la gestione automatica e solo verso il mittente.", replies, { stack: true }));
+      const instructions = h("textarea", { rows: 4, maxlength: 8000, "aria-label": agent ? "Regole aggiuntive dell'agente" : "Regole email generali", value: rules.instructions || "", placeholder: "Come deve gestire la corrispondenza" });
+      instructions.addEventListener("change", () => save({ instructions: instructions.value }, instructions));
+      controls.push(setRow(agent ? "Regole aggiuntive dell'agente" : "Regole email generali", agent ? "Si aggiungono alle istruzioni generali." : "Queste istruzioni valgono per tutti gli agenti.", instructions, { stack: true }));
+      const track = select("Traccia aperture", [...(agent ? [["inherit", "Eredita regole generali"]] : []), ["true", "Attiva"], ["false", "Disattiva"]], agent && rules.track == null ? "inherit" : String(effective.track), (value, input) => save({ track: value === "inherit" ? null : value === "true" }, input));
+      controls.push(setRow("Traccia aperture", "Il caricamento dell'immagine è un indizio di apertura, non una conferma di lettura.", track, { stack: true }));
+      if (!data.canManage) for (const row of controls) for (const input of row.querySelectorAll("input,select,textarea")) input.disabled = true;
+      const content = [panel({ icon: "mail", title: agent ? "Ricezione e regole" : "E-mail", hint: agent ? "Le preferenze di questo agente, insieme alle regole dello spazio." : "Dall'arrivo della posta al resoconto nel canale scelto." }, setRows(...controls), feedback)];
+      if (agent) {
+        const sender = h("select", { "aria-label": "Mittente delle email", disabled: !data.canManage }, h("option", { value: "" }, "La casella dell'agente"),
+          (data.senders || []).map((item) => h("option", { value: item.id, selected: rules.senderId === item.id }, raw(item.email))));
+        if (rules.senderId && !data.senders?.some((item) => item.id === rules.senderId)) sender.append(h("option", { value: rules.senderId, selected: true }, "Account da ricollegare"));
+        sender.value = rules.senderId || "";
+        sender.addEventListener("change", () => save({ senderId: sender.value }, sender));
+        content.push(panel({ icon: "send", title: "Mittente delle email", hint: "Usa la sua casella oppure un account esterno autorizzato." }, sender,
+          h("a", { href: "#/settings/connettori", class: "muted" }, "Gestisci connettori")));
+        const signature = h("textarea", { rows: 3, maxlength: 1500, "aria-label": "Testo della firma", value: rules.signature || `${agent.name}\n${agent.mailbox?.email || ""}`, disabled: !data.canManage });
+        signature.addEventListener("change", () => save({ signature: signature.value }, signature));
+        const preview = h("div", { class: "email-signature-preview", role: "status" });
+        content.push(panel({ icon: "edit", title: "Firma come immagine", hint: "Il suo avatar, il nome e i dettagli: la stessa firma nelle email HTML." }, field("Testo della firma", signature),
+          btn("Mostra anteprima", { icon: "eye", cls: "ghost", onclick: async (event) => {
+            const button = event.currentTarget; button.disabled = true;
+            preview.replaceChildren(h("p", { class: "muted" }, "Preparo la firma…"));
+            try {
+              const response = await fetch(`${endpoint}/signature`, { credentials: "same-origin" });
+              if (!response.ok) throw new Error("Non riesco a preparare la firma. Riprova.");
+              const url = URL.createObjectURL(await response.blob());
+              const image = h("img", { src: url, alt: tr("Anteprima della firma"), onload: (event) => { event.currentTarget.width = Math.round(event.currentTarget.naturalWidth / 2); URL.revokeObjectURL(url); } });
+              preview.replaceChildren(image);
+            } catch (error) { preview.replaceChildren(h("p", { class: "err-text", role: "alert" }, raw(tr(error.message)))); }
+            finally { button.disabled = false; }
+          } }), preview));
+        content.push(emailRecap(agent, data));
+      } else {
+        content.push(panel({ icon: "users", title: "Caselle degli agenti", hint: "Le regole personali e il recap si trovano nella pagina Email di ogni agente." },
+          h("div", { class: "email-agent-list" }, data.agents.map((item) => h("a", { class: "email-agent-row", href: `#/agent/${item.id}/email` }, raw(item.name), h("span", { class: "muted" }, tr("{received} ricevute · {sent} inviate", { received: item.received, sent: item.sent })), icon("chevron"))))));
+      }
+      slot.replaceChildren(...content); slot.setAttribute("aria-busy", "false");
+    } catch (error) { slot.setAttribute("aria-busy", "false"); slot.replaceChildren(panel({ icon: "alert", title: "Email non disponibile" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
+  }
+  Promise.resolve().then(load);
+  return slot;
+}
+
+function emailRecap(agent, initial) {
+  let data = initial, filter = "all";
+  const body = h("div", { class: "stack" });
+  const stateLabel = { pending: "In coda", ignored: "Solo ricevuta", notified: "Segnalata", working: "In gestione", processed: "Gestita", stopped: "Fermata", interrupted: "Da verificare", error: "Da verificare", sent: "Inviata", sending: "Invio in corso", uncertain: "Invio da verificare", draft: "Bozza" };
+  function draw() {
+    const summary = data.summary, status = data.status;
+    const modes = [["all", "Tutte"], ["received", "Ricevute"], ["sent", "Inviate"], ["draft", "Bozze"]];
+    const picker = h("div", { class: "segmented", role: "group", "aria-label": "Filtra email" }, modes.map(([id, label]) => btn(label, { cls: filter === id ? "active" : "", onclick: () => { filter = id; draw(); } })));
+    const messages = data.recent.filter((item) => filter === "all" || item.direction === filter);
+    body.replaceChildren(h("div", { class: "email-totals" }, [[summary.received, "Ricevute"], [summary.sent, "Inviate"], [summary.draft, "Bozze"]].map(([value, label]) => h("div", {}, h("strong", {}, raw(value)), h("span", {}, label)))),
+      h("div", { class: "row wrap" }, picker, h("span", { class: "spacer" }), btn("Aggiorna posta", { icon: "refresh", cls: "sm ghost", onclick: async (event) => {
+        const button = event.currentTarget; button.disabled = true;
+        try { data = await api(`/api/agents/${agent.id}/email/refresh`, { method: "POST" }); draw(); }
+        catch (error) { toast(error.message, true); button.disabled = false; }
+      } })),
+      status?.error ? h("p", { class: "err-text", role: "status" }, raw(tr(status.error))) : h("p", { class: "muted" }, status?.checkedAt ? tr("Ultimo controllo: {date}", { date: new Date(status.checkedAt).toLocaleString(LANG) }) : "Il primo controllo partirà automaticamente."),
+      status?.partial ? h("p", { class: "muted" }, "Sono mostrate le email più recenti.") : null,
+      h("div", { class: "email-ledger" }, messages.length ? messages.map((item) => h("article", { class: "email-ledger-row" },
+        h("div", { class: "email-ledger-main" }, icon(item.direction === "received" ? "mail" : "send"), h("div", {}, h("strong", {}, raw(item.subject || tr("Senza oggetto"))), h("p", { class: "muted" }, raw(item.direction === "received" ? item.from : (item.to || []).join(", "))))),
+        h("div", { class: "email-ledger-meta" }, tag(item.opened ? "Apertura rilevata" : stateLabel[item.status] || "Ricevuta", item.opened ? "ok" : ["error", "interrupted", "uncertain"].includes(item.status) ? "agent" : ""), h("time", { datetime: item.at }, raw(new Date(item.at).toLocaleString(LANG))),
+          item.direction === "sent" && !item.opened ? h("small", { class: "muted" }, item.tracked ? "Nessuna apertura rilevata" : "Tracking disattivato") : null))) : h("p", { class: "muted" }, "Nessuna email da mostrare.")));
+  }
+  draw();
+  return panel({ icon: "mail", title: "Recap email", hint: "La posta ricevuta e inviata dall'agente, con lo stato di gestione e apertura." }, body);
 }
 
 function mailDomainChecks(domain, account) {
@@ -6358,6 +6535,9 @@ function renderSettings() {
   const back = () => btn("Impostazioni", { icon: "back", cls: "sm ghost rail-back", onclick: () => show("") });
   const page = (id, ...content) => pages.set(id, h("div", { class: "stack" }, back(), content));
 
+  page("email", emailChannelPane());
+  page("connettori", connectorsPane());
+
   /* ---------- Canali ---------- */
   const listenRow = (kind) => platformControls(kind);
   const ownersRow = (key, hint) => {
@@ -6634,6 +6814,8 @@ function renderSettings() {
   entries = [
     { id: "contesto", group: "Contesto", label: "Contesto degli agenti", mark: "book", href: "#/contesto", state: () => [null, tr("istruzioni e file che tutti leggono")] },
     ...["discord", "telegram", "slack"].map((kind) => ({ id: kind, group: "Canali", label: TRANSPORTS[kind].label, mark: TRANSPORTS[kind].icon, state: () => channelState(kind) })),
+    { id: "email", group: "Canali", label: "E-mail", mark: "mail", state: () => [null, tr("Ricezione e regole")] },
+    { id: "connettori", group: "Connettori", label: "Connettori", mark: "link", state: () => [null, tr("Google e account esterni")] },
     { id: "server", group: "Abbonamenti", label: "Account del server", mark: "monitor", state: () => [null, settings.useResidentSubscriptions ? tr("in uso per chi non sceglie") : tr("non usati")] },
     ...providers.map((provider) => ({ id: provider, group: "Abbonamenti", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
     ...CONNECTION_KEYS.map(([provider, name, mark]) => ({ id: provider, group: "Chiavi API", label: name, mark, state: () => keyState(provider) })),

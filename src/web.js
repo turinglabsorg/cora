@@ -176,7 +176,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, github = null, mailDomains = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, github = null, mailDomains = null, email = null, googleConnector = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -410,6 +410,44 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { ok: true }, { "Set-Cookie": clearedCookies() });
     }
 
+    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(), canManage: user.role === "owner", notice: store.value("googleConnectorNotice", "") });
+    if (path === "/api/connectors/google" && method === "POST") {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega account Google.");
+      const started = googleConnector.begin(user);
+      const name = config.insecureCookies ? "cora_google" : "__Host-cora_google";
+      return send(res, 200, { url: started.url }, { "Set-Cookie": `${name}=${started.nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=900${config.insecureCookies ? "" : "; Secure"}` });
+    }
+    const connector = /^\/api\/connectors\/(gc_[a-f0-9]{16})$/.exec(path);
+    if (connector && ["PUT", "DELETE"].includes(method)) {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia i connettori.");
+      if (method === "DELETE") { googleConnector.disconnect(connector[1]); return send(res, 200, { ok: true }); }
+      return send(res, 200, googleConnector.update(connector[1], await readJson(req, 8000)));
+    }
+    if (path === "/api/mail/channel") {
+      if (method === "GET") return send(res, 200, { ...email.view(), canManage: user.role === "owner" });
+      if (method === "PUT") {
+        if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia le regole email generali.");
+        return send(res, 200, await email.update(await readJson(req, 20000)));
+      }
+    }
+    const agentEmail = /^\/api\/agents\/([\w-]+)\/email(?:\/(refresh|signature))?$/.exec(path);
+    if (agentEmail) {
+      const agent = store.agent(agentEmail[1]);
+      if (!agent) throw new HttpError(404, "Agente non trovato.");
+      if (method === "GET" && !agentEmail[2]) { await email.poll(agent); return send(res, 200, { ...email.view(agent), canManage: user.role === "owner" }); }
+      if (method === "GET" && agentEmail[2] === "signature") {
+        const rendered = await email.compose(agent, { body_text: "" }, "preview", false);
+        return send(res, 200, Buffer.from(rendered.png, "base64"), { "Content-Type": "image/png" });
+      }
+      if (method === "POST" && agentEmail[2] === "refresh") {
+        await email.poll(agent);
+        return send(res, 200, email.view(agent));
+      }
+      if (method === "PUT" && !agentEmail[2]) {
+        if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia le regole email dell'agente.");
+        return send(res, 200, await email.update(await readJson(req, 20000), agent));
+      }
+    }
     if (path === "/api/mail/domains" && method === "GET") return send(res, 200, { ...mailDomains.view(), canManage: user.role === "owner" });
     if (path === "/api/mail/accounts" && method === "POST") {
       if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega account Resend.");
@@ -1603,6 +1641,18 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
     }
     try {
+      const mailEvent = /^\/mail\/events\/(ag_[a-z0-9]+)\/([a-f0-9]{24})$/.exec(url.pathname);
+      if (mailEvent && email && req.method === "POST") {
+        const chunks = []; let size = 0;
+        for await (const chunk of req) { size += chunk.length; if (size > 16384) throw new HttpError(413, "event too large"); chunks.push(chunk); }
+        await email.acceptEvent(mailEvent[1], mailEvent[2], Buffer.concat(chunks), req.headers["x-ambox-signature"]);
+        return send(res, 200, { ok: true });
+      }
+      const mailImage = /^\/mail\/media\/([A-Za-z0-9_-]{24})\.(png|gif)$/.exec(url.pathname);
+      if (mailImage && email && ["GET", "HEAD"].includes(req.method)) {
+        const body = email.media(mailImage[1], { png: mailImage[2] === "png", head: req.method === "HEAD" });
+        return send(res, body ? 200 : 404, req.method === "HEAD" ? Buffer.alloc(0) : body || "", { "Content-Type": mailImage[2] === "png" ? "image/png" : "image/gif", "Content-Security-Policy": "default-src 'none'", "Cache-Control": "no-store" });
+      }
       // A request page posts a plain form: it checks its own origin, and the link is the key.
       if (url.pathname.startsWith("/send/")) return await vaultPages(req, res, url);
       if (req.method !== "GET" && req.method !== "HEAD") {
@@ -1620,6 +1670,16 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (url.pathname === "/api/events") return events(req, res);
       const picture = /^\/avatars\/([\w-]+)\.png$/.exec(url.pathname);
       if (picture && (req.method === "GET" || req.method === "HEAD")) return avatarFile(res, url, picture[1]);
+      if (url.pathname === "/connectors/google/callback" && googleConnector && req.method === "GET") {
+        const name = config.insecureCookies ? "cora_google" : "__Host-cora_google";
+        let status = 200, message = "Account Google collegato. Scegli gli agenti che possono usarlo.";
+        try {
+          await googleConnector.finish({ ...Object.fromEntries(url.searchParams), nonce: parseCookies(req.headers.cookie)[name] || "" });
+          store.setValue("googleConnectorNotice", message);
+        } catch { status = 400; message = "Collegamento Google non riuscito o scaduto. Riprova da Connettori."; store.setValue("googleConnectorNotice", message); }
+        const body = `<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${status === 200 ? '<meta http-equiv="refresh" content="1;url=/#/settings/connettori">' : ""}<title>Google · Cora</title><style>${SEND_STYLE}</style></head><body><main>${SEND_MARK}<h1>Google</h1><p>${message}</p><a class="button" href="/#/settings/connettori">Torna a Connettori</a></main></body></html>`;
+        return send(res, status, body, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'", "Set-Cookie": `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${config.insecureCookies ? "" : "; Secure"}` });
+      }
       if (url.pathname.startsWith("/github/") && github && (req.method === "GET" || req.method === "HEAD")) return await githubReturn(res, url);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (url.pathname.startsWith("/box/")) return await proxyBox(req, res);

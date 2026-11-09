@@ -5,6 +5,7 @@ import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const OUTPUT_LIMIT = 24000;
+const MAIL_CLIENT_SCRIPT = readFileSync(new URL("./desktop-mail.mjs", import.meta.url), "utf8");
 const MAILBOX_SCRIPT = readFileSync(new URL("./desktop-mailbox.mjs", import.meta.url), "utf8");
 const GIT_SCRIPT = readFileSync(new URL("./desktop-git.sh", import.meta.url), "utf8");
 const SSH_SCRIPT = readFileSync(new URL("./desktop-ssh.mjs", import.meta.url), "utf8");
@@ -356,6 +357,22 @@ export class Boxes {
     });
     if (result.code !== 0) throw new Error(`Git attribution setup failed: ${result.stderr.trim().slice(0, 300)}`);
     this.gitChecks.set(agent.id, version);
+  }
+
+  async mailCommand(agent, request) {
+    if (!agent.enabled || !agent.tools) throw new Error("The agent mailbox is unavailable.");
+    await this.ensure(agent);
+    const result = await runProcess(this.docker, this.execArgs(agent.id, ["node", "--input-type=module", "-e", MAIL_CLIENT_SCRIPT]), {
+      input: JSON.stringify({ ...request, endpoint: this.mailbox.endpoint }), timeoutMs: 45000, maxBytes: 2 * 1024 * 1024,
+    });
+    if (result.code !== 0) throw new Error("Email operation failed; check the mailbox connection.");
+    return JSON.parse(result.stdout);
+  }
+
+  async ensureMailRenderer(agent) {
+    await this.ensure(agent);
+    const result = await runProcess(this.docker, this.execArgs(agent.id, ["sh", "-c", "python3 -c 'import PIL' >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq --no-install-recommends python3-pil; }"], { root: true }), { timeoutMs: 180000, maxBytes: 4096 });
+    if (result.code !== 0) throw new Error("Email signature renderer unavailable.");
   }
 
   ensureMailbox(agent) {

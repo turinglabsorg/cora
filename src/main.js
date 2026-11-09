@@ -29,6 +29,8 @@ import { SlackApps } from "./slack-apps.js";
 import { Store } from "./store.js";
 import { Subscriptions } from "./subscriptions.js";
 import { Voice } from "./voice.js";
+import { GoogleConnector } from "./google-connector.js";
+import { EmailChannel } from "./email-channel.js";
 import { MailDomains } from "./mail-domains.js";
 import { createWeb } from "./web.js";
 
@@ -138,6 +140,10 @@ export function startCora(overrides = {}) {
   // Where the owner reviews the brain: the address people reach this Cora on.
   const instanceUrl = cfg.publicHost ? `https://${cfg.publicHost}` : cfg.cloudUrl && cfg.cloudSpace ? `https://${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
   orchestrator.instanceUrl = instanceUrl;
+  const googleConnector = new GoogleConnector({ store, enabled: cfg.googleConnectorEnabled !== false, broker: cfg.googleConnectorBroker || (cfg.cloudUrl && cfg.cloudSpace ? "https://connect.fluxkit.dev" : ""), space: cfg.cloudSpace, storeSecret, tokenFor, ...(cfg.gmailApi ? { api: cfg.gmailApi } : {}) });
+  const email = new EmailChannel({ store, boxes, channels, orchestrator, instanceUrl, key: cfg.sessionKey || cfg.adminPassword, log: activity, googleConnector });
+  brain.email = email;
+  orchestrator.email = email;
   // The agents' pictures are served from here, so Slack and Discord fetch them from this address.
   store.setAvatarBase(instanceUrl);
   // What the agents make on their desktops, versioned and reviewed on this server.
@@ -174,7 +180,7 @@ export function startCora(overrides = {}) {
   companyBrain.onNote = () => librarian.requestRun({ reason: "memoria" });
   // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
   const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, github, mailDomains });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, github, mailDomains, email, googleConnector });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -268,6 +274,7 @@ export function startCora(overrides = {}) {
       }
     }, 60000);
     scheduler.start();
+    email.start();
     if (cfg.startBoxes !== false) {
       for (const agent of store.agents()) {
         if (agent.enabled && agent.tools) boxes.ensure(agent, { upgrade: true }).catch((error) => activity({ type: "error", agentId: agent.id, text: `desktop: ${error.message}` }));
@@ -283,6 +290,7 @@ export function startCora(overrides = {}) {
     clearInterval(botTimer);
     scheduler.stop();
     github.stop();
+    await email.stop();
     await librarian.stop();
     await subscriptions.close();
     discord.stop();
@@ -298,7 +306,7 @@ export function startCora(overrides = {}) {
     await companyBrain.close();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, github, mailDomains, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, github, mailDomains, email, googleConnector, server: web.server };
 }
 
 const isMain = (() => {

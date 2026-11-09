@@ -1,3 +1,4 @@
+import { GoogleConnectorBroker } from "./google-connector.js";
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import http from "node:http";
@@ -114,6 +115,10 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
   const STATE = secure ? "__Host-cora_oauth" : "cora_oauth";
   // Where a space answers: its own domain when it is installed somewhere else, otherwise its name here.
   const spaceOrigin = (space) => (typeof space === "string" ? store.space(space)?.publicUrl : space?.publicUrl) || `${origin.protocol}//${typeof space === "string" ? space : space?.slug}.${origin.host}`;
+  const googleConnector = new GoogleConnectorBroker({ origin: config.googleConnector?.origin || origin.origin, key: sessionKey, ...config.googleConnector,
+    spaceOrigin: (slug) => { const space = store.space(slug); return space ? spaceOrigin(space) : null; },
+    endpoints: endpoints.googleConnector || {},
+  });
   const spaceAudience = (space) => new URL(spaceOrigin(space)).hostname;
   const version = createHash("sha256").update(readFileSync(join(ASSETS, "cloud.css"))).digest("hex").slice(0, 10);
   views.configure({ origin: origin.origin, version });
@@ -239,6 +244,27 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       return res.end(JSON.stringify({ domain, publicKey: keys.publicKey }));
     }
     if (path.startsWith("/assets/") && (method === "GET" || method === "HEAD") && asset(res, path.slice("/assets/".length))) return;
+    if (path === "/connectors/google/start" && method === "GET") {
+      try { return redirect(res, googleConnector.start(Object.fromEntries(url.searchParams))); }
+      catch { return html(res, 409, "Google connection unavailable. Return to Cora and try again."); }
+    }
+    if (path === "/connectors/google/callback" && method === "GET") {
+      try { return redirect(res, googleConnector.callback(Object.fromEntries(url.searchParams))); }
+      catch { return html(res, 400, "Google connection expired. Return to Cora and try again."); }
+    }
+    if (["/connectors/google/exchange", "/connectors/google/refresh"].includes(path) && method === "POST") {
+      try {
+        const chunks = []; let size = 0;
+        for await (const chunk of req) { size += chunk.length; if (size > 16000) throw new Error(); chunks.push(chunk); }
+        const data = JSON.parse(Buffer.concat(chunks));
+        const result = await googleConnector[path.endsWith("exchange") ? "exchange" : "refresh"](data);
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+        return res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        return res.end(JSON.stringify({ error: "Google connection could not be completed. Reconnect from Cora." }));
+      }
+    }
     if (path === "/robots.txt") {
       res.writeHead(200, { "Content-Type": "text/plain" });
       return res.end("User-agent: *\nAllow: /\nDisallow: /account\nDisallow: /go/\nDisallow: /auth/\n");
@@ -511,7 +537,7 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
           },
         });
       }
-      if (host !== domain && url.pathname !== "/healthz") return html(res, 404, views.notFound());
+      if (host !== domain && !(config.googleConnector?.origin && host === new URL(config.googleConnector.origin).hostname && url.pathname.startsWith("/connectors/google/")) && url.pathname !== "/healthz") return html(res, 404, views.notFound());
       await site(req, res, url);
     } catch (error) {
       log({ type: "error", path: url.pathname, error: error.message });

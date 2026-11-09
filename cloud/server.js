@@ -19,6 +19,7 @@ const config = {
     resendKey: env.CORA_CLOUD_RESEND_API_KEY || "", from: env.CORA_CLOUD_MAIL_FROM || "Cora <cora@usecora.space>",
     url: env.CORA_CLOUD_AMBOX_URL || "https://ambox.dev", key: env.CORA_CLOUD_AMBOX_API_KEY || "",
   },
+  googleConnector: { origin: env.CORA_CONNECTORS_ORIGIN || "https://connect.fluxkit.dev", redirectUri: "https://ubercal.fluxkit.dev/auth/google/callback", clientSecret: env.FLUXKIT_GOOGLE_CLIENT_SECRET || "" },
   clients: {
     google: { id: env.GOOGLE_CLIENT_ID || "", secret: env.GOOGLE_CLIENT_SECRET || "" },
     github: { id: env.GITHUB_CLIENT_ID || "", secret: env.GITHUB_CLIENT_SECRET || "" },
