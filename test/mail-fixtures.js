@@ -6,6 +6,7 @@ import { startCora } from "../src/main.js";
 import { fakeDocker, fakeOllama, tempHome } from "./helpers.js";
 
 export async function mailWorld(t = null) {
+  const previousReply = fakeOllama.current;
   const state = { requests: [], messages: new Map(), clientKeys: new Map(), webhooks: new Map(), sent: [], accounts: new Map(), routes: new Map(), relayAccounts: new Map(), mailboxes: new Map(), dnsReady: new Set(), refuse: false, relayRefuse: false };
   const keyA = "re_fixture_account_alpha", keyB = "re_fixture_account_beta";
   for (const key of [keyA, keyB]) state.accounts.set(key, { domains: [], hooks: [] });
@@ -145,7 +146,7 @@ export async function mailWorld(t = null) {
     const response = await fetch(`${base}${path}`, { method, headers: { ...(auth ? { Cookie: asMember ? memberCookie : cookie } : {}), "X-Cora": "1", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: response.status, data: await response.json(), headers: response.headers };
   };
-  const close = async () => { await app.stop(); await ollama.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); };
+  const close = async () => { await app.stop(); await ollama.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); fakeOllama.current = previousReply; };
   t?.after(close);
   return { app, state, vault, keyA, keyB, call, base, home, close, deliver };
 }

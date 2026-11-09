@@ -75,6 +75,8 @@ const CHAT_PERSON = /^(discord|telegram|slack):[\w.-]{1,40}$/;
 const AGENT_DEFAULTS = {
   // Who the agent answers to: a real person in the chats ("discord:<user id>"); empty means the owner of the space.
   ownerId: "",
+  brainSource: "internal",
+  brainOwnerId: "",
   // What Cora draws the picture from: empty means the agent's id.
   avatarSeed: "",
   color: "#e8a33d",
@@ -168,6 +170,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_channel_at ON messages(channel_id, at);
+CREATE INDEX IF NOT EXISTS messages_at ON messages(at);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(author_name, content, content='messages', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2');
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
   INSERT INTO messages_fts(rowid, author_name, content) VALUES (new.rowid, new.author_name, new.content);
@@ -297,6 +300,8 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     model: checkModel(merged.model),
     subscriptionId: cleanText(merged.subscriptionId, 80).trim(),
     ownerId: CHAT_PERSON.test(String(merged.ownerId || "")) ? String(merged.ownerId) : "",
+    brainSource: merged.brainSource === "external" ? "external" : "internal",
+    brainOwnerId: cleanText(merged.brainOwnerId, 160).trim(),
     // Ollama decides the card when it starts, so one server per card is how an agent picks one.
     ollamaHost: cleanUrl(merged.ollamaHost),
     chattiness: clampNumber(merged.chattiness, 0, 1, 0.5),
@@ -1249,8 +1254,9 @@ export class Store {
     });
   }
 
-  routineHistory({ agentId = "", routineId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
+  routineHistory({ agentIds = null, agentId = "", routineId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
     const conditions = [], args = [];
+    if (agentIds) { conditions.push(agentIds.length ? `agent_id IN (${agentIds.map(() => "?").join(",")})` : "0"); args.push(...agentIds); }
     if (agentId) { conditions.push("agent_id = ?"); args.push(agentId); }
     if (routineId) { conditions.push("routine_id = ?"); args.push(routineId); }
     if (kind) { conditions.push("json_extract(data, '$.kind') = ?"); args.push(kind); }
@@ -1267,8 +1273,8 @@ export class Store {
     return { items, total, limit, offset };
   }
 
-  routineArchive({ agentId = "", routineId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
-    const matches = this.cachedRoutines.filter((routine) => routine.archivedAt && (!agentId || routine.agentId === agentId) && (!routineId || routine.id === routineId) && (!kind || (routine.kind || "routine") === kind)
+  routineArchive({ agentIds = null, agentId = "", routineId = "", kind = "", query = "", limit = 20, offset = 0 } = {}) {
+    const matches = this.cachedRoutines.filter((routine) => routine.archivedAt && (!agentIds || agentIds.includes(routine.agentId)) && (!agentId || routine.agentId === agentId) && (!routineId || routine.id === routineId) && (!kind || (routine.kind || "routine") === kind)
       && `${routine.name} ${routine.prompt} ${routine.lastOutput}`.toLowerCase().includes(query.trim().slice(0, 200).toLowerCase()))
       .sort((a, b) => b.archivedAt.localeCompare(a.archivedAt));
     limit = Math.max(1, Math.min(50, Math.floor(Number(limit) || 20)));
@@ -1366,10 +1372,11 @@ export class Store {
   }
 
   /* ---------- push notifications ---------- */
-  addPushSubscription({ endpoint, keys }, device = "") {
+  addPushSubscription({ endpoint, keys }, device = "", userId = "") {
     if (!/^https?:\/\/\S+$/.test(String(endpoint || "")) || !keys?.p256dh || !keys?.auth) throw new ValidationError("subscription non valida");
     this.stmt("INSERT INTO push_subscriptions(endpoint, p256dh, auth, device, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, device = excluded.device")
       .run(String(endpoint), String(keys.p256dh), String(keys.auth), cleanText(device, 200), new Date().toISOString());
+    if (userId) this.setValue(`pushOwner:${createHash("sha256").update(String(endpoint)).digest("hex")}`, String(userId));
   }
 
   removePushSubscription(endpoint) {
@@ -1377,7 +1384,10 @@ export class Store {
   }
 
   pushSubscriptions() {
-    return this.stmt("SELECT * FROM push_subscriptions").all().map((row) => ({ endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth }, device: row.device }));
+    return this.stmt("SELECT * FROM push_subscriptions").all().map((row) => {
+      const userId = this.value(`pushOwner:${createHash("sha256").update(row.endpoint).digest("hex")}`, "");
+      return { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth }, device: row.device, ...(userId ? { userId } : {}) };
+    });
   }
 
   /* ---------- artifacts ---------- */

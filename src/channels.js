@@ -1,4 +1,4 @@
-import { SALOTTO, isWebRoom, roomLabel } from "./rooms.js";
+import { SALOTTO, isWebRoom, isSalotto, roomLabel } from "./rooms.js";
 import { isDirectChannel } from "./slack.js";
 
 /** How each transport is named to people. */
@@ -194,7 +194,7 @@ export class Channels {
    */
   info(id) {
     if (isWebRoom(id)) {
-      return id === SALOTTO
+      return isSalotto(id)
         ? { id, kind: "web", web: true, name: "salotto", where: "nel salotto del pannello", place: "nel pannello web di cora", note: "il proprietario vi scrive dal pannello web di cora, ci siete tutti voi agenti" }
         : { id, kind: "web", web: true, name: "chat privata", where: "nella chat privata del pannello", place: "nel pannello web di cora", note: "ci siete solo tu e il proprietario, che ti scrive dal pannello web di cora: rispondigli sempre" };
     }

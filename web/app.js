@@ -2934,7 +2934,7 @@ async function renderAgent() {
       h("div", { class: "hero-text" },
         h("h1", {}, raw(agent.name)),
         h("div", { class: "badges" },
-          badge(modelLabel(agent.model, { short: true }), "", "chip"),
+          badge(h("span", { class: "hero-model", title: modelLabel(agent.model, { short: true }) }, raw(modelLabel(agent.model, { short: true }))), "", "chip"),
           compact ? null : badge(agent.box?.running ? "Desktop acceso" : "Desktop spento", agent.box?.running ? "on" : "", "monitor"),
           compact || !agent.box?.outdated || !agent.box?.exists ? null : badge("Da aggiornare", "warn", "upgrade"),
           compact ? null : platformBadges(agent)),
@@ -2945,9 +2945,9 @@ async function renderAgent() {
       return h("a", { href: `#/agent/${agent.id}/${key}`, class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, count) : null);
     })),
     slot,
-  ], { title: agent.name, back: tab === "email" && sub ? `#/agent/${agent.id}/email` : sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : tab === "email" ? "email" : "" });
+  ], { title: agent.name, back: ["email", "memoria"].includes(tab) && sub ? `#/agent/${agent.id}/${tab}` : sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : ["email", "memoria"].includes(tab) ? "email" : "" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const isCurrent = () => slot.isConnected && (tab === "email" ? location.hash.startsWith(`#/agent/${agent.id}/email`) : location.hash === view);
+  const isCurrent = () => slot.isConnected && (["email", "memoria"].includes(tab) ? location.hash.startsWith(`#/agent/${agent.id}/${tab}`) : location.hash === view);
   let body;
   if (tab === "memoria") body = await memoryTab(agent);
   else if (tab === "routine") body = await routineTab(agent, routines);
@@ -2964,6 +2964,8 @@ async function renderAgent() {
 async function memoryTab(agent) {
   const data = await guard(api(`/api/agents/${agent.id}/memories`));
   if (!data) return panel({ icon: "alert", title: "Memoria non disponibile" });
+  const source = data.knowledge ? agentKnowledgePane(agent, data.knowledge) : null;
+  if (data.source === "external") return sectionWorkspace({ title: "Memoria", base: `#/agent/${agent.id}/memoria`, current: route()[3], entries: [["fonte", "Fonte", "book", "Memoria e knowledge", [source]]] });
   const core = h("textarea", { class: "tall", placeholder: "Le note che ha sempre in testa: chi è, cosa gli importa, i rapporti con gli altri, cosa sta succedendo." }, data.core || "");
   const coreCount = h("span", { class: "label" }, `${(data.core || "").length}/4000`);
   core.addEventListener("input", () => { coreCount.textContent = `${core.value.length}/4000`; });
@@ -2983,7 +2985,7 @@ async function memoryTab(agent) {
   // A new memory is a line at the top of the list, like a rule in Accesso: no panel of its own.
   const input = h("input", { type: "text", name: "text", placeholder: "Un fatto da ricordare. Es: «Sara odia le riunioni prima delle 10».", "aria-label": tr("Nuovo ricordo"), autocomplete: "off" });
   const add = h("form", { class: "memory-add" }, input,
-    h("div", { class: "memory-add-options" }, data.brain ? null : switchInput("shared", "Condiviso", false), switchInput("pinned", "Fissato", false),
+    h("div", { class: "memory-add-options" }, data.brain || data.ownerMemory ? null : switchInput("shared", "Condiviso", false), switchInput("pinned", "Fissato", false),
       btn("Aggiungi", { icon: "plus", type: "submit", cls: "primary" })));
   add.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -3015,13 +3017,78 @@ async function memoryTab(agent) {
         if (await guard(api(`/api/agents/${agent.id}/diary/${entry.id}`, { method: "DELETE" }), "Pagina strappata")) renderAgent();
       } })))))
     : empty("moon", "Il diario si scrive di notte, quando dorme.");
-  // With a company brain, what everyone should know goes there: an agent's memory is its own.
-  return [
-    corePanel,
-    panel({ icon: "book", title: "Ricordi", hint: `${data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length })} ${tr("A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.")}` },
-      add, h("label", { class: "search" }, icon("search"), search), list),
-    panel({ icon: "moon", title: "Diario", hint: "Le ultime due pagine gli tornano in mente ogni giorno." }, diary),
-  ];
+  return sectionWorkspace({ title: "Memoria", base: `#/agent/${agent.id}/memoria`, current: route()[3], entries: [
+    ["fonte", "Fonte", "book", "Memoria e knowledge", [source]],
+    ["ricordi", data.ownerMemory ? "Ricordi del proprietario" : "Ricordi", "book", "Fatti e preferenze", [panel({ icon: "book", title: data.ownerMemory ? "Ricordi del proprietario" : "Ricordi", hint: `${data.ownerMemory ? tr("{count} ricordi disponibili solo a questo proprietario e ai suoi agenti interni.", { count: all.length }) : data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length })} ${tr("A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.")}` },
+      add, h("label", { class: "search" }, icon("search"), search), list)]],
+    ["scheda", "Scheda", "layers", "Sempre a mente", [corePanel]],
+    ["diario", "Diario", "moon", "Consolidamento e diario", [panel({ icon: "moon", title: "Diario", hint: "Le ultime due pagine gli tornano in mente ogni giorno." }, diary)]],
+  ] });
+}
+
+function sectionWorkspace({ title, base, current = "", entries }) {
+  const first = entries[0][0], panes = new Map(), tabs = new Map();
+  const back = btn(title, { icon: "back", cls: "sm ghost email-section-back", onclick: () => show("") });
+  const detail = h("div", { class: "email-workspace-detail" }, back);
+  const nav = h("nav", { class: "email-workspace-nav rail-nav", role: "tablist", "aria-label": tr("Sezioni di {title}", { title: tr(title) }), "aria-orientation": "vertical" }, h("span", { class: "rail-group" }, title));
+  const root = h("div", { class: "email-workspace" }, nav, detail);
+  for (const [id, label, mark, hint, content] of entries) {
+    const tabId = `section-tab-${id}`, paneId = `section-pane-${id}`;
+    const pane = h("section", { class: "email-section stack", role: "tabpanel", id: paneId, "aria-labelledby": tabId }, content);
+    const tab = h("button", { class: "rail-item", role: "tab", type: "button", id: tabId, "aria-controls": paneId, onclick: () => show(id) },
+      h("span", { class: "rail-mark" }, icon(mark)), h("span", { class: "rail-name" }, h("b", {}, label), h("small", {}, hint)), icon("next", "rail-go"));
+    panes.set(id, pane); tabs.set(id, tab); detail.append(pane); nav.append(tab);
+  }
+  function show(id, update = true) {
+    current = panes.has(id) ? id : "";
+    root.classList.toggle("open", Boolean(current));
+    for (const [key, pane] of panes) pane.hidden = key !== (current || first);
+    for (const [key, tab] of tabs) { tab.classList.toggle("active", key === (current || first)); tab.setAttribute("aria-selected", String(key === (current || first))); tab.tabIndex = key === (current || first) ? 0 : -1; }
+    if (update) { history.replaceState(null, "", base + (current ? "/" + current : "")); app.querySelector(".appbar a.icon-btn")?.setAttribute("href", current ? base : base.startsWith("#/brain/") ? "#/brain" : "#/agenti"); }
+    detail.scrollTop = 0;
+  }
+  nav.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault(); const ids = [...panes.keys()], at = ids.indexOf(current || first);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1 : (at + (event.key === "ArrowDown" ? 1 : -1) + ids.length) % ids.length;
+    show(ids[next]); tabs.get(ids[next]).focus();
+  });
+  show(current, false);
+  return root;
+}
+
+function agentKnowledgePane(agent, data) {
+  const source = h("select", { "aria-label": tr("Fonte della memoria"), disabled: !data.canManage },
+    h("option", { value: "internal", selected: data.source === "internal" }, "Brain interno"),
+    h("option", { value: "external", selected: data.source === "external" }, "Brain esterno · sola lettura"));
+  const link = h("input", { type: "password", autocomplete: "off", "aria-label": tr("Link al Brain esterno"), placeholder: "https://…", disabled: !data.canManage });
+  const external = h("div", { class: "stack-sm" }, link,
+    h("p", { class: "muted" }, data.external.configured ? tr("Link salvato: {host}", { host: data.external.host }) : tr("Collega un link HTTPS che espone le pagine in JSON o Markdown.")),
+    h("p", { class: "muted" }, "Quando scegli questa fonte, l'agente usa solo il Brain esterno per memoria e knowledge. Se non risponde, segnala il problema."));
+  const externalRow = setRow("Brain esterno", null, external, { stack: true });
+  externalRow.hidden = source.value !== "external";
+  source.addEventListener("change", () => { externalRow.hidden = source.value !== "external"; });
+  const owner = data.owners ? h("select", { "aria-label": tr("Proprietario del Brain") },
+    h("option", { value: "", selected: !data.owner }, "Non assegnato"),
+    data.owners.map((person) => h("option", { value: person.id, selected: person.id === data.owner?.id }, raw(person.name)))) : null;
+  const feedback = h("p", { role: "status", class: "muted" });
+  const check = btn("Verifica collegamento", { icon: "check", cls: "ghost", disabled: !data.canManage || data.source !== "external", onclick: async () => {
+    check.disabled = true;
+    try { const result = await api(`/api/agents/${agent.id}/knowledge/check`, { method: "POST" }); feedback.textContent = tr("Collegamento verificato: {count} pagine in sola lettura.", { count: result.pages }); }
+    catch (error) { feedback.textContent = tr(error.message); }
+    finally { check.disabled = false; }
+  } });
+  const save = btn("Salva fonte", { icon: "check", cls: "primary", disabled: !data.canManage, onclick: async () => {
+    save.disabled = true;
+    const body = { source: source.value, ...(link.value.trim() ? { url: link.value.trim() } : {}), ...(owner ? { ownerId: owner.value } : {}) };
+    link.value = "";
+    try { await api(`/api/agents/${agent.id}/knowledge`, { method: "PUT", body }); await loadState(); renderAgent(); }
+    catch (error) { feedback.textContent = tr(error.message); save.disabled = false; }
+  } });
+  return panel({ icon: "book", title: "Memoria e knowledge", hint: "La fonte che l'agente usa per ricordare e recuperare informazioni." },
+    setRows(setRow("Fonte", null, source), externalRow,
+      owner ? setRow("Proprietario del Brain", "Gestisce questa memoria.", owner) : null),
+    h("div", { class: "row end" }, check, save), feedback);
 }
 
 function memoryItem(agent, memory, brain = false) {
@@ -4301,7 +4368,7 @@ function renderBrain() {
       const data = await api(`/api/brain/pages?${new URLSearchParams(query ? { q: query } : { kind })}`);
       list.replaceChildren(...(data.pages.length ? data.pages.map((page) => h("a", { class: "brain-row", href: `#/brain/p/${page.slug}` },
         h("div", { class: "grow" }, h("b", {}, raw(page.title)), page.summary ? h("small", {}, raw(page.summary)) : null),
-        h("div", { class: "brain-row-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.pending ? badge("Da rivedere", "warn") : null))) :
+        h("div", { class: "brain-row-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.shared ? badge("Condivisa con te", "", "share") : null, page.pending ? badge("Da rivedere", "warn") : null))) :
         [empty("bulb", query ? "Niente nel brain su questo." : "Ancora nessuna pagina. Aggiungine una o lascia una nota al bibliotecario.")]));
     } catch (error) { list.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
   }
@@ -4355,7 +4422,7 @@ function renderBrain() {
         statCard({ icon: "clock", value: lastRun ? raw(fmtTime(lastRun.at, true)) : "—", label: "ultimo giro",
           sub: lastRun ? raw(tr("{created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato" })),
       h("div", { class: "brain-search" }, search, h("div", { class: "brain-views" }, chips, views)),
-      ...(mapView ? [mapBox] : state.canManage ? [list, settingsPanel()] : [list]));
+      ...(mapView ? [mapBox] : [list, ...(state.canConfigure ?? state.canManage ? [settingsPanel()] : [])]));
   }
   async function load() {
     try {
@@ -4408,7 +4475,7 @@ async function renderBrainPage(slug) {
   app.querySelector(".appbar h1")?.replaceChildren(raw(page.title));
   const editing = { on: false };
   const draw = () => {
-    const actions = state.canManage ? [
+    const actions = state.canManage && !page.readonly ? [
       btn(editing.on ? "Annulla" : "Modifica", { icon: editing.on ? "close" : "edit", cls: "ghost", onclick: () => { editing.on = !editing.on; draw(); } }),
       page.status === "live" ? btn("Archivia", { icon: "trash", cls: "ghost", onclick: async () => {
         const archived = await guard(api(`/api/brain/pages/${page.slug}`, { method: "DELETE" }), "Pagina archiviata");
@@ -4431,19 +4498,52 @@ async function renderBrainPage(slug) {
       });
       content = form;
     } else content = [page.summary ? h("p", { class: "lead" }, raw(page.summary)) : null, brainText(page.body)];
-    body.replaceChildren(
-      pageHead(raw(page.title), h("span", { class: "brain-head-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.status === "archived" ? badge("Archiviata") : null, page.pending ? badge("Da rivedere", "warn") : null,
-        h("small", {}, tr("aggiornata {when}", { when: fmtTime(page.updatedAt, true) }))), actions),
-      panel({ cls: "brain-page" }, content),
-      panel({ icon: "clock", title: "Storia", hint: "Ogni modifica, chi l'ha fatta e da dove viene." },
+    const entries = [["pagina", "Pagina", "book", "Contenuto della pagina", [panel({ cls: "brain-page" }, content)]]];
+    if (page.readonly) entries[0][4].push(panel({ icon: "share", title: "Condivisa con te", hint: "Sola lettura: il proprietario gestisce contenuti e accesso." }));
+    else {
+      if (state.ownerMemory) entries.push(["condivisione", "Condivisione", "share", "Persone e permessi", [brainSharingPane(page)]]);
+      entries.push(["storia", "Storia", "clock", "Modifiche e fonti", [panel({ icon: "clock", title: "Storia", hint: "Ogni modifica, chi l'ha fatta e da dove viene." },
         h("ol", { class: "brain-history" }, page.revisions.map((revision) => h("li", {},
           h("div", { class: "row" }, h("b", {}, BRAIN_ACTIONS[revision.action] || raw(revision.action)), badge(BRAIN_REVIEWS[revision.review] || raw(revision.review), revision.review === "approved" ? "on" : revision.review === "reverted" ? "" : "warn"),
             h("small", { class: "grow" }, brainAuthor(revision.author), raw(` · ${fmtTime(revision.createdAt, true)}`))),
           revision.note ? h("p", {}, raw(revision.note)) : null,
           revision.conflict ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(revision.conflict))) : null,
-          brainSources(revision.sources))))));
+          brainSources(revision.sources)))))]]);
+    }
+    body.replaceChildren(pageHead(raw(page.title), h("span", { class: "brain-head-meta" }, badge(BRAIN_KINDS_LABEL[page.kind] || raw(page.kind)), page.status === "archived" ? badge("Archiviata") : null, page.pending ? badge("Da rivedere", "warn") : null,
+        h("small", {}, tr("aggiornata {when}", { when: fmtTime(page.updatedAt, true) }))), actions), sectionWorkspace({ title: "Brain", base: `#/brain/p/${page.slug}`, current: editing.on ? "pagina" : route()[3], entries }));
   };
   draw();
+}
+
+function brainSharingPane(page) {
+  const sharing = page.sharing || { visibility: "private", users: [] };
+  const visibility = h("select", { "aria-label": tr("Chi può leggere questa pagina") },
+    [["private", "Solo io e i miei agenti"], ["team", "Tutto il team"], ["people", "Persone scelte"]].map(([value, label]) => h("option", { value, selected: sharing.visibility === value }, label)));
+  const people = h("div", { class: "set-switches" });
+  const feedback = h("p", { role: "status", class: "muted" });
+  const chosen = new Set(sharing.users);
+  const peopleRow = setRow("Persone", null, people, { stack: true });
+  peopleRow.hidden = visibility.value !== "people";
+  visibility.addEventListener("change", () => { peopleRow.hidden = visibility.value !== "people"; });
+  api("/api/brain/sharing").then((data) => {
+    people.replaceChildren(...(data.people.length ? data.people.map((person) => {
+      const input = h("input", { type: "checkbox", checked: chosen.has(person.id) });
+      input.addEventListener("change", () => input.checked ? chosen.add(person.id) : chosen.delete(person.id));
+      return h("label", { class: "switch" }, h("span", { class: "switch-label" }, raw(person.name)), input, h("span", { class: "rocker" }));
+    }) : [h("p", { class: "muted" }, "Non ci sono altre persone nello spazio.")]));
+  }).catch((error) => { feedback.textContent = tr(error.message); });
+  const save = btn("Salva condivisione", { icon: "check", cls: "primary", onclick: async () => {
+    save.disabled = true;
+    try {
+      const result = await api("/api/brain/pages/" + page.slug + "/sharing", { method: "PUT", body: { visibility: visibility.value, users: [...chosen] } });
+      page.sharing = result;
+      feedback.textContent = tr("Condivisione aggiornata");
+    } catch (error) { feedback.textContent = tr(error.message); }
+    finally { save.disabled = false; }
+  } });
+  return panel({ icon: "share", title: "Condivisione", hint: "La pagina è privata finché scegli di condividerla. Gli altri owner e i loro agenti ricevono solo accesso in lettura." },
+    setRows(setRow("Chi può leggere questa pagina", null, visibility), peopleRow), h("div", { class: "row end" }, save), feedback);
 }
 
 async function renderBrainReview() {

@@ -17,7 +17,7 @@ import { Telegram } from "./telegram.js";
 import { telegramSetup } from "./telegram-setup.js";
 import { pullModel } from "./llm.js";
 import { telegramBotEnvName } from "./telegram-bots.js";
-import { isWebRoom, roomAgentId } from "./rooms.js";
+import { isWebRoom, isSalotto, ownerRoom, roomAgentId } from "./rooms.js";
 import { nextRuns } from "./scheduler.js";
 import { SHARED } from "./store.js";
 import { BRAIN_KINDS } from "./company-brain.js";
@@ -176,7 +176,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, github = null, mailDomains = null, email = null, googleConnector = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, github = null, mailDomains = null, email = null, googleConnector = null, knowledge = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -260,7 +260,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const noteForBrain = async (text, agent, user) => {
     const fact = String(text || "").trim();
     if (!fact) throw new HttpError(400, "scrivi il ricordo");
-    return companyBrain.note({ text: fact, agentId: agent.id, author: user?.name || user?.email || "Owner" });
+    return (knowledge?.forAgent(agent) || companyBrain).note({ text: fact, agentId: agent.id, author: user?.name || user?.email || "Owner" });
   };
   const localOwner = () => store.panelUser("local-owner") || store.registerPanelUser({ id: "local-owner", name: "Owner", email: "", role: "owner", source: "local" });
   const sessionHash = (token) => createHash("sha256").update(token).digest("hex");
@@ -355,16 +355,35 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const pulls = new Set();
   const publicAgent = async (agent) => ({
     ...agent,
+    ...(knowledge?.ownerMemory || agent.brainSource === "external" ? { core: "" } : {}),
     // Who it answers to: a real person in the chats; null means the owner of the space.
     owner: store.agentOwner(agent),
     mailbox: store.value(`agentMailbox:${agent.id}`, null),
-    memoryCount: store.memoryCount(agent.id),
+    memoryCount: agent.brainSource === "external" ? 0 : knowledge?.ownerMemory ? knowledge.ownerKeys(agent.id).reduce((sum, key) => sum + store.memoryCount(key), 0) : store.memoryCount(agent.id),
     box: await boxStatus(agent),
     bot: bots ? bots.status(agent, store.settings.guildIds[0]) : null,
     telegramBot: tgBots ? await tgBots.status(agent, telegramChatId(channels.list()[0]?.id) || store.settings.telegramChatIds[0]) : null,
     slackBot: skBots ? await skBots.status(agent, slackIds(channels.list()[0]?.id)?.channelId || store.settings.slackChannelIds[0]) : null,
     github: github ? github.view(agent) : null,
   });
+
+  const privateOwner = (entry) => {
+    if (entry.ownerId) return entry.ownerId;
+    if (isSalotto(entry.room) || isSalotto(entry.channelId) || isSalotto(entry.trace?.channelId)) {
+      const room = entry.room || entry.channelId || entry.trace.channelId;
+      return knowledge.ownerIds().find((id) => ownerRoom(id) === room) || "unavailable";
+    }
+    if (entry.room?.startsWith("web-ag_")) { const agent = store.agent(entry.room.slice(4)); return agent ? knowledge.ownerId(agent) : "unavailable"; }
+    const id = entry.agentId || entry.trace?.agentId;
+    if (id && !String(id).startsWith("librarian:") && !store.agent(id)) return "unavailable";
+    if (String(id || "").startsWith("librarian:")) return id.slice(10);
+    const agent = id && store.agent(id);
+    return agent ? knowledge.ownerId(agent) : "";
+  };
+  const ownsEntry = (entry, viewer) => !knowledge?.ownerMemory || privateOwner(entry) === viewer?.id || (!privateOwner(entry) && !entry.text && !entry.item && !entry.trace && !entry.agentId && !entry.id);
+  const checkAgentMemory = (id, viewer) => {
+    if (knowledge?.ownerMemory && !knowledge.canManage(store.agent(id), viewer)) throw new HttpError(403, "Questi dati appartengono al proprietario dell'agente.");
+  };
 
   const routineView = (routine) => {
     let next = [];
@@ -404,27 +423,32 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const action = path.startsWith("/api/secrets") ? "secrets" : path.startsWith("/api/artifacts") ? "artifacts" : path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/brain") ? "brain" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
+    const scopedAgent = /^\/api\/agents\/([\w-]+)(?:\/|$)/.exec(path);
+    if (scopedAgent && knowledge?.ownerMemory) checkAgentMemory(scopedAgent[1], user);
     if (path === "/api/logout" && method === "POST") {
       const token = sessionValue(req).value.split(".")[1];
       if (token) store.deletePanelSession(sessionHash(token));
       return send(res, 200, { ok: true }, { "Set-Cookie": clearedCookies() });
     }
 
-    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(), canManage: user.role === "owner", notice: store.value("googleConnectorNotice", "") });
+    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(user), canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"), notice: store.value("googleConnectorNotice", "") });
     if (path === "/api/connectors/google" && method === "POST") {
-      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega account Google.");
+      if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega account Google.");
       const started = googleConnector.begin(user);
       const name = config.insecureCookies ? "cora_google" : "__Host-cora_google";
       return send(res, 200, { url: started.url }, { "Set-Cookie": `${name}=${started.nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=900${config.insecureCookies ? "" : "; Secure"}` });
     }
     const connector = /^\/api\/connectors\/(gc_[a-f0-9]{16})$/.exec(path);
     if (connector && ["PUT", "DELETE"].includes(method)) {
-      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia i connettori.");
+      if (knowledge?.ownerMemory ? googleConnector.records().find((entry) => entry.id === connector[1])?.connectedBy !== user.id : user.role !== "owner") throw new HttpError(403, "Connettore privato.");
       if (method === "DELETE") { googleConnector.disconnect(connector[1]); return send(res, 200, { ok: true }); }
-      return send(res, 200, googleConnector.update(connector[1], await readJson(req, 8000)));
+      const body = await readJson(req, 8000);
+      if (knowledge?.ownerMemory && Array.isArray(body.agents) && body.agents.some((id) => !knowledge.canManage(store.agent(id), user))) throw new HttpError(403, "Agente privato.");
+      googleConnector.update(connector[1], body);
+      return send(res, 200, googleConnector.view(user));
     }
     if (path === "/api/mail/channel") {
-      if (method === "GET") return send(res, 200, { ...email.view(), canManage: user.role === "owner" });
+      if (method === "GET") return send(res, 200, { ...email.view(), ...(knowledge?.ownerMemory ? { agents: email.view().agents.filter((entry) => ownsEntry(entry, user) || knowledge.canManage(store.agent(entry.id), user)) } : {}), canManage: user.role === "owner" });
       if (method === "PUT") {
         if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia le regole email generali.");
         return send(res, 200, await email.update(await readJson(req, 20000)));
@@ -434,7 +458,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (agentEmail) {
       const agent = store.agent(agentEmail[1]);
       if (!agent) throw new HttpError(404, "Agente non trovato.");
-      if (method === "GET" && !agentEmail[2]) { await email.poll(agent); return send(res, 200, { ...email.view(agent), canManage: user.role === "owner" }); }
+      if (method === "GET" && !agentEmail[2]) { await email.poll(agent); return send(res, 200, { ...email.view(agent), canManage: Boolean(knowledge?.ownerMemory || user.role === "owner") }); }
       if (method === "GET" && agentEmail[2] === "signature") {
         const rendered = await email.compose(agent, { body_text: "" }, "preview", false);
         return send(res, 200, Buffer.from(rendered.png, "base64"), { "Content-Type": "image/png" });
@@ -444,7 +468,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 200, email.view(agent));
       }
       if (method === "PUT" && !agentEmail[2]) {
-        if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia le regole email dell'agente.");
+        if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia le regole email dell'agente.");
         return send(res, 200, await email.update(await readJson(req, 20000), agent));
       }
     }
@@ -499,56 +523,66 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (method === "DELETE") { store.deleteContextDocument(id); return send(res, 200, { ok: true }); }
     }
     if (path === "/api/brain" || path.startsWith("/api/brain/")) {
-      const canManage = user.role === "owner";
-      if (!companyBrain?.enabled) {
+      const canManage = Boolean(knowledge?.ownerMemory || user.role === "owner");
+      const userBrain = knowledge?.forUser(user) || companyBrain;
+      const userLibrarian = knowledge?.ownerMemory ? librarian?.forOwner(user.id) : librarian;
+      if (!userBrain?.enabled) {
         if (path === "/api/brain" && method === "GET") return send(res, 200, { enabled: false, canManage, kinds: BRAIN_KINDS });
         throw new HttpError(409, "il brain non è collegato: serve CORA_BRAIN_DATABASE_URL in hush");
       }
       const manage = () => { if (!canManage) throw new HttpError(403, "solo l'owner cambia il brain"); };
       const author = `owner:${user.name || user.email || "Owner"}`;
       if (path === "/api/brain" && method === "GET") {
-        return send(res, 200, { enabled: true, canManage, kinds: BRAIN_KINDS, stats: await companyBrain.stats(), lastRun: await companyBrain.state("lastRun"), running: Boolean(librarian?.running || librarian?.pending) });
+        return send(res, 200, { enabled: true, canManage, canConfigure: user.role === "owner", ownerMemory: Boolean(knowledge?.ownerMemory), kinds: BRAIN_KINDS, stats: await userBrain.stats(), lastRun: await userBrain.state("lastRun"), running: Boolean(userLibrarian?.running || userLibrarian?.pending) });
       }
-      if (path === "/api/brain/graph" && method === "GET") return send(res, 200, await companyBrain.graph());
+      if (path === "/api/brain/graph" && method === "GET") return send(res, 200, await userBrain.graph());
+      if (path === "/api/brain/sharing" && method === "GET" && knowledge?.ownerMemory) return send(res, 200, {
+        people: store.panelUsers().filter((person) => !person.blocked && person.id !== user.id).map((person) => ({ id: person.id, name: person.name || person.email })),
+      });
       if (path === "/api/brain/pages" && method === "GET") {
         const q = String(url.searchParams.get("q") || "").trim();
-        const pages = q ? await companyBrain.search(q, { limit: 30 }) : await companyBrain.pages({ kind: String(url.searchParams.get("kind") || ""), status: url.searchParams.get("status") === "archived" ? "archived" : "live" });
+        const pages = q ? await userBrain.search(q, { limit: 30 }) : await userBrain.pages({ kind: String(url.searchParams.get("kind") || ""), status: url.searchParams.get("status") === "archived" ? "archived" : "live" });
         return send(res, 200, { pages });
       }
       if (path === "/api/brain/pages" && method === "POST") {
         manage();
         const body = await readJson(req, 65536);
-        if (await companyBrain.page(body.slug || body.title || "")) throw new HttpError(409, "una pagina con questo nome c'è già");
-        const written = await companyBrain.write({ ...body, author, review: "approved", note: String(body.note || "scritta dal proprietario") });
-        librarian?.requestRun({ reason: "pagina aggiunta" });
+        if (await userBrain.page(body.slug || body.title || "")) throw new HttpError(409, "una pagina con questo nome c'è già");
+        const written = await userBrain.write({ ...body, author, review: "approved", note: String(body.note || "scritta dal proprietario") });
+        userLibrarian?.requestRun({ reason: "pagina aggiunta" });
         return send(res, 201, written.page);
+      }
+      const brainShare = /^\/api\/brain\/pages\/([a-z0-9-]{2,60})\/sharing$/.exec(path);
+      if (brainShare && method === "PUT" && knowledge?.ownerMemory) {
+        if (brainShare[1].startsWith("shared-")) throw new HttpError(403, "Solo il proprietario condivide la pagina.");
+        return send(res, 200, await knowledge.share(user.id, brainShare[1], await readJson(req, 12000)));
       }
       const brainPage = /^\/api\/brain\/pages\/([a-z0-9-]{2,60})$/.exec(path);
       if (brainPage) {
-        const page = await companyBrain.page(brainPage[1]);
+        const page = await userBrain.page(brainPage[1]);
         if (!page) throw new HttpError(404, "pagina non trovata");
         if (method === "GET") return send(res, 200, page);
         manage();
         if (method === "PUT") {
           const body = await readJson(req, 65536);
-          const written = await companyBrain.write({ slug: page.slug, kind: body.kind ?? page.kind, title: body.title ?? page.title, summary: body.summary ?? page.summary, body: body.body ?? page.body, author, review: "approved", note: String(body.note || "corretta dal proprietario") });
-          librarian?.requestRun({ reason: "pagina aggiornata" });
+          const written = await userBrain.write({ slug: page.slug, kind: body.kind ?? page.kind, title: body.title ?? page.title, summary: body.summary ?? page.summary, body: body.body ?? page.body, author, review: "approved", note: String(body.note || "corretta dal proprietario") });
+          userLibrarian?.requestRun({ reason: "pagina aggiornata" });
           return send(res, 200, written.page);
         }
-        if (method === "DELETE") return send(res, 200, await companyBrain.archive(page.slug, { author, note: "archiviata dal proprietario", review: "approved" }));
+        if (method === "DELETE") return send(res, 200, await userBrain.archive(page.slug, { author, note: "archiviata dal proprietario", review: "approved" }));
       }
-      if (path === "/api/brain/review" && method === "GET") return send(res, 200, { queue: await companyBrain.reviewQueue() });
+      if (path === "/api/brain/review" && method === "GET") return send(res, 200, { queue: await userBrain.reviewQueue() });
       if (path === "/api/brain/review" && method === "POST") {
         manage();
         const body = await readJson(req, 65536);
-        const result = await companyBrain.review({ ids: Array.isArray(body.ids) ? body.ids.map(String) : [], all: body.all === true, decision: body.decision, by: author });
-        librarian?.requestRun({ reason: "revisione" });
+        const result = await userBrain.review({ ids: Array.isArray(body.ids) ? body.ids.map(String) : [], all: body.all === true, decision: body.decision, by: author });
+        userLibrarian?.requestRun({ reason: "revisione" });
         return send(res, 200, result);
       }
       if (path === "/api/brain/run" && method === "POST") {
         manage();
-        if (librarian?.running) return send(res, 202, { started: false, running: true });
-        librarian?.run({ reason: "pannello" }).catch((error) => activity({ type: "error", text: `bibliotecario: ${error.message}` }));
+        if (userLibrarian?.running) return send(res, 202, { started: false, running: true });
+        userLibrarian?.run({ reason: "pannello" }).catch((error) => activity({ type: "error", text: `bibliotecario: ${error.message}` }));
         return send(res, 202, { started: true, running: true });
       }
       throw new HttpError(404, "not found");
@@ -585,7 +619,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     if (path === "/api/state" && method === "GET") {
       const [agents, models, imageReady] = await Promise.all([
-        Promise.all(store.agents().map(publicAgent)),
+        Promise.all((knowledge?.agentsFor(user) || store.agents()).map(publicAgent)),
         llm.listModels(),
         boxes.imageExists().catch(() => false),
       ]);
@@ -601,23 +635,23 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         channels: channels.list(),
         discordChannels: discord.listChannels(store.settings.guildIds),
         guilds: discord.status().guilds,
-        requests: store.pendingRequests(),
-        push: push ? push.status() : { enabled: false, publicKey: "", devices: 0 },
+        requests: store.pendingRequests().filter((entry) => ownsEntry(entry, user)),
+        push: push ? push.status(knowledge?.ownerMemory ? user.id : "") : { enabled: false, publicKey: "", devices: 0 },
         agents,
-        routines: store.routines().map(routineView),
+        routines: store.routines().filter((entry) => ownsEntry(entry, user)).map(routineView),
         models,
         providers: llm.providers(),
         ollamaCloud: llm.cloudAccount || { signedIn: false, signinUrl: "" },
         // Which keys are stored, apart from whether the thing they unlock is reachable some other way.
         keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key), soniox: Boolean(voice?.enabled), deepseek: Boolean(llm.deepseek?.key) },
         doc: { installed: Boolean(brain.doc?.installed), ...(brain.doc?.installed ? brain.doc.activity() : {}) },
-        subscriptions: subscriptions.list(),
+        subscriptions: subscriptions.list().filter((entry) => !knowledge?.ownerMemory || entry.connectedBy?.id === user.id),
         boxImage: { name: config.boxImage, ready: imageReady },
         timezone: config.timezone,
         artifacts: artifacts ? { reviews: artifacts.reviewsFor(user).length, ...(user.role === "owner" ? { space: artifacts.space() } : {}) } : null,
       });
     }
-    if (path === "/api/subscriptions" && method === "GET") return send(res, 200, subscriptions.list());
+    if (path === "/api/subscriptions" && method === "GET") return send(res, 200, subscriptions.list().filter((entry) => !knowledge?.ownerMemory || entry.connectedBy?.id === user.id));
     if (path === "/api/subscriptions" && method === "POST") {
       const body = await readJson(req, 4096);
       if (store.subscriptions().length >= 50) throw new HttpError(409, "troppe subscription: rimuovi quelle inutilizzate");
@@ -626,7 +660,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const subscriptionMatch = /^\/api\/subscriptions\/(sub_[a-f0-9]{12})(?:\/(login|code|cancel|check))?$/.exec(path);
     if (subscriptionMatch) {
       const [, id, action] = subscriptionMatch;
-      if (!store.subscription(id)) throw new HttpError(404, "subscription non trovata");
+      if (!store.subscription(id) || (knowledge?.ownerMemory && store.subscription(id).connectedBy?.id !== user.id)) throw new HttpError(404, "subscription non trovata");
       if (!action && method === "GET") return send(res, 200, subscriptions.view(id));
       if (!action && method === "DELETE") {
         await subscriptions.remove(id);
@@ -742,10 +776,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { status: job.status, total: job.total, target: job.target, results: job.results });
     }
     if (path === "/api/subscriptions/resident/check" && method === "POST") {
+      if (knowledge?.ownerMemory) throw new HttpError(403, "Le subscription personali si collegano dal proprio account.");
       await subscriptions.discoverResidents();
       return send(res, 200, subscriptions.list().filter((record) => record.resident));
     }
     if (path === "/api/settings" && method === "PUT") {
+      if (knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario gestisce le impostazioni dello spazio.");
       const before = channels.active;
       const enabledBefore = channels.enabled;
       const residentsBefore = store.settings.useResidentSubscriptions;
@@ -773,23 +809,24 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       return send(res, 200, settings);
     }
-    if (path === "/api/push" && method === "GET") return send(res, 200, push ? push.status() : { enabled: false });
+    if (path === "/api/push" && method === "GET") return send(res, 200, push ? push.status(knowledge?.ownerMemory ? user.id : "") : { enabled: false });
     if (path === "/api/push/subscribe" && method === "POST") {
       if (!push?.enabled) throw new HttpError(409, "notifiche non configurate sul server");
       const body = await readJson(req, 8192);
-      store.addPushSubscription(body.subscription || {}, String(body.device || req.headers["user-agent"] || "").slice(0, 200));
+      store.addPushSubscription(body.subscription || {}, String(body.device || req.headers["user-agent"] || "").slice(0, 200), user.id);
       activity({ type: "settings", text: "notifiche attivate su un dispositivo" });
-      return send(res, 200, push.status());
+      return send(res, 200, push.status(knowledge?.ownerMemory ? user.id : ""));
     }
     if (path === "/api/push/unsubscribe" && method === "POST") {
       const body = await readJson(req, 8192);
+      if (knowledge?.ownerMemory && store.pushSubscriptions().some((subscription) => subscription.endpoint === body.endpoint && subscription.userId !== user.id)) throw new HttpError(403, "Dispositivo privato.");
       store.removePushSubscription(String(body.endpoint || ""));
-      return send(res, 200, push ? push.status() : { enabled: false });
+      return send(res, 200, push ? push.status(knowledge?.ownerMemory ? user.id : "") : { enabled: false });
     }
     if (path === "/api/push/test" && method === "POST") {
       if (!push?.enabled) throw new HttpError(409, "notifiche non configurate sul server");
       const english = store.settings.language === "en";
-      const result = await push.notify({ title: "Cora", body: english ? "Notifications work: the agents will reach you here." : "Le notifiche funzionano: gli agenti ti scriveranno qui.", url: "/#/settings", tag: "test" });
+      const result = await push.notify({ userId: knowledge?.ownerMemory ? user.id : "", title: "Cora", body: english ? "Notifications work: the agents will reach you here." : "Le notifiche funzionano: gli agenti ti scriveranno qui.", url: "/#/settings", tag: "test" });
       if (!result.sent) throw new HttpError(502, "nessun dispositivo ha accettato la notifica");
       return send(res, 200, result);
     }
@@ -891,7 +928,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 202, { started: true, host: host.url, model: name });
     }
     if (path === "/api/activity" && method === "GET") {
-      return send(res, 200, store.recentActivity(300));
+      return send(res, 200, store.recentActivity(300).filter((entry) => ownsEntry(entry, user)));
     }
     if (path === "/api/cron/preview" && method === "GET") {
       try {
@@ -911,6 +948,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const body = await readJson(req);
       // Whom an agent answers to is the owner of the space's choice.
       if (user?.role !== "owner") delete body.ownerId;
+      delete body.brainSource;
+      body.brainOwnerId = user.id;
+      if (knowledge?.ownerMemory && body.subscriptionId && store.subscription(body.subscriptionId)?.connectedBy?.id !== user.id) throw new HttpError(403, "Subscription privata.");
       const agent = store.createAgent(body);
       bots?.sync();
       tgBots?.sync();
@@ -928,6 +968,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (method === "PUT") {
         const body = await readJson(req);
         if (user?.role !== "owner") delete body.ownerId;
+        delete body.brainSource;
+        delete body.brainOwnerId;
+        if (body.core !== undefined) checkAgentMemory(agent.id, user);
+        if (knowledge?.ownerMemory && body.subscriptionId && store.subscription(body.subscriptionId)?.connectedBy?.id !== user.id) throw new HttpError(403, "Subscription privata.");
+        if (agent.brainSource === "external") delete body.core;
         const updated = store.updateAgent(agent.id, body);
         bots?.envName(agent);
         skBots?.envNames(agent);
@@ -949,18 +994,45 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
     }
 
+    match = /^\/api\/agents\/([\w-]+)\/knowledge(?:\/(check))?$/.exec(path);
+    if (match && knowledge) {
+      const agent = store.agent(match[1]);
+      if (!agent) throw new HttpError(404, "Agente non trovato.");
+      if (!knowledge.canManage(agent, user)) throw new HttpError(403, "Solo il proprietario dell'agente può accedere al suo Brain.");
+      if (!match[2] && method === "GET") return send(res, 200, knowledge.view(agent, user));
+      if (!match[2] && method === "PUT") {
+        const updated = await knowledge.configure(agent, await readJson(req, 12000), user);
+        broadcast({ type: "agents" });
+        return send(res, 200, knowledge.view(updated, user));
+      }
+      if (match[2] && method === "POST") {
+        if (agent.brainSource !== "external") throw new HttpError(409, "Seleziona il Brain esterno prima di verificarlo.");
+        const pages = await knowledge.forAgent(agent).pages({ fresh: true });
+        return send(res, 200, { ok: true, pages: pages.length, readonly: true });
+      }
+      throw new HttpError(405, "method not allowed");
+    }
+
     match = /^\/api\/agents\/([\w-]+)\/(memories|core|sleep|diary)(?:\/([\w-]+))?$/.exec(path);
     if (match) {
       const agent = store.agent(match[1]);
       if (!agent) throw new HttpError(404, "agente non trovato");
       const [, , section, itemId] = match;
+      if (knowledge?.ownerMemory && !knowledge.canManage(agent, user)) throw new HttpError(403, "Solo il proprietario dell'agente può accedere alla sua memoria.");
+      if (agent.brainSource === "external") {
+        if (!knowledge?.canManage(agent, user)) throw new HttpError(403, "Solo il proprietario dell'agente può accedere al suo Brain.");
+        if (section === "memories" && !itemId && method === "GET") return send(res, 200, { source: "external", readonly: true, knowledge: knowledge.view(agent, user), core: "", coreHistory: [], facts: [], shared: [], brain: true, diary: [], lastSleepAt: "", sleeping: false });
+        throw new HttpError(409, "Il Brain esterno è in sola lettura. La memoria interna resta esclusa.");
+      }
       if (section === "memories" && !itemId && method === "GET") {
         return send(res, 200, {
+          source: "internal", knowledge: knowledge?.view(agent, user),
           core: agent.core,
           coreHistory: store.coreHistory(agent.id),
-          facts: store.memories(agent.id),
+          facts: knowledge?.ownerMemory ? knowledge.ownerKeys(agent.id).flatMap((key) => store.memories(key)) : store.memories(agent.id),
+          ownerMemory: Boolean(knowledge?.ownerMemory),
           // With a company brain, what everyone knows lives there: once the librarian has read the shared memories, agents no longer get them.
-          shared: companyBrain?.holdsShared ? [] : store.memories(SHARED),
+          shared: knowledge?.ownerMemory || companyBrain?.holdsShared ? [] : store.memories(SHARED),
           brain: Boolean(companyBrain?.enabled),
           diary: store.diary(agent.id),
           lastSleepAt: agent.lastSleepAt,
@@ -970,18 +1042,18 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (section === "memories" && !itemId && method === "POST") {
         const body = await readJson(req);
         if (body.shared && companyBrain?.enabled) return send(res, 201, { noted: await noteForBrain(body.text, agent, user) });
-        const memory = store.addMemory(body.shared ? SHARED : agent.id, body.text, "manual", { pinned: body.pinned });
+        const memory = store.addMemory(knowledge?.ownerMemory ? knowledge.memoryKey(agent) : body.shared ? SHARED : agent.id, body.text, "manual", { pinned: body.pinned });
         return send(res, 201, memory);
       }
       if (section === "memories" && itemId) {
         const found = store.findMemory(itemId);
-        if (!found || (found.key !== agent.id && found.key !== SHARED)) throw new HttpError(404, "ricordo non trovato");
+        if (!found || (knowledge?.ownerMemory ? !knowledge.ownerKeys(agent.id).includes(found.key) : found.key !== agent.id && found.key !== SHARED)) throw new HttpError(404, "ricordo non trovato");
         if (method === "PUT") {
           const body = await readJson(req);
           let key = found.key;
           // Sharing a memory, with a company brain, hands it to the librarian: the agent keeps its own copy.
           if (body.shared === true && key !== SHARED && companyBrain?.enabled) return send(res, 200, { ...found.memory, noted: await noteForBrain(found.memory.text, agent, user) });
-          if (body.shared !== undefined && Boolean(body.shared) !== (key === SHARED)) {
+          if (!knowledge?.ownerMemory && body.shared !== undefined && Boolean(body.shared) !== (key === SHARED)) {
             const target = body.shared ? SHARED : agent.id;
             store.moveMemory(key, itemId, target);
             key = target;
@@ -1011,9 +1083,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
 
     match = /^\/api\/rooms\/(web(?:-[\w-]+)?)\/messages$/.exec(path);
     if (match) {
-      const room = match[1];
+      const room = match[1] === "web" ? knowledge?.roomFor(user) || "web" : match[1];
+      if (knowledge?.ownerMemory && isSalotto(room) && room !== knowledge.roomFor(user)) throw new HttpError(403, "Stanza privata.");
       const agentId = roomAgentId(room);
       if (!isWebRoom(room) || (agentId && !store.agent(agentId))) throw new HttpError(404, "stanza non trovata");
+      if (agentId) checkAgentMemory(agentId, user);
       if (method === "GET") {
         const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 80));
         const running = [...(traces?.live.values() || [])].filter((trace) => trace.channelId === room).map((trace) => trace.summary());
@@ -1032,6 +1106,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     match = /^\/api\/agents\/([\w-]+)\/traces$/.exec(path);
     if (match && method === "GET") {
       if (!store.agent(match[1])) throw new HttpError(404, "agente non trovato");
+      checkAgentMemory(match[1], user);
       // ?goal= gives only the turns that worked toward that goal.
       const goal = url.searchParams.has("goal") ? String(url.searchParams.get("goal")) : null;
       const live = [...(traces?.live.values() || [])].filter((trace) => trace.agentId === match[1] && (goal === null || trace.goal === goal)).map((trace) => trace.summary());
@@ -1047,19 +1122,20 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
 
     if (path === "/api/usage" && method === "GET") {
       const days = Math.min(366, Math.max(30, Number(url.searchParams.get("days")) || 365));
-      return send(res, 200, { days, today: new Intl.DateTimeFormat("en-CA", { timeZone: config.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()), usage: store.usageByDay(days, config.timezone) });
+      return send(res, 200, { days, today: new Intl.DateTimeFormat("en-CA", { timeZone: config.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()), usage: store.usageByDay(days, config.timezone).filter((entry) => ownsEntry(entry, user)) });
     }
 
     if (path === "/api/traces" && method === "GET") {
       const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit")) || 12));
       const live = [...(traces?.live.values() || [])].map((trace) => trace.summary());
-      return send(res, 200, [...live, ...store.recentTraces(limit).filter((trace) => !live.some((item) => item.id === trace.id))].slice(0, limit));
+      return send(res, 200, [...live, ...store.recentTraces(limit).filter((trace) => !live.some((item) => item.id === trace.id))].filter((trace) => ownsEntry(trace, user)).slice(0, limit));
     }
 
     match = /^\/api\/traces\/(tr_[0-9a-f]+)$/.exec(path);
     if (match && method === "GET") {
       const trace = traces ? traces.get(match[1]) : store.trace(match[1]);
       if (!trace) throw new HttpError(404, "ragionamento non trovato");
+      if (knowledge?.ownerMemory && !ownsEntry(trace, user)) throw new HttpError(403, "Questo ragionamento appartiene a un altro proprietario.");
       return send(res, 200, trace);
     }
 
@@ -1071,6 +1147,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const file = join(config.filesDir, match[1]);
       if (!existsSync(file)) throw new HttpError(404, "file non trovato");
       const meta = JSON.parse(readFileSync(`${file}.json`, "utf8"));
+      if (knowledge?.ownerMemory && meta.ownerId !== user.id) throw new HttpError(404, "file non trovato");
       // Pictures and the agents' voice messages play in the page; everything else downloads.
       const inline = /^(image\/(png|jpeg|gif|webp)|audio\/(mpeg|ogg))$/.test(meta.type);
       return send(res, 200, readFileSync(file), {
@@ -1195,7 +1272,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (["/api/routines/history", "/api/routines/archive"].includes(path) && method === "GET") {
       const options = Object.fromEntries(["agentId", "kind", "query", "limit", "offset"].map((key) => [key, url.searchParams.get(key) || ""]));
       if (options.kind && !["routine", "reminder"].includes(options.kind)) throw new HttpError(400, "tipo di attività non valido");
-      return send(res, 200, path.endsWith("/history") ? store.routineHistory(options) : store.routineArchive(options));
+      return send(res, 200, path.endsWith("/history") ? store.routineHistory({ ...options, ...(knowledge?.ownerMemory ? { agentIds: knowledge.agentsFor(user).map((agent) => agent.id) } : {}) }) : store.routineArchive({ ...options, ...(knowledge?.ownerMemory ? { agentIds: knowledge.agentsFor(user).map((agent) => agent.id) } : {}) }));
     }
 
     match = /^\/api\/agents\/([\w-]+)\/routines$/.exec(path);
@@ -1210,7 +1287,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     match = /^\/api\/routines\/([\w-]+)(\/run)?$/.exec(path);
     if (match) {
       const routine = store.routine(match[1]);
-      if (!routine) throw new HttpError(404, "routine non trovata");
+      if (!routine || !ownsEntry(routine, user)) throw new HttpError(404, "routine non trovata");
       if (match[2] && method === "POST") {
         orchestrator.runRoutine(routine, { manual: true }).catch(() => {});
         return send(res, 202, { ok: true });
@@ -1288,12 +1365,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         reviews: artifacts.reviewsFor(user).map((commit) => artifacts.commitSummary(commit)),
         quota: artifacts.space(),
         people: store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })),
-        canManage: user.role === "owner",
+        canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"),
       });
     }
     if (path === "/api/artifacts/folders" && method === "POST") {
       const body = await readJson(req, 16384);
-      const owner = user.role === "owner";
+      const owner = knowledge?.ownerMemory || user.role === "owner";
       if (!owner && body.memberAccess !== undefined) throw new HttpError(403, "solo il proprietario cambia l'accesso del team");
       const folder = artifacts.createFolder({
         path: body.path, title: body.title, description: body.description, kind: body.kind, writers: body.writers,
@@ -1342,8 +1419,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           folder: artifacts.folderView(folder),
           canReview: artifacts.canReview(folder, user),
           canUpload: artifacts.canUpload(folder, user),
-          canManage: user.role === "owner",
-          people: user.role === "owner" ? store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })) : [],
+          canManage: artifacts.canManage(folder, user),
+          people: artifacts.canManage(folder, user) ? store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })) : [],
           shareHosting: Boolean(artifacts.shareSuffix),
           shareSuffix: artifacts.shareSuffix,
           shares: store.artifactShares(folder.id).map((share) => artifacts.shareView(share)),
@@ -1358,7 +1435,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 200, artifacts.folderView(artifacts.updateFolder(folder.id, body, user)));
       }
       if (method === "DELETE") {
-        if (user.role !== "owner") throw new HttpError(403, "solo il proprietario elimina una cartella");
+        if (!artifacts.canManage(folder, user)) throw new HttpError(403, "solo il proprietario elimina una cartella");
         artifacts.deleteFolder(folder.id);
         activity({ type: "artifact", text: `${by.name} ha eliminato la cartella ${folder.path}` });
         return send(res, 200, { ok: true });
@@ -1433,12 +1510,19 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const path = url.pathname;
     const method = req.method;
     const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
-    const owner = user.role === "owner";
+    const owner = knowledge?.ownerMemory || user.role === "owner";
+    const ownsSecretRecord = (record) => !knowledge?.ownerMemory || Boolean(record && vault.canManage(record, user));
+    const secretRoute = /^\/api\/secrets\/([A-Z][A-Z0-9_]{1,63})(?:\/|$)/.exec(path);
+    if (secretRoute && !ownsSecretRecord(store.vaultSecret(secretRoute[1]))) throw new HttpError(404, "segreto non trovato");
+    const requestRoute = /^\/api\/secrets\/requests\/(vr_[a-f0-9]{12})$/.exec(path);
+    if (requestRoute && !ownsSecretRecord(vault.requests().find((record) => record.id === requestRoute[1]))) throw new HttpError(404, "richiesta non trovata");
+    const sendRoute = /^\/api\/secrets\/sends\/(vx_[a-f0-9]{12})/.exec(path);
+    if (sendRoute && !ownsSecretRecord(vault.sends().find((record) => record.id === sendRoute[1]))) throw new HttpError(404, "invio non trovato");
     if (path === "/api/secrets" && method === "GET") {
       return send(res, 200, {
-        enabled: vault.enabled, canManage: owner, secrets: vault.list(), peopleSends: Boolean(vault.shareSuffix && vault.access),
-        requests: owner ? vault.requests().filter((request) => request.status === "open" && !request.expired) : [],
-        sends: owner ? vault.sends().filter((item) => item.status === "proposed" || (item.status === "active" && !item.expired)) : [],
+        enabled: vault.enabled, canManage: owner, secrets: vault.list(user), peopleSends: Boolean(vault.shareSuffix && vault.access),
+        requests: owner ? vault.requests().filter(ownsSecretRecord).filter((request) => request.status === "open" && !request.expired) : [],
+        sends: owner ? vault.sends().filter(ownsSecretRecord).filter((item) => item.status === "proposed" || (item.status === "active" && !item.expired)) : [],
       });
     }
     if (!owner) throw new HttpError(403, "la cassaforte la gestisce solo il proprietario");
@@ -1452,7 +1536,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     // The vault's log: who opened what was sent, who filled a request, which agent used what, every change.
     if (path === "/api/secrets/events" && method === "GET") {
-      return send(res, 200, { events: vault.events({ name: url.searchParams.get("name") || "", before: Number(url.searchParams.get("before")) || 0 }) });
+      return send(res, 200, { events: vault.events({ name: url.searchParams.get("name") || "", before: Number(url.searchParams.get("before")) || 0 }).filter((entry) => !knowledge?.ownerMemory || ownsSecretRecord(store.vaultSecret(entry.name))) });
     }
     let match = /^\/api\/secrets\/requests\/(vr_[a-f0-9]{12})$/.exec(path);
     if (match && method === "DELETE") {
@@ -1588,7 +1672,10 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const clients = new Set();
   const broadcast = (entry) => {
     const line = `data: ${JSON.stringify(entry)}\n\n`;
-    for (const client of clients) client.write(line);
+    for (const client of clients) if (ownsEntry(entry, client.coraUser)) {
+      if (knowledge?.ownerMemory && isSalotto(entry.room)) client.write(`data: ${JSON.stringify({ ...entry, room: "web" })}\n\n`);
+      else client.write(line);
+    }
   };
 
   function events(req, res) {
@@ -1596,6 +1683,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive", "X-Accel-Buffering": "no" });
     res.write("retry: 3000\n\n");
     clients.add(res);
+    res.coraUser = sessionUser(req);
     const connection = { user: sessionUser(req), close: () => { clients.delete(res); res.write(`data: ${JSON.stringify({ type: "access-revoked" })}\n\n`); res.end(); accessConnections.delete(connection); } };
     accessConnections.add(connection);
     const ping = setInterval(() => res.write(": ping\n\n"), 25000);
@@ -1611,6 +1699,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (!match) return null;
     const agent = store.agent(match[1]);
     if (!agent) throw new HttpError(404, "agente non trovato");
+    checkAgentMemory(agent.id, sessionUser(req));
     const state = await boxes.inspect(agent.id);
     if (!state.running || !state.port) throw new HttpError(409, "desktop spento: avvialo dal pannello");
     const rest = req.url.slice(`/box/${match[1]}`.length) || "/";

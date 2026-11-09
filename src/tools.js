@@ -427,7 +427,17 @@ export async function executeTool(call, ctx) {
   const { agent, boxes, store, channelId, postFile } = ctx;
   const args = call.args || {};
   try {
+    const memoryCall = ["remember", "forget", "recall", "update_core", "brain_search", "brain_page", "brain_note"].includes(call.name);
+    if (memoryCall) ctx.knowledge?.assertCurrent(agent);
+    const externalBrain = agent.brainSource === "external";
+    const selectedBrain = memoryCall && ctx.knowledge ? ctx.knowledge.forAgent(agent) : externalBrain ? null : ctx.companyBrain;
+    if (memoryCall && externalBrain && ["remember", "forget", "update_core", "brain_note"].includes(call.name)) return { text: "error: the external Brain is read-only; internal memory writes are also disabled" };
+    if (memoryCall && externalBrain && !selectedBrain) return { text: "error: the external Brain is unavailable; internal memory remains excluded" };
     const artifactUserId = ctx.artifactUserId || (call.name.startsWith("artifact_") && store?.panelUser?.(ctx.requester?.id) ? ctx.requester.id : "");
+    if (ctx.knowledge?.ownerMemory && call.name.startsWith("artifact_") && call.name !== "artifact_folders" && ctx.artifacts) {
+      const folder = ctx.artifacts.findFolder(args.folder);
+      if (folder && !ctx.artifacts.canWrite(folder, agent) && !ctx.artifacts.canReadMember(folder, store.panelUser(ctx.knowledge.ownerId(agent)))) return { text: "error: folder not available" };
+    }
     if (call.name.startsWith("artifact_") && call.name !== "artifact_folders" && ctx.artifacts && artifactUserId) {
       const folder = ctx.artifacts.findFolder(args.folder);
       if (folder) {
@@ -510,21 +520,21 @@ export async function executeTool(call, ctx) {
       }
       case "remember": {
         // What everyone should know belongs to the company brain, when the instance has one.
-        if (args.shared && ctx.companyBrain?.enabled) {
+        if (args.shared && selectedBrain?.enabled) {
           const text = String(args.fact || "").trim();
           if (!text) return { text: "error: empty fact" };
-          await ctx.companyBrain.note({ text, agentId: agent.id, author: agent.name, channelId });
+          await selectedBrain.note({ text, agentId: agent.id, author: agent.name, channelId });
           ctx.log?.({ type: "memory", agentId: agent.id, text: `(per il brain) ${text.slice(0, 300)}` });
-          return { text: "noted for the company brain (shared facts go there): immediate librarian consolidation queued" };
+          return { text: ctx.knowledge?.ownerMemory ? "noted for this owner's Brain; sharing with other owners requires their explicit sharing settings" : "noted for the company brain (shared facts go there): immediate librarian consolidation queued" };
         }
-        const key = args.shared ? SHARED : agent.id;
+        const key = ctx.knowledge?.ownerMemory ? ctx.knowledge.memoryKey(agent) : args.shared ? SHARED : agent.id;
         const memory = store.addMemory(key, String(args.fact || ""), "agent", { by: agent.name });
         ctx.log?.({ type: "memory", agentId: agent.id, text: `${args.shared ? "(condiviso) " : ""}${memory.text}` });
         return { text: `saved [${memory.id}]${args.shared ? " (shared)" : ""}` };
       }
       case "forget": {
         const found = store.findMemory(String(args.memory_id || ""));
-        if (!found || (found.key !== agent.id && found.key !== SHARED)) return { text: "error: no memory with that id" };
+        if (!found || (ctx.knowledge?.ownerMemory ? !ctx.knowledge.ownerKeys(agent.id).includes(found.key) : found.key !== agent.id && found.key !== SHARED)) return { text: "error: no memory with that id" };
         store.deleteMemory(found.key, found.memory.id);
         ctx.log?.({ type: "memory", agentId: agent.id, text: `dimenticato: ${found.memory.text}` });
         return { text: "deleted" };
@@ -532,8 +542,9 @@ export async function executeTool(call, ctx) {
       case "recall": {
         const query = String(args.query || "");
         if (!query.trim()) return { text: "error: empty query" };
+        if (externalBrain) return { text: JSON.stringify({ source: "external", readonly: true, pages: await selectedBrain.search(query, { limit: 10 }) }) };
         const facts = ctx.memory.searchFacts(agent.id, query, 10).map((doc) => ({ doc }));
-        const messages = ctx.memory.searchArchive(ctx.channelIds || [], query, { limit: 12 });
+        const messages = ctx.memory.searchArchive(ctx.channelIds || [], query, { limit: ctx.knowledge?.ownerMemory ? 48 : 12 }).filter((message) => !ctx.knowledge?.ownerMemory || ctx.knowledge.messageOwner(message) === ctx.knowledge.ownerId(agent)).slice(0, 12);
         const diary = bm25(store.diary(agent.id), query, (item) => item.text, { limit: 3 });
         const lines = [];
         lines.push("Memories:", ...(facts.length ? facts.map(({ doc }) => `- [${doc.id}] ${doc.text}${doc.scope === "shared" ? " (shared)" : ""}`) : ["- none"]));
@@ -632,30 +643,30 @@ export async function executeTool(call, ctx) {
       }
       case "list_channels": return { text: JSON.stringify(ctx.postingChannels || []) };
       case "brain_search": {
-        if (!ctx.companyBrain?.enabled) return { text: "error: this instance has no company brain" };
+        if (!selectedBrain?.enabled) return { text: "error: this instance has no company brain" };
         const query = String(args.query || "").trim();
         if (!query) return { text: "error: say what to look for" };
-        const [pages, chats] = await Promise.all([ctx.companyBrain.search(query, { limit: 6 }), ctx.companyBrain.searchArchive(query, { limit: 5 })]);
+        const [pages, chats] = await Promise.all([selectedBrain.search(query, { limit: 6 }), selectedBrain.searchArchive(query, { limit: 5 })]);
         return { text: JSON.stringify({
           pages: pages.map((page) => ({ slug: page.slug, title: page.title, kind: page.kind, summary: page.summary, updatedAt: page.updatedAt, reviewed: !page.pending })),
           chats: chats.map((chat) => ({ at: chat.at, author: chat.author, channel: ctx.channelLabel ? ctx.channelLabel(chat.channelId) : chat.channelId, text: chat.text.slice(0, 500) })),
         }) };
       }
       case "brain_page": {
-        if (!ctx.companyBrain?.enabled) return { text: "error: this instance has no company brain" };
-        const page = await ctx.companyBrain.page(String(args.slug || ""));
+        if (!selectedBrain?.enabled) return { text: "error: this instance has no company brain" };
+        const page = await selectedBrain.page(String(args.slug || ""));
         if (!page || page.status !== "live") return { text: "error: no such page; find it with brain_search" };
-        const latest = page.revisions[0];
+        const latest = page.revisions?.[0];
         return { text: JSON.stringify({
           slug: page.slug, title: page.title, kind: page.kind, summary: page.summary, body: page.body, updatedAt: page.updatedAt, reviewed: !page.pending,
           sources: (latest?.sources || []).slice(0, 6).map((source) => ({ type: source.type, author: source.author, channel: source.channel, at: source.at, quote: source.quote })),
         }) };
       }
       case "brain_note": {
-        if (!ctx.companyBrain?.enabled) return { text: "error: this instance has no company brain" };
+        if (!selectedBrain?.enabled) return { text: "error: this instance has no company brain" };
         const text = String(args.text || "").trim();
         if (!text) return { text: "error: empty note" };
-        await ctx.companyBrain.note({ text, agentId: agent.id, author: agent.name, channelId });
+        await selectedBrain.note({ text, agentId: agent.id, author: agent.name, channelId });
         return { text: "noted for the librarian: immediate company brain consolidation queued, and the owner sees it in the morning review" };
       }
       case "say": {
@@ -700,7 +711,7 @@ export async function executeTool(call, ctx) {
       case "share_file": {
         const wanted = String(args.agent || "").trim().toLowerCase();
         const recipient = store.agents().find((other) => other.id === wanted || other.name.toLowerCase() === wanted);
-        if (!recipient || recipient.id === agent.id || !recipient.enabled || !recipient.tools) return { text: "error: recipient must be another enabled Cora agent with a desktop" };
+        if (!recipient || recipient.id === agent.id || !recipient.enabled || !recipient.tools || (ctx.knowledge?.ownerMemory && ctx.knowledge.ownerId(recipient) !== ctx.knowledge.ownerId(agent))) return { text: "error: recipient must be another enabled Cora agent with a desktop" };
         await boxes.ensure(agent);
         await boxes.ensure(recipient);
         const receipt = await boxes.shareFile(agent.id, recipient.id, String(args.path || ""));
@@ -759,7 +770,7 @@ export async function executeTool(call, ctx) {
       }
       case "secret_list": {
         if (!ctx.vault?.enabled) return { text: "error: this Cora has no vault" };
-        const secrets = ctx.vault.list().map((secret) => ({ name: secret.name, what: secret.description, you_may_use: ctx.vault.canUse(ctx.store.vaultSecret(secret.name), agent), updated: new Date(secret.updatedAt).toISOString() }));
+        const secrets = ctx.vault.list(null, agent).map((secret) => ({ name: secret.name, what: secret.description, you_may_use: ctx.vault.canUse(ctx.store.vaultSecret(secret.name), agent), updated: new Date(secret.updatedAt).toISOString() }));
         return { text: JSON.stringify(secrets.length ? { secrets } : { secrets, note: "the vault is empty: to get a secret, send the person a link with secret_request" }) };
       }
       case "secret_request": {

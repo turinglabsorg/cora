@@ -297,6 +297,9 @@ a.stat:hover { border-color: var(--line-strong); }
   display: flex; align-items: center; gap: 18px; padding: 18px 20px; border-radius: var(--r-lg); border: 1px solid var(--line); box-shadow: var(--shadow);
   background: linear-gradient(115deg, color-mix(in srgb, var(--ring) 16%, var(--panel)), var(--panel) 62%);
 }
+.hero .badge { max-width: 100%; min-width: 0; }
+.hero .badge .ico { flex: none; }
+.hero-model { overflow: hidden; text-overflow: ellipsis; }
 .hero-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
 .hero h1 { margin: 0; font: 600 38px/1.05 var(--display); letter-spacing: -0.04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hero.compact { padding: 10px 14px; gap: 14px; }

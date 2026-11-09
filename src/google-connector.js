@@ -11,9 +11,9 @@ export class GoogleConnector {
     this.pending = new Map(); this.bundles = new Map(); this.access = new Map();
   }
   records() { return this.store.value("googleConnectors", []); }
-  view() {
-    return { available: Boolean(this.enabled && this.broker && this.space), connections: this.records().filter((item) => !item.disconnected),
-      agents: this.store.agents().map(({ id, name }) => ({ id, name })) };
+  view(user = null) {
+    return { available: Boolean(this.enabled && this.broker && this.space), connections: this.records().filter((item) => !item.disconnected && (!this.knowledge?.ownerMemory || item.connectedBy === user?.id)),
+      agents: (this.knowledge?.ownerMemory ? this.knowledge.agentsFor(user) : this.store.agents()).map(({ id, name }) => ({ id, name })) };
   }
   forAgent(agent) { return this.records().filter((item) => !item.disconnected && item.agents.includes(agent.id)); }
   identity(agent, id) {
@@ -42,7 +42,7 @@ export class GoogleConnector {
     if (!pending || pending.expires < Date.now() || data.space !== this.space || data.nonce !== nonce) throw new ConnectorError("Collegamento Google scaduto. Riprova.");
     this.pending.delete(data.nonce);
     const user = this.store.panelUser(pending.userId);
-    if (!user || user.role !== "owner" || user.blocked) throw new ConnectorError("Accesso non autorizzato.", 403);
+    if (!user || (!this.knowledge?.ownerMemory && user.role !== "owner") || user.blocked) throw new ConnectorError("Accesso non autorizzato.", 403);
     if (error || !code) throw new ConnectorError("Collegamento Google annullato.");
     const result = await this.relay("exchange", { state, code, verifier: pending.verifier });
     if (!result.refresh_token || !result.grant || !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(result.email || "")) throw new ConnectorError("Google non ha confermato l'indirizzo.");

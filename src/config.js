@@ -45,6 +45,7 @@ export const config = {
   orcaKey: env.ORCAROUTER_API_KEY || "",
   // The company brain: Postgres with pgvector (hush CORA_BRAIN_DATABASE_URL), embeddings from this machine's Ollama.
   brainDatabaseUrl: env.BRAIN_DATABASE_URL || "",
+  ownerMemory: setting("OWNER_MEMORY") === "1",
   brainEmbedUrl: (setting("BRAIN_EMBED_URL") || "http://127.0.0.1:11434").replace(/\/$/, ""),
   // DeepSeek Harness (dsh) on the instance's own DeepSeek key, in a DSH_HOME of Cora's.
   deepseekKey: env.DEEPSEEK_API_KEY || "",

@@ -116,11 +116,19 @@ export class Vault {
     };
   }
 
-  list() {
-    return this.store.vaultSecrets().map((secret) => this.view(secret));
+  recordOwner(record) {
+    const by = record.createdBy || record.by;
+    return by?.kind === "user" ? by.id : this.store.agent(by?.id)?.brainOwnerId || "";
+  }
+
+  canManage(record, user) { return Boolean(user && this.recordOwner(record) === user.id); }
+
+  list(user = null, agent = null) {
+    return this.store.vaultSecrets().filter((secret) => !this.knowledge?.ownerMemory || (user ? this.canManage(secret, user) : agent && this.canUse(secret, agent))).map((secret) => this.view(secret));
   }
 
   canUse(secret, agent) {
+    if (this.knowledge?.ownerMemory && secret?.agents?.includes("*") && this.recordOwner(secret) !== this.knowledge.ownerId(agent)) return false;
     return Boolean(agent && (secret.agents || []).some((id) => id === "*" || id === agent.id));
   }
 
@@ -130,6 +138,7 @@ export class Vault {
     const clean = this.cleanName(name);
     const text = this.cleanValue(value);
     const old = this.store.vaultSecret(clean);
+    if (this.knowledge?.ownerMemory && old && this.recordOwner(old) !== this.recordOwner({ by })) throw new VaultError("nome non disponibile", 409);
     const now = Date.now();
     const secret = {
       id: old?.id || `vs_${randomBytes(6).toString("hex")}`, name: clean,
@@ -197,6 +206,8 @@ export class Vault {
   requestLink({ name, description = "", agents = [], by, channelId = "", hours = 72 }) {
     this.need();
     const clean = this.cleanName(name);
+    const old = this.store.vaultSecret(clean);
+    if (this.knowledge?.ownerMemory && old && this.recordOwner(old) !== this.recordOwner({ by })) throw new VaultError("nome non disponibile", 409);
     const token = b64url(randomBytes(24));
     const now = Date.now();
     const request = {
@@ -239,7 +250,7 @@ export class Vault {
     const secret = this.put({ name: request.name, value: text, description: request.description || undefined, agents: request.agents.length ? request.agents : undefined, by: request.by, source: "request" });
     this.event("request-filled", { name: request.name, requestId: request.id, who });
     const asker = request.by?.name ? ` (chiesto da ${request.by.name})` : "";
-    this.webPush?.notify({ title: "Cassaforte", body: `È arrivato ${request.name}${asker}`, url: "/#/artefatti/segreti", tag: `secret-${request.id}` }).catch?.(() => {});
+    this.webPush?.notify({ userId: this.knowledge?.ownerMemory ? this.recordOwner(request) || "unavailable" : "", title: "Cassaforte", body: `È arrivato ${request.name}${asker}`, url: "/#/artefatti/segreti", tag: `secret-${request.id}` }).catch?.(() => {});
     if (request.channelId && this.notice) Promise.resolve(this.notice(request.channelId, `🔐 È arrivato **${request.name}** nella cassaforte${asker}: si usa per nome, con secret_import.`)).catch(() => {});
     return secret;
   }
@@ -272,7 +283,7 @@ export class Vault {
     const actor = by ? { kind: by.kind || "user", id: by.id, name: by.name || "" } : null;
     if (status === "proposed") {
       this.store.writeVaultSend(`proposed:${send.id}`, send);
-      this.webPush?.notify({ title: "Cassaforte", body: `${by?.name || "Un agente"} chiede di mandare ${clean}`, url: "/#/artefatti/segreti", tag: `send-${send.id}` }).catch?.(() => {});
+      this.webPush?.notify({ userId: this.knowledge?.ownerMemory ? this.recordOwner(secret) || "unavailable" : "", title: "Cassaforte", body: `${by?.name || "Un agente"} chiede di mandare ${clean}`, url: "/#/artefatti/segreti", tag: `send-${send.id}` }).catch?.(() => {});
       this.log({ type: "secret", text: `${by?.name || "un agente"} chiede di mandare ${clean}: aspetta il proprietario` });
       this.event("send-proposed", { name: clean, sendId: send.id, note: send.note, by: actor });
       return this.sendView(send);

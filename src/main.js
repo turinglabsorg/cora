@@ -32,6 +32,7 @@ import { Voice } from "./voice.js";
 import { GoogleConnector } from "./google-connector.js";
 import { EmailChannel } from "./email-channel.js";
 import { MailDomains } from "./mail-domains.js";
+import { KnowledgeSources } from "./knowledge.js";
 import { createWeb } from "./web.js";
 
 export function startCora(overrides = {}) {
@@ -118,12 +119,20 @@ export function startCora(overrides = {}) {
   const voice = new Voice({ key: cfg.sonioxKey, api: cfg.sonioxApi, ttsUrl: cfg.sonioxTtsUrl, ffmpeg: cfg.ffmpeg });
   // The company brain lives in Postgres (pgvector); without its URL the agents simply have no brain to read.
   const companyBrain = new CompanyBrain({ url: cfg.brainDatabaseUrl, embed: (model, texts) => llm.embed(model, texts, cfg.brainEmbedUrl), embedModel: () => store.settings.brainEmbedModel, log: activity });
+  const knowledge = new KnowledgeSources({ store, internal: companyBrain, storeSecret, tokenFor, allowLocal: cfg.knowledgeAllowLocal === true, ownerMemory: cfg.ownerMemory === true });
   const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc, companyBrain,
+    knowledge,
     gitAttribution: { enabled: cfg.gitAttribution, email: cfg.gitCoauthorEmail },
     mailboxFor,
   });
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching(), voice });
+  knowledge.agentChannels = (agent) => brain.channelIdsFor(agent);
+  if (knowledge.ownerMemory) {
+    push.ownerForAgent = (agent) => knowledge.ownerId(agent);
+    orchestrator.memoryOwner = (agent) => knowledge.ownerId(agent);
+  }
+  knowledge.isBusy = (agent) => brain.sleeping.has(agent.id) || [...orchestrator.states.values()].some((state) => state.working?.has(agent.id)) || [...brain.activeTurns.values()].some((workers) => workers.has(agent.id));
   // DMs to an agent's own bot reach the orchestrator, where that one agent answers.
   bots.onDirect = (agentId, raw) => orchestrator.onDirectMessage(agentId, raw).catch((error) => activity({ type: "error", agentId, text: `dm: ${error.message}` }));
   // Every agent bot that may read content also listens: a private channel is heard if one of them is in it.
@@ -137,6 +146,7 @@ export function startCora(overrides = {}) {
   brain.threadFor = (agent, threadId) => orchestrator.threadFor(agent, threadId);
   // A private word to the owner from Cora: where a secret's link goes when they ask an agent for it.
   brain.messageOwner = (text) => orchestrator.messageOwner(text);
+  brain.messagePersonFor = (agent, text) => orchestrator.messagePerson(text, knowledge.contactFor(knowledge.ownerId(agent)));
   // Where the owner reviews the brain: the address people reach this Cora on.
   const instanceUrl = cfg.publicHost ? `https://${cfg.publicHost}` : cfg.cloudUrl && cfg.cloudSpace ? `https://${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
   orchestrator.instanceUrl = instanceUrl;
@@ -155,6 +165,7 @@ export function startCora(overrides = {}) {
     push: { notify: (notice) => (push.enabled ? push.notify(notice) : Promise.resolve()) },
     notice: (channelId, text) => orchestrator.notice(channelId, text),
   });
+  artifacts.knowledge = knowledge;
   brain.artifacts = artifacts;
   // Secrets by name: encrypted here, put into an agent's hush, never shown back.
   const vault = new Vault({
@@ -162,6 +173,8 @@ export function startCora(overrides = {}) {
     push: { notify: (notice) => (push.enabled ? push.notify(notice) : Promise.resolve()) },
     notice: (channelId, text) => orchestrator.notice(channelId, text),
   });
+  vault.knowledge = knowledge;
+  googleConnector.knowledge = knowledge;
   brain.vault = vault;
   // Each agent's own GitHub App: made from the panel, its hour-long tokens written on the agent's desktop.
   const github = new GithubApps({
@@ -170,17 +183,17 @@ export function startCora(overrides = {}) {
   brain.github = github;
   github.start();
   const librarian = new Librarian({
-    brain: companyBrain, store, llm, log: activity, traces, timezone: cfg.timezone,
+    brain: companyBrain, store, llm, log: activity, traces, timezone: cfg.timezone, knowledge,
     channelLabel: (id) => brain.channelLabel(id),
     notify: (notice) => (push.enabled ? push.notify(notice) : Promise.resolve()),
-    messageOwner: (text) => orchestrator.messageOwner(text),
+    messageOwner: (text, ownerId) => ownerId ? orchestrator.messagePerson(text, knowledge.contactFor(ownerId)) : orchestrator.messageOwner(text),
     reviewUrl: () => (instanceUrl ? `${instanceUrl}/#/brain/revisione` : ""),
   });
-  const scheduler = new Scheduler({ store, orchestrator, brain, librarian, companyBrain, artifacts, backups: join(cfg.home, "backups"), timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
+  const scheduler = new Scheduler({ store, orchestrator, brain, librarian, companyBrain: knowledge.ownerMemory ? { enabled: companyBrain.enabled, exportAll: () => knowledge.exportAll() } : companyBrain, artifacts, backups: join(cfg.home, "backups"), timezone: cfg.timezone, tickMs: cfg.schedulerTickMs, log: activity });
   companyBrain.onNote = () => librarian.requestRun({ reason: "memoria" });
   // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
   const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, github, mailDomains, email, googleConnector });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, github, mailDomains, email, googleConnector, knowledge });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -260,7 +273,7 @@ export function startCora(overrides = {}) {
     console.log(`> cora on http://${cfg.host}:${web.server.address().port}`);
     if (!cfg.adminPassword) console.error("! CORA_ADMIN_PASSWORD is not set: the panel refuses every login");
     channels.apply();
-    if (companyBrain.enabled) companyBrain.notes().then((notes) => {
+    if (companyBrain.enabled) (knowledge.ownerMemory ? Promise.all(knowledge.ownerIds().map((id) => knowledge.ownerBrain(id).notes())).then((sets) => sets.flat()) : companyBrain.notes()).then((notes) => {
       if (!stopping && notes.length) librarian.requestRun({ reason: "memorie in attesa" });
     }).catch(() => { if (!stopping) activity({ type: "error", text: "bibliotecario: il brain non risponde" }); });
     botTimer = setInterval(() => {
@@ -306,7 +319,7 @@ export function startCora(overrides = {}) {
     await companyBrain.close();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, github, mailDomains, email, googleConnector, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, github, mailDomains, email, googleConnector, knowledge, server: web.server };
 }
 
 const isMain = (() => {

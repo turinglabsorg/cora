@@ -20,7 +20,7 @@ const SYSTEM = "Sei il bibliotecario del brain aziendale. Rispondi solo con JSON
  * which never holds anything up. In the morning it tells the owner what changed.
  */
 export class Librarian {
-  constructor({ brain, store, llm, log = () => {}, traces = null, timezone = "Europe/Rome", channelLabel = (id) => id, notify = async () => {}, messageOwner = async () => false, reviewUrl = () => "" }) {
+  constructor({ brain, store, llm, log = () => {}, traces = null, timezone = "Europe/Rome", channelLabel = (id) => id, notify = async () => {}, messageOwner = async () => false, reviewUrl = () => "", knowledge = null, ownerId = "" }) {
     this.brain = brain;
     this.timezone = timezone;
     this.store = store;
@@ -31,6 +31,9 @@ export class Librarian {
     this.notify = notify;
     this.messageOwner = messageOwner;
     this.reviewUrl = reviewUrl;
+    this.knowledge = knowledge;
+    this.ownerId = ownerId;
+    this.workers = new Map();
     this.running = false;
     this.pending = false;
     this.timer = null;
@@ -63,7 +66,30 @@ export class Librarian {
     this.pending = false;
     clearTimeout(this.timer);
     this.timer = null;
-    return this.idle;
+    return Promise.all([this.idle, ...[...this.workers.values()].map((worker) => worker.stop())]);
+  }
+
+  forOwner(ownerId) {
+    if (!this.knowledge?.ownerMemory) return this;
+    if (!this.workers.has(ownerId)) this.workers.set(ownerId, new Librarian({ brain: this.knowledge.ownerBrain(ownerId), store: this.store, llm: this.llm, log: (entry) => this.log({ ...entry, ownerId }), traces: this.traces, timezone: this.timezone,
+      channelLabel: this.channelLabel, notify: (notice) => this.notify({ ...notice, userId: ownerId }), messageOwner: (text) => this.messageOwner(text, ownerId), reviewUrl: this.reviewUrl, knowledge: this.knowledge, ownerId }));
+    return this.workers.get(ownerId);
+  }
+
+  async runOwners(options) {
+    if (this.stopped) return { status: "stopped" };
+    if (this.running) return { status: "busy" };
+    clearTimeout(this.timer); this.timer = null; this.pending = false;
+    this.running = true;
+    let finish; this.idle = new Promise((resolve) => { finish = resolve; });
+    try {
+      const results = [];
+      for (const id of this.knowledge.ownerIds()) {
+        if (this.stopped) break;
+        results.push(await this.forOwner(id).run(options));
+      }
+      return { status: results.some((result) => result.status === "partial") ? "partial" : "done", owners: results.length };
+    } finally { this.running = false; finish(); this.queueRun(); }
   }
 
   get model() {
@@ -72,7 +98,7 @@ export class Librarian {
 
   async think(prompt) {
     const model = this.model;
-    const trace = this.traces?.start({ agentId: "librarian", kind: "librarian", model, system: SYSTEM, prompt });
+    const trace = this.traces?.start({ agentId: this.ownerId ? `librarian:${this.ownerId}` : "librarian", kind: "librarian", model, system: SYSTEM, prompt });
     try {
       const result = this.llm.isAgentic(model)
         ? await this.llm.runAgent({ model, system: SYSTEM, prompt, tools: [], execute: null, timeoutMs: 10 * 60 * 1000, onStep: (step) => trace?.add(step) })
@@ -88,6 +114,7 @@ export class Librarian {
 
   /** Consolidate notes and chats since the last successful batch. */
   async run({ reason = "notte" } = {}) {
+    if (this.knowledge?.ownerMemory && !this.ownerId) return this.runOwners({ reason });
     if (this.stopped) return { status: "stopped" };
     if (!this.brain?.enabled) return { status: "disabled" };
     if (this.running) return { status: "busy" };
@@ -101,10 +128,11 @@ export class Librarian {
     try {
       const last = await this.brain.state("lastRun", null);
       const since = Number(last?.until) || started - BACKFILL_MS;
-      const messages = this.store.messagesSince(this.store.archivedChannels(), since, RUN_MESSAGES)
-        .filter((message) => String(message.content || "").trim().length > 3);
+      const sourceMessages = this.ownerId ? this.knowledge.messagesSince(this.ownerId, since, RUN_MESSAGES) : this.store.messagesSince(this.store.archivedChannels(), since, RUN_MESSAGES);
+      const messages = sourceMessages
+        .filter((message) => String(message.content || "").trim().length > 3 && (!this.ownerId || this.knowledge.messageOwner(message) === this.ownerId));
       const notes = await this.brain.notes();
-      const shared = (await this.brain.state("sharedImported", false)) ? [] : this.store.memories(SHARED);
+      const shared = this.ownerId || (await this.brain.state("sharedImported", false)) ? [] : this.store.memories(SHARED);
       // Every message joins the searchable archive, whatever the librarian makes of it.
       await this.brain.addChunks(messages.map((message) => ({ id: `msg:${message.id}`, source: "message", channelId: message.channelId, at: message.at, author: message.authorName, text: message.content })));
       const totals = { created: 0, updated: 0, flagged: 0, skipped: 0, batches: 0, errors: [], traceIds: [] };
@@ -243,6 +271,11 @@ export class Librarian {
    * changes nothing: the pages stay as they are.
    */
   async digest() {
+    if (this.knowledge?.ownerMemory && !this.ownerId) {
+      const results = [];
+      for (const id of this.knowledge.ownerIds()) results.push(await this.forOwner(id).digest());
+      return { status: results.some((result) => result.status === "sent") ? "sent" : "nothing", owners: results.length };
+    }
     if (!this.brain?.enabled) return { status: "disabled" };
     const queue = await this.brain.reviewQueue();
     const last = Number(await this.brain.state("lastDigest", 0)) || 0;

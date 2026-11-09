@@ -69,16 +69,16 @@ export class Push {
     return Boolean(this.keys);
   }
 
-  status() {
-    return { enabled: this.enabled, publicKey: this.keys?.publicKey || "", devices: this.store.pushSubscriptions().length };
+  status(userId = "") {
+    return { enabled: this.enabled, publicKey: this.keys?.publicKey || "", devices: this.store.pushSubscriptions().filter((subscription) => !userId || subscription.userId === userId).length };
   }
 
   /** Send to every device; subscriptions the push service has dropped are removed. */
-  async notify({ title, body = "", url = "/", tag = "" }) {
+  async notify({ title, body = "", url = "/", tag = "", userId = "" }) {
     if (!this.keys) return { sent: 0 };
     const payload = JSON.stringify({ title: String(title).slice(0, 80), body: String(body).slice(0, 400), url, tag });
     let sent = 0;
-    await Promise.all(this.store.pushSubscriptions().map(async (subscription) => {
+    await Promise.all(this.store.pushSubscriptions().filter((subscription) => !userId || subscription.userId === userId).map(async (subscription) => {
       try {
         const response = await fetch(subscription.endpoint, {
           method: "POST",
@@ -112,7 +112,7 @@ export class Push {
     if (recent.length >= AGENT_DAILY) return { error: "daily notification limit reached" };
     recent.push(now);
     this.sentByAgent.set(agent.id, recent);
-    const result = await this.notify({ title: title ? `${agent.name}: ${title}` : agent.name, body: message, url: url || `/#/agent/${agent.id}/chat`, tag: `agent-${agent.id}-${now}` });
+    const result = await this.notify({ userId: this.ownerForAgent?.(agent) || "", title: title ? `${agent.name}: ${title}` : agent.name, body: message, url: url || `/#/agent/${agent.id}/chat`, tag: `agent-${agent.id}-${now}` });
     return result.sent ? { sent: result.sent } : { error: "no device accepted the notification" };
   }
 }

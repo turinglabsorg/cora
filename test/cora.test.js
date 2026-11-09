@@ -1,6 +1,7 @@
 import { googleConnectorFixture } from "./google-connector-fixtures.js";
 import { EmailChannel } from "../src/email-channel.js";
 import { mailWorld } from "./mail-fixtures.js";
+import { knowledgeWorld } from "./knowledge-fixtures.js";
 import assert from "node:assert/strict";
 import { createECDH, createDecipheriv, createPublicKey, createHmac, createHash, hkdfSync, randomBytes, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -21,6 +22,7 @@ import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
 import { Boxes } from "../src/box.js";
 import { Voice } from "../src/voice.js";
+import { ExternalBrain, publicKnowledgeAddress } from "../src/knowledge.js";
 import { gitLauncherFixture, gitSetupFixture } from "./git-launcher-fixtures.js";
 import { executeTool } from "../src/tools.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -241,6 +243,263 @@ beforeEach(async () => {
   departures = null;
   discord.state.webhookPosts.length = 0;
   discord.state.botPosts.length = 0;
+});
+
+test("owner memory isolates facts, clients, projects, archives and reviews until a page is explicitly shared", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const create = async (actor, name) => {
+    const result = await f.request(actor, "/api/agents", { method: "POST", body: { name, tools: false, core: name + " private core" } });
+    assert.equal(result.status, 201); return f.app.store.agent(result.data.id);
+  };
+  const alice = await create(f.alice, "Alice agent"), sister = await create(f.alice, "Alice colleague"), bob = await create(f.bob, "Bob agent");
+  assert.equal(alice.brainOwnerId, f.alice.user.id);
+  f.app.store.addMemory(alice.id, "ORBIT_ALICE_PRIVATE", "manual", { pinned: true });
+  f.app.store.addMemory(bob.id, "ORBIT_BOB_PRIVATE", "manual", { pinned: true });
+  f.app.store.addMemory(SHARED, "ORBIT_LEGACY_SHARED_PRIVATE", "manual", { pinned: true });
+  assert.match(f.app.brain.memoryContext(sister, "orbit"), /ORBIT_ALICE_PRIVATE/);
+  assert.doesNotMatch(f.app.brain.memoryContext(sister, "orbit"), /ORBIT_BOB|ORBIT_LEGACY/);
+  for (const [actor, title, body] of [[f.alice, "Orbit Alice", "ORBIT_ALICE_PAGE_PRIVATE"], [f.bob, "Orbit Bob", "ORBIT_BOB_PAGE_PRIVATE"]]) {
+    const result = await f.request(actor, "/api/brain/pages", { method: "POST", body: { slug: "orbit", kind: "client", title, body } });
+    assert.equal(result.status, 201);
+  }
+  const ownAlice = f.app.knowledge.ownerBrain(f.alice.user.id), ownBob = f.app.knowledge.ownerBrain(f.bob.user.id);
+  assert.notEqual(ownAlice.schema, ownBob.schema);
+  assert.match((await ownAlice.page("orbit")).body, /ALICE/);
+  assert.match((await ownBob.page("orbit")).body, /BOB/);
+  assert.equal((await f.request(f.bob, "/api/agents/" + alice.id + "/memories")).status, 403);
+  assert.equal((await f.request(f.bob, "/api/rooms/web-" + alice.id + "/messages")).status, 403);
+  assert.ok((await f.request(f.bob, "/api/state")).data.agents.every((agent) => !agent.core));
+  f.app.store.appendArchive("web-" + alice.id, { id: "owner-alice-message", kind: "owner", authorId: f.alice.user.id, authorName: "alice", at: Date.now(), content: "ORBIT_ALICE_CHAT_PRIVATE" });
+  f.app.store.appendArchive("web-" + bob.id, { id: "owner-bob-message", kind: "owner", authorId: f.bob.user.id, authorName: "bob", at: Date.now(), content: "ORBIT_BOB_CHAT_PRIVATE" });
+  await f.app.librarian.run();
+  assert.match(JSON.stringify(await ownAlice.searchArchive("ORBIT")), /ALICE_CHAT/);
+  assert.doesNotMatch(JSON.stringify(await ownAlice.searchArchive("ORBIT")), /BOB_CHAT/);
+  const ctx = { agent: bob, store: f.app.store, knowledge: f.app.knowledge, companyBrain: f.app.companyBrain, memory: f.app.brain.memory, channelIds: ["web-" + bob.id, "web-" + alice.id], channelLabel: (id) => id, formatWhen: String };
+  assert.doesNotMatch((await executeTool({ name: "recall", args: { query: "ORBIT" } }, ctx)).text, /ALICE|LEGACY_SHARED/);
+  assert.doesNotMatch((await executeTool({ name: "brain_search", args: { query: "ORBIT" } }, ctx)).text, /Alice/);
+  const aliceRevision = await ownAlice.write({ slug: "alice-pending", kind: "project", title: "Alice pending", body: "ORBIT_ALICE_REVIEW_PRIVATE", author: "librarian" });
+  await ownBob.write({ slug: "bob-pending", title: "Bob pending", body: "ORBIT_BOB_REVIEW_PRIVATE", author: "librarian" });
+  const queue = await f.request(f.bob, "/api/brain/review");
+  assert.doesNotMatch(JSON.stringify(queue.data), /ALICE/);
+  await f.request(f.bob, "/api/brain/review", { method: "POST", body: { ids: [aliceRevision.revisionId], decision: "approve" } });
+  assert.equal((await ownAlice.page("alice-pending")).pending, 1);
+  const shared = await f.request(f.alice, "/api/brain/pages/orbit/sharing", { method: "PUT", body: { visibility: "people", users: [f.bob.user.id] } });
+  assert.equal(shared.status, 200);
+  const pages = (await f.request(f.bob, "/api/brain/pages")).data.pages;
+  const alias = pages.find((page) => page.title === "Orbit Alice")?.slug;
+  assert.ok(alias?.startsWith("shared-"));
+  const visible = (await f.request(f.bob, "/api/brain/pages/" + alias)).data;
+  assert.match(visible.body, /ORBIT_ALICE_PAGE_PRIVATE/);
+  assert.equal(visible.readonly, true); assert.deepEqual(visible.revisions, []);
+  assert.equal((await f.request(f.bob, "/api/brain/pages/" + alias, { method: "PUT", body: { body: "forged write" } })).status, 403);
+  assert.equal((await f.request(f.bob, "/api/brain/pages/" + alias + "/sharing", { method: "PUT", body: { visibility: "team" } })).status, 403);
+  await f.request(f.alice, "/api/brain/pages/orbit/sharing", { method: "PUT", body: { visibility: "private" } });
+  assert.equal((await f.request(f.bob, "/api/brain/pages/" + alias)).status, 404);
+  assert.doesNotMatch(JSON.stringify((await f.request(f.bob, "/api/brain/pages?q=ORBIT")).data), /Alice/);
+  const prompts = [];
+  f.state.answer = (body) => { prompts.push(body); return { content: "La procedura è disponibile.", thinking: "OWNER_PRIVATE_THINKING" }; };
+  await f.app.brain.chatTurn({ agent: bob, history: [{ kind: "owner", authorId: f.bob.user.id, authorName: "bob", at: Date.now(), content: "ORBIT?" }], channel: { id: "web-" + bob.id, name: "QA" }, forced: true, computer: false });
+  assert.match(JSON.stringify(prompts), /ORBIT_BOB/);
+  assert.doesNotMatch(JSON.stringify(prompts), /ORBIT_ALICE|ORBIT_LEGACY/);
+  const phones = [await fakePhone(), await fakePhone()];
+  t.after(async () => { await Promise.all(phones.map((phone) => phone.close())); });
+  await f.request(f.alice, "/api/push/subscribe", { method: "POST", body: { subscription: phones[0].subscription } });
+  await f.request(f.bob, "/api/push/subscribe", { method: "POST", body: { subscription: phones[1].subscription } });
+  await f.app.librarian.forOwner(f.alice.user.id).digest();
+  assert.equal(phones[0].received.length, 1);
+  assert.equal(phones[1].received.length, 0, "a review never reaches another owner's device");
+  assert.equal((await f.request(f.bob, "/api/push/test", { method: "POST", body: {} })).status, 200);
+  assert.equal(phones[0].received.length, 1);
+  assert.equal(phones[1].received.length, 1);
+  assert.equal((await f.request(f.bob, "/api/push/unsubscribe", { method: "POST", body: { endpoint: phones[0].subscription.endpoint } })).status, 403);
+  await executeTool({ name: "remember", args: { fact: "ORBIT_BOB_PERSISTENT" } }, ctx);
+  assert.ok(f.app.store.memories(f.app.knowledge.memoryKey(bob)).some((item) => item.text === "ORBIT_BOB_PERSISTENT"));
+  await f.request(f.bob, "/api/agents/" + bob.id, { method: "DELETE" });
+  const replacement = await create(f.bob, "Bob replacement");
+  assert.match(f.app.brain.memoryContext(replacement, "orbit"), /ORBIT_BOB_PERSISTENT/);
+});
+
+test("owner isolation hides private platform resources from other members and the space administrator", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const created = await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Alice private assistant", core: "PRIVATE_CORE", tools: false } });
+  const agent = f.app.store.agent(created.data.id);
+  const routine = f.app.store.createRoutine(agent.id, { name: "PRIVATE_ROUTINE", prompt: "PRIVATE_TASK", schedule: "0 9 * * *", channelId: "web-" + agent.id });
+  const subscription = f.app.store.createSubscription({ provider: "claude", label: "PRIVATE_ACCOUNT", connectedBy: { id: f.alice.user.id, name: "alice" } });
+  const connection = { id: "gc_1111222233334444", email: "alice@private.test", agents: [agent.id], connectedBy: f.alice.user.id };
+  f.app.store.setValue("googleConnectors", [connection]);
+  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "alice-private", description: "PRIVATE_FOLDER" } })).data;
+  assert.equal(folder.memberAccess.default, "none");
+  const legacy = f.app.artifacts.createFolder({ path: "alice-legacy-private", description: "PRIVATE_LEGACY_FOLDER", createdBy: { kind: "user", id: f.alice.user.id, name: "alice" } });
+  delete legacy.ownerId; legacy.memberAccess = { default: "write", users: {} }; f.app.store.writeArtifactFolder(legacy);
+  assert.equal((await f.request(f.alice, "/api/artifacts/folders/" + legacy.id)).status, 200);
+  const secret = await f.request(f.alice, "/api/secrets", { method: "POST", body: { name: "ALICE_FIXTURE_KEY", value: "fixture-value", description: "PRIVATE_SECRET", agents: ["*"] } });
+  assert.equal(secret.status, 201);
+  const file = f.app.orchestrator.saveWebFile({ name: "private.txt", type: "text/plain", data: Buffer.from("PRIVATE_FILE") }, agent);
+  const trace = f.app.traces.start({ agentId: agent.id, channelId: "web-" + agent.id, kind: "chat", prompt: "PRIVATE_PROMPT", system: "PRIVATE_SYSTEM", model: "ollama/test-model" });
+  trace.finish({ status: "done", output: "PRIVATE_OUTPUT" });
+  for (const actor of [f.bob, f.admin]) {
+    const state = (await f.request(actor, "/api/state")).data;
+    assert.ok(!state.agents.some((item) => item.id === agent.id));
+    assert.ok(!state.routines.some((item) => item.id === routine.id));
+    assert.ok(!state.subscriptions.some((item) => item.id === subscription.id));
+    for (const path of ["", "/email", "/mailbox", "/memories", "/traces", "/goals", "/box/access"]) assert.equal((await f.request(actor, "/api/agents/" + agent.id + path)).status, 403, path);
+    assert.equal((await f.request(actor, "/api/agents/" + agent.id, { method: "PUT", body: { core: "FORGED" } })).status, 403);
+    assert.equal((await f.request(actor, "/api/agents/" + agent.id, { method: "DELETE" })).status, 403);
+    assert.equal((await f.request(actor, "/api/traces/" + trace.id)).status, 403);
+    assert.equal((await f.request(actor, "/api/routines/" + routine.id, { method: "DELETE" })).status, 404);
+    assert.equal((await f.request(actor, "/api/subscriptions/" + subscription.id)).status, 404);
+    assert.deepEqual((await f.request(actor, "/api/connectors")).data.connections, []);
+    assert.equal((await f.request(actor, "/api/connectors/" + connection.id, { method: "DELETE" })).status, 403);
+    assert.deepEqual((await f.request(actor, "/api/artifacts")).data.folders, []);
+    assert.equal((await f.request(actor, "/api/artifacts/folders/" + folder.id)).status, 403);
+    assert.deepEqual((await f.request(actor, "/api/secrets")).data.secrets, []);
+    assert.equal((await f.request(actor, "/api/secrets/ALICE_FIXTURE_KEY", { method: "DELETE" })).status, 404);
+    const denied = await fetch(f.base + "/api/files/" + file.id, { headers: actor.headers });
+    assert.equal(denied.status, 404);
+    assert.equal((await f.request(actor, "/api/agents/" + agent.id + "/routines", { method: "POST", body: { name: "FORGED" } })).status, 403);
+    const desktop = await fetch(f.base + "/box/" + agent.id + "/", { headers: actor.headers });
+    assert.equal(desktop.status, 403);
+  }
+  assert.equal((await f.request(f.alice, "/api/agents/" + agent.id)).status, 200);
+  assert.equal((await fetch(f.base + "/api/files/" + file.id, { headers: f.alice.headers })).status, 200);
+  const bobAgent = (await f.request(f.bob, "/api/agents", { method: "POST", body: { name: "Bob private assistant", tools: false } })).data;
+  assert.ok(!f.app.artifacts.foldersFor(f.app.store.agent(bobAgent.id)).length);
+  assert.ok(!f.app.vault.canUse(f.app.store.vaultSecret("ALICE_FIXTURE_KEY"), f.app.store.agent(bobAgent.id)));
+  assert.doesNotMatch(f.app.brain.systemPrompt(agent, { computer: false }), /Bob private assistant/);
+  assert.equal(f.app.knowledge.acceptsMessage(agent, { authorId: f.bob.user.id, kind: "owner" }, "web"), false);
+  assert.equal(f.app.knowledge.acceptsMessage(agent, { agentId: bobAgent.id, kind: "agent" }, "web"), false);
+  const abort = new AbortController();
+  const stream = await fetch(f.base + "/api/events", { headers: f.bob.headers, signal: abort.signal });
+  let events = ""; const reading = (async () => { try { for await (const chunk of stream.body) events += Buffer.from(chunk).toString(); } catch {} })();
+  try {
+    await f.request(f.alice, "/api/rooms/web/messages", { method: "POST", body: { text: "ALICE_PRIVATE_SALOTTO" } });
+    const own = await f.request(f.alice, "/api/rooms/web/messages");
+    assert.match(JSON.stringify(own.data), /ALICE_PRIVATE_SALOTTO/);
+    assert.doesNotMatch(JSON.stringify((await f.request(f.bob, "/api/rooms/web/messages")).data), /ALICE_PRIVATE_SALOTTO/);
+    assert.doesNotMatch(JSON.stringify((await f.request(f.admin, "/api/rooms/web/messages")).data), /ALICE_PRIVATE_SALOTTO/);
+    const live = f.app.traces.start({ agentId: agent.id, kind: "chat", channelId: "web-" + agent.id, prompt: "LIVE_PRIVATE", model: "ollama/test-model" });
+    live.add({ type: "thinking", text: "LIVE_PRIVATE_THINKING" }); live.finish({ status: "done", output: "LIVE_PRIVATE_OUTPUT" });
+    await f.request(f.bob, "/api/rooms/web/messages", { method: "POST", body: { text: "BOB_OWN_SALOTTO" } });
+    await waitFor(() => events.includes("BOB_OWN_SALOTTO"));
+    assert.doesNotMatch(events, /ALICE_PRIVATE|LIVE_PRIVATE|Alice private assistant/);
+  } finally { abort.abort(); await reading; }
+  await f.request(f.alice, "/api/artifacts/folders/" + folder.id, { method: "PUT", body: { memberAccess: { default: "none", users: { [f.bob.user.id]: "read" } } } });
+  assert.equal((await f.request(f.bob, "/api/artifacts/folders/" + folder.id)).status, 200);
+  assert.equal((await f.request(f.admin, "/api/artifacts/folders/" + folder.id)).status, 403);
+  await f.request(f.alice, "/api/artifacts/folders/" + folder.id, { method: "PUT", body: { memberAccess: { default: "read", users: {} } } });
+  assert.ok(f.app.artifacts.foldersFor(f.app.store.agent(bobAgent.id)).some((item) => item.folder === folder.path));
+  assert.equal((await f.request(f.admin, "/api/artifacts/folders/" + folder.id)).status, 200);
+  assert.equal((await f.request(f.admin, "/api/artifacts/folders/" + folder.id)).data.canReview, false);
+  await f.request(f.alice, "/api/artifacts/folders/" + folder.id, { method: "PUT", body: { memberAccess: { default: "none", users: {} } } });
+  assert.equal((await f.request(f.bob, "/api/artifacts/folders/" + folder.id)).status, 403);
+});
+
+test("an agent CLI cannot inherit owner Brain links, database access or other agents' GitHub credentials", async (t) => {
+  const agent = app.store.createAgent({ name: "Owner env guard", model: "hermes/test-model", tools: false });
+  t.after(() => app.store.deleteAgent(agent.id));
+  const names = ["CORA_KNOWLEDGE_PRIVATE_FIXTURE", "CORO_KNOWLEDGE_PRIVATE_FIXTURE", "CORA_GH_KEY_PRIVATE_FIXTURE", "BRAIN_DATABASE_URL"];
+  const previous = new Map(names.map((name) => [name, process.env[name]]));
+  for (const name of names) process.env[name] = "fixture-private-value";
+  cli.set({ reply: "Controllo completato.", tool: "list_routines" });
+  try {
+    const answer = await app.brain.chatTurn({ agent, forced: true, computer: false, history: [{ kind: "owner", authorId: OWNER, authorName: "Owner", content: "Controlla le tue routine.", at: Date.now() }], channel: { id: "web-" + agent.id, name: "QA" } });
+    assert.match(answer.text, /Controllo completato/);
+    const run = cli.calls().findLast((item) => item.flavor === "hermes");
+    assert.ok(run.tools.includes("list_routines"));
+    assert.deepEqual(run.secretEnv, []);
+  } finally {
+    for (const [name, value] of previous) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
+});
+
+test("a Brain link replacement cannot change the active source when work begins while hush is saving", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const agent = (await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Link guard", tools: false } })).data;
+  assert.equal((await f.request(f.alice, "/api/agents/" + agent.id + "/knowledge", { method: "PUT", body: { source: "external", url: "https://old.owner.test/brain" } })).status, 200);
+  const original = f.app.store.value("agentBrainLink:" + agent.id), oldLink = f.app.knowledge.links.get(agent.id);
+  let saving, finish; const began = new Promise((resolve) => { saving = resolve; });
+  f.app.knowledge.storeSecret = async () => { saving(); await new Promise((resolve) => { finish = resolve; }); };
+  const changing = f.request(f.alice, "/api/agents/" + agent.id + "/knowledge", { method: "PUT", body: { source: "external", url: "https://new.owner.test/brain" } });
+  await began;
+  assert.throws(() => f.app.knowledge.forAgent(f.app.store.agent(agent.id)), /aggiornamento/);
+  f.app.knowledge.isBusy = () => true; finish();
+  assert.equal((await changing).status, 409);
+  assert.deepEqual(f.app.store.value("agentBrainLink:" + agent.id), original);
+  assert.equal(f.app.knowledge.links.get(agent.id), oldLink);
+  assert.equal(f.app.store.agent(agent.id).brainSource, "external");
+});
+
+test("an external agent Brain is the exclusive read-only source across prompts, tools, APIs and failures", async (t) => {
+  const signedIn = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+  const headers = { Cookie: signedIn.headers.get("set-cookie").split(";")[0] };
+  const requests = [];
+  const source = http.createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ pages: [{ slug: "external-nimbus", title: "Nimbus", summary: "EXTERNAL_NIMBUS_CANARY", body: "EXTERNAL_NIMBUS_CANARY: read the external procedure." }] }));
+  });
+  await new Promise((resolve) => source.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${source.address().port}/brain?access=fixture-link`;
+  const previous = { internal: app.knowledge.internal, company: app.brain.companyBrain, allowLocal: app.knowledge.allowLocal };
+  let internalCalls = 0;
+  const internal = { enabled: true, search: async () => { internalCalls++; return [{ slug: "private", title: "Nimbus", summary: "INTERNAL_COMPANY_CANARY" }]; } };
+  app.knowledge.internal = internal; app.brain.companyBrain = internal; app.knowledge.allowLocal = true;
+  const created = await call("/api/agents", { method: "POST", headers, body: { name: "Exclusive Source", tools: false, core: "INTERNAL_CORE_CANARY", brainSource: "external" } });
+  const id = created.data.id;
+  const memory = app.store.addMemory(id, "Nimbus INTERNAL_FACT_CANARY", "manual");
+  app.store.addDiary(id, "Nimbus INTERNAL_DIARY_CANARY");
+  t.after(async () => {
+    app.knowledge.internal = previous.internal; app.brain.companyBrain = previous.company; app.knowledge.allowLocal = previous.allowLocal;
+    app.knowledge.external.delete(id); app.knowledge.links.delete(id); delete hushVault[`CORA_KNOWLEDGE_${id.toUpperCase()}`]; app.store.deleteAgent(id);
+    await new Promise((resolve) => source.close(resolve));
+  });
+  assert.equal(created.data.brainSource, "internal", "the generic creation API cannot bypass source configuration");
+  const configured = await call(`/api/agents/${id}/knowledge`, { method: "PUT", headers, body: { source: "external", url } });
+  assert.equal(configured.status, 200);
+  assert.equal(configured.data.readonly, true);
+  assert.ok(!JSON.stringify(configured.data).includes("fixture-link"));
+  assert.equal(hushVault[`CORA_KNOWLEDGE_${id.toUpperCase()}`], url);
+  const agent = app.store.agent(id);
+  const ctx = { agent, store: app.store, knowledge: app.knowledge, companyBrain: internal, memory: app.brain.memory, channelId: `web-${id}`, channelLabel: (id) => id };
+  for (const call of [{ name: "recall", args: { query: "Nimbus" } }, { name: "brain_search", args: { query: "Nimbus" } }, { name: "brain_page", args: { slug: "external-nimbus" } }]) {
+    const result = await executeTool(call, ctx);
+    assert.match(result.text, /EXTERNAL_NIMBUS_CANARY|external-nimbus/);
+    assert.doesNotMatch(result.text, /INTERNAL_/);
+  }
+  for (const name of ["remember", "forget", "update_core", "brain_note"]) assert.match((await executeTool({ name, args: { fact: "forged write", text: "forged write", memory_id: memory.id, shared: true } }, ctx)).text, /read-only/);
+  const prompts = [];
+  replies.set("Exclusive Source", (body) => { prompts.push(body); return { content: "La procedura è nel Brain esterno." }; });
+  const result = await app.brain.chatTurn({ agent, forced: true, computer: false, history: [{ kind: "owner", authorId: OWNER, authorName: "Sam", content: "Nimbus?", at: Date.now() }], channel: { id: `web-${id}`, name: "QA", place: "nel pannello" } });
+  assert.ok(result.text);
+  const serialized = JSON.stringify(prompts);
+  assert.match(serialized, /EXTERNAL_NIMBUS_CANARY/);
+  assert.doesNotMatch(serialized, /INTERNAL_(?:CORE|FACT|DIARY|COMPANY)_CANARY/);
+  const tools = prompts[0].tools.map((tool) => tool.function.name);
+  assert.ok(tools.includes("brain_search"));
+  assert.ok(!tools.some((name) => ["remember", "forget", "update_core", "brain_note"].includes(name)));
+  const visible = await call(`/api/agents/${id}/memories`, { headers });
+  assert.equal(visible.data.source, "external");
+  assert.doesNotMatch(JSON.stringify(visible.data), /INTERNAL_/);
+  for (const [path, method, body] of [["memories", "POST", { text: "forged write" }], ["core", "PUT", { text: "forged write" }], ["sleep", "POST", {}], [`memories/${memory.id}`, "DELETE", {}]]) {
+    assert.equal((await call(`/api/agents/${id}/${path}`, { method, headers, body })).status, 409);
+  }
+  await call(`/api/agents/${id}`, { method: "PUT", headers, body: { core: "forged write", brainSource: "internal", brainOwnerId: "forged" } });
+  assert.equal(app.store.agent(id).core, "INTERNAL_CORE_CANARY");
+  assert.equal(app.store.agent(id).brainSource, "external");
+  assert.equal((await app.brain.sleep(agent, { force: true })).status, "external-readonly");
+  const external = app.knowledge.forAgent(agent); external.cache = null;
+  await new Promise((resolve) => source.close(resolve));
+  assert.match((await executeTool({ name: "recall", args: { query: "Nimbus" } }, ctx)).text, /error:/);
+  assert.equal(internalCalls, 0, "an unavailable external source never falls back to internal knowledge");
+  assert.ok(requests.every((request) => request.method === "GET"));
+  const restored = await call(`/api/agents/${id}/knowledge`, { method: "PUT", headers, body: { source: "internal" } });
+  assert.equal(restored.status, 200);
+  assert.match((await executeTool({ name: "recall", args: { query: "Nimbus" } }, ctx)).text, /fonte del Brain è cambiata/);
+  assert.equal(app.store.memories(id).length, 1);
+  assert.equal(app.store.agent(id).core, "INTERNAL_CORE_CANARY");
+  for (const address of ["127.0.0.1", "169.254.169.254", "100.64.0.1", "::1", "::ffff:127.0.0.1"]) assert.equal(publicKnowledgeAddress(address), false);
+  const denied = new ExternalBrain({ url: () => "https://127.0.0.1/brain" });
+  await assert.rejects(denied.pages(), /Internet pubblico/);
 });
 
 test("voice format decisions require an explicit written medium and exact evidence before publishing text", async (t) => {
@@ -3502,6 +3761,7 @@ describe("what runs the models", () => {
     t.after(() => app.store.deleteAgent(agent.id));
     assert.equal(agent.model, "");
     assert.equal(agent.tools, true);
+    await waitFor(() => panel.run(`S.data.agents.some((item) => item.id === "${agent.id}")`));
     await panel.navigate(`#/agent/${agent.id}/cervello`);
     await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 7);
     assert.ok(panel.app.textContent.includes("Claude Code"));

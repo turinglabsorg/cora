@@ -1,4 +1,5 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { tokenize } from "./memory.js";
 import { openBrainDb } from "./brain-db.js";
 
 /**
@@ -47,7 +48,7 @@ export function slugify(text) {
 
 /** Any of the words, each as a prefix: a tsquery built only from letters and digits. */
 function anyWords(query) {
-  const words = [...new Set(searchText(query).split(" ").filter((word) => word.length > 2))].slice(0, 30);
+  const words = [...new Set(tokenize(query).filter((word) => word.length > 2))].slice(0, 30);
   return words.length ? words.map((word) => `${word}:*`).join(" | ") : "";
 }
 
@@ -147,11 +148,14 @@ function fuse(lists, limit) {
 
 export class CompanyBrain {
   /** `embed(texts)` → vectors, or null when no embedding model is set; `embedModel` names it. */
-  constructor({ url = "", embed = null, embedModel = () => "", log = () => {} } = {}) {
+  constructor({ url = "", embed = null, embedModel = () => "", log = () => {}, schema = "", connection = null } = {}) {
     this.url = url;
     this.embed = embed;
     this.embedModel = embedModel;
     this.log = log;
+    this.schema = schema;
+    this.connection = connection;
+    this.owners = new Map();
     this.onNote = null;
     this.db = null;
     this.opening = null;
@@ -186,8 +190,27 @@ export class CompanyBrain {
    */
   get holdsShared() { return this.enabled && this.sharedImported === true; }
 
+  forOwner(ownerId) {
+    if (!ownerId || ownerId === "space-owner") return this;
+    if (!this.owners.has(ownerId)) {
+      const schema = `owner_${createHash("sha256").update(ownerId).digest("hex").slice(0, 24)}`;
+      const brain = new CompanyBrain({ url: this.url, embed: this.embed, embedModel: this.embedModel, log: this.log, schema, connection: () => this.connect() });
+      brain.onNote = () => this.onNote?.();
+      this.owners.set(ownerId, brain);
+    }
+    return this.owners.get(ownerId);
+  }
+
   async open() {
-    const db = await openBrainDb(this.url);
+    const base = this.connection ? await this.connection() : await openBrainDb(this.url);
+    let db = base;
+    if (this.schema) {
+      if (!/^owner_[a-f0-9]{24}$/.test(this.schema)) throw new Error("invalid owner Brain scope");
+      await base.exec(`CREATE SCHEMA IF NOT EXISTS "${this.schema}"`);
+      const qualify = (sql) => sql.replace(/\bbrain_(pages|revisions|notes|chunks|state)\b/g, (table) => `"${this.schema}".${table}`);
+      db = { query: (sql, params) => base.query(qualify(sql), params), exec: (sql) => base.exec(qualify(sql)),
+        transaction: (work) => base.transaction((tx) => work({ query: (sql, params) => tx.query(qualify(sql), params) })), close: async () => {} };
+    }
     try {
       await db.exec(SCHEMA);
       const [row] = await db.query("SELECT value FROM brain_state WHERE key = 'sharedImported'");
@@ -246,6 +269,7 @@ export class CompanyBrain {
 
   async close() {
     try {
+      await Promise.all([...this.owners.values()].map((brain) => brain.close()));
       await this.opening;
       await this.db?.close();
     } catch {}
@@ -285,11 +309,11 @@ export class CompanyBrain {
   }
 
   /* ---------- pages ---------- */
-  async pages({ kind = "", status = "live" } = {}) {
+  async pages({ kind = "", status = "live", slugs = null } = {}) {
     return (await this.q(`
       SELECT p.id, p.slug, p.kind, p.title, p.summary, p.status, p.version, p.created_at, p.updated_at,
         (SELECT count(*) FROM brain_revisions r WHERE r.page_id = p.id AND r.review = ANY($3::text[])) AS pending
-      FROM brain_pages p WHERE p.status = $1 AND ($2 = '' OR p.kind = $2) ORDER BY p.updated_at DESC`, [status, kind, OPEN_REVIEWS])).map(pageRow);
+      FROM brain_pages p WHERE p.status = $1 AND ($2 = '' OR p.kind = $2) AND ($4::text[] IS NULL OR p.slug = ANY($4::text[])) ORDER BY p.updated_at DESC`, [status, kind, OPEN_REVIEWS, slugs])).map(pageRow);
   }
 
   async page(slug) {
@@ -506,8 +530,8 @@ export class CompanyBrain {
   }
 
   /** The live pages that answer a question, best first, each with its summary and the start of its text. */
-  async search(query, { limit = 6 } = {}) {
-    const ids = await this.hybrid("brain_pages", query, { limit, where: "status = 'live'" });
+  async search(query, { limit = 6, slugs = null } = {}) {
+    const ids = await this.hybrid("brain_pages", query, { limit, where: "status = 'live' AND ($1::text[] IS NULL OR slug = ANY($1::text[]))", params: [slugs] });
     if (!ids.length) return [];
     const rows = await this.q(`SELECT p.*, (SELECT count(*) FROM brain_revisions r WHERE r.page_id = p.id AND r.review = ANY($2::text[])) AS pending FROM brain_pages p WHERE p.id = ANY($1::text[])`, [ids, OPEN_REVIEWS]);
     const byId = new Map(rows.map((row) => [row.id, pageRow(row)]));
@@ -515,8 +539,8 @@ export class CompanyBrain {
   }
 
   /** What was said in the chats about it, by words and by meaning. */
-  async searchArchive(query, { limit = 8 } = {}) {
-    const ids = await this.hybrid("brain_chunks", query, { limit });
+  async searchArchive(query, { limit = 8, channelIds = null } = {}) {
+    const ids = await this.hybrid("brain_chunks", query, { limit, where: "($1::text[] IS NULL OR channel_id = ANY($1::text[]))", params: [channelIds] });
     if (!ids.length) return [];
     const rows = await this.q("SELECT id, source, channel_id, at, author, text FROM brain_chunks WHERE id = ANY($1::text[])", [ids]);
     const byId = new Map(rows.map((row) => [row.id, { id: row.id, source: row.source, channelId: row.channel_id, at: iso(row.at), author: row.author, text: row.text }]));

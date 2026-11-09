@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ThreadState } from "./thread-state.js";
 import { TRANSPORT_LABELS, isSlackChannel, isTelegramChannel, slackChannel, slackIds, telegramBotAgent, telegramChannel, telegramChatId, transportOf } from "./channels.js";
-import { SALOTTO, isWebRoom, privateRoom, roomAgentId } from "./rooms.js";
+import { SALOTTO, isWebRoom, isSalotto, ownerRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { MEMORY_TOOLS } from "./tools.js";
 import { userName } from "./telegram.js";
 import { asksToStop } from "./brain.js";
@@ -158,7 +158,7 @@ export class Orchestrator {
   agentsFor(channelId) {
     if (isWebRoom(channelId)) {
       const only = roomAgentId(channelId);
-      return this.store.agents().filter((agent) => agent.enabled && (!only || agent.id === only));
+      return this.store.agents().filter((agent) => agent.enabled && (!only || agent.id === only) && (!this.brain.knowledge?.ownerMemory || only || channelId === ownerRoom(this.brain.knowledge.ownerId(agent))));
     }
     const dm = this.dmAgentId(channelId);
     if (dm) {
@@ -204,6 +204,25 @@ export class Orchestrator {
     if (!owner || !this.discord.user) return false;
     const dm = await this.discord.request("POST", "/users/@me/channels", { body: { recipient_id: owner } });
     await this.discord.say(dm.id, { content: text });
+    return true;
+  }
+
+  async messagePerson(text, personId) {
+    const match = /^(discord|slack|telegram):(.+)$/.exec(String(personId || ""));
+    if (!match) return false;
+    const [, transport, id] = match;
+    if (transport === "slack") {
+      if (!this.slack?.user) return false;
+      const opened = await this.slack.request("conversations.open", { users: id });
+      await this.slack.say(opened.channel.id, { content: text });
+    } else if (transport === "telegram") {
+      if (!this.telegram?.user) return false;
+      await this.telegram.say(id, { content: text });
+    } else {
+      if (!this.discord.user) return false;
+      const dm = await this.discord.request("POST", "/users/@me/channels", { body: { recipient_id: id } });
+      await this.discord.say(dm.id, { content: text });
+    }
     return true;
   }
 
@@ -500,7 +519,7 @@ export class Orchestrator {
    * human was just talking to. Addressed messages keep the others quiet.
    */
   async address(state, item) {
-    const available = this.agentsFor(state.id);
+    const available = this.agentsFor(state.id).filter((agent) => !this.brain.knowledge || this.brain.knowledge.acceptsMessage(agent, item, state.id));
     if (!state.focus) state.focus = this.engagements[state.id] || null;
     if (state.focus) state.focus = { ...state.focus, ids: state.focus.ids.filter((id) => available.some((agent) => agent.id === id)) };
     const previous = state.focus?.ids || [];
@@ -920,7 +939,7 @@ export class Orchestrator {
     if (pending.length && !queued) return;
     const last = queued || state.history[state.history.length - 1];
     if (!last || last.passive) return;
-    const { forced, optional } = this.pickCandidates(state, last, agents);
+    const { forced, optional } = this.pickCandidates(state, last, agents.filter((agent) => !this.brain.knowledge || this.brain.knowledge.acceptsMessage(agent, last, state.id)));
     if (!forced.length && !optional.length) return;
 
     const generation = state.generation;
@@ -1285,7 +1304,7 @@ export class Orchestrator {
     let info = this.channels.listFor(agent).find((channel) => channel.id === target);
     // A thread under a channel it may write to counts too, even one opened since the list was made.
     if (!info && transportOf(target) === "discord") info = await this.threadFor(agent, target);
-    const allowed = target === SALOTTO || target === privateRoom(agent.id) || telegramBotAgent(target) === agent.id || Boolean(info);
+    const allowed = target === (this.brain.knowledge?.ownerMemory ? ownerRoom(this.brain.knowledge.ownerId(agent)) : SALOTTO) || target === privateRoom(agent.id) || telegramBotAgent(target) === agent.id || Boolean(info);
     if (!allowed || !this.channels.isActive(target)) throw new Error("destination not authorized; use list_channels");
     const state = this.state(target);
     if (transportOf(target) === "discord") {
@@ -1633,7 +1652,7 @@ export class Orchestrator {
       agentId: agent.id,
       content: file ? `${text || ""} [file: ${file.name}]`.trim() : text,
       traceId,
-      file: file ? this.saveWebFile(file) : undefined,
+      file: file ? this.saveWebFile(file, agent) : undefined,
       request,
       passive,
       ...(voiceOnly ? { voiceOnly: true } : {}),
@@ -1648,8 +1667,8 @@ export class Orchestrator {
     this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
     // Nobody has the panel open: the reply reaches the owner's phone.
     if (this.notifier?.enabled && !this.watching() && !item.request && !silent) {
-      const url = state.id === "web" ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
-      this.notifier.notify({ title: agent.name, body: voiceOnly ? `🎙 ${file?.name}` : text || `📎 ${file?.name}`, url, tag: state.id }).catch(() => {});
+      const url = isSalotto(state.id) ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
+      this.notifier.notify({ userId: this.memoryOwner?.(agent) || "", title: agent.name, body: voiceOnly ? `🎙 ${file?.name}` : text || `📎 ${file?.name}`, url, tag: state.id }).catch(() => {});
     }
     return [item];
   }
@@ -1682,8 +1701,8 @@ export class Orchestrator {
       [item] = await this.postAs(agent, state, text, undefined, traceId, { request, ...this.replyDelivery(replyTo) });
       this.emit({ type: "request", agentId: agent.id });
       if (this.notifier?.enabled) {
-        const url = state.id === SALOTTO ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
-        this.notifier.notify({ title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: replyTo?.voice && replyTo.replyMode !== "text" && replyTo.replyMode !== "both" ? (english ? "Voice message" : "Messaggio vocale") : text, url, tag: `request-${agent.id}` }).catch(() => {});
+        const url = isSalotto(state.id) ? "/#/salotto" : `/#/agent/${agent.id}/chat`;
+        this.notifier.notify({ userId: this.memoryOwner?.(agent) || "", title: english ? `${agent.name} asks you` : `${agent.name} ti chiede`, body: replyTo?.voice && replyTo.replyMode !== "text" && replyTo.replyMode !== "both" ? (english ? "Voice message" : "Messaggio vocale") : text, url, tag: `request-${agent.id}` }).catch(() => {});
       }
     } else {
       const slack = slackIds(state.id);
@@ -1700,13 +1719,13 @@ export class Orchestrator {
     return { id: item?.id, where: this.channels?.label(state.id) || state.id, here: Boolean(here) };
   }
 
-  saveWebFile(file) {
+  saveWebFile(file, agent = null) {
     if (!this.filesDir) return undefined;
     mkdirSync(this.filesDir, { recursive: true, mode: 0o700 });
     const id = randomBytes(12).toString("hex");
     const name = String(file.name || "file").replace(/[^\w.\- ]+/g, "_").slice(0, 120);
     writeFileSync(join(this.filesDir, id), file.data, { mode: 0o600 });
-    writeFileSync(join(this.filesDir, `${id}.json`), JSON.stringify({ name, type: file.type || "application/octet-stream" }), { mode: 0o600 });
+    writeFileSync(join(this.filesDir, `${id}.json`), JSON.stringify({ name, type: file.type || "application/octet-stream", ...(this.memoryOwner && agent ? { ownerId: this.memoryOwner(agent) } : {}) }), { mode: 0o600 });
     return { id, name, type: file.type || "application/octet-stream" };
   }
 

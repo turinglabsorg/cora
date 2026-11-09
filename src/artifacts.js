@@ -290,17 +290,27 @@ export class Artifacts {
   /* ---------- folders ---------- */
 
   canWrite(folder, agent) {
+    if (this.knowledge?.ownerMemory && folder.writers?.includes("*") && this.folderOwner(folder) !== this.knowledge.ownerId(agent)) return false;
     return Boolean(agent?.enabled !== false && (folder.writers || ["*"]).some((id) => id === "*" || id === agent.id));
   }
 
+  folderOwner(folder) {
+    return folder.ownerId || (folder.createdBy?.kind === "user" ? folder.createdBy.id : this.store.agent(folder.createdBy?.id)?.brainOwnerId) || "";
+  }
+
+  canManage(folder, user) {
+    return this.knowledge?.ownerMemory ? Boolean(user && this.folderOwner(folder) === user.id) : user?.role === "owner";
+  }
+
   canReview(folder, user) {
-    return Boolean(folder && user && !user.blocked && !this.store.panelUser(user.id)?.blocked && (user.role === "owner" || (folder.reviewers || []).includes(user.id)));
+    return Boolean(folder && user && !user.blocked && !this.store.panelUser(user.id)?.blocked && (this.canManage(folder, user) || (folder.reviewers || []).includes(user.id)));
   }
 
   memberPermission(folder, user) {
     if (!folder || !user || user.blocked || this.store.panelUser(user.id)?.blocked) return "none";
     if (this.canReview(folder, user)) return "write";
-    return folder.memberAccess?.users && Object.hasOwn(folder.memberAccess.users, user.id) ? folder.memberAccess.users[user.id] : folder.memberAccess?.default ?? "write";
+    if (this.knowledge?.ownerMemory && !folder.ownerId && !Object.hasOwn(folder.memberAccess?.users || {}, user.id)) return "none";
+    return folder.memberAccess?.users && Object.hasOwn(folder.memberAccess.users, user.id) ? folder.memberAccess.users[user.id] : folder.memberAccess?.default ?? (this.knowledge?.ownerMemory ? "none" : "write");
   }
 
   canReadMember(folder, user) {
@@ -340,8 +350,9 @@ export class Artifacts {
       policy: createdBy?.kind === "agent" ? "review" : policy === "direct" ? "direct" : "review",
       writers: this.cleanWriters(writers),
       reviewers: this.cleanReviewers(reviewers),
-      memberAccess: this.cleanMemberAccess(memberAccess),
+      memberAccess: this.cleanMemberAccess(memberAccess ?? (this.knowledge?.ownerMemory ? { default: "none", users: {} } : undefined)),
       createdBy: createdBy || null,
+      ...(this.knowledge?.ownerMemory ? { ownerId: createdBy?.kind === "user" ? createdBy.id : this.store.agent(createdBy?.id)?.brainOwnerId || "" } : {}),
       requestedBy,
       createdAt: now,
       updatedAt: now,
@@ -409,11 +420,12 @@ export class Artifacts {
     const folder = this.store.artifactFolder(id);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
     const next = { ...folder };
+    if (this.knowledge?.ownerMemory && this.canManage(folder, user)) next.ownerId = this.folderOwner(folder);
     if (changes.title !== undefined) next.title = String(changes.title || "").trim().slice(0, 80) || folder.path.split("/").at(-1);
     if (changes.description !== undefined) next.description = String(changes.description || "").trim().slice(0, 600);
     if (changes.kind !== undefined) next.kind = changes.kind === "site" ? "site" : "files";
     if (changes.writers !== undefined) next.writers = this.cleanWriters(changes.writers);
-    if (user?.role === "owner") {
+    if (this.canManage(folder, user)) {
       if (changes.policy !== undefined) next.policy = changes.policy === "direct" ? "direct" : "review";
       if (changes.reviewers !== undefined) next.reviewers = this.cleanReviewers(changes.reviewers);
       if (changes.memberAccess !== undefined) next.memberAccess = this.cleanMemberAccess(changes.memberAccess);
@@ -446,6 +458,7 @@ export class Artifacts {
     const head = folder.head ? commits.find((commit) => commit.id === folder.head) || this.store.artifactCommit(folder.head) : null;
     return {
       id: folder.id, path: folder.path, title: folder.title, description: folder.description, kind: folder.kind, policy: folder.policy,
+      ...(folder.ownerId ? { ownerId: folder.ownerId } : {}),
       writers: folder.writers, reviewers: folder.reviewers, createdBy: folder.createdBy, requestedBy: folder.requestedBy,
       memberAccess: folder.memberAccess || { default: "write", users: {} },
       createdAt: folder.createdAt, updatedAt: folder.updatedAt, head: folder.head || "",
@@ -467,6 +480,7 @@ export class Artifacts {
   foldersFor(agent, query = "", memberUserId = "") {
     const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
     return this.folders()
+      .filter((folder) => !this.knowledge?.ownerMemory || this.canWrite(this.store.artifactFolder(folder.id), agent) || this.canReadMember(folder, this.store.panelUser(this.knowledge.ownerId(agent))))
       .filter((folder) => !memberUserId || this.canReadMember(folder, this.store.panelUser(memberUserId)))
       .filter((folder) => !words.length || words.some((word) => `${folder.path} ${folder.title} ${folder.description}`.toLowerCase().includes(word)))
       .map((folder) => ({
@@ -813,7 +827,7 @@ export class Artifacts {
       if (final.status === "published") this.log({ type: "artifact", text: `${said(delta, by, true)} (${short(final.id)})` });
       else if (final.status === "proposed") {
         this.log({ type: "artifact", text: `${said(delta, by, false)} (${short(final.id)}): da rivedere` });
-        this.webPush?.notify({ title: `Artefatti · ${folder.path}`, body: `${by.name} propone: ${final.message}`, url: `/#/artefatti/${folder.id}/c/${final.id}`, tag: `artifact-${final.id}` }).catch?.(() => {});
+        this.webPush?.notify({ userId: this.knowledge?.ownerMemory ? this.folderOwner(folder) || "unavailable" : "", title: `Artefatti · ${folder.path}`, body: `${by.name} propone: ${final.message}`, url: `/#/artefatti/${folder.id}/c/${final.id}`, tag: `artifact-${final.id}` }).catch?.(() => {});
       }
       return { ...(result || {}), commit: this.commitView(final.id) };
     });
@@ -1223,7 +1237,7 @@ export class Artifacts {
       return;
     }
     this.log({ type: "artifact", agentId: agent.id, text: `${agent.name} propone ${what} in ${folder.path} (${short(commit.id)}): da rivedere` });
-    this.webPush?.notify({ title: `Artefatti · ${folder.path}`, body: `${agent.name} propone: ${commit.message}`, url: `/#/artefatti/${folder.id}/c/${commit.id}`, tag: `artifact-${commit.id}` }).catch?.(() => {});
+    this.webPush?.notify({ userId: this.knowledge?.ownerMemory ? this.folderOwner(folder) || "unavailable" : "", title: `Artefatti · ${folder.path}`, body: `${agent.name} propone: ${commit.message}`, url: `/#/artefatti/${folder.id}/c/${commit.id}`, tag: `artifact-${commit.id}` }).catch?.(() => {});
     if (channelId && this.notice) {
       const text = `📦 ${agent.name} ha proposto «${commit.message}» in **${folder.path}** (${short(commit.id)}): aspetta una revisione.${link ? ` ${link}` : ""}`;
       Promise.resolve(this.notice(channelId, text)).catch(() => {});
@@ -1235,7 +1249,7 @@ export class Artifacts {
     const what = share.root ? `${folder.path}/${share.root}` : folder.path;
     const active = share.status === "active";
     const access = share.access.mode === "public" ? "pubblico" : share.access.mode === "password" ? "con password" : "per le persone indicate";
-    this.webPush?.notify({ title: `Artefatti · ${what}`, body: active ? `${agent.name} ha aperto un link ${access}: ${share.label}` : `${agent.name} chiede un link: ${share.label}`, url: `/#/artefatti/${folder.id}/condivisione`, tag: `share-${share.id}` }).catch?.(() => {});
+    this.webPush?.notify({ userId: this.knowledge?.ownerMemory ? this.folderOwner(folder) || "unavailable" : "", title: `Artefatti · ${what}`, body: active ? `${agent.name} ha aperto un link ${access}: ${share.label}` : `${agent.name} chiede un link: ${share.label}`, url: `/#/artefatti/${folder.id}/condivisione`, tag: `share-${share.id}` }).catch?.(() => {});
     const text = active ? `🔗 ${agent.name} ha aperto un link ${access} per **${what}**: ${share.url}`
       : `🔗 Richiesta di un link per **${what}** (${share.label}) da ${agent.name}: si apre quando il proprietario lo attiva.`;
     if (channelId && this.notice) Promise.resolve(this.notice(channelId, text)).catch(() => {});

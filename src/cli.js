@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const MCP_SCRIPT = fileURLToPath(new URL("./mcp-server.js", import.meta.url));
-const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "TYPESAFE_API_KEY", "SONIOX_API_KEY", "DEEPSEEK_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "CORA_VAULT_KEY", "CORA_MAIL_REGISTRATION_TOKEN", "VAPID_KEY"];
+const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "TYPESAFE_API_KEY", "SONIOX_API_KEY", "DEEPSEEK_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "CORA_VAULT_KEY", "CORA_MAIL_REGISTRATION_TOKEN", "VAPID_KEY", "BRAIN_DATABASE_URL", "CORA_BRAIN_DATABASE_URL", "CORO_BRAIN_DATABASE_URL"];
 const CODEX_CORA_INSTRUCTIONS = [
   "You are running inside Cora. Codex's read-only sandbox protects the local CLI host; its native shell, filesystem editing and browser tools are disabled.",
   "The mcp__cora tools are provided by Cora separately. When available, mcp__cora.shell executes on the agent's own Linux desktop, where files can be written and authorized remote connectors can be called. The local host sandbox does not make those connectors read-only.",
@@ -21,7 +21,7 @@ const CODEX_DISABLED_FEATURES = [
 /** Cora's environment without its secrets: what an agent's CLI starts with. */
 export function childEnv() {
   const env = { ...process.env };
-  for (const name of Object.keys(env)) if (SECRET_ENV.includes(name) || /^COR[AO]_(BOT|TG_BOT|SK_BOT|SK_APP|MAIL_ACCOUNT|GOOGLE)_/.test(name)) delete env[name];
+  for (const name of Object.keys(env)) if (SECRET_ENV.includes(name) || /^COR[AO]_(BOT|TG_BOT|SK_BOT|SK_APP|GH_KEY|MAIL_ACCOUNT|GOOGLE|KNOWLEDGE)_/.test(name)) delete env[name];
   return env;
 }
 
