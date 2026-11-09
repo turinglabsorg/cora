@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { runClaude, runCodex, runDeepSeek, runGrok, runHermes, runMuse } from "./cli.js";
+import { runClaude, runCodex, runDeepSeek, runGemini, runGrok, runHermes, runMuse } from "./cli.js";
 import { isSubscriptionProvider } from "./harnesses.js";
 
 const REQUEST_TIMEOUT_MS = 240000;
@@ -105,6 +105,7 @@ export const PROVIDERS = {
   codex: "ChatGPT (abbonamento)",
   grok: "Grok (abbonamento)",
   muse: "Meta Muse (abbonamento)",
+  gemini: "Gemini (abbonamento)",
   ollama: "Ollama Cloud",
   orcarouter: "OrcaRouter",
   hermes: "Hermes Agent",
@@ -170,7 +171,7 @@ export function onPath(bin) {
 }
 
 export class LLM {
-  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", grokBin = "grok", museBin = "muse", grokHome = "", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", deepseekBin = "dsh", deepseekKey = "", deepseekHome = "", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
+  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", grokBin = "grok", museBin = "muse", geminiBin = "agy", grokHome = "", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", deepseekBin = "dsh", deepseekKey = "", deepseekHome = "", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
     this.hermes = { bin: hermesBin, home: hermesHome || join(homedir(), ".cora", "hermes-home"), baseUrl: String(hermesBaseUrl).replace(/\/$/, "") };
     // DeepSeek Harness runs on the instance's own DeepSeek key, in a DSH_HOME of Cora's.
     this.deepseek = { bin: deepseekBin, key: deepseekKey, home: deepseekHome || join(homedir(), ".cora", "dsh-home") };
@@ -181,6 +182,7 @@ export class LLM {
     this.codexBin = codexBin;
     this.grokBin = grokBin;
     this.museBin = museBin;
+    this.geminiBin = geminiBin;
     // Grok's own home for the machine's login: Cora's MCP server lives in its config, never in the owner's.
     this.grokHome = grokHome || join(homedir(), ".cora", "grok-home");
     this.cliWorkDir = cliWorkDir;
@@ -295,6 +297,7 @@ export class LLM {
       codex: onPath(this.codexBin),
       grok: onPath(this.grokBin),
       muse: onPath(this.museBin),
+      gemini: onPath(this.geminiBin),
       ollama: Boolean(this.ollamaKey) || this.localOllama,
       // An Ollama on this machine is not an Ollama Cloud account: it lists the cloud
       // models either way, and only a paired machine (or a key) can run them.
@@ -401,7 +404,7 @@ export class LLM {
 
   /** The CLIs run the whole tool loop themselves; Ollama and the routers go through the Cora harness. */
   isAgentic(model) {
-    return ["claude", "codex", "grok", "muse", "hermes", "deepseek"].includes(splitModel(model).provider);
+    return isSubscriptionProvider(splitModel(model).provider) || ["hermes", "deepseek"].includes(splitModel(model).provider);
   }
 
   /**
@@ -424,7 +427,8 @@ export class LLM {
 
   async listModels({ fresh = false, host = "" } = {}) {
     if (host && host !== this.ollamaUrl) return this.hostModels(host, { fresh });
-    if (!fresh && Date.now() - this.cache.at < 5 * 60 * 1000 && this.cache.models.length) return this.cache.models;
+    const geminiAccounts = JSON.stringify(this.subscriptions?.list().filter((record) => record.provider === "gemini").map(({ id, status }) => [id, status]) || []);
+    if (!fresh && this.cache.geminiAccounts === geminiAccounts && Date.now() - this.cache.at < 5 * 60 * 1000 && this.cache.models.length) return this.cache.models;
     const available = this.providers();
     const models = [];
     if (available.claude) {
@@ -441,6 +445,9 @@ export class LLM {
     }
     if (available.muse) {
       for (const model of MUSE_MODELS) models.push({ id: `muse/${model.name}`, provider: "muse", label: model.label, tools: true, vision: false, thinking: false });
+    }
+    if (available.gemini) {
+      for (const model of await this.subscriptions?.geminiModels() || []) models.push({ ...model, id: `gemini/${model.name}`, provider: "gemini", tools: true, vision: false, thinking: true });
     }
     if (available.ollama) {
       // One place decides what a model is and what it can do, asking the model when the
@@ -516,7 +523,7 @@ export class LLM {
         models.push({ id, provider: "hermes", label: model.label, via: ROUTERS[model.provider].label, local: false, tools: model.tools, vision: false, thinking: false });
       }
     }
-    this.cache = { at: Date.now(), models };
+    this.cache = { at: Date.now(), models, geminiAccounts };
     return models;
   }
 
@@ -578,6 +585,7 @@ export class LLM {
             codex: { run: runCodex, bin: this.codexBin },
             grok: { run: runGrok, bin: this.grokBin },
             muse: { run: runMuse, bin: this.museBin },
+            gemini: { run: runGemini, bin: this.geminiBin },
           }[provider];
           const invoke = (authEnv, residentAuth) => cli.run({ bin: cli.bin, ...options, authEnv, residentAuth, home: this.grokHome,
             workDir: authEnv ? join(this.cliWorkDir, subscriptionId) : this.cliWorkDir });

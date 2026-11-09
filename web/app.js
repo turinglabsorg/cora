@@ -31,6 +31,7 @@ const PROVIDERS = {
   codex: "ChatGPT (abbonamento)",
   grok: "Grok (abbonamento)",
   muse: "Meta Muse (abbonamento)",
+  gemini: "Gemini (abbonamento)",
   ollama: "Ollama Cloud",
   orcarouter: "OrcaRouter",
   hermes: "Hermes Agent",
@@ -44,6 +45,7 @@ const HARNESSES = {
   codex: { label: "Codex", hint: "Codex guida sé stesso con l'account scelto qui sotto.", providers: ["codex"] },
   grok: { label: "Grok Build", hint: "Grok guida sé stesso con l'account scelto qui sotto.", providers: ["grok"] },
   muse: { label: "Muse Code", hint: "Muse guida sé stesso con l'account Meta scelto qui sotto.", providers: ["muse"] },
+  gemini: { label: "Antigravity CLI", hint: "Gemini usa l'abbonamento Google AI dell'account scelto qui sotto.", providers: ["gemini"] },
   hermes: { label: "Hermes", hint: "Hermes guida sé stesso sui modelli del suo endpoint, di solito quelli di questa macchina.", providers: ["hermes"] },
   deepseek: { label: "DeepSeek Harness", hint: "dsh, l'harness di DeepSeek, guida sé stesso con la chiave DeepSeek di questa Cora.", providers: ["deepseek"] },
 };
@@ -65,6 +67,7 @@ const CONNECTIONS = [
   ["codex", "Codex"],
   ["grok", "Grok Build"],
   ["muse", "Muse Code"],
+  ["gemini", "Antigravity CLI"],
   ["hermes", "Hermes Agent"],
   ["deepseek", "DeepSeek Harness"],
 ];
@@ -73,6 +76,7 @@ const PROVIDER_HINTS = {
   codex: "Codex non trovato su questa macchina",
   grok: "Grok Build non trovato su questa macchina",
   muse: "Muse Code non trovato su questa macchina",
+  gemini: "Antigravity CLI non trovato su questa macchina",
   ollama: "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush",
   ollamaLocal: "nessun Ollama in ascolto su questa macchina",
   ollamaCloud: "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush",
@@ -80,11 +84,11 @@ const PROVIDER_HINTS = {
   hermes: "Hermes non trovato su questa macchina",
   deepseek: "serve dsh su questa macchina e la chiave DeepSeek",
 };
-const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", grok: "Grok", muse: "Meta", ollama: "Ollama", orcarouter: "OrcaRouter", hermes: "Hermes", deepseek: "DeepSeek" };
+const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", grok: "Grok", muse: "Meta", gemini: "Gemini", ollama: "Ollama", orcarouter: "OrcaRouter", hermes: "Hermes", deepseek: "DeepSeek" };
 /** Each subscription's mark, so two accounts are told apart at a glance. */
-const SUBSCRIPTION_ICONS = { claude: "spark", codex: "chip", grok: "terminal", muse: "layers" };
+const SUBSCRIPTION_ICONS = { claude: "spark", codex: "chip", grok: "terminal", muse: "layers", gemini: "spark" };
 /** The account's name and the program that uses it, as Settings lists them. */
-const SUBSCRIPTION_NAMES = { claude: "Claude", codex: "ChatGPT / Codex", grok: "Grok / Grok Build", muse: "Meta / Muse Code" };
+const SUBSCRIPTION_NAMES = { claude: "Claude", codex: "ChatGPT / Codex", grok: "Grok / Grok Build", muse: "Meta / Muse Code", gemini: "Gemini / Antigravity" };
 const PRESETS = [
   ["Ogni mattina 9:00", "0 9 * * *"],
   ["Ogni sera 21:00", "0 21 * * *"],
@@ -1103,6 +1107,7 @@ const HARNESS_NEEDS = {
   codex: "Codex non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   grok: "Grok Build non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   muse: "Muse Code non è installato su questa macchina: installalo sul server con l'utente di Cora.",
+  gemini: "Antigravity CLI non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   hermes: "Hermes non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   deepseek: "DeepSeek Harness ha bisogno di dsh sul server (npm i -g @deepseek-ai/dsh) e della chiave DeepSeek in Impostazioni → DeepSeek.",
   ollama: "Nessun Ollama su questa macchina e nessuna chiave Ollama Cloud.",
@@ -1123,7 +1128,7 @@ const HERMES_MIN_CONTEXT = 64000;
 const HERMES_TOO_SHORT = "troppo poco contesto per Hermes, che ne vuole almeno 64K";
 
 /** The harnesses that run on someone's subscription: the account is part of the choice. */
-const SUBSCRIPTION_HARNESSES = ["claude", "codex", "grok", "muse"];
+const SUBSCRIPTION_HARNESSES = ["claude", "codex", "grok", "muse", "gemini"];
 
 const modelsOf = (harness, place) => {
   const providers = harnessProviders(harness);
@@ -1401,12 +1406,19 @@ function brainPanel(agent) {
   drawRight();
   loadHardware();
 
-  return {
-    node: h("div", { class: "brain" },
+  const node = h("div", { class: "brain" },
       h("div", { class: "brain-main" },
         h("div", { class: "stack-sm" }, h("span", { class: "label" }, "Harness"), left),
         h("div", { class: "stack-sm" }, h("span", { class: "label" }, "Modello"), right)),
-      modelInput, hostInput),
+      modelInput, hostInput);
+  node.refreshModels = () => {
+    if (harness !== "gemini") return;
+    if (!chosen) { chosen = opening(harness) || ""; modelInput.value = chosen; place = "cloud"; }
+    drawLeft();
+    drawRight();
+  };
+  return {
+    node,
     validate,
     subscriptionId: () => subscription.value(),
   };
@@ -1486,12 +1498,22 @@ function pickedModel(data, name) {
 }
 
 /** The program each subscription runs through, which is what has to be installed. */
-const CLI_NAMES = { claude: "Claude Code", codex: "Codex", grok: "Grok Build", muse: "Muse Code" };
+const CLI_NAMES = { claude: "Claude Code", codex: "Codex", grok: "Grok Build", muse: "Muse Code", gemini: "Antigravity CLI" };
 const SUBSCRIPTION_STATES = { disconnected: "Da collegare", connecting: "Accesso in corso", ready: "Collegata", error: "Accesso non riuscito" };
 
 function subscriptionDisplay(record) {
   const { id, provider, resident, email, label, status, installed, issue, connectedBy, login } = record;
   return { id, provider, resident, email, label, status, installed, issue, connectedBy, login };
+}
+
+async function refreshSubscriptions(provider) {
+  const ready = () => (S.data.subscriptions || []).filter((record) => record.provider === "gemini" && record.status === "ready").map((record) => record.id).join(",");
+  const previous = ready();
+  S.data.subscriptions = await api("/api/subscriptions");
+  if (provider === "gemini" && previous !== ready()) {
+    S.data.models = (await api("/api/state")).models;
+    for (const node of document.querySelectorAll(".brain")) node.refreshModels?.();
+  }
 }
 
 /** Whose an account is, as the person looking at the panel reads it. */
@@ -1570,7 +1592,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
     draw(true);
     try { await fn(); }
     catch (failure) { error = failure.message; }
-    try { S.data.subscriptions = await api("/api/subscriptions"); }
+    try { await refreshSubscriptions(provider); }
     catch { error ||= "Impossibile aggiornare il collegamento. Riprova."; }
     busy = false;
     draw(true);
@@ -1587,7 +1609,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
     const installed = Boolean(S.data.providers?.[provider]);
     const rows = records.map((record) => {
       const used = (S.data.agents || []).filter((agent) => agent.subscriptionId === record.id).length;
-      if (!codes.has(record.id)) codes.set(record.id, h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Codice di autorizzazione", placeholder: "Incolla il codice di Claude" }));
+      if (!codes.has(record.id)) codes.set(record.id, h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Codice di autorizzazione", placeholder: "Incolla il codice di autorizzazione" }));
       const remove = btn("", { icon: "trash", cls: "sm ghost danger", title: used ? "In uso: prima scegli un altro account nel Cervello dell'agente" : "Rimuovi account", disabled: Boolean(used) || busy,
         onclick: () => act(() => api(`/api/subscriptions/${record.id}`, { method: "DELETE" })) });
       return h("div", { class: `account ${record.status}` },
@@ -1619,7 +1641,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
     if (!root.isConnected) return;
     if (!busy && S.data.subscriptions?.some((item) => item.provider === provider && item.status === "connecting")) {
       try {
-        S.data.subscriptions = await api("/api/subscriptions");
+        await refreshSubscriptions(provider);
         draw();
       } catch {}
     }
@@ -1642,7 +1664,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   const input = h("input", { type: "hidden", name: "subscriptionId" });
   const content = h("div", { class: "subscription-content" });
   const root = h("section", { class: "subscription-picker", "aria-label": "Account del modello" }, input, content);
-  const authCode = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Codice di autorizzazione", placeholder: "Incolla il codice di Claude" });
+  const authCode = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Codice di autorizzazione", placeholder: "Incolla il codice di autorizzazione" });
   authCode.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -1664,7 +1686,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   }
 
   async function refresh() {
-    S.data.subscriptions = await api("/api/subscriptions");
+    await refreshSubscriptions(provider);
     draw();
   }
 
@@ -6857,7 +6879,7 @@ function renderSettings() {
     panel({ icon: "user", title: "Aspetto delle app", hint: "Nome, descrizione e immagine di ogni app seguono il pannello." }, slackAppsField()));
 
   /* ---------- Abbonamenti e chiavi ---------- */
-  const providers = SUBSCRIPTION_HARNESSES.filter((provider) => provider === "claude" || provider === "codex" || S.data.providers?.[provider] || S.data.subscriptions?.some((item) => item.provider === provider));
+  const providers = SUBSCRIPTION_HARNESSES.filter((provider) => ["claude", "codex", "gemini"].includes(provider) || S.data.providers?.[provider] || S.data.subscriptions?.some((item) => item.provider === provider));
   const residentToggle = switchInput("useResidentSubscriptions", "", S.data.settings.useResidentSubscriptions);
   const toggle = residentToggle.querySelector("input");
   const residentToggleRow = setRow("Usa gli account del server", "Gli agenti che non scelgono un account usano quelli già presenti sulla macchina che ospita Cora.", residentToggle);
@@ -6883,8 +6905,8 @@ function renderSettings() {
   const residentList = h("div", { class: "resident-accounts" });
   const residentSlots = new Map(providers.map((provider) => [provider, h("div", {})]));
   const drawResidents = () => {
-    residentList.replaceChildren(...providers.map((provider) => residentRow(provider, () => show(provider))));
-    for (const [provider, slot] of residentSlots) slot.replaceChildren(residentRow(provider));
+    residentList.replaceChildren(...providers.filter((provider) => provider !== "gemini").map((provider) => residentRow(provider, () => show(provider))));
+    for (const [provider, slot] of residentSlots) if (provider !== "gemini") slot.replaceChildren(residentRow(provider));
     drawNav();
   };
   const scan = btn("Rileva account", { icon: "refresh", cls: "ghost", onclick: async () => {
@@ -6901,12 +6923,19 @@ function renderSettings() {
       setRows(residentToggleRow), residentList),
     h("p", { class: "set-note" }, icon("info"), h("span", {}, "Le chiavi vengono salvate in hush e non sono più mostrate dopo il salvataggio. Valgono per tutti gli agenti di questa istanza.")));
   for (const provider of providers) {
+    const accountStatus = h("span", {});
+    const drawAccountStatus = () => {
+      const [led, line] = providerState(provider);
+      accountStatus.replaceChildren(badge(raw(line), led === "on" ? "on" : led === "busy" ? "warn" : "", led === "on" ? "check" : "user"));
+      drawNav();
+    };
     page(provider,
-      panel({ icon: SUBSCRIPTION_ICONS[provider], title: SUBSCRIPTION_NAMES[provider], hint: tr("Lo usa {cli}, per gli agenti che lo scelgono nel loro Cervello.", { cli: CLI_NAMES[provider] }), actions: (() => { const [led, line] = providerState(provider); return badge(raw(line), led === "on" ? "on" : led === "busy" ? "warn" : "", led === "on" ? "check" : "user"); })() },
-        h("div", { class: "set-section" }, h("span", { class: "label" }, "Su questo server"), residentSlots.get(provider)),
-        h("div", { class: "set-section" }, h("span", { class: "label" }, "Altri account"),
+      panel({ icon: SUBSCRIPTION_ICONS[provider], title: SUBSCRIPTION_NAMES[provider], hint: tr("Lo usa {cli}, per gli agenti che lo scelgono nel loro Cervello.", { cli: CLI_NAMES[provider] }), actions: accountStatus },
+        provider === "gemini" ? h("p", { class: "muted" }, "Collega il tuo account Google AI Pro o Ultra. Gli agenti usano l'abbonamento, con le sue quote, senza una chiave API.")
+          : h("div", { class: "set-section" }, h("span", { class: "label" }, "Su questo server"), residentSlots.get(provider)),
+        h("div", { class: "set-section" }, h("span", { class: "label" }, provider === "gemini" ? "Account" : "Altri account"),
           h("p", { class: "muted" }, "Collegane quanti vuoi, dal browser: nel Cervello di ogni agente scegli quale usa."),
-          subscriptionAccounts(provider, { onChange: () => drawNav() }))));
+          subscriptionAccounts(provider, { onChange: drawAccountStatus }))));
   }
   // doc runs on this machine or it does not: the page says which, and proves it on demand.
   const docStatus = () => {

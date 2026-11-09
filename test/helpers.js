@@ -649,6 +649,14 @@ if (flavor === "claude" && argv[0] === "auth" && argv[1] === "status") {
   process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: "claude.ai", configDirectory: process.env.CLAUDE_CONFIG_DIR, email: "fixture@example.test" }));
   process.exit(0);
 }
+if (flavor === "gemini" && argv.includes("/usage")) {
+  process.stdout.write(JSON.stringify({ status: "SUCCESS", response: "Account: fixture@example.test" }));
+  process.exit(0);
+}
+if (flavor === "gemini" && argv[0] === "models") {
+  process.stdout.write("gemini-4-argon-high  Gemini 4 Argon (High)\\ngemini-3.8-flash-medium  Gemini 3.8 Flash (Medium)\\n");
+  process.exit(0);
+}
 const countCalls = (file, kind) => {
   try {
     return fs.readFileSync(file, "utf8").split("\\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.flavor === kind).length;
@@ -664,6 +672,8 @@ process.stdin.on("end", async () => {
   let hermesConfig = null;
   let grokConfig = null;
   let dshPatch = null;
+  let geminiSettings = null;
+  let geminiMcp = null;
   if (flavor === "claude") {
     const index = argv.indexOf("--mcp-config");
     if (index >= 0) server = JSON.parse(fs.readFileSync(argv[index + 1], "utf8")).mcpServers.cora;
@@ -697,6 +707,11 @@ process.stdin.on("end", async () => {
       server = { command: JSON.parse(command[1]), args: JSON.parse(dshPatch.match(/^        args: (.*)$/m)[1]),
         env: { CORA_BRIDGE_URL: process.env.CORA_BRIDGE_URL || "", CORA_BRIDGE_TOKEN: process.env.CORA_BRIDGE_TOKEN || "" } };
     }
+  } else if (flavor === "gemini") {
+    geminiSettings = JSON.parse(argv[argv.indexOf("--settings") + 1]);
+    geminiMcp = JSON.parse(fs.readFileSync(path.join(process.cwd(), ".agents", "mcp_config.json"), "utf8"));
+    server = geminiMcp.mcpServers.cora;
+    stdin = JSON.parse(stdin).message.content;
   } else if (flavor === "muse") {
     // Muse takes the server for this run in -c and fills \${...} in its env from its own environment.
     const item = argv.find((arg) => arg.startsWith("mcpServers.cora="));
@@ -723,7 +738,7 @@ process.stdin.on("end", async () => {
   if (promptFile) stdin = fs.readFileSync(promptFile, "utf8");
   const env = Object.fromEntries(["HOME", "GROK_HOME", "GROK_AUTH_PATH", "GROK_CLAUDE_MCPS_ENABLED", "GROK_CLAUDE_HOOKS_ENABLED", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TBH_CREDENTIAL_BACKEND", "MISE_DATA_DIR"].map((key) => [key, process.env[key] || ""]));
   if (flavor === "dsh") Object.assign(env, { DSH_HOME: process.env.DSH_HOME || "", DSH_TELEMETRY_MODE: process.env.DSH_TELEMETRY_MODE || "", DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY ? "set" : "" });
-  const record = { flavor, argv, stdin, env, tools: null, output: null, hermesConfig, grokConfig, dshPatch, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", secretEnv: Object.keys(process.env).filter((key) => /^COR[AO]_(BOT|KNOWLEDGE|GH_KEY)_/.test(key) || key === "BRAIN_DATABASE_URL" || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
+  const record = { flavor, argv, stdin, env, cwd: process.cwd(), geminiSettings, geminiMcp, scope: process.env.ANTIGRAVITY_CREDENTIAL_SCOPE, tools: null, output: null, hermesConfig, grokConfig, dshPatch, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", secretEnv: Object.keys(process.env).filter((key) => /^COR[AO]_(BOT|KNOWLEDGE|GH_KEY)_/.test(key) || key === "GEMINI_API_KEY" || key === "GOOGLE_API_KEY" || key === "BRAIN_DATABASE_URL" || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
   if (control.hang) {
     fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ ...record, pid: process.pid }) + "\\n");
     setInterval(() => {}, 1000);
@@ -791,6 +806,16 @@ process.stdin.on("end", async () => {
     event("run.output.delta", { text: answer });
     event("run.usage", { models: [{ model: "muse-wonder-1.0", input_tokens: 80, cached_tokens: 20, output_tokens: 9, reasoning_tokens: 3 }] });
     event("run.terminal.completed", { terminal: "completed", text: answer, reason: null });
+  } else if (flavor === "gemini") {
+    line({ event: "init", conversation_id: "fixture-gemini" });
+    if (control.tool) {
+      line({ event: "step_update", step_update: { step_type: "agent_response", state: "DONE", text_delta: "Prima controllo." } });
+      line({ event: "step_update", step_update: { step_type: "tool", state: "DONE", tool_info: { name: control.tool } } });
+    }
+    line({ event: "step_update", step_update: { step_type: "agent_response", state: "ACTIVE", text_delta: answer.slice(0, 4) } });
+    line({ event: "step_update", step_update: { step_type: "agent_response", state: "DONE", text_delta: answer.slice(4) } });
+    if (!control.missingFinal) line({ event: "result", result: { status: control.error ? "ERROR" : "SUCCESS", response: answer, error: control.error || "", usage: { input_tokens: 70, cache_read_tokens: 30, output_tokens: 12, thinking_tokens: 8 } } });
+    if (control.exitCode) process.exit(control.exitCode);
   } else if (flavor === "claude") {
     line({ type: "system", subtype: "init" });
     line({ type: "assistant", message: { content: [{ type: "thinking", thinking: control.thinking || "" }] } });
@@ -811,7 +836,7 @@ process.stdin.on("end", async () => {
   }
 });
 `;
-  for (const name of ["claude", "codex", "grok", "muse", "hermes", "dsh"]) {
+  for (const name of ["claude", "codex", "grok", "muse", "gemini", "hermes", "dsh"]) {
     writeFileSync(join(dir, name), source);
     chmodSync(join(dir, name), 0o755);
   }
@@ -822,6 +847,7 @@ process.stdin.on("end", async () => {
     codex: join(dir, "codex"),
     grok: join(dir, "grok"),
     muse: join(dir, "muse"),
+    gemini: join(dir, "gemini"),
     hermes: join(dir, "hermes"),
     dsh: join(dir, "dsh"),
     models,

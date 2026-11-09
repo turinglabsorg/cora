@@ -6,14 +6,14 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ToolBridge } from "../src/bridge.js";
-import { runGrok, runMuse } from "../src/cli.js";
+import { runGemini, runGrok, runMuse } from "../src/cli.js";
 import { HARNESSES } from "../src/harnesses.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
 
 const provider = process.argv[2];
-const cli = { grok: { run: runGrok, model: "grok-4.7" }, muse: { run: runMuse, model: "muse-wonder-1.0" } }[provider];
-if (!cli) {
-  console.error("usage: node bin/cli-smoke.mjs grok|muse [model]");
+const cli = { grok: { run: runGrok, model: "grok-4.7" }, muse: { run: runMuse, model: "muse-wonder-1.0" }, gemini: { run: runGemini, bin: "agy" } }[provider];
+if (!cli || (provider === "gemini" && (!process.argv[3] || !process.argv[4]?.startsWith("/")))) {
+  console.error("usage: node bin/cli-smoke.mjs grok|muse [model], or gemini <model> <absolute account profile>");
   process.exit(1);
 }
 const bridge = new ToolBridge();
@@ -34,13 +34,13 @@ const mcp = bridge.register({
   ttlMs: 300000,
 });
 // The machine's own account, as Cora runs it: no home override, nothing else from this shell.
-const authEnv = subscriptionEnvironment(provider, "");
-delete authEnv[HARNESSES[provider].homeVar];
+const authEnv = subscriptionEnvironment(provider, provider === "gemini" ? process.argv[4] : "");
+if (provider !== "gemini") delete authEnv[HARNESSES[provider].homeVar];
 delete authEnv.XDG_DATA_HOME;
 const started = Date.now();
 try {
   const result = await cli.run({
-    bin: process.env[`CORA_${provider.toUpperCase()}_BIN`] || provider,
+    bin: process.env[`CORA_${provider.toUpperCase()}_BIN`] || cli.bin || provider,
     model: process.argv[3] || cli.model,
     system: "You are a test agent. Use only the tools you are given.",
     prompt: "1) Call the probe tool with value 42 and report the code it returns. 2) Then try to run the shell command `ls ~` and tell me whether you could. 3) List the names of all the tools you have.",

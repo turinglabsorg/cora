@@ -4,9 +4,10 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { geminiSettings } from "./gemini-profile.js";
 
 export const MCP_SCRIPT = fileURLToPath(new URL("./mcp-server.js", import.meta.url));
-const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "TYPESAFE_API_KEY", "SONIOX_API_KEY", "DEEPSEEK_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "CORA_VAULT_KEY", "CORA_MAIL_REGISTRATION_TOKEN", "VAPID_KEY", "BRAIN_DATABASE_URL", "CORA_BRAIN_DATABASE_URL", "CORO_BRAIN_DATABASE_URL"];
+const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "TYPESAFE_API_KEY", "SONIOX_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "CORA_VAULT_KEY", "CORA_MAIL_REGISTRATION_TOKEN", "VAPID_KEY", "BRAIN_DATABASE_URL", "CORA_BRAIN_DATABASE_URL", "CORO_BRAIN_DATABASE_URL"];
 const CODEX_CORA_INSTRUCTIONS = [
   "You are running inside Cora. Codex's read-only sandbox protects the local CLI host; its native shell, filesystem editing and browser tools are disabled.",
   "The mcp__cora tools are provided by Cora separately. When available, mcp__cora.shell executes on the agent's own Linux desktop, where files can be written and authorized remote connectors can be called. The local host sandbox does not make those connectors read-only.",
@@ -101,6 +102,58 @@ function textSteps(onStep) {
       pending = "";
     },
   };
+}
+
+export async function runGemini({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", authEnv, signal }) {
+  if (!authEnv?.HOME || !authEnv.ANTIGRAVITY_CREDENTIAL_SCOPE) throw new Error("subscription da collegare");
+  const directory = join(workDir, `gemini-${randomBytes(6).toString("hex")}`);
+  const config = join(directory, ".agents");
+  mkdirSync(config, { recursive: true, mode: 0o700 });
+  const tools = mcp && toolNames.length ? toolNames : [];
+  const agents = join(config, "agents");
+  mkdirSync(agents, { recursive: true, mode: 0o700 });
+  writeFileSync(join(agents, "cora.md"), `---\nname: cora\ndescription: Cora agent with Cora MCP tools only\nmainAgent: true\nsubagent: false\ntools: []\ncommandExecutionPolicy: off\n---\n${system}\n`, { mode: 0o600 });
+  writeFileSync(join(config, "mcp_config.json"), JSON.stringify({ mcpServers: tools.length ? {
+    cora: { command: process.execPath, args: [MCP_SCRIPT], env: { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token }, enabledTools: tools,
+      tools: Object.fromEntries(tools.map((name) => [name, { eager: true }])) },
+  } : {} }), { mode: 0o600 });
+  const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--disable-slash-commands", "--agent", "cora", "--model", model,
+    "--settings", JSON.stringify(geminiSettings(tools)), ...(effort ? ["--effort", effort] : [])];
+  const input = `${JSON.stringify({ event: "user", message: { content: `<istruzioni_di_sistema>\n${system}\n</istruzioni_di_sistema>\n\n${prompt}` } })}\n`;
+  const texts = textSteps(onStep);
+  let final = null;
+  let fragment = "";
+  const onLine = (line) => {
+    const event = JSON.parse(line);
+    if (event.event === "result") final = event.result;
+    if (event.event !== "step_update") return;
+    const step = event.step_update || {};
+    if (step.step_type === "agent_response" && step.text_delta) {
+      fragment += step.text_delta;
+      if (step.state === "DONE") { texts.text(fragment); fragment = ""; }
+    } else if (step.step_type === "tool") {
+      if (fragment) { texts.text(fragment); fragment = ""; }
+      texts.flush();
+    } else if (step.step_type === "thinking" && step.text_delta) {
+      texts.flush();
+      onStep?.({ type: "thinking", text: step.text_delta });
+    }
+  };
+  try {
+    const out = await run(bin, args, { input, cwd: directory, timeoutMs, onLine, authEnv, signal });
+    signal?.throwIfAborted();
+    if (out.timedOut) throw new Error(`gemini: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (!final || out.code !== 0 || final.status !== "SUCCESS") {
+      if (/authentication required|authentication failed|not signed in/i.test(`${final?.error || ""} ${out.stderr}`)) throw new Error("gemini: not signed in, collega la subscription");
+      throw new Error(`gemini: ${String(final?.error || "Antigravity non ha completato la richiesta").slice(0, 240)}`);
+    }
+    texts.finish(final.response);
+    const usage = final.usage || {};
+    return { text: String(final.response || ""), usage: {
+      in: (Number(usage.input_tokens) || 0) + (Number(usage.cache_read_tokens) || 0),
+      out: Number(usage.output_tokens) || 0,
+    } };
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
 /** One agent turn on Claude Code with the owner's subscription; cora's tools arrive over MCP. */

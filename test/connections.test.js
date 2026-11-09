@@ -24,6 +24,7 @@ async function fixture(t, { storeSecret, harnesses = ["claude", "codex"] } = {})
     claudeBin: identity.claude, codexBin: identity.codex, hermesBin: "/missing/hermes", botTokenFor: () => "",
     // Grok and Muse are not installed unless a test asks for them.
     grokBin: harnesses.includes("grok") ? identity.grok : "/missing/grok", museBin: harnesses.includes("muse") ? identity.muse : "/missing/muse",
+    geminiBin: harnesses.includes("gemini") ? identity.gemini : "/missing/agy",
     grokHome: join(home, "grok-home"),
     docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys", storeSecret,
   });
@@ -291,4 +292,53 @@ test("an account says whose it is, and a member's new agent starts on the accoun
   assert.match(accounts.before[0], /Sara's account · Connected/);
   assert.equal(accounts.after.length, 2, "a second ChatGPT account, being signed in");
   assert.equal((await request(owner, "/api/subscriptions")).data.filter((record) => record.provider === "codex" && !record.resident).length, 2);
+});
+
+test("Gemini connects through Google's manual authorization and keeps each subscription in its own profile", async (t) => {
+  const { app, home, identity, request } = await fixture(t, { harnesses: ["claude", "codex", "gemini"] });
+  assert.equal(app.store.residentSubscription("gemini"), null, "the machine's shared keyring is never borrowed");
+  assert.equal((await request("/api/state")).data.providers.gemini, true);
+  const accounts = [];
+  for (const label of ["Personal Gemini", "Other Gemini"]) {
+    const created = await request("/api/subscriptions", { method: "POST", body: { provider: "gemini", label } });
+    assert.equal(created.status, 201);
+    const started = await request(`/api/subscriptions/${created.data.id}/login`, { method: "POST" });
+    assert.equal(started.data.status, "connecting");
+    assert.equal(new URL(started.data.login.url).hostname, "accounts.google.com");
+    assert.equal(started.data.login.manualCode, true);
+    assert.equal((await request(`/api/subscriptions/${created.data.id}/code`, { method: "POST", body: { code: "bad\ncode" } })).status, 400);
+    assert.equal((await request(`/api/subscriptions/${created.data.id}/code`, { method: "POST", body: { code: "\u001b[2J" } })).status, 400);
+    await request(`/api/subscriptions/${created.data.id}/code`, { method: "POST", body: { code: "fixture-authorization-code" } });
+    const record = await waitFor(() => { const value = app.store.subscription(created.data.id); return value.status === "ready" && value; });
+    assert.equal(record.email, `${record.id}@example.test`);
+    assert.ok(!JSON.stringify(record).includes("authorization-code"));
+    accounts.push(record);
+  }
+  const options = { model: "gemini/gemini-4-argon-high", tools: [], system: "Test", prompt: "Identity?", timeoutMs: 5000 };
+  const answers = await Promise.all(accounts.map((record) => app.llm.runAgent({ ...options, subscriptionId: record.id })));
+  assert.deepEqual(answers.map((answer) => answer.text), accounts.map((record) => `Identity: ${record.id}@example.test`));
+  assert.deepEqual(answers[0].usage, { in: 25, out: 3 });
+  const runs = identity.calls().filter((run) => run.provider === "gemini");
+  assert.equal(new Set(runs.map((run) => run.scope)).size, 2);
+  assert.ok(runs.every((run) => run.directory === join(home, "subscriptions", accounts.find((record) => run.account.startsWith(record.id)).id) && run.inheritedKeys.length === 0));
+  const state = (await request("/api/state")).data;
+  assert.deepEqual(state.models.filter((model) => model.provider === "gemini").map((model) => model.id), ["gemini/gemini-4-argon-high", "gemini/gemini-3.8-flash-medium"]);
+  const panel = panelHarness({ language: "en", fetch: async () => { throw new Error("unexpected request"); } });
+  panel.run(`S.data = ${JSON.stringify(state)}`);
+  const picker = panel.run(`(() => { const p = subscriptionPicker(${JSON.stringify(accounts[0].id)}); p.setProvider("gemini"); return { text: p.node.textContent, value: p.value() }; })()`);
+  assert.equal(picker.value, accounts[0].id);
+  assert.match(picker.text, /Gemini.*Your account/s);
+  const loginUi = panel.run(`(() => {
+    const record = { ...S.data.subscriptions.find(a => a.id === ${JSON.stringify(accounts[0].id)}), status: "connecting", login: { url: "https://accounts.google.com/o/oauth2/auth?state=fixture", manualCode: true } };
+    const input = document.createElement("input");
+    return subscriptionLoginSteps(record, "Gemini", { authCode: input, act() {} }).map(n => n.textContent).join(" ");
+  })()`);
+  assert.match(loginUi, /Sign in to Gemini.*Return here with the code/s);
+  assert.doesNotMatch(loginUi, /Claude|ChatGPT/);
+  await assert.rejects(app.llm.runAgent(options), /subscription da collegare/, "Gemini always needs an explicitly selected account");
+  for (const record of accounts) {
+    assert.equal((await request(`/api/subscriptions/${record.id}`, { method: "DELETE" })).status, 200);
+    assert.ok(!existsSync(join(home, "subscriptions", record.id)));
+  }
+  assert.equal(app.store.residentSubscription("gemini"), null);
 });

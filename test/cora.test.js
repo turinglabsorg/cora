@@ -202,6 +202,7 @@ before(async () => {
     codexBin: cli.codex,
     grokBin: cli.grok,
     museBin: cli.muse,
+    geminiBin: cli.gemini,
     codexModelsFile: cli.models,
     ownerInstructions: join(home, "owner-AGENTS.md"),
     sshAuthorizedKeys: join(home, "authorized_keys"),
@@ -216,7 +217,7 @@ before(async () => {
     startBoxes: false,
   });
   await app.ready;
-  for (const provider of ["claude", "codex", "grok", "muse"]) {
+  for (const provider of ["claude", "codex", "grok", "muse", "gemini"]) {
     const identity = app.store.createSubscription({ provider, label: `Fixture ${provider}` });
     app.store.updateSubscription(identity.id, { status: "ready" });
     subscriptionIds[provider] = identity.id;
@@ -1646,7 +1647,7 @@ describe("agents in Discord", () => {
     assert.ok(state.data.models.some((model) => model.id === "claude/claude-opus-5-5"));
     assert.ok(state.data.models.some((model) => model.id === "codex/gpt-6-sol"));
     assert.ok(!state.data.models.some((model) => model.id === "codex/hidden"));
-    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true, deepseek: false, deepseekInstalled: true }, "dsh is here, its key is not");
+    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, gemini: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true, deepseek: false, deepseekInstalled: true }, "dsh is here, its key is not");
   });
 
   test("creates two agents through the API", async () => {
@@ -2198,6 +2199,55 @@ describe("agents in Discord", () => {
     assert.ok(trace.steps.some((step) => step.type === "text" && step.text === "Prima controllo."), "what it wrote before the tool is its reasoning");
     assert.equal(trace.steps.find((step) => step.type === "tool").name, "remember");
     assert.match(trace.output, /^Fatto\./);
+    await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
+  });
+
+  test("a Gemini subscription answers through Cora's MCP tools, records usage and refuses failed or cancelled runs", async () => {
+    const login = await call("/api/login", { method: "POST", auth: false, body: { password: PASSWORD } });
+    cookie = login.headers.get("set-cookie").split(";")[0];
+    const created = await call("/api/agents", { method: "POST", body: { name: "Gema", model: "gemini/gemini-4-argon-high", subscriptionId: subscriptionIds.gemini, effort: "high", chattiness: 0, tools: false } });
+    assert.equal(created.status, 201);
+    cli.set({ tool: "remember", args: { fact: "La consegna delle sedie è venerdì" }, reply: "Segnato." });
+    discord.say({ content: "@Gema, ricordati che la consegna delle sedie è venerdì" });
+    const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Gema"), { what: "Gemini's answer" });
+    assert.match(post.content, /^Segnato\. \[saved \[mem_/);
+    const run = cli.calls().find((item) => item.flavor === "gemini" && item.stdin.includes("Sei Gema."));
+    assert.match(run.stdin, /^<istruzioni_di_sistema>\nSei Gema\./);
+    assert.ok(run.stdin.includes("ISTRUZIONI DI PROVA"), "shared owner instructions reach Gemini too");
+    assert.equal(run.argv[run.argv.indexOf("--model") + 1], "gemini-4-argon-high");
+    assert.equal(run.argv[run.argv.indexOf("--effort") + 1], "high");
+    assert.equal(run.env.HOME, join(home, "subscriptions", subscriptionIds.gemini));
+    assert.match(run.scope, /^cora-[a-f0-9]{32}$/);
+    assert.deepEqual(run.geminiSettings.permissions.deny, ["command(*)", "read_file(*)", "write_file(*)", "read_url(*)", "execute_url(*)"]);
+    assert.equal(run.geminiSettings.useG1Credits, false);
+    assert.equal(run.geminiSettings.modelProvider, "");
+    assert.deepEqual(Object.keys(run.geminiMcp.mcpServers), ["cora"]);
+    assert.ok(run.tools.includes("remember") && !run.tools.includes("shell"));
+    assert.deepEqual(run.secretEnv, []);
+    assert.ok(!existsSync(run.cwd), "the per-turn MCP configuration is removed");
+    const memories = (await call(`/api/agents/${created.data.id}/memories`)).data;
+    assert.ok(memories.facts.some((memory) => memory.text === "La consegna delle sedie è venerdì"));
+    const [summary] = (await call(`/api/agents/${created.data.id}/traces`)).data;
+    const trace = (await call(`/api/traces/${summary.id}`)).data;
+    assert.ok(trace.steps.some((step) => step.type === "text" && step.text === "Prima controllo."));
+    assert.equal(trace.steps.find((step) => step.type === "tool").name, "remember");
+    assert.equal(summary.tokensIn, 100);
+    assert.equal(summary.tokensOut, 12);
+
+    const options = { model: created.data.model, subscriptionId: subscriptionIds.gemini, system: "Test", prompt: "Test", tools: [], execute: async () => "ok", timeoutMs: 5000 };
+    cli.set({ reply: "Partial", error: "provider refused" });
+    await assert.rejects(app.llm.runAgent(options), /provider refused/);
+    cli.set({ reply: "Partial", missingFinal: true });
+    await assert.rejects(app.llm.runAgent(options), /non ha completato/);
+    cli.set({ reply: "Partial", exitCode: 7 });
+    await assert.rejects(app.llm.runAgent(options), /non ha completato/);
+    cli.set({ reply: "", hang: true });
+    const controller = new AbortController();
+    const running = app.llm.runAgent({ ...options, signal: controller.signal });
+    await waitFor(() => cli.calls().findLast((item) => item.flavor === "gemini" && item.pid), { what: "Gemini process started" });
+    controller.abort(new Error("owner stopped"));
+    await assert.rejects(running, /owner stopped/);
+    assert.ok(!app.subscriptions.running.has(subscriptionIds.gemini));
     await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
   });
 
@@ -3909,7 +3959,7 @@ describe("what runs the models", () => {
     assert.equal(agent.tools, true);
     await waitFor(() => panel.run(`S.data.agents.some((item) => item.id === "${agent.id}")`));
     await panel.navigate(`#/agent/${agent.id}/cervello`);
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 7);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 8);
     assert.ok(panel.app.textContent.includes("Claude Code"));
   });
 
@@ -3919,9 +3969,9 @@ describe("what runs the models", () => {
     const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
     await panel.run("boot()");
     await panel.navigate(`#/agent/${agent.id}/cervello`);
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 7);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 8);
     assert.deepEqual(panel.app.querySelectorAll(".harness-row").map((node) => node.querySelector(".harness-name").textContent),
-      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Hermes", "DeepSeek Harnessno key"], "every harness, as a list and not a dropdown; dsh is here without its key");
+      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Antigravity CLI", "Hermes", "DeepSeek Harnessno key"], "every harness, as a list and not a dropdown; dsh is here without its key");
     // It opens on the side the agent is already on: the cloud.
     const places = panel.app.querySelector(".segmented");
     assert.deepEqual(places.children.map((node) => node.textContent), ["On this machine", "In the cloud"]);
@@ -3971,12 +4021,13 @@ describe("what runs the models", () => {
       return reply({});
     } });
     await panel.run("boot()");
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 7);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 8);
     const side = () => panel.app.querySelector(".brain-side");
     const row = (name) => panel.app.querySelectorAll(".harness-row").find((node) => node.querySelector(".harness-name").textContent.startsWith(name));
     assert.ok(!row("Cora's harness").querySelector(".harness-flag"), "a missing router does not make Cora's harness missing");
     assert.equal(row("Codex").querySelector(".harness-flag").textContent, "not installed");
     assert.equal(row("Grok Build").querySelector(".harness-flag").textContent, "not installed", "a machine without Grok says so instead of hiding it");
+    assert.equal(row("Antigravity CLI").querySelector(".harness-flag").textContent, "not installed");
     assert.equal(row("DeepSeek Harness").querySelector(".harness-flag").textContent, "not installed");
 
     // Its own cloud: listed, but not choosable, and the default that points there neither.

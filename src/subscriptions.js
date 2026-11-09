@@ -1,17 +1,19 @@
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { resolve as resolvePath, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ValidationError } from "./store.js";
 import { onPath } from "./llm.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS } from "./harnesses.js";
+import { geminiScope, prepareGeminiProfile } from "./gemini-profile.js";
 
 const LOGIN_MS = 10 * 60 * 1000;
 const BROWSER_HELPER = fileURLToPath(new URL("./subscription-browser.js", import.meta.url));
+const TERMINAL_HELPER = fileURLToPath(new URL("./subscription-terminal.py", import.meta.url));
 const AUTH_FAILURE = /authentication_failed|failed to authenticate|login expired|not logged in|not signed in|not authenticated|please (run \/login|log in)|refresh token.*(expired|invalid|revoked)/i;
 /** The CLIs that log in by showing a code to confirm on a page, and how to start it. */
 const DEVICE_LOGIN = { grok: ["login", "--device-auth"], muse: ["login"] };
-const LOGOUT = { claude: ["auth", "logout"], codex: ["-c", 'cli_auth_credentials_store="file"', "logout"], grok: ["logout"], muse: ["logout"] };
+const LOGOUT = { claude: ["auth", "logout"], codex: ["-c", 'cli_auth_credentials_store="file"', "logout"], grok: ["logout"], muse: ["logout"], gemini: ["--settings", '{"disableSlashCommands":false}', "-p", "/logout"] };
 
 function terminate(child) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -38,6 +40,12 @@ export function subscriptionEnvironment(provider, directory, source = process.en
     env.MUSE_NO_AUTO_UPDATE = "1";
   }
   if (provider === "grok") env.GROK_DISABLE_AUTOUPDATER = "1";
+  if (provider === "gemini") {
+    env.ANTIGRAVITY_CREDENTIAL_SCOPE = geminiScope(directory);
+    env.AGY_CLI_DISABLE_AUTO_UPDATE = "1";
+    env.TERM = "xterm-256color";
+    for (const key of ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"]) if (source[key]) env[key] = source[key];
+  }
   return env;
 }
 
@@ -119,11 +127,11 @@ class CodexAccount {
 
 /** The database selects an identity; the official CLI owns its protected credentials. */
 export class Subscriptions {
-  constructor({ store, claudeBin, codexBin, grokBin = "grok", museBin = "muse", residentDirectories = {}, emit = () => {} }) {
+  constructor({ store, claudeBin, codexBin, grokBin = "grok", museBin = "muse", geminiBin = "agy", residentDirectories = {}, emit = () => {} }) {
     this.store = store;
     this.residentOverrides = residentDirectories;
     this.residentDirectories = Object.fromEntries(SUBSCRIPTION_PROVIDERS.map((provider) => [provider, residentDirectories[provider] || HARNESSES[provider].resident()]));
-    this.bins = { claude: claudeBin, codex: codexBin, grok: grokBin, muse: museBin };
+    this.bins = { claude: claudeBin, codex: codexBin, grok: grokBin, muse: museBin, gemini: geminiBin };
     this.emit = emit;
     this.logins = new Map();
     this.stopping = new Map();
@@ -141,7 +149,7 @@ export class Subscriptions {
 
   /** Claude Code and Codex are always offered; a newer CLI shows up once it is installed here. */
   residentProviders() {
-    return SUBSCRIPTION_PROVIDERS.filter((provider) => provider === "claude" || provider === "codex" || this.installed(provider) || this.store.residentSubscription(provider));
+    return SUBSCRIPTION_PROVIDERS.filter((provider) => !HARNESSES[provider].managedOnly && (provider === "claude" || provider === "codex" || this.installed(provider) || this.store.residentSubscription(provider)));
   }
 
   async discoverResidents() {
@@ -188,7 +196,7 @@ export class Subscriptions {
     return {
       ...record,
       installed: this.installed(record.provider),
-      ...(login ? { login: { url: login.url, userCode: login.userCode, manualCode: record.provider === "claude", expiresAt: login.expiresAt } } : {}),
+      ...(login ? { login: { url: login.url, userCode: login.userCode, manualCode: ["claude", "gemini"].includes(record.provider), expiresAt: login.expiresAt } } : {}),
     };
   }
 
@@ -233,7 +241,46 @@ export class Subscriptions {
     this.logins.set(id, login);
     this.changed(id, { status: "connecting", ...(actor ? { connectedBy: actor } : {}) });
     try {
-      if (record.provider === "codex") {
+      if (record.provider === "gemini") {
+        const existing = record.status === "ready" || existsSync(join(directory, ".gemini", "antigravity-cli", "installation_id"))
+          ? await this.readGemini(record).catch(() => null) : null;
+        if (this.logins.get(id) !== login) return this.view(id);
+        if (existing) { this.finish(id, "ready", existing); return this.view(id); }
+        prepareGeminiProfile(directory);
+        const child = spawn("python3", [TERMINAL_HELPER, this.bins.gemini, "--settings", JSON.stringify({ altScreenMode: "never", showTips: false })], {
+          env: { ...env, ANTIGRAVITY_REMOTE_OOB_AUTH: "true", SSH_CONNECTION: "127.0.0.1 0 127.0.0.1 0", BROWSER: `${process.execPath} ${BROWSER_HELPER}` }, cwd: directory, stdio: ["pipe", "pipe", "pipe"],
+        });
+        login.child = child;
+        child.stdin.on("error", () => {});
+        let buffer = "";
+        let checking = false;
+        const check = async () => {
+          if (checking || !login.url || this.logins.get(id) !== login) return;
+          checking = true;
+          try {
+            const details = await this.readAccount(record);
+            if (details && this.logins.get(id) === login) this.finish(id, "ready", details);
+          } catch {} finally { checking = false; }
+        };
+        const poll = setInterval(check, 3000);
+        poll.unref();
+        login.check = check;
+        login.close = () => { clearInterval(poll); return terminate(child); };
+        const read = (chunk) => {
+          buffer = (buffer + chunk.toString().replace(/\x1b\[[0-9;?<>]*[a-zA-Z]/g, "")).slice(-32000);
+          for (const match of buffer.matchAll(/https:\/\/[^\s<>"'\x00-\x20\x7f-\x9f]+/g)) {
+            const url = allowedLoginUrl(match[0], "gemini");
+            if (url && this.logins.get(id) === login) { login.url = url; ready(); }
+          }
+        };
+        child.stdout.on("data", read);
+        child.stderr.on("data", read);
+        child.on("error", () => { if (this.logins.get(id) === login) this.finish(id, "error"); });
+        child.on("close", () => {
+          clearInterval(poll);
+          if (this.logins.get(id) === login) this.finish(id, "error");
+        });
+      } else if (record.provider === "codex") {
         const rpc = new CodexAccount(this.bins.codex, env, directory, (method, params) => {
           if (method !== "account/login/completed" || this.logins.get(id) !== login) return;
           if (!params.success) return this.finish(id, "error");
@@ -303,7 +350,7 @@ export class Subscriptions {
           }).catch(() => { if (this.logins.get(id) === login) this.finish(id, "error"); });
         });
       }
-      const timer = setTimeout(ready, 12000);
+      const timer = setTimeout(ready, record.provider === "gemini" ? 30000 : 12000);
       await available;
       clearTimeout(timer);
       if (this.logins.get(id) === login && !login.url) this.finish(id, "error");
@@ -320,9 +367,10 @@ export class Subscriptions {
     this.require(id);
     const login = this.logins.get(id);
     const code = String(value || "").trim();
-    if (!login?.child || !login.url) throw new ValidationError("nessun accesso Claude in attesa");
-    if (!code || code.length > 4096 || /[\r\n\x00]/.test(code)) throw new ValidationError("codice di autorizzazione non valido");
+    if (!login?.child || !login.url) throw new ValidationError("nessun accesso in attesa");
+    if (!code || code.length > 4096 || /[\x00-\x20\x7f-\x9f]/.test(code)) throw new ValidationError("codice di autorizzazione non valido");
     login.child.stdin.write(`${code}\n`);
+    login.check?.();
     return this.view(id);
   }
 
@@ -344,6 +392,7 @@ export class Subscriptions {
    */
   readAccount(record, signal) {
     if (record.provider === "claude") return this.readClaude(record, signal);
+    if (record.provider === "gemini") return this.readGemini(record, signal);
     const args = record.provider === "grok" ? ["models"] : ["usage"];
     return new Promise((resolve, reject) => {
       const child = spawn(this.bins[record.provider], args, { env: this.environment(record), cwd: record.resident ? this.store.home : this.directory(record), stdio: ["ignore", "pipe", "pipe"], signal: signal || undefined });
@@ -360,6 +409,42 @@ export class Subscriptions {
         resolve(code === 0 && tier && !AUTH_FAILURE.test(output) ? { email: "", plan: tier.slice(0, 80) } : null);
       });
     });
+  }
+
+  geminiCommand(record, args, signal) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.bins.gemini, args, { env: this.environment(record), cwd: this.directory(record), stdio: ["ignore", "pipe", "ignore"], signal: signal || undefined });
+      let output = "";
+      const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Antigravity timeout")); }, 15000);
+      child.stdout.on("data", (chunk) => { if (output.length < 64000) output += chunk; });
+      child.on("error", () => { clearTimeout(timer); reject(signal?.reason || new Error("Antigravity non disponibile")); });
+      child.on("close", (code) => { clearTimeout(timer); resolve({ code, output }); });
+    });
+  }
+
+  async readGemini(record, signal) {
+    const { code, output } = await this.geminiCommand(record, ["--settings", '{"disableSlashCommands":false}', "-p", "/usage", "--output-format", "json"], signal);
+    if (code !== 0 || !output.trim() || AUTH_FAILURE.test(output) || /authentication required|authentication failed/i.test(output)) return null;
+    let value;
+    try { value = JSON.parse(output); } catch {}
+    if (value?.status && value.status !== "SUCCESS") return null;
+    const text = String(value?.response || output);
+    return { email: text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0]?.slice(0, 254) || "", plan: "" };
+  }
+
+  async geminiModels() {
+    const record = this.store.subscriptions().find((item) => item.provider === "gemini" && item.status === "ready" && !this.logins.has(item.id));
+    if (!record || !this.installed("gemini")) return [];
+    try {
+      const { code, output } = await this.geminiCommand(record, ["models"]);
+      if (code !== 0) return [];
+      const models = new Map();
+      for (const line of output.replace(/\x1b\[[0-9;]*m/g, "").split("\n")) {
+        const match = line.match(/^\s*[*·-]?\s*(gemini-[a-z0-9.-]+)\s+(.+?)\s*$/i);
+        if (match) models.set(match[1], { name: match[1], label: match[2] });
+      }
+      return [...models.values()];
+    } catch { return []; }
   }
 
   readClaude(record, signal) {
@@ -424,7 +509,7 @@ export class Subscriptions {
     try {
       await this.cancel(id);
       const directory = this.directory(record);
-      await new Promise((resolve, reject) => {
+      if (record.provider !== "gemini" || record.status === "ready") await new Promise((resolve, reject) => {
         const child = spawn(this.bins[record.provider], LOGOUT[record.provider], { env: subscriptionEnvironment(record.provider, directory), cwd: directory, stdio: "ignore" });
         const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new ValidationError("rimozione non riuscita: riprova")); }, 12000);
         child.on("error", () => { clearTimeout(timer); reject(new ValidationError("rimozione non riuscita: riprova")); });

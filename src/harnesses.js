@@ -39,6 +39,14 @@ export const HARNESSES = {
     loginHosts: ["auth.meta.com"],
     deviceParam: "code",
   },
+  gemini: {
+    label: "Gemini",
+    product: "Antigravity CLI",
+    homeVar: "HOME",
+    resident: () => homedir(),
+    managedOnly: true,
+    loginHosts: ["accounts.google.com", "antigravity.google", "antigravity.google.com"],
+  },
 };
 
 export const SUBSCRIPTION_PROVIDERS = Object.keys(HARNESSES);

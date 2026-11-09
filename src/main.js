@@ -54,7 +54,7 @@ export function startCora(overrides = {}) {
   const telegram = new Telegram({ token: cfg.telegramToken, apiBase: cfg.telegramApi, pollTimeout: cfg.telegramPollTimeout, chats: store.value("telegramChats", []) });
   const slack = new Slack({ botToken: cfg.slackToken, appToken: cfg.slackAppToken, apiBase: cfg.slackApi });
   const bridge = new ToolBridge();
-  const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, grokBin: cfg.grokBin, museBin: cfg.museBin, residentDirectories: cfg.residentDirectories, emit: (event) => web?.broadcast(event) });
+  const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, grokBin: cfg.grokBin, museBin: cfg.museBin, geminiBin: cfg.geminiBin, residentDirectories: cfg.residentDirectories, emit: (event) => web?.broadcast(event) });
   const llm = new LLM({
     ollamaUrl: cfg.ollamaUrl,
     ollamaKey: cfg.ollamaKey,
@@ -70,6 +70,7 @@ export function startCora(overrides = {}) {
     codexBin: cfg.codexBin,
     grokBin: cfg.grokBin,
     museBin: cfg.museBin,
+    geminiBin: cfg.geminiBin,
     grokHome: cfg.grokHome || join(cfg.home, "grok-home"),
     codexModelsFile: cfg.codexModelsFile,
     cliWorkDir: join(cfg.home, "cli-work"),
