@@ -56,7 +56,7 @@ async function subscriptionApp(t, existing) {
   const directory = existing?.home || tempHome();
   const instance = startCora({ home: directory, host: "127.0.0.1", port: 0, insecureCookies: true,
     adminPassword: PASSWORD, sessionKey: "subscription-fixture-session", useResidentSubscriptions: false, discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
-    claudeBin: identity.claude, codexBin: identity.codex, hermesBin: "/not-installed/hermes", botTokenFor: () => "",
+    claudeBin: identity.claude, codexBin: identity.codex, grokBin: identity.grok, museBin: identity.muse, hermesBin: "/not-installed/hermes", botTokenFor: () => "",
     docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/not-installed/AGENTS.md", sshAuthorizedKeys: "/not-installed/keys",
   });
   await instance.ready;
@@ -371,6 +371,54 @@ test("artifact upload permissions are rechecked after streaming and while a comm
   deny(); release(); await held;
   await assert.rejects(queued, /non puoi caricare/);
   assert.equal(app.store.artifactCommits(folder.id).length, 0);
+});
+
+test("Claude OAuth keeps the current authorization form when returning from the provider page", async (t) => {
+  const fixture = await subscriptionApp(t);
+  const created = await fixture.request("/api/subscriptions", { method: "POST", body: { provider: "claude", label: "Claude OAuth" } });
+  await fixture.request(`/api/subscriptions/${created.data.id}/login`, { method: "POST" });
+  const panel = panelHarness({ language: "en", hash: "#/settings/claude", fetch: async (path, init = {}) => {
+    const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  await panel.run("boot()");
+  const before = panel.run(`document.getElementById("app").querySelector('.account-login')?.querySelector('input')`);
+  assert.ok(before);
+  before.value = "partial-authorization-code";
+  await panel.run(`document.hidden=false;document.listeners.visibilitychange[0]()`);
+  const after = panel.run(`document.getElementById("app").querySelector('.account-login')?.querySelector('input')`);
+  assert.equal(after, before, "returning to Cora must keep the mounted authorization input");
+  assert.equal(after.value, "partial-authorization-code");
+  assert.equal(fixture.app.store.subscription(created.data.id).status, "connecting");
+  panel.run(`S.data.subscriptions[0].lastUsedAt=Date.now();document.getElementById("app").querySelector('.accounts').refreshSubscription()`);
+  assert.equal(panel.run(`document.getElementById("app").querySelector('.account-login').querySelector('input')`), before, "usage metadata must not redraw a pending login");
+  panel.run(`S.events.onmessage({data:JSON.stringify({type:"telegram-chats"})})`);
+  await sleep(100);
+  assert.equal(panel.run(`document.getElementById("app").querySelector('.account-login').querySelector('input')`), before, "a Telegram group update must not replace the login form");
+  const form = panel.run(`(() => {location.hash="#/new";const picker=subscriptionPicker(${JSON.stringify(created.data.id)});picker.setProvider("claude");const form=h("form",{},h("input",{name:"name",value:"My pending agent"}),picker.node);document.getElementById("app").replaceChildren(form);return form;})()`);
+  await panel.run(`document.listeners.visibilitychange[0]()`);
+  assert.equal(panel.run(`document.getElementById("app").querySelector("form")`), form, "new-agent drafts must remain mounted during authorization");
+  assert.equal(form.querySelector("input").value, "My pending agent");
+});
+
+test("device-code flows keep their mounted steps when returning to Cora", async (t) => {
+  const fixture = await subscriptionApp(t);
+  for (const provider of ["codex", "grok", "muse"]) {
+    const created = await fixture.request("/api/subscriptions", { method: "POST", body: { provider, label: provider } });
+    assert.equal(created.status, 201);
+    assert.equal((await fixture.request(`/api/subscriptions/${created.data.id}/login`, { method: "POST" })).status, 202);
+    const panel = panelHarness({ language: "en", hash: `#/settings/${provider}`, fetch: async (path, init = {}) => {
+      const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
+    await panel.run("boot()");
+    const before = panel.run(`document.getElementById("app").querySelector('.account-login')`);
+    assert.ok(before, provider);
+    await panel.run(`document.hidden=false;document.listeners.visibilitychange[0]()`);
+    assert.equal(panel.run(`document.getElementById("app").querySelector('.account-login')`), before, provider);
+    assert.match(before.textContent, /TEST-ONLY/);
+    await fixture.request(`/api/subscriptions/${created.data.id}/cancel`, { method: "POST" });
+  }
 });
 
 describe("per-agent subscription authentication", () => {

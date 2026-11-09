@@ -34,6 +34,7 @@ class Element {
   get lastChild() { return this.children.at(-1); }
   get isConnected() { return this.tagName === "document" || Boolean(this.parent?.isConnected); }
   setAttribute(key, value) { this.attributes[key] = String(value); }
+  getAttribute(key) { return this.attributes[key] ?? null; }
   addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); }
   /** What a real click does to the panel, so a test can follow a choice through. */
   dispatch(type, event = {}) {

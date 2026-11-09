@@ -458,6 +458,14 @@ function scheduleRefresh() {
   }, 900);
 }
 
+function subscriptionLoginActive() {
+  return [...document.querySelectorAll(".account"), ...document.querySelectorAll(".subscription-picker")].some((node) => node.classList.contains("connecting") || node.getAttribute("data-state") === "connecting");
+}
+
+function refreshSubscriptionViews() {
+  for (const node of [...document.querySelectorAll(".accounts"), ...document.querySelectorAll(".subscription-picker")]) node.refreshSubscription?.();
+}
+
 function connectEvents() {
   if (S.events) return;
   S.events = new EventSource("/api/events");
@@ -507,7 +515,13 @@ function connectEvents() {
       return;
     }
     if (entry.type === "telegram-chats") {
-      if (route()[0] === "settings" && !document.activeElement?.matches("input, textarea, select")) guard(loadState()).then(() => renderSettings());
+      if (route()[0] === "settings" && !document.activeElement?.matches("input, textarea, select")) {
+        const view = location.hash, keepLogin = subscriptionLoginActive();
+        guard(loadState()).then(() => {
+          if (location.hash !== view) return;
+          if (keepLogin) refreshSubscriptionViews(); else renderSettings();
+        });
+      }
       return;
     }
     if ((entry.type === "discord" || entry.type === "telegram") && entry.state && S.data) {
@@ -1475,6 +1489,11 @@ function pickedModel(data, name) {
 const CLI_NAMES = { claude: "Claude Code", codex: "Codex", grok: "Grok Build", muse: "Muse Code" };
 const SUBSCRIPTION_STATES = { disconnected: "Da collegare", connecting: "Accesso in corso", ready: "Collegata", error: "Accesso non riuscito" };
 
+function subscriptionDisplay(record) {
+  const { id, provider, resident, email, label, status, installed, issue, connectedBy, login } = record;
+  return { id, provider, resident, email, label, status, installed, issue, connectedBy, login };
+}
+
 /** Whose an account is, as the person looking at the panel reads it. */
 function isOwnAccount(record) {
   return Boolean(!record.resident && record.connectedBy?.id && record.connectedBy.id === S.data.currentUser?.id);
@@ -1562,7 +1581,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
   });
   function draw(force = false) {
     const records = (S.data.subscriptions || []).filter((item) => item.provider === provider && !item.resident);
-    const next = JSON.stringify({ records, busy, error });
+    const next = JSON.stringify({ records: records.map(subscriptionDisplay), busy, error, usage: (S.data.agents || []).map((agent) => [agent.id, agent.subscriptionId]) });
     if (!force && next === snapshot) return;
     snapshot = next;
     const installed = Boolean(S.data.providers?.[provider]);
@@ -1607,6 +1626,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
     setTimeout(poll, 1500);
   };
   draw(true);
+  root.refreshSubscription = () => draw();
   setTimeout(poll, 1500);
   return root;
 }
@@ -1669,7 +1689,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
     const records = all.filter((record) => !record.resident);
     const resident = !manage && S.data.settings.useResidentSubscriptions && all.find((record) => record.resident);
     const record = all.find((item) => item.id === selectedId) || (!selectedId && !choosing ? resident : null);
-    const next = JSON.stringify({ provider, selectedId, choosing, records, requestBusy, actionError });
+    const next = JSON.stringify({ provider, selectedId, choosing, records: all.map(subscriptionDisplay), requestBusy, actionError });
     if (!force && next === snapshot) return;
     snapshot = next;
     input.value = record?.resident ? "" : record?.id || "";
@@ -1776,6 +1796,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
     setTimeout(poll, 1500);
   };
   setTimeout(poll, 1500);
+  root.refreshSubscription = () => draw();
   return {
     node: root,
     setProvider(value) {
@@ -5621,8 +5642,8 @@ function artifactPermissions(data) {
         return h("div", { class: "artifact-team-person" }, userMark(person), h("div", { class: "artifact-team-identity" }, h("b", {}, raw(person.name)), h("small", { class: "muted" }, raw(person.email || "")), reviewer ? h("small", { class: "artifact-team-reviewer" }, "Revisore: può anche approvare i commit.") : null), control);
       })) : h("p", { class: "muted small" }, "Nessun altro membro del team è ancora entrato."));
   };
-  const memberAccessRow = data.canManage ? setRow("Membri del team", "Scegli chi può vedere, scaricare o modificare i file. Tu e i revisori avete sempre accesso completo.", memberAccess, { stack: true }) : null;
-  if (data.canManage) drawMemberAccess();
+  const memberAccessRow = data.canManage && folder.memberAccess ? setRow("Membri del team", "Scegli chi può vedere, scaricare o modificare i file. Tu e i revisori avete sempre accesso completo.", memberAccess, { stack: true }) : null;
+  if (memberAccessRow) drawMemberAccess();
   const reviewers = !data.canManage ? null : people.length ? h("div", { class: "set-switches" }, people.map((person) => h("label", { class: "switch" },
     h("input", { type: "checkbox", value: person.id, checked: folder.reviewers.includes(person.id) }), h("span", { class: "rocker" }),
     h("span", { class: "switch-text" }, raw(person.name), h("small", { class: "mono" }, raw(person.email || "")))))) : h("p", { class: "muted small" }, "Nessun altro entra in questo spazio: per ora rivedi solo tu.");
@@ -7128,8 +7149,11 @@ document.addEventListener("visibilitychange", async () => {
     S.events = null;
     return;
   }
+  const view = location.hash, keepLogin = subscriptionLoginActive();
   connectEvents();
   await guard(loadState());
+  if (location.hash !== view) return;
+  if (keepLogin) { refreshSubscriptionViews(); return; }
   if (!document.activeElement?.matches("input, textarea, select") && !document.querySelector(".chat-input")?.value) render();
 });
 
