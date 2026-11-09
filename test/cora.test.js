@@ -243,6 +243,36 @@ beforeEach(async () => {
   discord.state.botPosts.length = 0;
 });
 
+test("voice format decisions require an explicit written medium and exact evidence before publishing text", async (t) => {
+  const soniox = await fakeSoniox();
+  const previousVoice = app.orchestrator.voice;
+  app.orchestrator.voice = new Voice({ key: soniox.key, api: soniox.url, ttsUrl: soniox.ttsUrl });
+  const agent = app.store.createAgent({ name: "Vani", model: "ollama/test-model", tools: false });
+  t.after(async () => { app.orchestrator.voice = previousVoice; app.store.deleteAgent(agent.id); await soniox.close(); });
+  for (const [index, scenario] of [
+    { request: "Vani, dammi una checklist delle attività che stavi facendo, di quelle attività che sono su Linear, e mi scrivi la lista.", decision: { mode: "both", evidence: "mi scrivi la lista" }, expected: "voice" },
+    { request: "Vani, dimmi come procede.", decision: { mode: "both", evidence: "mandami anche il testo" }, expected: "voice" },
+    { request: "Vani, dimmi come procede.", decision: { mode: "text" }, expected: "voice" },
+    { request: "Vani, rispondimi per iscritto.", decision: { mode: "text", evidence: "rispondimi per iscritto" }, expected: "text" },
+    { request: "Vani, mandami anche il testo.", decision: { mode: "both", evidence: "mandami anche il testo" }, expected: "both" },
+  ].entries()) {
+    replies.set("*", (body) => /^Decidi come consegnare/.test(body.messages[0].content) ? { content: JSON.stringify(scenario.decision) } : { content: "PASS" });
+    let step = 0;
+    const progress = `Controllo voce ${index}.`;
+    const final = `Risposta voce ${index}.`;
+    replies.set("Vani", () => ++step === 1 ? { tool_calls: [{ function: { name: "say", arguments: { text: progress, voice: true } } }] } : { content: final });
+    const before = discord.state.webhookPosts.length;
+    soniox.state.transcripts.push(scenario.request);
+    const message = discord.say({ content: "", flags: 1 << 13, attachments: [discord.attachment(`vani-${index}.ogg`, Buffer.concat([Buffer.from("OggS"), Buffer.alloc(1000)]), "audio/ogg")] });
+    await waitFor(() => app.store.recentMessages(CHANNEL).some((item) => item.agentId === agent.id && item.content === final));
+    await quiet();
+    assert.equal(app.store.recentMessages(CHANNEL).find((item) => item.id === message.id).replyMode, scenario.expected);
+    const posts = discord.state.webhookPosts.slice(before).filter((post) => post.username === "Vani");
+    assert.deepEqual(posts.filter((post) => post.content).map((post) => post.content), scenario.expected === "voice" ? [] : [progress, final]);
+    assert.equal(posts.filter((post) => post.file).length, scenario.expected === "text" ? 0 : 2);
+  }
+});
+
 test("voice reply delivery sends progress and final audio without text and preserves trace evidence", async (t) => {
   const soniox = await fakeSoniox();
   const previousVoice = app.orchestrator.voice;

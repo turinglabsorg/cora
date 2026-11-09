@@ -135,7 +135,7 @@ async function world(t) {
     const system = String(body.messages[0]?.content || "");
     if (/^Decidi come consegnare/.test(system)) {
       delivery.calls.push(body);
-      return { content: JSON.stringify({ mode: delivery.mode }) };
+      return { content: JSON.stringify({ mode: delivery.mode, evidence: body.messages[1].content }) };
     }
     if (/^Scrivi la condizione di completamento/.test(system)) return { content: "NESSUNO" };
     if (/^Giudichi se un compito è finito/.test(system)) return { content: JSON.stringify({ met: true, reason: "" }) };

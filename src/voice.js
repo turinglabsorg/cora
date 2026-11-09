@@ -7,6 +7,11 @@ import { runProcess } from "./box.js";
  */
 export const VOICE_LANGUAGES = ["it", "en", "es", "fr", "de", "pt"];
 export const AUDIO_LIMIT_BYTES = 25 * 1024 * 1024;
+
+export function writtenReplyEvidence(content, evidence) {
+  if (typeof evidence !== "string" || !evidence.trim() || evidence.length > 500 || !String(content || "").includes(evidence)) return false;
+  return /\b(?:testo|text|texto|texte|written|schriftlich|scritt[oa]|iscritto|escrit[oa]|ecrit(?:e)?)\b/iu.test(evidence.normalize("NFD").replace(/\p{M}/gu, ""));
+}
 const STT_MODEL = "stt-async-v5";
 const TTS_MODEL = "tts-rt-v2";
 const SPEECH_LIMIT = 1200;
