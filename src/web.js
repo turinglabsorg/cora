@@ -710,6 +710,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key), soniox: Boolean(voice?.enabled), deepseek: Boolean(llm.deepseek?.key) },
         doc: { installed: Boolean(brain.doc?.installed), ...(brain.doc?.installed ? brain.doc.activity() : {}) },
         subscriptions: subscriptions.list().filter((entry) => !knowledge?.ownerMemory || entry.connectedBy?.id === user.id),
+        providerUsage: user.role === "owner" ? subscriptions.usage.connections() : [],
         boxImage: { name: config.boxImage, ready: imageReady },
         timezone: config.timezone,
         artifacts: artifacts ? { reviews: artifacts.reviewsFor(user).length, ...(user.role === "owner" ? { space: artifacts.space() } : {}) } : null,
@@ -738,6 +739,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       if (action === "cancel" && method === "POST") return send(res, 200, await subscriptions.cancel(id));
       if (action === "check" && method === "POST") return send(res, 200, await subscriptions.check(id));
+    }
+    const providerUsageMatch = /^\/api\/providers\/(ollama|deepseek)\/usage$/.exec(path);
+    if (providerUsageMatch && method === "GET") {
+      if (user.role !== "owner" || !subscriptions.usage.record(`provider_${providerUsageMatch[1]}`)) throw new HttpError(404, "collegamento non trovato");
+      return send(res, 200, subscriptions.usage.get(`provider_${providerUsageMatch[1]}`));
     }
     const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter|typesafe|soniox|deepseek)\/key$/.exec(path);
     if (providerKeyMatch && method === "PUT") {
@@ -771,6 +777,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (provider === "ollama") llm.ollamaKey = key;
       else if (provider === "deepseek") llm.deepseek.key = key;
       else llm.routers.orcarouter.key = key;
+      if (["ollama", "deepseek"].includes(provider)) subscriptions.usage.invalidate(`provider_${provider}`);
       llm.cache = { at: 0, models: [] };
       return send(res, 200, { provider, configured: true });
     }

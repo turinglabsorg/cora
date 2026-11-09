@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 
-const INTERVAL = 5 * 60 * 1000;
+const INTERVAL = 60 * 1000;
 const number = (value) => value === null || value === undefined || value === "" ? null : Number.isFinite(Number(value)) ? Number(value) : null;
 const object = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+const fields = (value) => Object.fromEntries(Object.entries(object(value)).map(([key, item]) => [key.toLowerCase(), item]));
 
 function timestamp(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -66,8 +67,16 @@ export function parseSubscriptionUsage(provider, data) {
     for (const [key, fallback] of [["window", "session"], ["session", "session"], ["weekly", "weekly"]]) {
       const item = object(usage[key]), minutes = number(item.window_duration_mins);
       const kind = kindFor(minutes, fallback);
-      add(kind, kind, item.used_percent ?? item.used_percentage ?? item.utilization, item.resets_at, "", minutes);
+      add(kind, kind, item.used_percent ?? item.usedPercent ?? item.used_percentage ?? item.utilization, item.resets_at ?? item.resetsAtMs ?? item.resetsAt, "", minutes);
     }
+  } else if (provider === "ollama") {
+    const included = fields(fields(root).included);
+    for (const [key, kind] of [["session", "session"], ["weekly", "weekly"]]) {
+      const item = fields(included[key]), left = number(item.remaining_percent);
+      if (left !== null && left >= 0 && left <= 100) add(key, kind, 100 - left, item.resets_at);
+    }
+    const allowance = number(included.allowance_usd), balance = number(included.balance_usd);
+    if (allowance > 0 && balance !== null) add("monthly", "monthly", (allowance - balance) * 100 / allowance, fields(included.period).until);
   } else if (provider === "grok") {
     const config = object(root.config || root), period = object(config.currentPeriod);
     const money = (name) => number(object(config[name]).val);
@@ -86,26 +95,75 @@ export function parseSubscriptionUsage(provider, data) {
   return windows;
 }
 
+export function parseSubscriptionBalances(provider, data) {
+  const root = object(data), balances = [];
+  const add = (kind, currency, value) => {
+    const amount = String(value ?? "").trim();
+    if (!["USD", "CNY"].includes(currency) || !/^-?\d+(?:\.\d+)?$/.test(amount) || !Number.isFinite(Number(amount))) return;
+    balances.push({ kind, currency, amount });
+  };
+  if (provider === "deepseek") for (const item of Array.isArray(root.balance_infos) ? root.balance_infos : []) {
+    for (const [kind, key] of [["total", "total_balance"], ["granted", "granted_balance"], ["topped-up", "topped_up_balance"]]) add(kind, item?.currency, item?.[key]);
+  }
+  if (provider === "ollama") {
+    const included = fields(fields(root).included), purchased = fields(fields(root).purchased);
+    add("included", "USD", included.balance_usd); add("allowance", "USD", included.allowance_usd); add("purchased", "USD", purchased.balance_usd);
+  }
+  return balances;
+}
+
 export class SubscriptionUsage {
-  constructor({ store, subscriptions, now = Date.now, read = null }) {
+  constructor({ store, subscriptions, now = Date.now, read = null, emit = () => {}, providerRecords = () => [] }) {
     this.store = store; this.subscriptions = subscriptions; this.now = now;
     this.read = read || ((record, signal) => subscriptions.usageData(record.id, signal));
+    this.emit = emit;
+    this.providerRecords = providerRecords;
     this.pending = new Map(); this.revisions = new Map(); this.queue = []; this.workers = 0; this.closed = false;
   }
 
   key(id) { return `subscriptionUsage:${id}`; }
-  identity(record) { return createHash("sha256").update(JSON.stringify([record.provider, record.connectedBy?.id, record.email])).digest("hex"); }
+  identity(record) {
+    const identity = [record.provider, record.connectedBy?.id, record.email];
+    if (record.usageIdentity) identity.push(record.usageIdentity);
+    return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  }
+  record(id) { return this.store.subscription(id) || this.providerRecords().find((record) => record.id === id); }
+  require(id) { return this.record(id) || this.subscriptions.require(id); }
+  connections() { return this.providerRecords().map(({ id, provider, label, server, status }) => ({ id, provider, label, server, status, usage: this.get(id) })); }
 
   view(record, cache = {}) {
     const valid = cache.identity === this.identity(record);
-    return { subscriptionId: record.id, state: valid ? cache.state || "unavailable" : "unavailable", windows: valid ? cache.windows || [] : [],
+    return { subscriptionId: record.id, state: valid ? cache.state || "unavailable" : "unavailable", windows: valid ? cache.windows || [] : [], balances: valid ? cache.balances || [] : [],
       fetchedAt: valid ? cache.fetchedAt || null : null, checkedAt: valid ? cache.checkedAt || null : null,
       nextCheckAt: cache.nextCheckAt || null, issue: valid ? cache.issue || null : null,
-      stale: Boolean(valid && cache.windows?.length && cache.state !== "ready") };
+      stale: Boolean(valid && (cache.windows?.length || cache.balances?.length) && (cache.state !== "ready" || cache.windows?.some((item) => item.resetsAt && Date.parse(item.resetsAt) <= this.now()))) };
   }
 
-  async get(id) {
-    const record = this.subscriptions.require(id);
+  get(id) {
+    const record = this.require(id);
+    const cached = this.store.value(this.key(id), {}) || {};
+    if (record.status !== "ready" || (record.resident && !this.store.settings.useResidentSubscriptions)) return { ...this.view(record), issue: "AUTH_REQUIRED" };
+    const snapshot = this.view(record, cached);
+    if (this.pending.has(id) && !snapshot.windows.length && !snapshot.balances.length) return { ...snapshot, state: "loading" };
+    return snapshot;
+  }
+
+  start(interval = INTERVAL) {
+    if (this.timer || this.closed) return;
+    void this.refreshAll();
+    this.timer = setInterval(() => { void this.refreshAll(); }, interval);
+    this.timer.unref();
+  }
+
+  async refreshAll() {
+    if (this.closed) return;
+    const records = [...this.store.subscriptions(), ...this.providerRecords()].filter((record) => record.status === "ready" && (!record.resident || this.store.settings.useResidentSubscriptions));
+    await Promise.allSettled(records.map((record) => this.refresh(record.id)));
+    if (!this.closed && records.length) this.emit();
+  }
+
+  async refresh(id) {
+    const record = this.require(id);
     if (record.status !== "ready" || (record.resident && !this.store.settings.useResidentSubscriptions)) return this.view(record);
     const cached = this.store.value(this.key(id), {}) || {};
     if (this.closed || this.subscriptions.logins.has(id) || this.subscriptions.busy.has(id)) return { ...this.view(record, cached), issue: "connecting", stale: true };
@@ -119,20 +177,21 @@ export class SubscriptionUsage {
         try {
           const data = await this.read(record, controller.signal);
           controller.signal.throwIfAborted();
-          const windows = parseSubscriptionUsage(record.provider, data);
-          next = { identity: this.identity(record), windows, fetchedAt: windows.length ? at() : cached.identity === this.identity(record) ? cached.fetchedAt || null : null,
-            checkedAt: at(), nextCheckAt: new Date(this.now() + INTERVAL).toISOString(), state: windows.length ? "ready" : "unavailable", issue: windows.length ? null : "no-data", failures: 0 };
-          if (!windows.length && cached.identity === next.identity && cached.windows?.length) { next.windows = cached.windows; next.state = "unavailable"; }
+          const windows = parseSubscriptionUsage(record.provider, data), balances = parseSubscriptionBalances(record.provider, data), available = windows.length || balances.length;
+          next = { identity: this.identity(record), windows, balances, fetchedAt: available ? at() : cached.identity === this.identity(record) ? cached.fetchedAt || null : null,
+            checkedAt: at(), nextCheckAt: new Date(this.now() + INTERVAL).toISOString(), state: available ? "ready" : "unavailable", issue: available ? null : "no-data", failures: 0 };
+          if (!available && cached.identity === next.identity) { next.windows = cached.windows || []; next.balances = cached.balances || []; }
         } catch (error) {
           if (controller.signal.aborted || this.closed) return this.view(record);
           const rateLimited = error.code === "RATE_LIMITED";
           const failures = rateLimited ? (cached.failures || 0) + 1 : 0;
-          const delay = rateLimited ? Math.max(record.provider === "claude" ? Math.min(30 * 60000 * 2 ** Math.min(failures - 1, 5), 12 * 3600000) : INTERVAL, Number(error.retryAfterMs) || 0) : INTERVAL;
+          const delay = rateLimited ? Math.max(record.provider === "claude" ? Math.min(30 * 60000 * 2 ** Math.min(failures - 1, 5), 12 * 3600000) : 5 * INTERVAL, Number(error.retryAfterMs) || 0) : error.code === "AUTH_REQUIRED" ? 5 * INTERVAL : INTERVAL;
           next = { ...cached, identity: this.identity(record), windows: cached.identity === this.identity(record) ? cached.windows || [] : [],
+            balances: cached.identity === this.identity(record) ? cached.balances || [] : [],
             fetchedAt: cached.identity === this.identity(record) ? cached.fetchedAt || null : null, checkedAt: at(), nextCheckAt: new Date(this.now() + delay).toISOString(),
             state: rateLimited ? "cooldown" : "error", issue: ["AUTH_REQUIRED", "RATE_LIMITED", "UNSUPPORTED"].includes(error.code) ? error.code : "unavailable", failures };
         }
-        if (!this.closed && (this.revisions.get(id) || 0) === revision && this.store.subscription(id)?.status === "ready" && this.identity(this.store.subscription(id)) === this.identity(record)) this.store.setValue(this.key(id), next);
+        if (!this.closed && (this.revisions.get(id) || 0) === revision && this.record(id)?.status === "ready" && this.identity(this.record(id)) === this.identity(record)) this.store.setValue(this.key(id), next);
         else return this.view(record);
         return this.view(record, next);
       } finally { release(); }
@@ -159,11 +218,12 @@ export class SubscriptionUsage {
     this.pending.get(id)?.controller.abort();
     this.pending.delete(id);
     const previous = this.store.value(this.key(id), {}) || {};
-    this.store.setValue(this.key(id), remove ? null : { ...previous, windows: [], fetchedAt: null, identity: "", ...(previous.state === "cooldown" ? {} : { nextCheckAt: null }) });
+    this.store.setValue(this.key(id), remove ? null : { ...previous, windows: [], balances: [], fetchedAt: null, identity: "", ...(previous.state === "cooldown" ? {} : { nextCheckAt: null }) });
   }
 
   async close() {
     this.closed = true;
+    clearInterval(this.timer);
     for (const entry of this.pending.values()) entry.controller.abort();
     this.drain();
     await Promise.allSettled([...this.pending.values()].map((entry) => entry.promise));

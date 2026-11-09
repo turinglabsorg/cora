@@ -199,6 +199,7 @@ export class Subscriptions {
     return {
       ...record,
       installed: this.installed(record.provider),
+      ...(this.usage ? { usage: this.usage.get(id) } : {}),
       ...(login ? { login: { url: login.url, userCode: login.userCode, manualCode: ["claude", "gemini"].includes(record.provider), expiresAt: login.expiresAt,
         phase: login.codeSubmitted ? "verifying" : login.url ? "authorizing" : "preparing" } } : {}),
     };

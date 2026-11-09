@@ -29,6 +29,7 @@ import { SlackApps } from "./slack-apps.js";
 import { Store } from "./store.js";
 import { Subscriptions } from "./subscriptions.js";
 import { SubscriptionUsage } from "./subscription-usage.js";
+import { providerUsageData, providerUsageRecords } from "./provider-usage.js";
 import { Voice } from "./voice.js";
 import { GoogleConnector } from "./google-connector.js";
 import { EmailChannel } from "./email-channel.js";
@@ -56,7 +57,6 @@ export function startCora(overrides = {}) {
   const slack = new Slack({ botToken: cfg.slackToken, appToken: cfg.slackAppToken, apiBase: cfg.slackApi });
   const bridge = new ToolBridge();
   const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, grokBin: cfg.grokBin, museBin: cfg.museBin, geminiBin: cfg.geminiBin, timezone: cfg.timezone, residentDirectories: cfg.residentDirectories, emit: (event) => web?.broadcast(event) });
-  subscriptions.usage = new SubscriptionUsage({ store, subscriptions, read: overrides.subscriptionUsageReader });
   const llm = new LLM({
     ollamaUrl: cfg.ollamaUrl,
     ollamaKey: cfg.ollamaKey,
@@ -79,6 +79,9 @@ export function startCora(overrides = {}) {
     bridge,
     subscriptions,
   });
+  subscriptions.usage = new SubscriptionUsage({ store, subscriptions, providerRecords: () => providerUsageRecords(llm),
+    read: overrides.subscriptionUsageReader || ((record, signal) => record.server ? providerUsageData(record, { llm, config: cfg }, signal) : subscriptions.usageData(record.id, signal)),
+    emit: () => web?.broadcast({ type: "subscription-usage" }) });
   // SSH into a desktop: the keys that already open this machine, plus the ones added in the panel.
   const sshKeys = () => {
     let host = [];
@@ -273,6 +276,7 @@ export function startCora(overrides = {}) {
 
   const ready = Promise.all([bridge.start(), store.settings.useResidentSubscriptions ? subscriptions.discoverResidents() : Promise.resolve()]).then(() => new Promise((resolve) => web.server.listen(cfg.port, cfg.host, resolve)));
   ready.then(() => {
+    if (overrides.subscriptionUsageIntervalMs !== 0) subscriptions.usage.start(overrides.subscriptionUsageIntervalMs);
     console.log(`> cora on http://${cfg.host}:${web.server.address().port}`);
     if (!cfg.adminPassword) console.error("! CORA_ADMIN_PASSWORD is not set: the panel refuses every login");
     channels.apply();

@@ -18,7 +18,7 @@ import { encodePng, pngSize } from "../src/png.js";
 import { panelHarness } from "./panel.js";
 import { identityCli } from "./subscription-fixtures.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
-import { SubscriptionUsage, parseSubscriptionUsage } from "../src/subscription-usage.js";
+import { SubscriptionUsage, parseSubscriptionUsage, parseSubscriptionBalances } from "../src/subscription-usage.js";
 import { readNativeUsage } from "../src/subscription-usage-worker.js";
 import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
@@ -51,6 +51,12 @@ describe("subscription usage", () => {
     assert.deepEqual(parseSubscriptionUsage("gemini", gemini).map((item) => [item.kind, item.group, Math.round(item.usedPercent)]), [["weekly", "", 20], ["session", "", 55], ["weekly", "Gemini 4 Argon", 100]]);
     assert.deepEqual(parseSubscriptionUsage("codex", { rateLimitsByLimitId: { codex: { primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1794859200 }, secondary: { usedPercent: null } }, spark: { limitName: "Spark", primary: { usedPercent: 50, windowDurationMins: 60 } } }, rateLimits: { primary: { usedPercent: 99 } } }).map((item) => [item.kind, item.group, item.usedPercent]), [["session", "", 12], ["custom", "Spark", 50]]);
     assert.equal(parseSubscriptionUsage("muse", { subs_usage: { window: { used_percent: 0, window_duration_mins: 300, resets_at: 1794859200 }, weekly: { used_percent: 23, resets_at: reset } } }).length, 2);
+    assert.deepEqual(parseSubscriptionUsage("muse", { schemaVersion: 1, allowance: { window: { usedPercent: 10, resetsAtMs: 1794859200000 }, weekly: { usedPercent: 15, resetsAtMs: 1794859200000 } } }).map((item) => [item.kind, item.usedPercent, item.resetsAt]), [["session", 10, "2026-11-16T20:00:00.000Z"], ["weekly", 15, "2026-11-16T20:00:00.000Z"]]);
+    assert.equal(parseSubscriptionUsage("ollama", { Included: { Allowance_USD: 100, Balance_USD: 3, Period: { Until: reset } } })[0].usedPercent, 97);
+    assert.deepEqual(parseSubscriptionUsage("ollama", { included: { session: { remaining_percent: 75, resets_at: reset }, weekly: { remaining_percent: 40, resets_at: reset } } }).map((item) => item.usedPercent), [25, 60]);
+    assert.deepEqual(parseSubscriptionUsage("ollama", { included: { balance_usd: 3 } }), [], "an absent allowance is not a percentage");
+    assert.deepEqual(parseSubscriptionBalances("deepseek", { balance_infos: [{ currency: "USD", total_balance: "12.012345", granted_balance: "0.00", topped_up_balance: "12.012345" }, { currency: "CNY", total_balance: "110.00" }] }), [{ kind: "total", currency: "USD", amount: "12.012345" }, { kind: "granted", currency: "USD", amount: "0.00" }, { kind: "topped-up", currency: "USD", amount: "12.012345" }, { kind: "total", currency: "CNY", amount: "110.00" }]);
+    assert.deepEqual(parseSubscriptionBalances("deepseek", { balance_infos: [{ currency: "USD", total_balance: null }] }), []);
     assert.deepEqual(parseSubscriptionUsage("claude", { five_hour: { utilization: null }, seven_day: { utilization: "invalid" } }), []);
     assert.deepEqual(parseSubscriptionUsage("grok", {}), []);
     const weekly = { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", start: "2026-11-09T20:00:00Z", end: reset }, billingPeriodStart: "2026-11-09T20:00:00Z", billingPeriodEnd: reset };
@@ -61,12 +67,13 @@ describe("subscription usage", () => {
 
   test("reads native account usage without generating model turns or exposing credentials", async (t) => {
     const f = await subscriptionApp(t);
-    f.identity.set({ geminiUsage: gemini, codexUsage: { rateLimits: { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1794859200 } } }, museUsage: { subs_usage: { weekly: { used_percent: 28, resets_at: reset } } } });
+    f.identity.set({ geminiUsage: gemini, codexUsage: { rateLimits: { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1794859200 } } }, museUsage: { schemaVersion: 1, allowance: { window: { usedPercent: 10, resetsAtMs: 1794859200000 }, weekly: { usedPercent: 15, resetsAtMs: 1794859200000 } } } });
     for (const provider of ["gemini", "codex", "muse"]) {
       const record = f.app.store.createSubscription({ provider, label: provider });
       const directory = f.app.subscriptions.directory(record);
       writeFileSync(join(directory, "fixture-account.json"), JSON.stringify({ type: "chatgpt", email: "fixture@example.test", planType: "pro" }));
       f.app.store.updateSubscription(record.id, { status: "ready" });
+      await f.app.subscriptions.usage.refresh(record.id);
       const response = await f.request(`/api/subscriptions/${record.id}/usage`);
       assert.equal(response.status, 200); assert.equal(response.data.state, "ready");
       assert.ok(response.data.windows.length > 0); assert.equal(f.app.store.subscription(record.id).status, "ready");
@@ -92,7 +99,7 @@ describe("subscription usage", () => {
   test("isolates owners before reads and cache access, coalesces requests and persists cooldown", async (t) => {
     let reads = 0, result = claude;
     let time = Date.parse("2026-11-09T20:00:00Z");
-    const f = await knowledgeWorld({ subscriptionUsageReader: async () => { reads++; await sleep(30); if (result instanceof Error) throw result; return result; } });
+    const f = await knowledgeWorld({ subscriptionUsageIntervalMs: 0, subscriptionUsageReader: async () => { reads++; await sleep(30); if (result instanceof Error) throw result; return result; } });
     t.after(f.close);
     f.app.subscriptions.usage.now = () => time;
     const record = f.app.store.createSubscription({ provider: "claude", label: "Alice Claude", connectedBy: { id: f.alice.user.id } });
@@ -100,11 +107,15 @@ describe("subscription usage", () => {
     const path = `/api/subscriptions/${record.id}/usage`;
     assert.equal((await f.request(f.bob, path)).status, 404);
     assert.equal((await f.request(f.admin, path)).status, 404); assert.equal(reads, 0);
+    await Promise.all(Array.from({ length: 8 }, () => f.request(f.alice, path)));
+    assert.equal(reads, 0, "page requests must never read providers");
+    await Promise.all(Array.from({ length: 8 }, () => f.app.subscriptions.usage.refresh(record.id)));
     const responses = await Promise.all(Array.from({ length: 8 }, () => f.request(f.alice, path)));
     assert.ok(responses.every((response) => response.status === 200 && response.data.windows.length === 4)); assert.equal(reads, 1);
     assert.equal((await f.request(f.bob, path)).status, 404); assert.equal(reads, 1);
     await f.request(f.alice, path); assert.equal(reads, 1);
     time += 300001; result = Object.assign(new Error("private upstream detail"), { code: "RATE_LIMITED", retryAfterMs: 3600000 });
+    await f.app.subscriptions.usage.refresh(record.id);
     const limited = (await f.request(f.alice, path)).data;
     assert.equal(limited.state, "cooldown"); assert.equal(limited.stale, true); assert.equal(limited.windows[2].group, "Fable");
     assert.equal(Date.parse(limited.nextCheckAt) - time, 3600000); assert.doesNotMatch(JSON.stringify(limited), /private upstream/);
@@ -112,6 +123,7 @@ describe("subscription usage", () => {
     f.app.subscriptions.usage = new SubscriptionUsage({ store: f.app.store, subscriptions: f.app.subscriptions, now: () => time, read: async () => { reads++; return claude; } });
     assert.equal((await f.request(f.alice, path)).data.state, "cooldown"); assert.equal(reads, 2);
     time += 3600001;
+    await f.app.subscriptions.usage.refresh(record.id);
     assert.equal((await f.request(f.alice, path)).data.state, "ready"); assert.equal(reads, 3);
     assert.equal(f.app.store.subscription(record.id).status, "ready");
   });
@@ -122,7 +134,7 @@ describe("subscription usage", () => {
     const gate = Promise.withResolvers(); let active = 0, maximum = 0, entered = 0;
     usage.read = async () => { active++; maximum = Math.max(maximum, active); entered++; await gate.promise; active--; return claude; };
     const records = Array.from({ length: 6 }, (_, i) => { const record = f.app.store.createSubscription({ provider: "claude", label: `Claude ${i}` }); f.app.store.updateSubscription(record.id, { status: "ready" }); return record; });
-    const work = records.map((record) => usage.get(record.id));
+    const work = records.map((record) => usage.refresh(record.id));
     await waitFor(() => entered === 3);
     f.app.subscriptions.changed(records[0].id, { status: "connecting" });
     f.app.store.updateSubscription(records[0].id, { status: "ready", email: "new-account@example.test" });
@@ -130,7 +142,7 @@ describe("subscription usage", () => {
     await Promise.all(work);
     assert.equal(maximum, 3);
     assert.deepEqual(f.app.store.value(usage.key(records[0].id)).windows, [], "old account must not repopulate the cache");
-    assert.equal((await usage.get(records[0].id)).windows.length, 4);
+    assert.equal((await usage.refresh(records[0].id)).windows.length, 4);
   });
 
   test("keeps last known values on missing data, retains backoff across a service restart and clears removed accounts", async (t) => {
@@ -140,16 +152,17 @@ describe("subscription usage", () => {
     f.app.store.updateSubscription(record.id, { status: "ready" });
     const usage = f.app.subscriptions.usage, path = `/api/subscriptions/${record.id}/usage`;
     usage.now = () => time; usage.read = async () => claude;
-    const first = (await f.request(path)).data;
+    const pull = async () => { await usage.refresh(record.id); return (await f.request(path)).data; };
+    const first = await pull();
     time += 300001; usage.read = async () => ({});
-    const missing = (await f.request(path)).data;
+    const missing = await pull();
     assert.equal(missing.state, "unavailable"); assert.equal(missing.stale, true);
     assert.deepEqual(missing.windows, first.windows); assert.equal(missing.fetchedAt, first.fetchedAt);
     time += 300001; usage.read = async () => { throw Object.assign(new Error("synthetic throttle"), { code: "RATE_LIMITED" }); };
-    const throttled = (await f.request(path)).data;
+    const throttled = await pull();
     assert.equal(Date.parse(throttled.nextCheckAt) - time, 1800000);
     time += 1800001;
-    const again = (await f.request(path)).data;
+    const again = await pull();
     assert.equal(Date.parse(again.nextCheckAt) - time, 3600000);
     await f.stop();
     const restarted = await subscriptionApp(t, f);
@@ -162,32 +175,135 @@ describe("subscription usage", () => {
     assert.equal(restarted.app.store.value(usage.key(record.id)), null);
   });
 
-  test("Agents shows loading, separate percentages, resets, unknown states and recovery in place", async (t) => {
+  test("backend service refreshes independently of browser requests and retains rate-limit waits", async (t) => {
+    const f = await subscriptionApp(t);
+    const record = f.app.store.createSubscription({ provider: "codex", label: "Background account" });
+    f.app.store.updateSubscription(record.id, { status: "ready" });
+    const usage = f.app.subscriptions.usage; let reads = 0, time = Date.now();
+    usage.now = () => time;
+    usage.read = async () => { reads++; return { rateLimits: { primary: { usedPercent: 87, windowDurationMins: 10080 } } }; };
+    usage.start(20);
+    await waitFor(() => reads === 1);
+    for (let i = 0; i < 20; i++) {
+      const response = await f.request(`/api/subscriptions/${record.id}/usage`);
+      assert.equal(response.data.windows[0].usedPercent, 87);
+    }
+    assert.equal(reads, 1, "multiple tabs and refreshes only read persisted snapshots");
+    time += 60001;
+    await waitFor(() => reads === 2);
+    time += 60001;
+    usage.read = async () => { reads++; throw Object.assign(new Error("synthetic throttle"), { code: "RATE_LIMITED", retryAfterMs: 600000 }); };
+    await waitFor(() => reads === 3);
+    const snapshot = (await f.request(`/api/subscriptions/${record.id}/usage`)).data;
+    assert.equal(snapshot.state, "cooldown"); assert.equal(Date.parse(snapshot.nextCheckAt) - time, 600000);
+    time += 60001;
+    await sleep(80); assert.equal(reads, 3, "minute service honors longer cooldowns");
+    await usage.close();
+  });
+
+  test("backend reads Ollama allowances and DeepSeek balances once, while server finances stay owner-only", async (t) => {
+    const calls = [];
+    const server = http.createServer((req, res) => {
+      calls.push({ path: req.url, authorization: req.headers.authorization });
+      res.setHeader("Content-Type", "application/json");
+      if (req.url === "/user/balance") return res.end(JSON.stringify({ is_available: true, balance_infos: [{ currency: "USD", total_balance: "12.50", granted_balance: "2.50", topped_up_balance: "10.00" }] }));
+      if (req.url === "/api/balance") return res.end(JSON.stringify({ included: { balance_usd: 3, allowance_usd: 100, period: { until: reset } }, purchased: { balance_usd: 25 } }));
+      res.end(JSON.stringify({ data: [] }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    const endpoint = `http://127.0.0.1:${server.address().port}`;
+    const f = await knowledgeWorld({ subscriptionUsageIntervalMs: 0, ollamaKey: "synthetic-ollama-key", deepseekKey: "synthetic-deepseek-key", deepseekApi: endpoint, ollamaBalanceApi: endpoint + "/api/balance" });
+    t.after(f.close);
+    for (const provider of ["ollama", "deepseek"]) {
+      assert.equal((await f.request(f.alice, `/api/providers/${provider}/usage`)).status, 404);
+      assert.equal((await f.request(f.admin, `/api/providers/${provider}/usage`)).status, 200);
+    }
+    assert.equal(calls.length, 0, "cache-only endpoints never call the upstream");
+    assert.deepEqual((await f.request(f.alice, "/api/state")).data.providerUsage, []);
+    await f.app.subscriptions.usage.refreshAll();
+    assert.equal(calls.length, 2);
+    const ollama = (await f.request(f.admin, "/api/providers/ollama/usage")).data;
+    assert.equal(ollama.state, "ready"); assert.equal(ollama.windows[0].usedPercent, 97);
+    assert.deepEqual(ollama.balances.map((item) => item.amount), ["3", "100", "25"]);
+    const deepseek = (await f.request(f.admin, "/api/providers/deepseek/usage")).data;
+    assert.equal(deepseek.state, "ready"); assert.deepEqual(deepseek.balances.map((item) => item.amount), ["12.50", "2.50", "10.00"]);
+    assert.deepEqual(deepseek.windows, [], "API balances must not become invented percentages");
+    for (let i = 0; i < 10; i++) await f.request(f.admin, "/api/providers/deepseek/usage");
+    assert.equal(calls.length, 2);
+    const state = (await f.request(f.admin, "/api/state")).data;
+    assert.equal(state.providerUsage.length, 2);
+    assert.doesNotMatch(JSON.stringify(state), /synthetic-ollama-key|synthetic-deepseek-key|usageIdentity/);
+    f.app.llm.deepseek.key = "synthetic-replacement-key";
+    assert.deepEqual((await f.request(f.admin, "/api/providers/deepseek/usage")).data.balances, [], "new credentials cannot expose the previous account's balance");
+  });
+
+  test("Agents includes Ollama residual percentage and DeepSeek balances in one selected account", async (t) => {
+    const f = await subscriptionApp(t);
+    f.app.llm.ollamaKey = "synthetic-ollama-key"; f.app.llm.deepseek.key = "synthetic-deepseek-key";
+    f.app.subscriptions.usage.read = async (record) => record.provider === "ollama"
+      ? { included: { balance_usd: 3, allowance_usd: 100, period: { until: reset } }, purchased: { balance_usd: 25 } }
+      : { balance_infos: [{ currency: "CNY", total_balance: "110.00", granted_balance: "10.00", topped_up_balance: "100.00" }] };
+    await f.app.subscriptions.usage.refreshAll();
+    const panel = panelHarness({ hash: "#/agenti", fetch: async (path, options = {}) => {
+      const response = await f.request(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
+    await panel.run("boot()");
+    const quota = panel.app.querySelector(".subscription-usage"), slots = quota.querySelectorAll("article"), tabs = quota.querySelector(".quota-tabs").querySelectorAll("button");
+    assert.equal(tabs.length, 2); assert.equal(slots.filter((slot) => !slot.hidden).length, 1);
+    assert.match(slots[0].textContent, /3%disponibile/);
+    tabs[1].click();
+    assert.equal(slots[1].hidden, false); assert.equal(slots[0].hidden, true);
+    assert.equal(slots[1].querySelectorAll("progress").length, 0);
+    assert.match(slots[1].textContent, /Saldo disponibile/); assert.match(slots[1].textContent, /110,00.*CNY/);
+  });
+
+  test("Agents shows remaining allowance in compact tabs without reloading on live updates", async (t) => {
     const f = await subscriptionApp(t);
     const record = f.app.store.createSubscription({ provider: "gemini", label: "Google personale" });
-    f.app.store.updateSubscription(record.id, { status: "ready" });
-    const gate = Promise.withResolvers(); f.app.subscriptions.usage.read = async () => { await gate.promise; return gemini; };
-    // Use the fixture's authenticated API for the DOM's requests.
-    const panel = panelHarness({ hash: "#/agenti", fetch: async (path, options = {}) => { const response = await f.request(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined }); return { ok: response.status < 400, status: response.status, json: async () => response.data }; } });
+    const codex = f.app.store.createSubscription({ provider: "codex", label: "ChatGPT personale" });
+    for (const item of [record, codex]) f.app.store.updateSubscription(item.id, { status: "ready" });
+    const gate = Promise.withResolvers(); let reads = 0, cacheRequests = 0;
+    f.app.subscriptions.usage.read = async (item) => { reads++; await gate.promise; return item.provider === "gemini" ? gemini : { rateLimits: { secondary: { usedPercent: 87, windowDurationMins: 10080, resetsAt: 1794859200 } } }; };
+    const background = f.app.subscriptions.usage.refreshAll();
+    const panel = panelHarness({ hash: "#/agenti", fetch: async (path, options = {}) => {
+      if (/subscriptions.*usage$/.test(path)) cacheRequests++;
+      const response = await f.request(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
     await panel.run("boot()");
-    assert.match(panel.app.textContent, /Lettura delle quote/);
-    assert.doesNotMatch(panel.app.textContent, /null|undefined/);
-    const mounted = panel.app.querySelector(".quota-accounts");
-    gate.resolve();
-    await waitFor(() => panel.app.textContent.includes("Gemini 4 Argon"));
-    assert.equal(panel.app.querySelectorAll("progress").length, 3);
-    assert.match(panel.app.textContent, /100%/); assert.match(panel.app.textContent, /Reset/);
+    assert.match(panel.app.textContent, /Lettura delle quote/); assert.doesNotMatch(panel.app.textContent, /null|undefined/);
+    const mounted = panel.app.querySelector(".quota-accounts"), quota = panel.app.querySelector(".subscription-usage");
+    const tabs = quota.querySelector(".quota-tabs").querySelectorAll("button");
+    assert.equal(tabs.length, 2);
+    assert.equal(mounted.querySelectorAll("article").filter((item) => !item.hidden).length, 1);
+    gate.resolve(); await background; await quota.refreshQuota();
+    assert.deepEqual(mounted.querySelectorAll("article")[0].querySelectorAll("progress").map((item) => Math.round(Number(item.value))), [80, 45, 0]);
+    tabs[1].click();
+    const selected = mounted.querySelectorAll("article").find((item) => !item.hidden);
+    assert.match(selected.textContent, /13%disponibile/);
+    assert.equal(Number(selected.querySelector("progress").value), 13);
+    assert.equal(tabs[1].getAttribute("aria-selected"), "true");
+    const meter = selected.querySelector("progress"), before = cacheRequests;
+    for (let i = 0; i < 5; i++) await panel.run("renderAgents()");
     assert.equal(panel.app.querySelector(".quota-accounts"), mounted);
-    assert.doesNotMatch(panel.app.textContent, /null|undefined/);
-    f.app.subscriptions.usage.invalidate(record.id);
-    f.app.subscriptions.usage.read = async () => ({});
-    await panel.run("document.querySelector('.subscription-usage').querySelector('button').listeners.click[0]()");
-    await waitFor(() => panel.app.textContent.includes("non ha restituito"));
-    assert.equal(panel.app.querySelectorAll("progress").length, 0, "unknown data must not be shown as zero");
+    assert.equal(selected.querySelector("progress"), meter, "identical snapshots never reconstruct the account");
+    assert.equal(selected.hidden, false, "selected tab survives unrelated page updates");
+    assert.equal(cacheRequests, before); assert.equal(reads, 2, "page refreshes and tab selection do not read providers");
+    f.app.subscriptions.usage.now = () => Date.now() + 60001;
+    await f.app.subscriptions.usage.refreshAll(); await quota.refreshQuota();
+    assert.equal(selected.querySelector("progress"), meter, "a new timestamp alone updates the footer, not the meter");
+    tabs[0].click();
+    f.app.subscriptions.usage.invalidate(record.id); f.app.subscriptions.usage.read = async () => ({});
+    await f.app.subscriptions.usage.refresh(record.id); await quota.refreshQuota();
+    const visible = mounted.querySelectorAll("article").find((item) => !item.hidden);
+    assert.match(visible.textContent, /non ha restituito/); assert.equal(visible.querySelectorAll("progress").length, 0);
     f.app.subscriptions.usage.invalidate(record.id); f.app.subscriptions.usage.read = async () => gemini;
-    await panel.run("document.querySelector('.subscription-usage').querySelector('button').listeners.click[0]()");
-    await waitFor(() => panel.app.textContent.includes("Gemini 4 Argon"));
+    await f.app.subscriptions.usage.refresh(record.id); await quota.refreshQuota();
+    assert.equal(visible.querySelectorAll("progress").length, 3);
     assert.equal(panel.app.querySelector(".quota-accounts"), mounted);
+    assert.doesNotMatch(panel.app.textContent, /null|undefined/);
   });
 });
 let discord;
@@ -215,7 +331,7 @@ const hushVault = {};
 async function subscriptionApp(t, existing) {
   const identity = existing?.identity || identityCli();
   const directory = existing?.home || tempHome();
-  const instance = startCora({ home: directory, host: "127.0.0.1", port: 0, insecureCookies: true,
+  const instance = startCora({ subscriptionUsageIntervalMs: 0, home: directory, host: "127.0.0.1", port: 0, insecureCookies: true,
     adminPassword: PASSWORD, sessionKey: "subscription-fixture-session", useResidentSubscriptions: false, discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", cloudUrl: "", cloudKey: "", cloudSpace: "",
     claudeBin: identity.claude, codexBin: identity.codex, grokBin: identity.grok, museBin: identity.muse, geminiBin: identity.gemini, hermesBin: "/not-installed/hermes", botTokenFor: () => "",
     docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/not-installed/AGENTS.md", sshAuthorizedKeys: "/not-installed/keys",
@@ -338,6 +454,7 @@ before(async () => {
   seed.updateSettings({ guildIds: [GUILD] });
   seed.close();
   app = startCora({
+    subscriptionUsageIntervalMs: 0,
     home,
     host: "127.0.0.1",
     port: 0,
@@ -2114,7 +2231,7 @@ describe("panel auth", () => {
       const boot = panel.run("boot()");
       assert.ok(panel.app.querySelectorAll(".loading-skeleton").length, "startup reserves space before the state arrives");
       await boot;
-      assert.deepEqual(panel.app.querySelectorAll("h2").map((node) => node.textContent), ["Global usage", "Subscription quotas", "The agents", "Usage by agent"]);
+      assert.deepEqual(panel.app.querySelectorAll("h2").map((node) => node.textContent), ["Global usage", "Quotas and balances", "The agents", "Usage by agent"]);
       assert.equal(paths.filter((path) => path === "/api/usage").length, 1, "both panels share one request");
       assert.ok(!paths.some((path) => path.includes("/rooms/")), "opening the app never opens the lounge");
       assert.equal(panel.app.querySelectorAll(".loading-skeleton").length, 3, "one chart skeleton globally and one per agent");

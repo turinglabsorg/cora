@@ -449,6 +449,7 @@ async function loadState() {
   const data = await api("/api/state");
   if (S.revoked) return null;
   S.data = data;
+  if (S.quotaPanel?.node.isConnected) S.quotaPanel.apply([...(data.subscriptions || []), ...(data.providerUsage || [])]);
   updateLamp();
   return S.data;
 }
@@ -495,6 +496,10 @@ function connectEvents() {
       return;
     }
     if (entry.type === "subscriptions") return;
+    if (entry.type === "subscription-usage") {
+      if (S.quotaPanel?.node.isConnected) void S.quotaPanel.refresh();
+      return;
+    }
     if (["web-message", "web-typing", "trace"].includes(entry.type)) {
       S.live?.(entry);
       return;
@@ -1035,55 +1040,95 @@ function usagePanels(agents) {
 }
 
 function subscriptionUsagePanel() {
-  const records = (S.data.subscriptions || []).filter((record) => record.status === "ready" && (!record.resident || S.data.settings?.useResidentSubscriptions));
+  const records = [...(S.data.subscriptions || []), ...(S.data.providerUsage || [])].filter((record) => record.status === "ready" && (!record.resident || S.data.settings?.useResidentSubscriptions));
+  const signature = JSON.stringify([S.data.currentUser?.id, records.map(({ id, provider, label, email }) => [id, provider, label, email]), S.data.agents.map(({ id, model, subscriptionId }) => [id, model, subscriptionId])]);
+  if (S.quotaPanel?.signature === signature) { S.quotaPanel.apply(records); return S.quotaPanel; }
   const body = h("div", { class: "quota-accounts" });
-  const slots = new Map();
+  const tabs = h("div", { class: "quota-tabs", role: "tablist", "aria-label": "Abbonamenti" });
+  const slots = new Map(), snapshots = new Map(), buttons = new Map();
+  const labels = { claude: "Claude", codex: "ChatGPT", gemini: "Gemini", grok: "Grok", muse: "Muse", ollama: "Ollama", deepseek: "DeepSeek" };
+  const names = { ...SUBSCRIPTION_NAMES, ollama: "Ollama Cloud", deepseek: "DeepSeek API" };
   const date = (value) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(LOCALE, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  const foot = (data) => [h("span", {}, data.fetchedAt ? tr("Lettura {date}", { date: date(data.fetchedAt) }) : tr("Nessuna lettura disponibile")),
+    data.nextCheckAt ? h("span", {}, tr("Prossima verifica {date}", { date: date(data.nextCheckAt) })) : null].filter(Boolean);
   const paint = (record, data) => {
-    const slot = slots.get(record.id);
-    const windows = data?.windows || [];
+    const previous = snapshots.get(record.id);
+    if (snapshots.has(record.id) && JSON.stringify(snapshots.get(record.id)) === JSON.stringify(data)) return;
+    snapshots.set(record.id, data);
+    const slot = slots.get(record.id), windows = data?.windows || [], balances = data?.balances || [];
+    if (previous && data && ["windows", "balances", "state", "issue", "stale"].every((key) => JSON.stringify(previous[key]) === JSON.stringify(data[key]))) {
+      slot.querySelector(".quota-foot")?.replaceChildren(...foot(data));
+      return;
+    }
+    const loading = !data || data.state === "loading";
     const issues = { connecting: "Collegamento in corso…", AUTH_REQUIRED: "Accesso da verificare in Impostazioni.", RATE_LIMITED: "Il provider richiede una pausa prima della prossima lettura.", "no-data": "Il provider non ha restituito le percentuali.", unavailable: "Consumi temporaneamente non disponibili.", UNSUPPORTED: "Questo account non espone le percentuali." };
     const stale = data?.stale || windows.some((item) => item.resetsAt && Date.parse(item.resetsAt) <= Date.now());
-    const state = !data ? h("div", { class: "quota-status", role: "status" }, h("span", { class: "subscription-spinner", "aria-hidden": "true" }), "Lettura delle quote…")
-      : data.state !== "ready" || stale ? h("p", { class: "quota-status muted", role: "status" }, issues[data.issue] || (stale ? "Ultima lettura; in attesa di aggiornamento." : "Consumi temporaneamente non disponibili.")) : null;
+    const state = loading ? h("div", { class: "quota-status", role: "status" }, h("span", { class: "subscription-spinner", "aria-hidden": "true" }), "Lettura delle quote…")
+      : data.state !== "ready" || stale ? h("p", { class: "quota-status muted", role: "status" }, issues[data.issue] || (stale ? "Ultima lettura; in attesa di aggiornamento." : "In attesa del servizio quote.")) : null;
     const assigned = S.data.agents.filter((agent) => (agent.subscriptionId || (record.resident ? record.id : "")) === record.id && agent.model?.startsWith(`${record.provider}/`)).length;
-    slot.setAttribute("aria-busy", data ? "false" : "true");
+    slot.setAttribute("aria-busy", loading ? "true" : "false");
     slot.replaceChildren(...[
       h("header", { class: "quota-account-head" },
-        h("span", { class: "quota-provider" }, icon(SUBSCRIPTION_ICONS[record.provider] || "chart")),
-        h("div", { class: "grow" }, h("h3", {}, raw(record.label || SUBSCRIPTION_NAMES[record.provider])), h("p", {}, raw(SUBSCRIPTION_NAMES[record.provider]), record.email ? raw(` · ${record.email}`) : null)),
-        badge(assigned === 1 ? tr("1 agente") : tr("{count} agenti", { count: assigned }))),
+        h("div", { class: "grow" }, h("h3", {}, raw(record.label || names[record.provider])), record.server ? null : h("p", {}, raw(names[record.provider]), record.email ? raw(` · ${record.email}`) : null)),
+        badge(record.server ? tr("Account dello spazio") : assigned === 1 ? tr("1 agente") : tr("{count} agenti", { count: assigned }))),
       windows.length ? h("div", { class: `quota-windows${stale ? " stale" : ""}` }, windows.map((item) => {
-        const used = Math.min(100, Math.max(0, Number(item.usedPercent) || 0));
+        const available = 100 - Math.min(100, Math.max(0, Number(item.usedPercent) || 0));
         const label = item.kind === "weekly" ? tr("Settimana") : item.kind === "monthly" ? tr("Mese") : item.kind === "session" ? tr("Sessione · 5 ore") : tr("Finestra · {minutes} min", { minutes: item.minutes || "—" });
-        const percent = `${used.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%`;
-        return h("div", { class: `quota-window${used >= 100 ? " exhausted" : used >= 80 ? " high" : ""}` },
-          h("div", { class: "quota-window-label" }, h("span", {}, item.group ? raw(item.group) : record.provider === "gemini" ? "Gemini" : tr("Tutti i modelli")), h("strong", {}, raw(percent))),
-          h("progress", { class: "quota-meter", value: used, max: 100, "aria-label": tr("{model} · {window}: {percent} utilizzato", { model: item.group || SUBSCRIPTION_NAMES[record.provider], window: label, percent }) }),
+        const percent = `${available.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%`;
+        return h("div", { class: `quota-window${available <= 0 ? " exhausted" : available <= 20 ? " low" : ""}` },
+          h("div", { class: "quota-window-label" }, h("span", {}, item.group ? raw(item.group) : record.provider === "gemini" ? "Gemini" : tr("Tutti i modelli")), h("strong", {}, raw(percent), h("small", {}, "disponibile"))),
+          h("progress", { class: "quota-meter", value: available, max: 100, "aria-label": tr("{model} · {window}: {percent} disponibile", { model: item.group || names[record.provider], window: label, percent }) }),
           h("div", { class: "quota-window-meta" }, h("span", {}, label), h("span", { title: item.resetsAt || "" }, item.resetsAt ? tr("Reset {date}", { date: date(item.resetsAt) }) : tr("Reset non disponibile"))));
       })) : null,
-      ...(state ? [state] : []),
-      ...(data ? [h("footer", { class: "quota-foot" },
-        h("span", {}, data.fetchedAt ? tr("Lettura {date}", { date: date(data.fetchedAt) }) : tr("Nessuna lettura disponibile")),
-        data.nextCheckAt ? h("span", {}, tr("Prossima verifica {date}", { date: date(data.nextCheckAt) })) : null)] : [])].filter(Boolean));
+      balances.length ? h("div", { class: "quota-balances" }, balances.map((item) => {
+        const label = { total: "Saldo disponibile", granted: "Bonus", "topped-up": "Ricariche", included: "Credito incluso", allowance: "Plafond mensile", purchased: "Credito acquistato" }[item.kind];
+        return h("div", { class: `quota-balance${item.kind === "total" && Number(item.amount) <= 0 ? " empty" : ""}` }, h("span", {}, label),
+          h("strong", {}, raw(Number(item.amount).toLocaleString(LOCALE, { style: "currency", currency: item.currency, currencyDisplay: "code", minimumFractionDigits: 2, maximumFractionDigits: 6 }))));
+      })) : null, state,
+      data ? h("footer", { class: "quota-foot" }, foot(data)) : null].filter(Boolean));
   };
-  for (const record of records) { const slot = h("article", { class: "quota-account", "data-subscription": record.id }); slots.set(record.id, slot); body.append(slot); paint(record); }
-  if (!records.length) body.append(empty("chart", "Nessun abbonamento attivo.", btn("Collega un account", { href: "#/impostazioni/collegamenti" })));
-  let pending = false;
-  const update = async () => {
-    if (pending || !body.isConnected || !records.length) return;
-    pending = true; refresh.disabled = true;
-    refresh.replaceChildren(h("span", { class: "subscription-spinner", "aria-hidden": "true" }), h("span", {}, "Lettura delle quote…"));
-    try {
-      await Promise.all(records.map(async (record) => {
-        try { const data = await api(`/api/subscriptions/${record.id}/usage`); if (body.isConnected) paint(record, data); }
-        catch { if (body.isConnected) paint(record, { state: "error", issue: "unavailable", windows: [] }); }
-      }));
-    } finally { pending = false; refresh.disabled = false; refresh.replaceChildren(icon("refresh"), h("span", {}, "Aggiorna quote")); }
+  const select = (id) => {
+    S.quotaAccount = id;
+    for (const [key, slot] of slots) { slot.hidden = key !== id; buttons.get(key).classList.toggle("active", key === id); buttons.get(key).setAttribute("aria-selected", key === id ? "true" : "false"); buttons.get(key).setAttribute("tabindex", key === id ? "0" : "-1"); }
+    if (tabs.scrollWidth > tabs.clientWidth) requestAnimationFrame(() => revealSelection(tabs));
   };
-  const refresh = btn("Aggiorna quote", { icon: "refresh", cls: "ghost", onclick: update, disabled: !records.length });
-  return { node: panel({ icon: "chart", title: "Quote degli abbonamenti", hint: "Percentuale utilizzata sull’account, condivisa tra gli agenti. Ogni limite resta separato.", actions: refresh, cls: "subscription-usage" }, body),
-    start: () => { void update(); S.timers.push(setInterval(update, 5 * 60 * 1000)); } };
+  for (const record of records) {
+    const title = `${labels[record.provider]} · ${record.label}${record.email ? ` · ${record.email}` : ""}`;
+    const duplicates = records.filter((item) => item.provider === record.provider);
+    const index = duplicates.length > 1 ? ` ${duplicates.findIndex((item) => item.id === record.id) + 1}` : "";
+    const button = h("button", { class: "quota-tab", type: "button", role: "tab", id: `quota-tab-${record.id}`, "aria-controls": `quota-${record.id}`, "aria-label": title, title,
+      onclick: () => select(record.id), onkeydown: (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const at = records.findIndex((item) => item.id === record.id), next = event.key === "Home" ? 0 : event.key === "End" ? records.length - 1 : (at + (event.key === "ArrowLeft" ? -1 : 1) + records.length) % records.length;
+        select(records[next].id); buttons.get(records[next].id).focus();
+      } }, icon(SUBSCRIPTION_ICONS[record.provider] || (record.provider === "ollama" ? "globe" : "chip")), h("span", {}, raw(labels[record.provider] + index)));
+    const slot = h("article", { class: "quota-account", id: `quota-${record.id}`, role: "tabpanel", "aria-labelledby": `quota-tab-${record.id}`, "data-subscription": record.id });
+    slots.set(record.id, slot); buttons.set(record.id, button); body.append(slot); tabs.append(button); paint(record, record.usage);
+  }
+  if (records.length) select(records.some((record) => record.id === S.quotaAccount) ? S.quotaAccount : records[0].id);
+  else body.append(empty("chart", "Nessun abbonamento attivo.", btn("Collega un account", { href: "#/impostazioni/collegamenti" })));
+  let pending = null, requested = false, checkedAt = 0;
+  const update = () => {
+    if (!body.isConnected || !records.length) return Promise.resolve();
+    requested = true;
+    if (pending) return pending;
+    pending = (async () => {
+      do {
+        requested = false; checkedAt = Date.now();
+        await Promise.all(records.map(async (record) => {
+          try { const data = await api(record.server ? `/api/providers/${record.provider}/usage` : `/api/subscriptions/${record.id}/usage`); if (body.isConnected) { const current = [...(S.data.subscriptions || []), ...(S.data.providerUsage || [])].find((item) => item.id === record.id); if (current) current.usage = data; paint(record, data); } }
+          catch { if (body.isConnected) paint(record, { ...snapshots.get(record.id), state: "error", issue: "unavailable", stale: true }); }
+        }));
+      } while (requested && body.isConnected);
+    })().finally(() => { pending = null; });
+    return pending;
+  };
+  const node = panel({ icon: "chart", title: "Quote e saldi", hint: "Disponibilità e saldi degli account. Aggiornamento ogni minuto.", cls: "subscription-usage" }, records.length ? tabs : null, body);
+  node.refreshQuota = update;
+  S.quotaPanel = { signature, node, refresh: update, apply: (updated) => { for (const record of updated) if (slots.has(record.id)) paint(record, record.usage); },
+    start: () => { if (Date.now() - checkedAt >= 60000) void update(); if (tabs.scrollWidth > tabs.clientWidth) requestAnimationFrame(() => revealSelection(tabs)); S.timers.push(setInterval(update, 60000)); } };
+  return S.quotaPanel;
 }
 
 function renderAgents() {
@@ -7271,6 +7316,8 @@ function renderCloudLogin() {
 function renderLogin() {
   clearTimers();
   S.data = null;
+  S.quotaPanel = null;
+  S.quotaAccount = null;
   S.live = null;
   if (S.cloud) return renderCloudLogin();
   const password = h("input", { type: "password", id: "password", name: "password", autocomplete: "current-password", required: true, placeholder: "La password del pannello", enterkeyhint: "go" });
