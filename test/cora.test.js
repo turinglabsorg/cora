@@ -319,6 +319,109 @@ test("owner memory isolates facts, clients, projects, archives and reviews until
   assert.match(f.app.brain.memoryContext(replacement, "orbit"), /ORBIT_BOB_PERSISTENT/);
 });
 
+test("router image messages use the actual JPEG and GIF MIME types for incoming and tool images", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  let sent;
+  const endpoint = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    sent = JSON.parse(Buffer.concat(chunks).toString());
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ message: { content: "Image received." } }] }));
+  });
+  await new Promise((resolve) => endpoint.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => endpoint.close(resolve)));
+  f.app.llm.routers.orcarouter = { key: "fixture-image-router", url: "http://127.0.0.1:" + endpoint.address().port };
+  f.app.llm.capabilities = async () => ({ vision: true, tools: true });
+  const jpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDjKKKK+qPHP//Z";
+  const gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  await f.app.llm.routerChat("orcarouter", "vision-fixture", "orcarouter/vision-fixture", { tools: [], messages: [
+    { role: "user", content: "Describe the photograph", images: [jpeg] },
+    { role: "tool", name: "read_attachment", toolCallId: "image-call", content: "Image", image: gif },
+  ] });
+  assert.equal(sent.messages[0].content[1].image_url.url, "data:image/jpeg;base64," + jpeg);
+  assert.equal(sent.messages[2].content[1].image_url.url, "data:image/gif;base64," + gif);
+});
+
+test("Telegram photos and image documents reach vision CLIs as scoped MCP image content without desktop access", async (t) => {
+  const telegram = await fakeTelegram(), native = fakeCli();
+  const token = "fixture-image-main";
+  telegram.addBot(token, { id: 89002, username: "fixture_image_bot", first_name: "Cora" });
+  const f = await knowledgeWorld({ telegramToken: token, telegramApi: telegram.url, claudeBin: native.claude, codexBin: native.codex });
+  t.after(async () => { await f.close(); await telegram.close(); });
+  f.app.store.updateSettings({ transport: "telegram", transports: ["telegram"], telegramChatIds: [TG_GROUP, TG_OTHER_GROUP], telegramOwnerIds: [TG_OWNER] });
+  const pictures = [encodePng(1, 1, Buffer.from([255, 0, 0, 255])), encodePng(1, 1, Buffer.from([0, 255, 0, 255]))];
+  for (const [index, provider] of ["claude", "codex"].entries()) {
+    const account = f.app.store.createSubscription({ provider, label: provider, connectedBy: { id: f.alice.user.id, name: "Alice" } });
+    f.app.store.updateSubscription(account.id, { status: "ready" });
+    const chat = index ? TG_OTHER_GROUP : TG_GROUP;
+    const name = index ? "PixelCodex" : "PixelClaude";
+    const result = await f.request(f.alice, "/api/agents", { method: "POST", body: { name, tools: false, model: provider + "/" + (index ? "gpt-6-sol" : "claude-sonnet-5-5"), subscriptionId: account.id, channelIds: ["tg:" + chat] } });
+    assert.equal(result.status, 201);
+    f.app.store.updateAgent(result.data.id, { ownerId: "telegram:" + TG_OWNER });
+    const fileId = telegram.file("image-" + provider, pictures[index]);
+    native.set({ tool: "read_attachment", args: { attachment_id: "img-1" }, reply: "PIXEL_REPLY_" + provider });
+    await f.app.orchestrator.onTelegramMessage({ message_id: 700 + index, date: Math.floor(Date.now() / 1000), from: { id: Number(TG_OWNER), first_name: "Alice" }, chat: { id: Number(chat), type: "group", title: "Images QA" }, caption: "@" + name + ", guarda questa immagine.",
+      ...(index ? { document: { file_id: fileId, file_name: "screen.jpg", mime_type: "image/jpeg", file_size: pictures[index].length } } : { photo: [{ file_id: fileId, width: 1, height: 1, file_size: pictures[index].length }] }) });
+    const conversation = f.app.orchestrator.state("tg:" + chat);
+    assert.ok(f.app.orchestrator.agentsFor(conversation.id).some((entry) => entry.id === result.data.id), "the image's recipient listens to this group");
+    assert.equal(conversation.history.at(-1)?.images?.[0], pictures[index].toString("base64"), "the incoming Telegram pixels reach conversation history");
+    assert.ok(conversation.history.at(-1)?.addressed?.includes(result.data.id), "the human's message calls the image reader");
+    const call = await waitFor(() => native.calls().find((entry) => entry.flavor === provider && entry.content), { timeout: 15000, what: provider + " image tool result" });
+    assert.ok(call.tools.includes("read_attachment")); assert.ok(!call.tools.includes("shell"));
+    assert.match(call.stdin, /img-1:/);
+    assert.equal(call.content.find((part) => part.type === "image").mimeType, "image/png", "the file bytes determine MIME even when the document metadata says JPEG");
+    assert.equal(call.content.find((part) => part.type === "image").data, pictures[index].toString("base64"));
+    assert.ok(!call.stdin.includes(pictures[index].toString("base64")), "pixels travel as image content rather than prompt text");
+    await waitFor(() => telegram.state.sent.some((entry) => entry.method === "sendMessage" && entry.text.includes("PIXEL_REPLY_" + provider)), { timeout: 15000 });
+  }
+});
+
+test("conversation image references survive text followups and incoming steering but never cross turns", async (t) => {
+  const native = fakeCli();
+  const f = await knowledgeWorld({ claudeBin: native.claude }); t.after(f.close);
+  const account = f.app.store.createSubscription({ provider: "claude", label: "Images", connectedBy: { id: f.alice.user.id, name: "Alice" } });
+  f.app.store.updateSubscription(account.id, { status: "ready" });
+  const created = (await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "PixelReader", tools: false, model: "claude/claude-sonnet-5-5", subscriptionId: account.id } })).data;
+  const agent = f.app.store.agent(created.id), image = encodePng(1, 1, Buffer.from([70, 80, 90, 255])).toString("base64");
+  const earlier = { id: "earlier-photo", kind: "owner", authorId: f.alice.user.id, authorName: "Alice", content: "Una foto", images: [image], at: Date.now() };
+  const followup = { ...earlier, id: "text-followup", content: "Descrivi la foto precedente", images: undefined };
+  native.set({ tool: "read_attachment", args: { attachment_id: "img-1" }, reply: "Lettura completata." });
+  const turn = (history, channel, extra = {}) => f.app.brain.chatTurn({ agent, history, channel: { id: channel, name: "Images QA" }, forced: true, computer: false, ...extra });
+  await turn([earlier, followup], "web-" + agent.id);
+  assert.equal(native.calls().at(-1).content.find((part) => part.type === "image").data, image);
+  await turn([followup], "web-unrelated-image-turn");
+  assert.ok(!native.calls().at(-1).content.some((part) => part.type === "image"));
+  assert.match(native.calls().at(-1).output, /not available in the current conversation turn/);
+  let delivered = false;
+  await turn([followup], "web-" + agent.id, { inbox: () => delivered ? [] : (delivered = true, [{ ...earlier, id: "incoming-photo", addressed: [agent.id] }]) });
+  assert.match(native.calls().at(-1).stdin, /img-1: Alice/);
+  assert.equal(native.calls().at(-1).content.find((part) => part.type === "image").data, image);
+  delivered = false;
+  await turn([followup], "web-" + agent.id, { inbox: () => delivered ? [] : (delivered = true, [{ ...earlier, id: "colleague-photo", addressed: ["ag_999999999999"] }]) });
+  assert.ok(!native.calls().at(-1).content.some((part) => part.type === "image"), "an attachment explicitly sent to a colleague is not imported into this worker");
+  let prompt;
+  f.state.answer = (body) => { prompt = body; return { content: "Questo modello non supporta le immagini." }; };
+  await f.app.brain.chatTurn({ agent: { ...agent, model: "ollama/test-model" }, history: [earlier], channel: { id: "web-" + agent.id, name: "Images QA" }, forced: true, computer: false });
+  assert.ok(!prompt.tools?.some((tool) => tool.function?.name === "read_attachment"));
+  assert.match(JSON.stringify(prompt.messages), /modello selezionato non supporta la visione/);
+});
+
+test("Telegram reply photos are downloaded and unavailable or oversized image files are described explicitly", async (t) => {
+  const telegram = await fakeTelegram(); telegram.addBot("fixture-image-files", { id: 89003, username: "fixture_files_bot", first_name: "Cora" });
+  const f = await knowledgeWorld({ telegramToken: "fixture-image-files", telegramApi: telegram.url });
+  t.after(async () => { await f.close(); await telegram.close(); });
+  f.app.store.updateSettings({ transport: "telegram", transports: ["telegram"], telegramChatIds: [TG_GROUP], telegramOwnerIds: [TG_OWNER] });
+  const received = []; f.app.orchestrator.ingest = async (_state, item) => { received.push(item); };
+  const picture = encodePng(1, 1, Buffer.from([0, 0, 255, 255])), fileId = telegram.file("quoted-image", picture);
+  const message = { message_id: 800, chat: { id: Number(TG_GROUP), type: "group", title: "Images QA" }, from: { id: Number(TG_OWNER), first_name: "Alice" }, text: "Guarda l'immagine a cui rispondo" };
+  await f.app.orchestrator.onTelegramMessage({ ...message, reply_to_message: { message_id: 10, from: message.from, photo: [{ file_id: fileId, file_size: picture.length }] } });
+  assert.deepEqual(received[0].images, [picture.toString("base64")]);
+  await f.app.orchestrator.onTelegramMessage({ ...message, message_id: 801, document: { file_id: "oversized", file_name: "large.png", mime_type: "image/png", file_size: 6 * 1024 * 1024 } });
+  assert.equal(received[1].images, undefined); assert.match(received[1].content, /immagine non disponibile/);
+  await f.app.orchestrator.onTelegramMessage({ ...message, message_id: 802, photo: [{ file_id: "missing-image", file_size: 9 }] });
+  assert.equal(received[2].images, undefined); assert.match(received[2].content, /Non inventarne il contenuto/);
+});
+
 test("agent permissions are managed by each owner, scoped to its contacts and preserve other agents and wildcard grants", async (t) => {
   const f = await knowledgeWorld(); t.after(f.close);
   f.app.store.updateSettings({ transport: "telegram", transports: ["telegram"], telegramChatIds: [TG_GROUP, TG_OTHER_GROUP] });

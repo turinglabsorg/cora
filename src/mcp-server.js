@@ -3,6 +3,7 @@
 // and Codex CLIs start it for one agent turn; it forwards every tool call to
 // cora's loopback tool bridge with the run's token.
 import readline from "node:readline";
+import { imageMime } from "./images.js";
 
 const BRIDGE_URL = process.env.CORA_BRIDGE_URL;
 const BRIDGE_TOKEN = process.env.CORA_BRIDGE_TOKEN;
@@ -38,7 +39,7 @@ async function handle(message) {
     case "tools/call": {
       const out = await bridge("/tools/call", { name: message.params?.name, arguments: message.params?.arguments || {} });
       const content = [{ type: "text", text: out.text }];
-      if (out.image) content.push({ type: "image", data: out.image, mimeType: out.image.startsWith("iVBOR") ? "image/png" : "image/jpeg" });
+      if (out.image) content.push({ type: "image", data: out.image, mimeType: out.mimeType || imageMime(out.image) || "image/jpeg" });
       return { content, isError: String(out.text).startsWith("error:") };
     }
     default: {

@@ -749,6 +749,7 @@ process.stdin.on("end", async () => {
     record.tools = (await rpc("tools/list", {})).result.tools.map((tool) => tool.name);
     const call = await rpc("tools/call", { name: control.tool, arguments: control.args || {} });
     record.output = call.result.content[0].text;
+    record.content = call.result.content;
     child.kill();
   }
   fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(record) + "\\n");

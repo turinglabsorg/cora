@@ -63,7 +63,7 @@ export class ToolBridge {
       if (!run.tools.some((tool) => tool.name === name)) return reply(200, { text: `error: the tool ${name} is not available now` });
       try {
         const out = await run.execute(name, body.arguments && typeof body.arguments === "object" ? body.arguments : {});
-        return reply(200, { text: out.text, image: out.image || null });
+        return reply(200, { text: out.text, image: out.image || null, ...(out.mimeType ? { mimeType: out.mimeType } : {}) });
       } catch (error) {
         return reply(200, { text: `error: ${error.message}` });
       }
