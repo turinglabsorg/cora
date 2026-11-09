@@ -480,6 +480,41 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .subscription-wait { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
 .subscription-wait .ico { width: 14px; height: 14px; }
 .subscription-progress { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.quota-accounts { display: flex; flex-direction: column; gap: 24px; }
+.quota-account + .quota-account { border-top: 1px solid var(--line); padding-top: 24px; }
+.quota-account-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; min-width: 0; }
+.quota-provider { display: grid; place-items: center; width: 36px; height: 36px; flex: none; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--muted); }
+.quota-account-head .grow { min-width: 0; }
+.quota-account-head h3 { margin: 0 0 4px; font: 600 17px var(--display); overflow-wrap: anywhere; }
+.quota-account-head p { margin: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.quota-windows { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; }
+.quota-window { border: 1px solid var(--line); background: var(--well); border-radius: var(--r-sm); padding: 12px; min-width: 0; }
+.quota-window-label { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 12px; }
+.quota-window-label span { overflow-wrap: anywhere; }
+.quota-window-label strong { font: 500 20px var(--mono); white-space: nowrap; }
+.quota-meter { display: block; appearance: none; width: 100%; height: 4px; margin: 12px 0; border: 0; border-radius: 2px; overflow: hidden; background: var(--panel-2); color: var(--green); }
+.quota-meter::-webkit-progress-bar { background: var(--panel-2); }
+.quota-meter::-webkit-progress-value { background: var(--green); }
+.quota-meter::-moz-progress-bar { background: var(--green); }
+.quota-window.high .quota-meter { color: var(--amber); }
+.quota-window.high .quota-meter::-webkit-progress-value { background: var(--amber); }
+.quota-window.high .quota-meter::-moz-progress-bar { background: var(--amber); }
+.quota-window.exhausted .quota-meter { color: var(--red); }
+.quota-window.exhausted .quota-meter::-webkit-progress-value { background: var(--red); }
+.quota-window.exhausted .quota-meter::-moz-progress-bar { background: var(--red); }
+.quota-windows.stale .quota-meter { color: var(--muted); }
+.quota-windows.stale .quota-meter::-webkit-progress-value { background: var(--muted); }
+.quota-windows.stale .quota-meter::-moz-progress-bar { background: var(--muted); }
+.quota-window-meta, .quota-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; color: var(--muted); font: 400 10px var(--mono); line-height: 1.6; }
+.quota-foot { margin-top: 12px; color: var(--faint); }
+.quota-status { display: flex; gap: 8px; align-items: center; margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+@media (max-width: 600px) {
+  .subscription-usage .panel-title { flex-basis: calc(100% - 48px); }
+  .subscription-usage .panel-actions { margin-left: 48px; justify-content: flex-start; }
+  .quota-account-head { flex-wrap: wrap; }
+  .quota-account-head .grow { flex-basis: calc(100% - 48px); }
+  .quota-account-head .badge { margin-left: 48px; }
+}
 .subscription-spinner { flex: none; width: 16px; height: 16px; border: 2px solid var(--line-strong); border-top-color: var(--text); border-radius: 50%; animation: subscription-spin .8s linear infinite; }
 @keyframes subscription-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .subscription-spinner { animation: none; } }

@@ -24,6 +24,7 @@ const save = () => { const account = { email: path.basename(directory) + "@examp
 const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 if (provider === "gemini" && argv.includes("/usage")) {
   const account = saved();
+  if (account && state().geminiUsage) { line(state().geminiUsage); process.exit(0); }
   line({ status: account ? "SUCCESS" : "ERROR", response: account ? "Account: " + account.email : "", error: account ? "" : "authentication required" });
   process.exit(account ? 0 : 1);
 } else if (provider === "gemini" && argv[0] === "models") {
@@ -47,6 +48,7 @@ if (provider === "gemini" && argv.includes("/usage")) {
     const reply = (result) => line({ id: message.id, result });
     if (message.method === "initialize") return reply({});
     if (message.method === "account/read") return reply({ account: saved(), requiresOpenaiAuth: true });
+    if (message.method === "account/rateLimits/read") return reply(state().codexUsage || {});
     if (message.method === "account/login/start") {
       if (state().fail) { line({ id: message.id, error: { message: "fixture login failed with private provider detail" } }); return; }
       reply({ type: "chatgptDeviceCode", loginId: "fixture-login", verificationUrl: state().evilUrl || "https://auth.openai.com/codex/device", userCode: "TEST-ONLY" });
@@ -61,6 +63,7 @@ if (provider === "gemini" && argv.includes("/usage")) {
 } else if (argv[0] === "models" && provider === "grok") {
   process.stdout.write(saved() ? "You are logged in with grok.com.\\n\\nAvailable models:\\n  * grok-4.7 (default)\\n" : "You are not authenticated.\\n");
 } else if (argv[0] === "usage" && provider === "muse") {
+  if (argv.includes("--json")) { line(state().museUsage || {}); process.exit(saved() ? 0 : 1); }
   process.stdout.write(saved() ? "Tier: Muse Code High Usage\\nWindow: 0% used\\n" : "muse usage: not logged in: run \`muse login\` first\\n");
 } else if (argv[0] === "auth" && argv[1] === "status") {
   const account = saved();

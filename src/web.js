@@ -721,10 +721,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (store.subscriptions().length >= 50) throw new HttpError(409, "troppe subscription: rimuovi quelle inutilizzate");
       return send(res, 201, store.createSubscription({ provider: body.provider, label: body.label, connectedBy: { id: user.id, name: user.name || user.email } }));
     }
-    const subscriptionMatch = /^\/api\/subscriptions\/(sub_[a-f0-9]{12})(?:\/(login|code|cancel|check))?$/.exec(path);
+    const subscriptionMatch = /^\/api\/subscriptions\/(sub_[a-f0-9]{12})(?:\/(login|code|cancel|check|usage))?$/.exec(path);
     if (subscriptionMatch) {
       const [, id, action] = subscriptionMatch;
       if (!store.subscription(id) || (knowledge?.ownerMemory && store.subscription(id).connectedBy?.id !== user.id)) throw new HttpError(404, "subscription non trovata");
+      if (action === "usage" && method === "GET") return send(res, 200, await subscriptions.usage.get(id));
       if (!action && method === "GET") return send(res, 200, subscriptions.view(id));
       if (!action && method === "DELETE") {
         await subscriptions.remove(id);

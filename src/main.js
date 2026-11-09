@@ -28,6 +28,7 @@ import { Scheduler } from "./scheduler.js";
 import { SlackApps } from "./slack-apps.js";
 import { Store } from "./store.js";
 import { Subscriptions } from "./subscriptions.js";
+import { SubscriptionUsage } from "./subscription-usage.js";
 import { Voice } from "./voice.js";
 import { GoogleConnector } from "./google-connector.js";
 import { EmailChannel } from "./email-channel.js";
@@ -55,6 +56,7 @@ export function startCora(overrides = {}) {
   const slack = new Slack({ botToken: cfg.slackToken, appToken: cfg.slackAppToken, apiBase: cfg.slackApi });
   const bridge = new ToolBridge();
   const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, grokBin: cfg.grokBin, museBin: cfg.museBin, geminiBin: cfg.geminiBin, timezone: cfg.timezone, residentDirectories: cfg.residentDirectories, emit: (event) => web?.broadcast(event) });
+  subscriptions.usage = new SubscriptionUsage({ store, subscriptions, read: overrides.subscriptionUsageReader });
   const llm = new LLM({
     ollamaUrl: cfg.ollamaUrl,
     ollamaKey: cfg.ollamaKey,
@@ -306,6 +308,7 @@ export function startCora(overrides = {}) {
     github.stop();
     await email.stop();
     await librarian.stop();
+    await subscriptions.usage.close();
     await subscriptions.close();
     discord.stop();
     bots.stop();

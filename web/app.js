@@ -1034,13 +1034,67 @@ function usagePanels(agents) {
   return { global, individual };
 }
 
+function subscriptionUsagePanel() {
+  const records = (S.data.subscriptions || []).filter((record) => record.status === "ready" && (!record.resident || S.data.settings?.useResidentSubscriptions));
+  const body = h("div", { class: "quota-accounts" });
+  const slots = new Map();
+  const date = (value) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(LOCALE, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  const paint = (record, data) => {
+    const slot = slots.get(record.id);
+    const windows = data?.windows || [];
+    const issues = { connecting: "Collegamento in corso…", AUTH_REQUIRED: "Accesso da verificare in Impostazioni.", RATE_LIMITED: "Il provider richiede una pausa prima della prossima lettura.", "no-data": "Il provider non ha restituito le percentuali.", unavailable: "Consumi temporaneamente non disponibili.", UNSUPPORTED: "Questo account non espone le percentuali." };
+    const stale = data?.stale || windows.some((item) => item.resetsAt && Date.parse(item.resetsAt) <= Date.now());
+    const state = !data ? h("div", { class: "quota-status", role: "status" }, h("span", { class: "subscription-spinner", "aria-hidden": "true" }), "Lettura delle quote…")
+      : data.state !== "ready" || stale ? h("p", { class: "quota-status muted", role: "status" }, issues[data.issue] || (stale ? "Ultima lettura; in attesa di aggiornamento." : "Consumi temporaneamente non disponibili.")) : null;
+    const assigned = S.data.agents.filter((agent) => (agent.subscriptionId || (record.resident ? record.id : "")) === record.id && agent.model?.startsWith(`${record.provider}/`)).length;
+    slot.setAttribute("aria-busy", data ? "false" : "true");
+    slot.replaceChildren(...[
+      h("header", { class: "quota-account-head" },
+        h("span", { class: "quota-provider" }, icon(SUBSCRIPTION_ICONS[record.provider] || "chart")),
+        h("div", { class: "grow" }, h("h3", {}, raw(record.label || SUBSCRIPTION_NAMES[record.provider])), h("p", {}, raw(SUBSCRIPTION_NAMES[record.provider]), record.email ? raw(` · ${record.email}`) : null)),
+        badge(assigned === 1 ? tr("1 agente") : tr("{count} agenti", { count: assigned }))),
+      windows.length ? h("div", { class: `quota-windows${stale ? " stale" : ""}` }, windows.map((item) => {
+        const used = Math.min(100, Math.max(0, Number(item.usedPercent) || 0));
+        const label = item.kind === "weekly" ? tr("Settimana") : item.kind === "monthly" ? tr("Mese") : item.kind === "session" ? tr("Sessione · 5 ore") : tr("Finestra · {minutes} min", { minutes: item.minutes || "—" });
+        const percent = `${used.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%`;
+        return h("div", { class: `quota-window${used >= 100 ? " exhausted" : used >= 80 ? " high" : ""}` },
+          h("div", { class: "quota-window-label" }, h("span", {}, item.group ? raw(item.group) : record.provider === "gemini" ? "Gemini" : tr("Tutti i modelli")), h("strong", {}, raw(percent))),
+          h("progress", { class: "quota-meter", value: used, max: 100, "aria-label": tr("{model} · {window}: {percent} utilizzato", { model: item.group || SUBSCRIPTION_NAMES[record.provider], window: label, percent }) }),
+          h("div", { class: "quota-window-meta" }, h("span", {}, label), h("span", { title: item.resetsAt || "" }, item.resetsAt ? tr("Reset {date}", { date: date(item.resetsAt) }) : tr("Reset non disponibile"))));
+      })) : null,
+      ...(state ? [state] : []),
+      ...(data ? [h("footer", { class: "quota-foot" },
+        h("span", {}, data.fetchedAt ? tr("Lettura {date}", { date: date(data.fetchedAt) }) : tr("Nessuna lettura disponibile")),
+        data.nextCheckAt ? h("span", {}, tr("Prossima verifica {date}", { date: date(data.nextCheckAt) })) : null)] : [])].filter(Boolean));
+  };
+  for (const record of records) { const slot = h("article", { class: "quota-account", "data-subscription": record.id }); slots.set(record.id, slot); body.append(slot); paint(record); }
+  if (!records.length) body.append(empty("chart", "Nessun abbonamento attivo.", btn("Collega un account", { href: "#/impostazioni/collegamenti" })));
+  let pending = false;
+  const update = async () => {
+    if (pending || !body.isConnected || !records.length) return;
+    pending = true; refresh.disabled = true;
+    refresh.replaceChildren(h("span", { class: "subscription-spinner", "aria-hidden": "true" }), h("span", {}, "Lettura delle quote…"));
+    try {
+      await Promise.all(records.map(async (record) => {
+        try { const data = await api(`/api/subscriptions/${record.id}/usage`); if (body.isConnected) paint(record, data); }
+        catch { if (body.isConnected) paint(record, { state: "error", issue: "unavailable", windows: [] }); }
+      }));
+    } finally { pending = false; refresh.disabled = false; refresh.replaceChildren(icon("refresh"), h("span", {}, "Aggiorna quote")); }
+  };
+  const refresh = btn("Aggiorna quote", { icon: "refresh", cls: "ghost", onclick: update, disabled: !records.length });
+  return { node: panel({ icon: "chart", title: "Quote degli abbonamenti", hint: "Percentuale utilizzata sull’account, condivisa tra gli agenti. Ogni limite resta separato.", actions: refresh, cls: "subscription-usage" }, body),
+    start: () => { void update(); S.timers.push(setInterval(update, 5 * 60 * 1000)); } };
+}
+
 function renderAgents() {
   const agents = S.data.agents;
   const usage = usagePanels(agents);
+  const subscriptions = subscriptionUsagePanel();
   shell([
     pageHead("Agenti", tr("{on} in onda su {total}.", { on: agents.filter((agent) => agent.enabled).length, total: agents.length }), [btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
     requestsStrip(),
     panel({ icon: "chart", title: "Consumi globali", hint: "Tutti gli agenti, giorno per giorno.", actions: heatLegend() }, usage.global),
+    subscriptions.node,
     panel({ icon: "users", title: "Gli agenti", hint: "Tocca un agente per aprire la chat; da lì impostazioni, memoria, routine e desktop." },
       agents.length ? h("div", { class: "rows" }, agents.map((agent) => {
         // One platform: how it writes there; several: where it is.
@@ -1055,6 +1109,7 @@ function renderAgents() {
       })) : empty("users", "Ancora nessun agente.", btn("Crea il primo", { icon: "plus", href: "#/new", cls: "primary" }))),
     panel({ icon: "chart", title: "Consumi per agente", hint: "Quanti token spende ognuno, giorno per giorno.", actions: heatLegend() }, usage.individual),
   ], { title: "Agenti" });
+  subscriptions.start();
 }
 
 /* ---------- agent ---------- */

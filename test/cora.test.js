@@ -18,6 +18,8 @@ import { encodePng, pngSize } from "../src/png.js";
 import { panelHarness } from "./panel.js";
 import { identityCli } from "./subscription-fixtures.js";
 import { subscriptionEnvironment } from "../src/subscriptions.js";
+import { SubscriptionUsage, parseSubscriptionUsage } from "../src/subscription-usage.js";
+import { readNativeUsage } from "../src/subscription-usage-worker.js";
 import { LLM, graphicsCards } from "../src/llm.js";
 import { runClaude, runCodex } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
@@ -32,6 +34,162 @@ import { dirname, join } from "node:path";
 import { BOT, CHANNEL, GUILD, MAIN_TOKEN, OTHER_CHANNEL, OTHER_GUILD, OWNER, SLACK_CHANNEL, SLACK_DM, SLACK_OTHER_CHANNEL, SLACK_OWNER, SLACK_STRANGER, STRANGER, TG_GROUP, TG_OTHER_GROUP, TG_OWNER, TG_STRANGER, fakeCli, fakeDiscord, fakeDoc, fakeDocker, fakeOllama, fakeSlack, fakeSoniox, fakeTelegram, sleep, tempHome, waitFor } from "./helpers.js";
 
 const PASSWORD = "correct horse battery staple";
+
+describe("subscription usage", () => {
+  const reset = "2026-11-16T20:00:00.000Z";
+  const gemini = { status: "SUCCESS", command: { data: { groups: [
+    { name: "Gemini Models", buckets: [{ id: "weekly", window: "weekly", remaining_fraction: .8, reset_time: reset }, { id: "session", window: "5h", remaining_fraction: .45, reset_time: reset }] },
+    { name: "Gemini 4 Argon", buckets: [{ id: "argon", window: "weekly", remaining_fraction: 0, reset_time: reset }] },
+  ] } } };
+  const claude = { five_hour: { utilization: 15, resets_at: reset }, seven_day: { utilization: 30, resets_at: reset },
+    limits: [{ kind: "weekly_scoped", scope: { model: { display_name: "Fable" } }, percent: 60, resets_at: reset }], fable_weekly: { utilization: 20 }, seven_day_fable: { utilization: 25 }, seven_day_opus: { utilization: 10, resets_at: reset } };
+
+  test("preserves model allowances, account windows, resets and unknown values", () => {
+    const c = parseSubscriptionUsage("claude", claude);
+    assert.deepEqual(c.map((item) => [item.kind, item.group, item.usedPercent]), [["session", "", 15], ["weekly", "", 30], ["weekly", "Fable", 60], ["weekly", "Opus", 10]]);
+    assert.equal(c[2].resetsAt, reset);
+    assert.deepEqual(parseSubscriptionUsage("gemini", gemini).map((item) => [item.kind, item.group, Math.round(item.usedPercent)]), [["weekly", "", 20], ["session", "", 55], ["weekly", "Gemini 4 Argon", 100]]);
+    assert.deepEqual(parseSubscriptionUsage("codex", { rateLimitsByLimitId: { codex: { primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1794859200 }, secondary: { usedPercent: null } }, spark: { limitName: "Spark", primary: { usedPercent: 50, windowDurationMins: 60 } } }, rateLimits: { primary: { usedPercent: 99 } } }).map((item) => [item.kind, item.group, item.usedPercent]), [["session", "", 12], ["custom", "Spark", 50]]);
+    assert.equal(parseSubscriptionUsage("muse", { subs_usage: { window: { used_percent: 0, window_duration_mins: 300, resets_at: 1794859200 }, weekly: { used_percent: 23, resets_at: reset } } }).length, 2);
+    assert.deepEqual(parseSubscriptionUsage("claude", { five_hour: { utilization: null }, seven_day: { utilization: "invalid" } }), []);
+    assert.deepEqual(parseSubscriptionUsage("grok", {}), []);
+    const weekly = { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", start: "2026-11-09T20:00:00Z", end: reset }, billingPeriodStart: "2026-11-09T20:00:00Z", billingPeriodEnd: reset };
+    assert.equal(parseSubscriptionUsage("grok", weekly)[0].usedPercent, 0);
+    assert.deepEqual(parseSubscriptionUsage("grok", { ...weekly, used: { val: 0 } }), [], "an explicit zero amount is insufficient to infer the percentage");
+    assert.equal(parseSubscriptionUsage("grok", { monthlyLimit: { val: 100 }, used: { val: 25 } })[0].usedPercent, 25);
+  });
+
+  test("reads native account usage without generating model turns or exposing credentials", async (t) => {
+    const f = await subscriptionApp(t);
+    f.identity.set({ geminiUsage: gemini, codexUsage: { rateLimits: { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1794859200 } } }, museUsage: { subs_usage: { weekly: { used_percent: 28, resets_at: reset } } } });
+    for (const provider of ["gemini", "codex", "muse"]) {
+      const record = f.app.store.createSubscription({ provider, label: provider });
+      const directory = f.app.subscriptions.directory(record);
+      writeFileSync(join(directory, "fixture-account.json"), JSON.stringify({ type: "chatgpt", email: "fixture@example.test", planType: "pro" }));
+      f.app.store.updateSubscription(record.id, { status: "ready" });
+      const response = await f.request(`/api/subscriptions/${record.id}/usage`);
+      assert.equal(response.status, 200); assert.equal(response.data.state, "ready");
+      assert.ok(response.data.windows.length > 0); assert.equal(f.app.store.subscription(record.id).status, "ready");
+    }
+    assert.equal(f.identity.calls().length, 0, "usage must not call a model");
+    const seen = [];
+    const server = http.createServer((req, res) => {
+      seen.push({ url: req.url, authorization: req.headers.authorization, beta: req.headers["anthropic-beta"] });
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(req.url.includes("anthropic") ? { ...claude, privateField: "must-not-escape" } : { config: { creditUsagePercent: 7, currentPeriod: { end: reset, type: "USAGE_PERIOD_TYPE_WEEKLY" } }, key: "must-not-escape" }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    for (const provider of ["claude", "grok"]) {
+      const result = await readNativeUsage({ provider, directory: "/synthetic-profile", credentialReader: async () => ({ token: "synthetic-test-token" }), request: (url, options) => fetch(`http://127.0.0.1:${server.address().port}/${url.includes("anthropic") ? "anthropic" : "grok"}`, options) });
+      assert.ok(result.windows.length); assert.doesNotMatch(JSON.stringify(result), /must-not-escape|synthetic-test-token/);
+    }
+    assert.equal(seen.length, 2); assert.ok(seen.every((item) => item.authorization === "Bearer synthetic-test-token"));
+    assert.equal(seen[0].beta, "oauth-2025-04-20");
+    await assert.rejects(readNativeUsage({ provider: "claude", directory: "/synthetic", credentialReader: async () => ({ token: "synthetic" }), request: async () => new Response("private response", { status: 429, headers: { "Retry-After": "3600" } }) }), (error) => error.code === "RATE_LIMITED" && error.retryAfterMs === 3600000 && !error.message.includes("private"));
+  });
+
+  test("isolates owners before reads and cache access, coalesces requests and persists cooldown", async (t) => {
+    let reads = 0, result = claude;
+    let time = Date.parse("2026-11-09T20:00:00Z");
+    const f = await knowledgeWorld({ subscriptionUsageReader: async () => { reads++; await sleep(30); if (result instanceof Error) throw result; return result; } });
+    t.after(f.close);
+    f.app.subscriptions.usage.now = () => time;
+    const record = f.app.store.createSubscription({ provider: "claude", label: "Alice Claude", connectedBy: { id: f.alice.user.id } });
+    f.app.store.updateSubscription(record.id, { status: "ready" });
+    const path = `/api/subscriptions/${record.id}/usage`;
+    assert.equal((await f.request(f.bob, path)).status, 404);
+    assert.equal((await f.request(f.admin, path)).status, 404); assert.equal(reads, 0);
+    const responses = await Promise.all(Array.from({ length: 8 }, () => f.request(f.alice, path)));
+    assert.ok(responses.every((response) => response.status === 200 && response.data.windows.length === 4)); assert.equal(reads, 1);
+    assert.equal((await f.request(f.bob, path)).status, 404); assert.equal(reads, 1);
+    await f.request(f.alice, path); assert.equal(reads, 1);
+    time += 300001; result = Object.assign(new Error("private upstream detail"), { code: "RATE_LIMITED", retryAfterMs: 3600000 });
+    const limited = (await f.request(f.alice, path)).data;
+    assert.equal(limited.state, "cooldown"); assert.equal(limited.stale, true); assert.equal(limited.windows[2].group, "Fable");
+    assert.equal(Date.parse(limited.nextCheckAt) - time, 3600000); assert.doesNotMatch(JSON.stringify(limited), /private upstream/);
+    await f.app.subscriptions.usage.close();
+    f.app.subscriptions.usage = new SubscriptionUsage({ store: f.app.store, subscriptions: f.app.subscriptions, now: () => time, read: async () => { reads++; return claude; } });
+    assert.equal((await f.request(f.alice, path)).data.state, "cooldown"); assert.equal(reads, 2);
+    time += 3600001;
+    assert.equal((await f.request(f.alice, path)).data.state, "ready"); assert.equal(reads, 3);
+    assert.equal(f.app.store.subscription(record.id).status, "ready");
+  });
+
+  test("invalidates in-flight reads on reconnect and bounds provider concurrency", async (t) => {
+    const f = await subscriptionApp(t);
+    const usage = f.app.subscriptions.usage;
+    const gate = Promise.withResolvers(); let active = 0, maximum = 0, entered = 0;
+    usage.read = async () => { active++; maximum = Math.max(maximum, active); entered++; await gate.promise; active--; return claude; };
+    const records = Array.from({ length: 6 }, (_, i) => { const record = f.app.store.createSubscription({ provider: "claude", label: `Claude ${i}` }); f.app.store.updateSubscription(record.id, { status: "ready" }); return record; });
+    const work = records.map((record) => usage.get(record.id));
+    await waitFor(() => entered === 3);
+    f.app.subscriptions.changed(records[0].id, { status: "connecting" });
+    f.app.store.updateSubscription(records[0].id, { status: "ready", email: "new-account@example.test" });
+    gate.resolve();
+    await Promise.all(work);
+    assert.equal(maximum, 3);
+    assert.deepEqual(f.app.store.value(usage.key(records[0].id)).windows, [], "old account must not repopulate the cache");
+    assert.equal((await usage.get(records[0].id)).windows.length, 4);
+  });
+
+  test("keeps last known values on missing data, retains backoff across a service restart and clears removed accounts", async (t) => {
+    const f = await subscriptionApp(t);
+    let time = Date.parse("2026-11-09T20:00:00Z");
+    const record = f.app.store.createSubscription({ provider: "claude", label: "Persistent Claude" });
+    f.app.store.updateSubscription(record.id, { status: "ready" });
+    const usage = f.app.subscriptions.usage, path = `/api/subscriptions/${record.id}/usage`;
+    usage.now = () => time; usage.read = async () => claude;
+    const first = (await f.request(path)).data;
+    time += 300001; usage.read = async () => ({});
+    const missing = (await f.request(path)).data;
+    assert.equal(missing.state, "unavailable"); assert.equal(missing.stale, true);
+    assert.deepEqual(missing.windows, first.windows); assert.equal(missing.fetchedAt, first.fetchedAt);
+    time += 300001; usage.read = async () => { throw Object.assign(new Error("synthetic throttle"), { code: "RATE_LIMITED" }); };
+    const throttled = (await f.request(path)).data;
+    assert.equal(Date.parse(throttled.nextCheckAt) - time, 1800000);
+    time += 1800001;
+    const again = (await f.request(path)).data;
+    assert.equal(Date.parse(again.nextCheckAt) - time, 3600000);
+    await f.stop();
+    const restarted = await subscriptionApp(t, f);
+    restarted.app.subscriptions.usage.now = () => time;
+    let reads = 0;
+    restarted.app.subscriptions.usage.read = async () => { reads++; return claude; };
+    assert.deepEqual((await restarted.request(path)).data, again); assert.equal(reads, 0);
+    assert.equal((await restarted.request(`/api/subscriptions/${record.id}`, { method: "DELETE" })).status, 200);
+    assert.equal((await restarted.request(path)).status, 404);
+    assert.equal(restarted.app.store.value(usage.key(record.id)), null);
+  });
+
+  test("Agents shows loading, separate percentages, resets, unknown states and recovery in place", async (t) => {
+    const f = await subscriptionApp(t);
+    const record = f.app.store.createSubscription({ provider: "gemini", label: "Google personale" });
+    f.app.store.updateSubscription(record.id, { status: "ready" });
+    const gate = Promise.withResolvers(); f.app.subscriptions.usage.read = async () => { await gate.promise; return gemini; };
+    // Use the fixture's authenticated API for the DOM's requests.
+    const panel = panelHarness({ hash: "#/agenti", fetch: async (path, options = {}) => { const response = await f.request(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined }); return { ok: response.status < 400, status: response.status, json: async () => response.data }; } });
+    await panel.run("boot()");
+    assert.match(panel.app.textContent, /Lettura delle quote/);
+    assert.doesNotMatch(panel.app.textContent, /null|undefined/);
+    const mounted = panel.app.querySelector(".quota-accounts");
+    gate.resolve();
+    await waitFor(() => panel.app.textContent.includes("Gemini 4 Argon"));
+    assert.equal(panel.app.querySelectorAll("progress").length, 3);
+    assert.match(panel.app.textContent, /100%/); assert.match(panel.app.textContent, /Reset/);
+    assert.equal(panel.app.querySelector(".quota-accounts"), mounted);
+    assert.doesNotMatch(panel.app.textContent, /null|undefined/);
+    f.app.subscriptions.usage.invalidate(record.id);
+    f.app.subscriptions.usage.read = async () => ({});
+    await panel.run("document.querySelector('.subscription-usage').querySelector('button').listeners.click[0]()");
+    await waitFor(() => panel.app.textContent.includes("non ha restituito"));
+    assert.equal(panel.app.querySelectorAll("progress").length, 0, "unknown data must not be shown as zero");
+    f.app.subscriptions.usage.invalidate(record.id); f.app.subscriptions.usage.read = async () => gemini;
+    await panel.run("document.querySelector('.subscription-usage').querySelector('button').listeners.click[0]()");
+    await waitFor(() => panel.app.textContent.includes("Gemini 4 Argon"));
+    assert.equal(panel.app.querySelector(".quota-accounts"), mounted);
+  });
+});
 let discord;
 let telegram;
 let slack;
@@ -1956,7 +2114,7 @@ describe("panel auth", () => {
       const boot = panel.run("boot()");
       assert.ok(panel.app.querySelectorAll(".loading-skeleton").length, "startup reserves space before the state arrives");
       await boot;
-      assert.deepEqual(panel.app.querySelectorAll("h2").map((node) => node.textContent), ["Global usage", "The agents", "Usage by agent"]);
+      assert.deepEqual(panel.app.querySelectorAll("h2").map((node) => node.textContent), ["Global usage", "Subscription quotas", "The agents", "Usage by agent"]);
       assert.equal(paths.filter((path) => path === "/api/usage").length, 1, "both panels share one request");
       assert.ok(!paths.some((path) => path.includes("/rooms/")), "opening the app never opens the lounge");
       assert.equal(panel.app.querySelectorAll(".loading-skeleton").length, 3, "one chart skeleton globally and one per agent");

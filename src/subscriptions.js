@@ -11,6 +11,7 @@ import { geminiQuotaMessage } from "./gemini-quota.js";
 const LOGIN_MS = 10 * 60 * 1000;
 const BROWSER_HELPER = fileURLToPath(new URL("./subscription-browser.js", import.meta.url));
 const TERMINAL_HELPER = fileURLToPath(new URL("./subscription-terminal.py", import.meta.url));
+const USAGE_HELPER = fileURLToPath(new URL("./subscription-usage-worker.js", import.meta.url));
 const AUTH_FAILURE = /authentication_failed|failed to authenticate|login expired|not logged in|not signed in|not authenticated|please (run \/login|log in)|refresh token.*(expired|invalid|revoked)/i;
 /** The CLIs that log in by showing a code to confirm on a page, and how to start it. */
 const DEVICE_LOGIN = { grok: ["login", "--device-auth"], muse: ["login"] };
@@ -207,6 +208,7 @@ export class Subscriptions {
 
   changed(id, patch) {
     if (this.closed) return;
+    if (patch.status && patch.status !== "ready") this.usage?.invalidate(id);
     this.store.updateSubscription(id, patch);
     // Authorization URLs and device codes stay in authenticated responses, never the activity feed.
     this.emit({ type: "subscriptions" });
@@ -391,6 +393,47 @@ export class Subscriptions {
     return account?.type === "chatgpt" ? { email: String(account.email || "").slice(0, 254), plan: String(account.planType || "").slice(0, 80) } : null;
   }
 
+  async usageData(id, signal) {
+    const record = this.require(id), directory = this.directory(record);
+    const unavailable = (code = "UNAVAILABLE") => Object.assign(new Error("Subscription usage unavailable"), { code });
+    if (record.status !== "ready" || !this.installed(record.provider)) throw unavailable("AUTH_REQUIRED");
+    if (record.provider === "codex") {
+      const rpc = new CodexAccount(this.bins.codex, this.environment(record), record.resident ? this.store.home : directory, undefined, undefined, Boolean(record.resident));
+      const abort = () => { void rpc.close(); };
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        signal?.throwIfAborted();
+        await rpc.initialize();
+        if (!await this.readCodex(rpc)) throw unavailable("AUTH_REQUIRED");
+        return await rpc.request("account/rateLimits/read", {});
+      } finally { signal?.removeEventListener("abort", abort); await rpc.close(); }
+    }
+    if (record.provider === "claude" && !await this.readClaude(record, signal)) throw unavailable("AUTH_REQUIRED");
+    if (record.provider === "gemini") {
+      const result = await this.geminiCommand(record, ["--settings", '{"disableSlashCommands":false}', "-p", "/usage", "--output-format", "json"], signal);
+      let data; try { data = JSON.parse(result.output); } catch { throw unavailable(); }
+      if (result.code || data.status !== "SUCCESS") throw unavailable();
+      return data;
+    }
+    return new Promise((resolve, reject) => {
+      const args = record.provider === "muse" ? ["usage", "--json"] : [USAGE_HELPER, record.provider, directory, record.resident ? "resident" : "managed"];
+      const child = spawn(record.provider === "muse" ? this.bins.muse : process.execPath, args, { env: this.environment(record), cwd: directory, stdio: ["ignore", "pipe", "ignore"], signal });
+      let output = "";
+      const timer = setTimeout(() => { child.kill("SIGKILL"); reject(unavailable()); }, 28000);
+      child.stdout.on("data", (chunk) => { output += chunk; if (output.length > 256 * 1024) { child.kill("SIGKILL"); reject(unavailable()); } });
+      child.on("error", () => { clearTimeout(timer); reject(unavailable()); });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        try {
+          const data = JSON.parse(output);
+          if (data.error) throw Object.assign(unavailable(["AUTH_REQUIRED", "RATE_LIMITED", "UNSUPPORTED"].includes(data.error) ? data.error : "UNAVAILABLE"), { retryAfterMs: Number(data.retryAfterMs) || 0 });
+          if (code !== 0) throw unavailable();
+          resolve(data);
+        } catch (error) { reject(error.code ? error : unavailable()); }
+      });
+    });
+  }
+
   /**
    * Who an account is, from the CLI that holds it: Grok says whether it is signed in
    * before it lists its models, Muse shows the plan it bills against.
@@ -521,6 +564,7 @@ export class Subscriptions {
         child.on("close", (code) => { clearTimeout(timer); if (code === 0) resolve(); else reject(new ValidationError("rimozione non riuscita: riprova")); });
       });
       this.store.deleteSubscription(record.id);
+      this.usage?.invalidate(id, { remove: true });
       rmSync(directory, { recursive: true, force: true });
       this.emit({ type: "subscriptions" });
     } finally { this.busy.delete(id); }
