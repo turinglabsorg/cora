@@ -7096,6 +7096,32 @@ describe("email channel", () => {
     assert.equal(f.state.sent.length, 0);
   });
 
+  test("Google review gate blocks new connections while existing authorized senders keep working", async (t) => {
+    const f = await emailWorld(t);
+    assert.equal(f.app.googleConnector.enabled, false);
+    const google = await googleConnectorFixture(t, f);
+    assert.equal((await google.connect()).response.status, 200);
+    const connection = (await f.call("/api/connectors")).data.connections[0];
+    await f.call(`/api/connectors/${connection.id}`, { method: "PUT", body: { agents: [f.agent.id] } });
+    await f.call(`/api/agents/${f.agent.id}/email`, { method: "PUT", body: { senderId: connection.id } });
+    f.app.googleConnector.enabled = false;
+
+    const view = await f.call("/api/connectors");
+    assert.equal(view.data.available, false);
+    assert.deepEqual(view.data.connections[0].agents, [f.agent.id]);
+    const pending = f.app.googleConnector.pending.size;
+    assert.equal((await f.call("/api/connectors/google", { method: "POST" })).status, 409);
+    assert.equal(f.app.googleConnector.pending.size, pending);
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email`)).data.overrides.senderId, connection.id);
+
+    f.app.googleConnector.access.clear();
+    const sent = await f.app.email.send(f.agent, { to: ["robin+google-recipient@ambox.dev"], subject: "Existing authorized sender", body_text: "Previously connected account" }, { requester: { kind: "owner" } });
+    assert.equal(sent.status, "sent");
+    assert.equal(google.sent.length, 1);
+    assert.ok(google.requests.some((request) => request.path === "/token" && new URLSearchParams(request.body).get("grant_type") === "refresh_token"));
+    assert.equal(f.state.sent.length, 0);
+  });
+
   test("Google OAuth uses Fluxkit through the broker and restricts external sending to assigned agents", async (t) => {
     const f = await emailWorld(t), google = await googleConnectorFixture(t, f);
     assert.equal((await f.call("/api/connectors/google", { method: "POST", asMember: true })).status, 403);

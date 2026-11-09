@@ -33,7 +33,7 @@ export const config = {
   boxImage: setting("BOX_IMAGE") || "cora-box:latest",
   gitAttribution: setting("GIT_ATTRIBUTION") !== "0",
   gitCoauthorEmail: setting("GIT_COAUTHOR_EMAIL") || CORA_GIT_COAUTHOR_EMAIL,
-  googleConnectorEnabled: setting("GOOGLE_CONNECTOR_ENABLED") !== "0",
+  googleConnectorEnabled: setting("GOOGLE_CONNECTOR_ENABLED") === "1",
   mailEndpoint: (setting("MAIL_ENDPOINT") || "https://ambox.dev").replace(/\/$/, ""),
   mailDomain: setting("MAIL_DOMAIN") || "",
   mailNamespace: setting("MAIL_NAMESPACE") || "",
