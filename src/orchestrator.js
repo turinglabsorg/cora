@@ -9,6 +9,7 @@ import { userName } from "./telegram.js";
 import { asksToStop } from "./brain.js";
 import { VOICE_MESSAGE } from "./discord.js";
 import { AUDIO_LIMIT_BYTES, VOICE_LANGUAGES, speechParts } from "./voice.js";
+import { imageMime } from "./images.js";
 
 const HUMAN_DEBOUNCE_MS = 1200;
 const INACTIVITY_MS = 30 * 60 * 1000;
@@ -706,10 +707,18 @@ export class Orchestrator {
       agentId: null,
       content: this.telegramText(message),
     };
-    if ((kind === "owner" || kind === "human") && message.photo?.length) {
-      const photo = [...message.photo].sort((a, b) => (b.file_size || 0) - (a.file_size || 0)).find((size) => !size.file_size || size.file_size <= IMAGE_LIMIT_BYTES);
-      const data = photo && await client.download(photo.file_id, IMAGE_LIMIT_BYTES).catch(() => null);
-      if (data) item.images = [data.toString("base64")];
+    if (kind === "owner" || kind === "human") {
+      for (const source of [message, message.reply_to_message].filter(Boolean)) {
+        const document = source.document;
+        const imageDocument = document && (/^image\/(?:png|jpe?g|webp|gif)$/i.test(document.mime_type || "") || /\.(?:png|jpe?g|webp|gif)$/i.test(document.file_name || ""));
+        if (!source.photo?.length && !imageDocument) continue;
+        const picture = source.photo?.length
+          ? [...source.photo].sort((a, b) => (b.file_size || b.width * b.height || 0) - (a.file_size || a.width * a.height || 0)).find((size) => !size.file_size || size.file_size <= IMAGE_LIMIT_BYTES)
+          : !document.file_size || document.file_size <= IMAGE_LIMIT_BYTES ? document : null;
+        const data = picture?.file_id && await client.download(picture.file_id, IMAGE_LIMIT_BYTES).catch(() => null);
+        if (data && imageMime(data)) (item.images ||= []).push(data.toString("base64"));
+        else item.content += " [Cora: immagine non disponibile: download non riuscito, file troppo grande o formato non supportato. Non inventarne il contenuto.]";
+      }
     }
     const audio = message.voice || message.audio;
     if (audio?.file_id) {

@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { runClaude, runCodex, runDeepSeek, runGemini, runGrok, runHermes, runMuse } from "./cli.js";
 import { isSubscriptionProvider } from "./harnesses.js";
+import { imageMime } from "./images.js";
 
 const REQUEST_TIMEOUT_MS = 240000;
 
@@ -694,7 +695,7 @@ export class LLM {
     const router = this.routers[provider];
     if (!router.key) throw new Error(`${ROUTERS[provider].label}: no API key (CORA_${provider.toUpperCase()}_API_KEY in hush)`);
     const caps = await this.capabilities(model);
-    const picture = (image) => ({ type: "image_url", image_url: { url: String(image).startsWith("data:") ? image : `data:image/png;base64,${image}` } });
+    const picture = (image) => ({ type: "image_url", image_url: { url: String(image).startsWith("data:") ? image : `data:${imageMime(image) || "image/png"};base64,${image}` } });
     const out = [];
     for (const message of messages) {
       if (message.role === "assistant") {
