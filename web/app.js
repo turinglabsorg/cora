@@ -1958,12 +1958,11 @@ function agentOwnerPanel(agent) {
 }
 
 /**
- * Who the agent is. The brain lives in its own tab once the agent exists; while it
- * is being created there is no tab yet, so the simple pair harness + model rides here.
+ * Who the agent is. Brain configuration belongs to the saved agent's own tab.
  */
 function agentForm(agent, { only = "" } = {}) {
   const isNew = !agent.id;
-  const wantsBrain = only !== "profile";
+  const wantsBrain = !isNew && only !== "profile";
   const nameInput = h("input", { type: "text", name: "name", value: agent.name || "", required: true, maxlength: 32, placeholder: "es. Marta", autocomplete: "off" });
   const colorInput = h("input", { type: "color", name: "color", value: agent.color || "#e8a33d" });
   const picture = avatarPicker(agent, colorInput);
@@ -2908,7 +2907,7 @@ function mailDomainsPane() {
 }
 
 function renderNew() {
-  shell([pageHead("Nuovo agente", "Dagli un nome, un cervello e un carattere."), agentForm({ enabled: true, tools: true })], { title: "Nuovo agente", back: "#/agenti" });
+  shell([pageHead("Nuovo agente", "Dagli un nome e un carattere."), agentForm({ enabled: true, tools: true })], { title: "Nuovo agente", back: "#/agenti" });
 }
 
 async function renderAgent() {

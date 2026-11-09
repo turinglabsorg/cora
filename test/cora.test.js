@@ -3484,6 +3484,29 @@ describe("what runs the models", () => {
     assert.ok(Array.isArray(hardware.gpus), "a host without a card reports none instead of failing");
   });
 
+  test("creating an agent skips initial Brain setup and keeps configuration in the saved agent tab", async (t) => {
+    const signedIn = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    const session = signedIn.headers.get("set-cookie").split(";")[0];
+    const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: session } }) });
+    panel.run('globalThis.crypto = { randomUUID: () => "fixture-new-agent" }');
+    await panel.run("boot()");
+    await panel.navigate("#/new");
+    const form = panel.app.querySelector("form");
+    assert.ok(form);
+    assert.equal(form.elements.model, undefined);
+    assert.equal(form.elements.subscriptionId, undefined);
+    assert.doesNotMatch(form.textContent, /Connect an account|Harness|Reasoning/);
+    form.elements.name.value = "No Brain Setup";
+    form.dispatch("submit");
+    const agent = await waitFor(() => app.store.agents().find((item) => item.name === "No Brain Setup"));
+    t.after(() => app.store.deleteAgent(agent.id));
+    assert.equal(agent.model, "");
+    assert.equal(agent.tools, true);
+    await panel.navigate(`#/agent/${agent.id}/cervello`);
+    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 7);
+    assert.ok(panel.app.textContent.includes("Claude Code"));
+  });
+
   test("the brain is its own tab: a harness on the left, where the model runs on the right", async () => {
     // It starts in the cloud, so a save that changed nothing could not pass for one that did.
     const agent = app.store.createAgent({ name: "Cervellone", model: "ollama/test-model-big:cloud", tools: false, chattiness: 0 });

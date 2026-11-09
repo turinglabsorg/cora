@@ -1160,7 +1160,7 @@ export const EN = {
   "Il suo bot su Telegram.": "Its bot on Telegram.",
 
   // agent page
-  "Dagli un nome, un cervello e un carattere.": "Give it a name, a brain and a character.",
+  "Dagli un nome e un carattere.": "Give it a name and a character.",
   "Agente non trovato": "Agent not found",
   "Torna agli agenti": "Back to the agents",
   "Agente": "Agent",

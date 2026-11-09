@@ -97,6 +97,7 @@ class FormData {
     }
   }
   get(name) { return this.entries.find(([key]) => key === name)?.[1] ?? null; }
+  has(name) { return this.entries.some(([key]) => key === name); }
   getAll(name) { return this.entries.filter(([key]) => key === name).map(([, value]) => value); }
 }
 
