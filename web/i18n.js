@@ -12,6 +12,7 @@ export const EN = {
   "Questo dominio o account è già gestito da un altro spazio.": "This domain or account is already managed by another space.",
   "Il servizio email ha rifiutato l'operazione. Riprova tra poco.": "The email service refused this operation. Try again shortly.",
   "Domini": "Domains",
+  "Account Resend e domini email": "Resend accounts and email domains",
   "Email": "Email",
   "Copia indirizzo": "Copy address",
   "Email non disponibile": "Email unavailable",

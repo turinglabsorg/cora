@@ -1,10 +1,10 @@
 # Agent email and domains
 
-The Domains page connects multiple Resend accounts to a Cora instance. Each managed domain is bound to one account and the instance namespace. The existing configured Cora domain continues to use the relay’s default account.
+The Settings → Domains page connects multiple Resend accounts to a Cora instance. Each managed domain is bound to one account and the instance namespace. The existing configured Cora domain continues to use the relay’s default account.
 
 ## Setup
 
-1. Open Domains and connect a named Resend account with a full-access API key. Cora checks access, saves the key in hush, and registers an account-specific receiving webhook.
+1. Open Settings → Domains (`#/settings/domini`, in the Agents group) and connect a named Resend account with a full-access API key. Cora checks access, saves the key in hush, and registers an account-specific receiving webhook.
 2. Add a domain or dedicated mail subdomain under that account. Cora enables sending and receiving in Resend and shows its current DNS records. Use a dedicated subdomain when the main domain already receives mail elsewhere: changing its MX records changes its email destination.
 3. Copy the required DKIM, SPF and receiving MX records into the domain’s DNS provider. Press Verify DNS, then refresh after propagation if necessary. Sending, receiving and relay activation are checked separately.
 4. In an agent’s Email tab, choose a name (3–32 lowercase letters, digits or hyphens) and a ready domain. The agent must be enabled and have its computer enabled. The address changes only after the desktop successfully provisions and validates the new mailbox.

@@ -569,9 +569,8 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     ["banco", "Banco", "grid", section === "banco" || section === "salotto"],
     ["brain", "Brain", "bulb", section === "brain"],
     ["artefatti", "Artefatti", "archive", section === "artefatti", S.data?.artifacts?.reviews || 0],
-    ["domini", "Domini", "globe", section === "domini"],
     // Contesto opens from Impostazioni: what the agents read is a setting of the space, not a place of its own.
-    ["settings", "Impostazioni", "sliders", section === "settings" || section === "contesto"],
+    ["settings", "Impostazioni", "sliders", section === "settings" || section === "contesto" || section === "domini"],
   ];
   const info = S.data ? transportInfo() : { icon: "radio", label: "Cora", where: tr("Caricamento…") };
   app.replaceChildren(h("div", { class: `app${mode ? ` mode-${mode}` : ""}` },
@@ -2542,7 +2541,7 @@ async function agentEmailTab(agent, isCurrent = () => true) {
     h("p", { class: "muted" }, "Da 3 a 32 lettere minuscole, numeri o trattini. Il nuovo indirizzo diventa quello principale; la casella precedente resta accessibile all'agente."),
     !data.canCustomize ? h("p", { class: "muted" }, "Accendi l'agente e abilita il suo computer per assegnargli un'email.") : null,
     !usable.length ? h("p", { class: "muted" }, "Prima verifica un dominio nella pagina Domini.") : null,
-    feedback, h("div", { class: "row" }, btn("Gestisci domini", { icon: "globe", href: "#/domini", cls: "ghost" }), h("span", { class: "spacer" }), submit));
+    feedback, h("div", { class: "row" }, btn("Gestisci domini", { icon: "globe", href: "#/settings/domini", cls: "ghost" }), h("span", { class: "spacer" }), submit));
   const previous = mailbox?.previousEmails?.length ? panel({ icon: "archive", title: "Indirizzi precedenti", hint: "Restano all'agente, insieme alla posta già ricevuta." },
     mailbox.previousEmails.map((email) => h("div", { class: "mail-address previous" }, h("code", {}, raw(email)), emailCopy(email)))) : null;
   return [identity, panel({ icon: "edit", title: "Personalizza indirizzo", hint: "Scegli il nome e uno dei domini pronti per inviare e ricevere." }, form), previous];
@@ -2568,11 +2567,9 @@ function mailDomainChecks(domain, account) {
   }));
 }
 
-async function renderMailDomains() {
-  const view = location.hash;
+function mailDomainsPane() {
   const slot = h("div", { class: "stack", "aria-busy": "true" }, panel({}, skeleton("rows", 3)));
-  shell([pageHead("Domini", "Gli indirizzi degli agenti, sui tuoi domini. Collega gli account Resend e verifica invio e ricezione."), slot], { title: "Domini" });
-  const current = () => slot.isConnected && location.hash === view;
+  const current = () => slot.isConnected && route()[0] === "settings";
   const load = async () => {
     try {
       const data = await api("/api/mail/domains");
@@ -2625,7 +2622,9 @@ async function renderMailDomains() {
       if (current()) { slot.setAttribute("aria-busy", "false"); slot.replaceChildren(panel({ icon: "alert", title: "Domini non disponibili" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
     }
   };
-  await load();
+  load();
+  return h("div", { class: "stack" },
+    h("div", { class: "stack-sm" }, h("div", { class: "panel-title" }, h("h2", {}, "Domini")), h("p", { class: "lead muted" }, "Gli indirizzi degli agenti, sui tuoi domini. Collega gli account Resend e verifica invio e ricezione.")), slot);
 }
 
 function renderNew() {
@@ -6613,6 +6612,7 @@ function renderSettings() {
   const githubRow = setRow("Organizzazione", "Il nome dell'organizzazione GitHub dove nascono le app degli agenti, come appare in github.com/nome. Vuoto: nel tuo account. Si salva quando esci dal campo.", githubOrg);
   githubOrg.addEventListener("change", () => saveSettings({ githubOrg: githubOrg.value.trim() }, githubRow).then(() => { githubOrg.value = S.data.settings.githubOrg || ""; drawNav(); }));
   page("github", panel({ icon: "github", title: "GitHub", hint: "Ogni agente può avere la sua app GitHub: si crea dalla sua pagina, Profilo → Account GitHub, con due clic su GitHub." }, setRows(githubRow)));
+  page("domini", mailDomainsPane());
 
   /* ---------- Persone ---------- */
   page("permessi", permissionsPane());
@@ -6643,6 +6643,7 @@ function renderSettings() {
       return [known && known.usable !== false ? null : "warn", S.data.settings.defaultModel || tr("nessun modello")];
     } },
     { id: "github", group: "Agenti", label: "GitHub", mark: "github", state: () => [null, S.data.settings.githubOrg || tr("le app nel tuo account")] },
+    { id: "domini", group: "Agenti", label: "Domini", mark: "globe", state: () => [null, tr("Account Resend e domini email")] },
     { id: "permessi", group: "Persone", label: "Permessi", mark: "user", state: () => [null, people ? (people === 1 ? tr("1 persona oltre a te") : tr("{count} persone oltre a te", { count: people })) : tr("solo tu")] },
     { id: "accesso", group: "Persone", label: "Accesso", mark: "shield", state: () => [null, tr("chi entra nella tua Cora")] },
     { id: "ssh", group: "Persone", label: "Chiavi SSH", mark: "key", state: () => [null, keyCount ? (keyCount === 1 ? tr("1 chiave in più") : tr("{count} chiavi in più", { count: keyCount })) : tr("solo quelle dell'host")] },
@@ -6759,7 +6760,11 @@ function renderLogin() {
 async function render() {
   closeAccountMenu();
   if (!S.data) return;
-  const [page] = route();
+  let [page] = route();
+  if (page === "domini") {
+    history.replaceState(null, "", "#/settings/domini");
+    page = "settings";
+  }
   S.live = null;
   if (page === "agent") await renderAgent();
   else if (page === "banco") await renderDashboard();
@@ -6770,7 +6775,6 @@ async function render() {
   else if (page === "brain") renderBrain();
   else if (page === "artefatti") renderArtifacts();
   else if (page === "settings") renderSettings();
-  else if (page === "domini") renderMailDomains();
   else if (page === "salotto") renderSalotto();
   else renderAgents();
 }
@@ -6779,7 +6783,7 @@ document.documentElement.lang = LANG;
 document.title = "Cora · Computer-Operating Resident Agents";
 
 /** While the state loads, the page being opened in outline: its own name, not always the agents page. */
-const BOOT_TITLES = { agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", domini: "Domini", settings: "Impostazioni", archivio: "Archivio" };
+const BOOT_TITLES = { agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", domini: "Impostazioni", settings: "Impostazioni", archivio: "Archivio" };
 
 function bootSkeleton() {
   const [section] = route();
