@@ -336,7 +336,8 @@ function cleanPermissions(list) {
     const agents = [...new Set((Array.isArray(grant.agents) ? grant.agents : []).map(String).filter((agent) => agent === "*" || AGENT_ID.test(agent)))];
     if (!agents.length) continue;
     seen.add(id);
-    grants.push({ id, name: cleanText(grant.name, 80).trim(), agents: agents.includes("*") ? ["*"] : agents.slice(0, 50) });
+    const excludedAgents = agents.includes("*") ? [...new Set((Array.isArray(grant.excludedAgents) ? grant.excludedAgents : []).map(String).filter((agent) => AGENT_ID.test(agent)))].slice(0, 50) : [];
+    grants.push({ id, name: cleanText(grant.name, 80).trim(), agents: agents.includes("*") ? ["*"] : agents.slice(0, 50), ...(excludedAgents.length ? { excludedAgents } : {}) });
   }
   return grants.slice(0, 100);
 }
@@ -673,6 +674,13 @@ export class Store {
 
   panelUsers() {
     return this.stmt("SELECT id FROM panel_users ORDER BY role DESC, last_seen_at DESC").all().map((row) => this.panelUser(row.id));
+  }
+
+  sharingPeople(viewer) {
+    const users = this.panelUsers().filter((person) => !person.blocked && this.allowsPanelUser({ ...person, emailVerified: true }));
+    const cloudOwner = users.some((person) => person.role === "owner" && person.source !== "local");
+    return users.filter((person) => person.id !== viewer?.id && !(cloudOwner && person.id === "local-owner" && person.source === "local"))
+      .map(({ id, name, email, role, avatar }) => ({ id, name: name || email, email, role, avatar }));
   }
 
   allowsPanelUser(identity) {
@@ -1088,11 +1096,22 @@ export class Store {
   }
 
   /** Everyone who wrote in a chat (not the panel), once per platform and person, newest first: who the owner can give permissions to. */
-  speakers(limit = 200) {
+  speakers(limit = 200, { channelIds = null, agentId = "" } = {}) {
+    const scope = [], params = [];
+    if (channelIds) {
+      if (channelIds.length) { scope.push(`channel_id IN (${channelIds.map(() => "?").join(",")})`); params.push(...channelIds); }
+      if (agentId) { scope.push("channel_id LIKE ?"); params.push(`tg:%@${agentId}`); }
+      if (!scope.length) return [];
+    }
     return this.db.prepare(`SELECT CASE WHEN channel_id LIKE 'tg:%' THEN 'telegram' WHEN channel_id LIKE 'sl:%' THEN 'slack' ELSE 'discord' END AS transport,
       author_id AS userId, author_name AS name, MAX(at) AS last, COUNT(*) AS messages FROM messages
       WHERE kind IN ('owner', 'human') AND author_id IS NOT NULL AND author_id != '' AND channel_id NOT LIKE 'web%'
-      GROUP BY transport, author_id ORDER BY last DESC LIMIT ?`).all(limit);
+      ${scope.length ? `AND (${scope.join(" OR ")})` : ""}
+      GROUP BY transport, author_id ORDER BY last DESC LIMIT ?`).all(...params, limit);
+  }
+
+  hasAgentPermission(contact, agentId) {
+    return this.settings.permissions.some((grant) => grant.id === contact && (grant.agents.includes(agentId) || (grant.agents.includes("*") && !grant.excludedAgents?.includes(agentId))));
   }
 
   /** The newest request in each panel room that the owner has not answered yet (requests on Discord or Telegram are answered there). */

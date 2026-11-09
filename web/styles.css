@@ -1968,6 +1968,19 @@ a.share-stats:hover { color: var(--amber); }
   .email-settings-tabs .btn { flex: 1 1 40%; }
 }
 .email-workspace .rail-item { grid-template-columns: 30px minmax(0, 1fr) 16px; }
+.agent-settings-save[hidden] { display: none; }
+.agent-settings-save { margin-top: 20px; }
+.agent-permissions { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); }
+.agent-permission { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 14px; cursor: pointer; }
+.agent-permission + .agent-permission { border-top: 1px solid var(--line); }
+.agent-permission .grow { min-width: 0; overflow-wrap: anywhere; }
+.agent-permission small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.agent-permission .switch { flex-shrink: 0; }
+.agent-permission-note { color: var(--muted); }
+@media (max-width: 599px) {
+  .artifact-default-row { grid-template-columns: minmax(0, 1fr); }
+  .artifact-default-row .set-control > select { width: 100%; }
+}
 
 @media (max-width: 480px) { .mode-email .tabs, .mode-artifacts .tabs { margin: 0 -12px; padding: 2px 12px; } }
 

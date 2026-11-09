@@ -319,6 +319,68 @@ test("owner memory isolates facts, clients, projects, archives and reviews until
   assert.match(f.app.brain.memoryContext(replacement, "orbit"), /ORBIT_BOB_PERSISTENT/);
 });
 
+test("agent permissions are managed by each owner, scoped to its contacts and preserve other agents and wildcard grants", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  f.app.store.updateSettings({ transport: "telegram", transports: ["telegram"], telegramChatIds: [TG_GROUP, TG_OTHER_GROUP] });
+  const create = async (actor, name) => (await f.request(actor, "/api/agents", { method: "POST", body: { name, tools: false, channelIds: ["tg:" + TG_GROUP] } })).data;
+  const nico = await create(f.alice, "Nico"), vera = await create(f.bob, "Vera");
+  const contact = "telegram:" + TG_STRANGER;
+  const message = { id: "permission-contact", kind: "human", authorId: TG_STRANGER, authorName: "Virginia Test", content: "Nico, ci sei?", at: Date.now() };
+  f.app.store.appendArchive("tg:" + TG_GROUP, message);
+  f.app.store.appendArchive("tg:" + TG_OTHER_GROUP, { ...message, id: "private-contact", authorId: "987654321", authorName: "PRIVATE_OTHER_CONTACT" });
+  f.app.store.appendArchive(`tg:11223344@${nico.id}`, { ...message, id: "own-dm-contact", authorId: "11223344", authorName: "Own DM contact" });
+  const path = "/api/agents/" + nico.id + "/permissions";
+  const initial = await f.request(f.alice, path);
+  assert.equal(initial.status, 200); assert.equal(initial.data.canManage, true);
+  assert.ok(initial.data.people.some((person) => person.id === contact && !person.allowed));
+  assert.ok(initial.data.people.some((person) => person.name === "Own DM contact"));
+  assert.doesNotMatch(JSON.stringify(initial.data), /PRIVATE_OTHER_CONTACT/);
+  for (const actor of [f.bob, f.admin]) {
+    assert.equal((await f.request(actor, path)).status, 403);
+    assert.equal((await f.request(actor, path, { method: "PUT", body: { id: contact, allowed: true } })).status, 403);
+  }
+  assert.equal((await f.request(f.alice, path, { method: "PUT", body: { id: "telegram:987654321", allowed: true } })).status, 400);
+  const enabled = await f.request(f.alice, path, { method: "PUT", body: { id: contact, allowed: true, agentId: vera.id } });
+  assert.equal(enabled.status, 200);
+  assert.equal(f.app.store.hasAgentPermission(contact, nico.id), true);
+  assert.equal(f.app.store.hasAgentPermission(contact, vera.id), false);
+  assert.equal(f.app.knowledge.acceptsMessage(f.app.store.agent(nico.id), message, "tg:" + TG_GROUP), true);
+  assert.equal((await f.request(f.alice, "/api/agents/" + vera.id + "/memories")).status, 403);
+  f.app.store.updateSettings({ permissions: [{ id: contact, name: "Virginia Test", agents: ["*"] }] });
+  assert.equal((await f.request(f.alice, path, { method: "PUT", body: { id: contact, allowed: false } })).status, 200);
+  assert.equal(f.app.store.hasAgentPermission(contact, nico.id), false);
+  assert.equal(f.app.store.hasAgentPermission(contact, vera.id), true);
+  const future = await create(f.bob, "Future agent");
+  assert.equal(f.app.store.hasAgentPermission(contact, future.id), true, "revoking one agent preserves the original future-agent grant");
+  assert.deepEqual(f.app.store.settings.permissions[0].excludedAgents, [nico.id]);
+  const reopened = new Store(f.app.store.home);
+  try {
+    assert.equal(reopened.hasAgentPermission(contact, nico.id), false);
+    assert.equal(reopened.hasAgentPermission(contact, future.id), true);
+  } finally { reopened.close(); }
+  assert.equal(f.app.knowledge.acceptsMessage(f.app.store.agent(nico.id), message, "tg:" + TG_GROUP), false);
+  assert.equal((await f.request(f.alice, path, { method: "PUT", body: { id: contact, allowed: true } })).status, 200);
+  assert.equal(f.app.store.hasAgentPermission(contact, nico.id), true);
+  assert.equal(f.app.store.agent(nico.id).brainOwnerId, f.alice.user.id);
+  assert.equal(f.app.store.agent(nico.id).ownerId, "");
+});
+
+test("sharing recipients omit the viewer and emergency owner and retain admitted people by their public identities", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  f.app.store.registerPanelUser({ id: "real-space-owner", name: "Space Owner Name", email: "owner@owner.test", role: "owner", source: "cloud" });
+  f.app.store.registerPanelUser({ ...f.bob.user, name: "Bob Public Name", emailVerified: true });
+  for (const path of ["/api/brain/sharing", "/api/artifacts"]) {
+    const result = await f.request(f.alice, path);
+    assert.equal(result.status, 200);
+    assert.ok(result.data.people.some((person) => person.id === f.bob.user.id && person.name === "Bob Public Name"));
+    assert.ok(result.data.people.some((person) => person.id === "real-space-owner" && person.name === "Space Owner Name"));
+    assert.ok(result.data.people.every((person) => !["local-owner", f.alice.user.id].includes(person.id)));
+  }
+  assert.ok(f.app.store.panelUser("local-owner"), "emergency access is preserved");
+  f.app.store.blockPanelUser(f.bob.user.id, true);
+  assert.ok((await f.request(f.alice, "/api/brain/sharing")).data.people.every((person) => person.id !== f.bob.user.id));
+});
+
 test("owner isolation preserves explicit chat permissions without granting private panel access", async (t) => {
   const telegram = await fakeTelegram();
   telegram.addBot("owner-permission-fixture", { id: 89001, username: "fixture_cora_bot", first_name: "Cora" });

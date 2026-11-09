@@ -158,7 +158,7 @@ export class KnowledgeSources {
     if (!sender && agent.ownerId === `${transportOf(channelId)}:${message.authorId}`) return true;
     if (!sender && ["owner", "human"].includes(message.kind) && transportOf(channelId) !== "web") {
       const contact = `${transportOf(channelId)}:${message.authorId}`;
-      if (this.store.settings.permissions.some((grant) => grant.id === contact && (grant.agents.includes("*") || grant.agents.includes(agent.id)))) return true;
+      if (this.store.hasAgentPermission(contact, agent.id)) return true;
     }
     const person = !sender && this.store.panelUser(message.authorId);
     const owner = sender ? this.ownerId(sender) : person && !person.blocked ? person.id : this.messageOwner({ ...message, channelId });

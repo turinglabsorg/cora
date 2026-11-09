@@ -247,7 +247,28 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       .filter((person) => !owners[person.transport]?.includes(person.userId))
       .map((person) => ({ id: `${person.transport}:${person.userId}`, transport: person.transport, name: person.name, last: person.last, messages: person.messages }));
     for (const grant of settings.permissions) if (!people.some((person) => person.id === grant.id)) people.push({ id: grant.id, transport: grant.id.split(":")[0], name: grant.name || grant.id, last: 0, messages: 0 });
-    return { canManage: user.role === "owner", people: people.map((person) => ({ ...person, agents: grants.get(person.id)?.agents || [] })) };
+    return { canManage: user.role === "owner", people: people.map((person) => ({ ...person, agents: grants.get(person.id)?.agents || [], ...(grants.get(person.id)?.excludedAgents?.length ? { excludedAgents: grants.get(person.id).excludedAgents } : {}) })) };
+  };
+  const agentPermissionsView = async (agent, user) => {
+    const visible = await Promise.all(channels.listFor(agent).map(async (channel) => {
+      if (channel.kind === "discord" && bots && !await bots.canRead(agent, channel.id).catch(() => false)) return null;
+      return channel.id;
+    }));
+    const ids = new Set(visible.filter(Boolean));
+    for (const [id, owner] of orchestrator.dmAgent) if (owner === agent.id) ids.add(id);
+    for (const id of store.archivedChannels()) {
+      const parent = channels.info(id)?.parentId;
+      if ((parent && ids.has(parent)) || (id.startsWith("sl:") && [...ids].some((channel) => id.startsWith(channel + ":")))) ids.add(id);
+    }
+    const people = store.speakers(500, { channelIds: [...ids], agentId: agent.id }).map((person) => ({
+      id: `${person.transport}:${person.userId}`, transport: person.transport, name: person.name, last: person.last,
+    }));
+    for (const grant of store.settings.permissions) {
+      if ((grant.agents.includes("*") || grant.agents.includes(agent.id)) && !people.some((person) => person.id === grant.id)) people.push({ id: grant.id, transport: grant.id.split(":")[0], name: grant.name || grant.id, last: 0 });
+    }
+    return { canManage: knowledge?.ownerMemory ? knowledge.canManage(agent, user) : user.role === "owner", people: people.map((person) => ({
+      ...person, allowed: store.hasAgentPermission(person.id, agent.id), inherent: store.agentOwnerChats(agent).includes(person.id),
+    })) };
   };
   /** Every Slack app brought in line with the panel now, Cora's own first. */
   const syncSlackApps = async () => {
@@ -537,7 +558,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       if (path === "/api/brain/graph" && method === "GET") return send(res, 200, await userBrain.graph());
       if (path === "/api/brain/sharing" && method === "GET" && knowledge?.ownerMemory) return send(res, 200, {
-        people: store.panelUsers().filter((person) => !person.blocked && person.id !== user.id).map((person) => ({ id: person.id, name: person.name || person.email })),
+        people: store.sharingPeople(user),
       });
       if (path === "/api/brain/pages" && method === "GET") {
         const q = String(url.searchParams.get("q") || "").trim();
@@ -586,6 +607,37 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 202, { started: true, running: true });
       }
       throw new HttpError(404, "not found");
+    }
+    const agentPermissions = /^\/api\/agents\/([\w-]+)\/permissions$/.exec(path);
+    if (agentPermissions) {
+      const agent = store.agent(agentPermissions[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      if (!["GET", "PUT"].includes(method)) throw new HttpError(405, "metodo non supportato");
+      const view = await agentPermissionsView(agent, user);
+      if (method === "PUT") {
+        if (!view.canManage) throw new HttpError(403, "Solo il proprietario dell'agente cambia le autorizzazioni.");
+        const body = await readJson(req, 2048);
+        const person = view.people.find((entry) => entry.id === body.id);
+        if (!person || person.inherent || typeof body.allowed !== "boolean") throw new HttpError(400, "Persona o autorizzazione non valida.");
+        // Recheck ownership after the channel access lookups.
+        checkAgentMemory(agent.id, user);
+        const grants = store.settings.permissions.map((grant) => ({ ...grant }));
+        const grant = grants.find((entry) => entry.id === person.id);
+        if (grant?.agents.includes("*")) {
+          if (!body.allowed && !grant.excludedAgents?.includes(agent.id) && grant.excludedAgents?.length >= 50) throw new HttpError(409, "Troppe eccezioni per questa persona.");
+          grant.excludedAgents = body.allowed ? (grant.excludedAgents || []).filter((id) => id !== agent.id) : [...new Set([...(grant.excludedAgents || []), agent.id])];
+        } else if (grant) {
+          if (body.allowed && !grant.agents.includes(agent.id) && grant.agents.length >= 50) throw new HttpError(409, "Troppi agenti autorizzati per questa persona.");
+          grant.agents = body.allowed ? [...new Set([...grant.agents, agent.id])] : grant.agents.filter((id) => id !== agent.id);
+        }
+        else if (body.allowed) {
+          if (grants.length >= 100) throw new HttpError(409, "Troppe persone autorizzate.");
+          grants.push({ id: person.id, name: person.name, agents: [agent.id] });
+        }
+        store.updateSettings({ permissions: grants });
+        return send(res, 200, { ...view, people: view.people.map((entry) => ({ ...entry, allowed: store.hasAgentPermission(entry.id, agent.id) })) });
+      }
+      return send(res, 200, view);
     }
     if (path === "/api/permissions") {
       if (method === "PUT") {
@@ -1364,7 +1416,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         folders: store.artifactFolders().filter((folder) => artifacts.canReadMember(folder, user)).map((folder) => artifacts.folderView(folder)),
         reviews: artifacts.reviewsFor(user).map((commit) => artifacts.commitSummary(commit)),
         quota: artifacts.space(),
-        people: store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })),
+        people: store.sharingPeople(user),
         canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"),
       });
     }
@@ -1420,7 +1472,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           canReview: artifacts.canReview(folder, user),
           canUpload: artifacts.canUpload(folder, user),
           canManage: artifacts.canManage(folder, user),
-          people: artifacts.canManage(folder, user) ? store.panelUsers().filter((person) => !person.blocked).map((person) => ({ id: person.id, name: person.name || person.email, email: person.email, role: person.role })) : [],
+          people: artifacts.canManage(folder, user) ? store.sharingPeople(user) : [],
           shareHosting: Boolean(artifacts.shareSuffix),
           shareSuffix: artifacts.shareSuffix,
           shares: store.artifactShares(folder.id).map((share) => artifacts.shareView(share)),

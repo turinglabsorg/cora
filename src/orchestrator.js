@@ -237,7 +237,7 @@ export class Orchestrator {
     const id = `${transport}:${item.authorId}`;
     // The person an agent belongs to answers for it: their word counts as the owner's for their own agents.
     if (this.ownsAgent(item, agent, state)) return true;
-    return this.store.settings.permissions.some((grant) => grant.id === id && (grant.agents.includes("*") || grant.agents.includes(agent.id)));
+    return this.store.hasAgentPermission(id, agent.id);
   }
 
   /** Whether this message comes from the person the agent belongs to (not the owner of the space). */

@@ -8,9 +8,11 @@ A panel user owns the agents they create. That user's internal agents share a st
 
 The space administrator manages infrastructure and admission, but does not receive automatic access to another user's private agents or content. Agent rosters, private chat, each user's Salotto, desktops, files, email, traces, live events, routines, subscription accounts, Google connections, artifact folders and vault capabilities enforce ownership on the server. Direct URLs and guessed ids do not bypass those checks. Other owners' agents are also excluded from model rosters and file-transfer recipients.
 
-Common server instructions, configured transport channels and instance infrastructure remain space settings. A conversation deliberately held in a shared Discord, Slack or Telegram channel is visible to that channel's participants; moving private material there is a separate publication action. Bind an agent's chat owner explicitly in its profile. An ambiguous chat identity is not mapped to another panel owner.
+Common server instructions, configured transport channels and instance infrastructure remain space settings. A conversation deliberately held in a shared Discord, Slack or Telegram channel is visible to that channel's participants; moving private material there is a separate publication action. Bind an agent's chat contact in Agent → Settings → Permissions. An ambiguous chat identity is not mapped to another panel owner.
 
 Explicit operational permissions for a person's Discord, Slack or Telegram identity also let that person invoke the selected agents in their configured conversations. They do not change the agent's owner or grant access to the panel, private Brain pages, files, email, desktops or traces through the panel API. The space administrator receives no implicit cross-owner chat permission; revoked and other-agent grants remain refused, as do bot messages that impersonate a human permission.
+
+Manage each agent's operational grants in Agent → Settings → Permissions. `GET|PUT /api/agents/:id/permissions` is restricted to that agent's owner in owner-memory mode. A write accepts `{id, allowed}` for a contact from the agent's conversations or its existing grants. It preserves other agents' permissions, including future-agent wildcard access through optional per-agent exclusions. Operational grants can expose the agent's memory in its chat replies; they do not make private panel resources accessible.
 
 ## Explicit sharing
 
@@ -48,6 +50,7 @@ After a deliberate reset, an operator may set the existing settings value `knowl
 
 ## API and persistence
 
+- `GET|PUT /api/agents/:id/permissions`: agent-specific operational contact grants; writes accept `id` and boolean `allowed`.
 - `GET|PUT /api/agents/:id/knowledge`: source, saved-host status and owner; writes accept `source`, an optional `url`, and an authorized ownership assignment.
 - `POST /api/agents/:id/knowledge/check`: refresh the external source and return a read-only page count.
 - `/api/brain`, its page/search/graph routes, reviews and manual librarian runs select the signed-in user's namespace.

@@ -328,7 +328,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       sections.push([
         "## Il tuo computer",
         "L'uso del tuo computer è abilitato nella tua scheda, ma gli strumenti per usarlo non sono disponibili in questo turno. Questo non dice se il desktop è acceso: non dichiararlo spento, assente o da accendere. Non esiste un interruttore del computer per il singolo gruppo o la singola chat.",
-        "Accensione del desktop e autorizzazione della persona sono due cose distinte. Se Cora indica che il richiedente non è autorizzato, spiega quel limite: il proprietario dello spazio può autorizzare quello specifico account in Impostazioni → Permessi per questo agente. Le identità di Discord, Telegram e Slack sono separate: un permesso su una piattaforma non vale automaticamente sulle altre.",
+        "Accensione del desktop e autorizzazione della persona sono due cose distinte. Se Cora indica che il richiedente non è autorizzato, spiega quel limite: il proprietario dell'agente può autorizzare quello specifico account nella pagina di questo agente, Impostazioni → Autorizzazioni. Le identità di Discord, Telegram e Slack sono separate: un permesso su una piattaforma non vale automaticamente sulle altre.",
         "Non supporre che un'impostazione non sia stata salvata e non chiedere di riaccendere il desktop. Per un lavoro che richiede strumenti, chiedi con ask_owner l'intervento realmente necessario oppure spiega il permesso mancante. Se il limite è già stato spiegato, non ripeterlo a ogni messaggio: rispondi intanto alle domande che puoi gestire senza computer.",
       ].join("\n"));
     }

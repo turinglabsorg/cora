@@ -94,7 +94,7 @@ const PRESETS = [
   ["Ogni 15 minuti", "*/15 * * * *"],
 ];
 const TABS = [
-  ["profilo", "Profilo", "user"],
+  ["impostazioni", "Impostazioni", "sliders"],
   ["cervello", "Cervello", "chip"],
   ["chat", "Chat", "chat"],
   ["email", "Email", "mail"],
@@ -1992,13 +1992,20 @@ function agentForm(agent, { only = "" } = {}) {
     });
     subscription.setProvider((agent.model || S.data.settings.defaultModel).split("/")[0]);
   }
-  const form = h("form", { class: "stack" },
-    panel({ icon: "user", title: "Identità", hint: "Come si chiama e come appare." },
+  const identity = panel({ icon: "user", title: "Identità", hint: "Come si chiama e come appare." },
       setRows(
         setRow("Nome", "Chi lo nomina riceve la sua risposta.", nameInput),
         setRow("Colore", "Quello della sua immagine e del suo nome nel pannello.", colorInput),
         setRow("Genere", "Come parla di sé, e la voce che gli viene data.", genderInput),
-        setRow("Immagine", "La disegna Cora con il colore dell'agente; «Ridisegna» propone un'altra faccia. Una tua viene tagliata quadrata.", picture.node, { stack: true }))),
+        setRow("Immagine", "La disegna Cora con il colore dell'agente; «Ridisegna» propone un'altra faccia. Una tua viene tagliata quadrata.", picture.node, { stack: true })));
+  const character = panel({ icon: "spark", title: "Carattere", hint: "Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri." },
+    h("textarea", { name: "personality", class: "tall", placeholder: "Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…" }, agent.personality || ""));
+  const listening = panel({ icon: "radio", title: "Ascolto", hint: "Dove ascolta. Parla solo quando qualcuno lo chiama." },
+    setRows(platformsOn().map((kind) => platformRow(agent, kind)),
+      setRow("In onda", "Spento non ascolta e non parla, da nessuna parte.", switchInput("enabled", "", agent.enabled ?? true))));
+  const owner = !isNew && S.data.currentUser?.role === "owner" ? agentOwnerPanel(agent) : null;
+  const voice = voicePanel(agent, genderInput);
+  const form = h("form", { class: "stack", ...(isNew ? {} : { id: `agent-settings-${agent.id}` }) }, identity,
     wantsBrain ? panel({ icon: "chip", title: "Cervello", hint: "Con che modello pensa e cosa può usare." },
       setRows(
         setRow("Harness", harnessHint, harnessPick),
@@ -2006,14 +2013,7 @@ function agentForm(agent, { only = "" } = {}) {
         h("div", { class: "set-row stack" }, subscription.node),
         setRow("Ragionamento", "Quanto pensa prima di rispondere: più alto è più accurato ma più lento.", effortSelect(agent)),
         setRow("Usa il suo computer", "Un desktop Linux tutto suo, che vedi anche tu.", switchInput("tools", "", agent.tools ?? true)))) : null,
-    panel({ icon: "spark", title: "Carattere", hint: "Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri." },
-      h("textarea", { name: "personality", class: "tall", placeholder: "Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…" }, agent.personality || "")),
-    panel({ icon: "radio", title: "Ascolto", hint: "Dove ascolta. Parla solo quando qualcuno lo chiama." },
-      setRows(
-        platformsOn().map((kind) => platformRow(agent, kind)),
-        setRow("In onda", "Spento non ascolta e non parla, da nessuna parte.", switchInput("enabled", "", agent.enabled ?? true)))),
-    !isNew && S.data.currentUser?.role === "owner" ? agentOwnerPanel(agent) : null,
-    voicePanel(agent, genderInput),
+    character, listening, owner, voice,
     h("div", { class: "savebar" },
       isNew ? null : armedButton("Elimina", "Conferma", { onconfirm: async () => {
         if (await guard(api(`/api/agents/${agent.id}`, { method: "DELETE" }), `${agent.name} eliminato`)) {
@@ -2023,6 +2023,7 @@ function agentForm(agent, { only = "" } = {}) {
       } }),
       h("span", { class: "spacer" }),
       btn(isNew ? "Crea agente" : "Salva", { icon: "check", type: "submit", cls: "primary" })));
+  let controls = form;
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (wantsBrain && !subscription.validate()) return;
@@ -2032,7 +2033,7 @@ function agentForm(agent, { only = "" } = {}) {
       avatarSeed: data.get("avatarSeed"),
       color: data.get("color"),
       gender: data.get("gender"),
-      channelIds: [...hidden, ...[...form.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
+      channelIds: [...hidden, ...[...controls.querySelectorAll("[data-channels] .chip.on")].map((chip) => chip.dataset.id)],
       // Platforms not switched on keep what the agent had there.
       platformsOff: [...(agent.platformsOff || []).filter((kind) => !platformsOn().includes(kind)), ...platformsOn().filter((kind) => form.elements[`platform-${kind}`] && !form.elements[`platform-${kind}`].checked)],
       ...(form.elements.ownerId ? { ownerId: form.elements.ownerId.value } : {}),
@@ -2053,10 +2054,27 @@ function agentForm(agent, { only = "" } = {}) {
     if (!saved) return;
     await picture.upload(saved.id);
     await loadState();
-    if (isNew) location.hash = `#/agent/${saved.id}/profilo`;
+    if (isNew) location.hash = `#/agent/${saved.id}/impostazioni`;
     else renderAgent();
   });
-  return form;
+  if (isNew || only !== "profile") return form;
+  for (const input of form.querySelectorAll("input, select, textarea")) input.setAttribute("form", form.id);
+  const savebar = form.lastElementChild;
+  form.classList.add("agent-settings-save");
+  form.replaceChildren(savebar);
+  const entries = [
+    ["identita", "Identità", "user", "Nome, immagine e colore", [identity]],
+    ["carattere", "Carattere", "spark", "Personalità e modo di parlare", [character]],
+    ["ascolto", "Ascolto", "radio", "Canali e presenza", [listening]],
+    ["voce", "Voce", "mic", "Lingua e risposte vocali", [voice]],
+    ["autorizzazioni", "Autorizzazioni", "shield", "Chi può farlo lavorare", [agentPermissionsPane(agent), owner].filter(Boolean)],
+    ...platformsOn().map((kind) => [kind, TRANSPORTS[kind].label, TRANSPORTS[kind].icon, "Account e collegamento", [kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)]]),
+    ["github", "GitHub", "github", "App e repository", [githubAccount(agent)]],
+  ];
+  controls = sectionWorkspace({ title: "Impostazioni", base: `#/agent/${agent.id}/impostazioni`, current: route()[3], entries,
+    onSelect: (id) => { form.hidden = !["identita", "carattere", "ascolto", "voce"].includes(id) && !(id === "autorizzazioni" && owner); } });
+  controls.querySelector(".email-workspace-detail").append(form);
+  return controls;
 }
 
 const VOICE_LANGUAGE_NAMES = { it: "Italiano", en: "English", es: "Español", fr: "Français", de: "Deutsch", pt: "Português" };
@@ -2913,7 +2931,9 @@ function renderNew() {
 async function renderAgent() {
   const view = location.hash;
   S.live = null;
-  const [, id, tab = "profilo", sub] = route();
+  const [, id, requested = "impostazioni", sub] = route();
+  const tab = requested === "profilo" ? "impostazioni" : requested;
+  if (requested === "profilo") history.replaceState(null, "", `#/agent/${id}/impostazioni${sub ? "/" + sub : ""}`);
   const agent = S.data.agents.find((item) => item.id === id);
   if (!agent) {
     shell(panel({ icon: "alert", title: "Agente non trovato" }, btn("Torna agli agenti", { icon: "back", href: "#/agenti" })), { title: "Agente", back: "#/agenti" });
@@ -2945,9 +2965,9 @@ async function renderAgent() {
       return h("a", { href: `#/agent/${agent.id}/${key}`, class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, count) : null);
     })),
     slot,
-  ], { title: agent.name, back: ["email", "memoria"].includes(tab) && sub ? `#/agent/${agent.id}/${tab}` : sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : ["email", "memoria"].includes(tab) ? "email" : "" });
+  ], { title: agent.name, back: ["email", "memoria", "impostazioni"].includes(tab) && sub ? `#/agent/${agent.id}/${tab}` : sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : ["email", "memoria", "impostazioni"].includes(tab) ? "email" : "" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const isCurrent = () => slot.isConnected && (["email", "memoria"].includes(tab) ? location.hash.startsWith(`#/agent/${agent.id}/${tab}`) : location.hash === view);
+  const isCurrent = () => slot.isConnected && (["email", "memoria", "impostazioni"].includes(tab) ? location.hash.startsWith(`#/agent/${agent.id}/${tab}`) : location.hash === view);
   let body;
   if (tab === "memoria") body = await memoryTab(agent);
   else if (tab === "routine") body = await routineTab(agent, routines);
@@ -2957,7 +2977,7 @@ async function renderAgent() {
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
   else if (tab === "cervello") body = brainTab(agent);
   else if (tab === "email") body = await agentEmailTab(agent, isCurrent);
-  else body = [...platformsOn().map((kind) => kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)), githubAccount(agent), agentForm(agent, { only: "profile" })].filter(Boolean);
+  else body = agentForm(agent, { only: "profile" });
   if (isCurrent()) slot.replaceChildren(...[body].flat().filter(Boolean));
 }
 
@@ -3026,7 +3046,7 @@ async function memoryTab(agent) {
   ] });
 }
 
-function sectionWorkspace({ title, base, current = "", entries }) {
+function sectionWorkspace({ title, base, current = "", entries, onSelect = () => {} }) {
   const first = entries[0][0], panes = new Map(), tabs = new Map();
   const back = btn(title, { icon: "back", cls: "sm ghost email-section-back", onclick: () => show("") });
   const detail = h("div", { class: "email-workspace-detail" }, back);
@@ -3046,6 +3066,7 @@ function sectionWorkspace({ title, base, current = "", entries }) {
     for (const [key, tab] of tabs) { tab.classList.toggle("active", key === (current || first)); tab.setAttribute("aria-selected", String(key === (current || first))); tab.tabIndex = key === (current || first) ? 0 : -1; }
     if (update) { history.replaceState(null, "", base + (current ? "/" + current : "")); app.querySelector(".appbar a.icon-btn")?.setAttribute("href", current ? base : base.startsWith("#/brain/") ? "#/brain" : "#/agenti"); }
     detail.scrollTop = 0;
+    onSelect(current || first);
   }
   nav.addEventListener("keydown", (event) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -5207,7 +5228,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   const { folder } = data;
   const head = data.commits.find((commit) => commit.id === folder.head) || null;
   const pending = data.commits.filter((commit) => commit.status === "proposed" || commit.status === "conflict");
-  const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"]];
+  const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"], ["impostazioni", "Impostazioni", "sliders"]];
   const content = h("div", { class: "stack" });
   // Inside a subfolder the page is that subfolder's: its name, its path, the way up one level.
   const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
@@ -5233,7 +5254,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
     content,
   ], { title: folder.title, back: "#/artefatti", mode: "artifacts" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const shown = tab === "commit" ? artifactTakes(data) : tab === "permessi" ? artifactPermissions(data) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
+  const shown = tab === "commit" ? artifactTakes(data) : ["permessi", "impostazioni"].includes(tab) ? artifactPermissions(data, { settings: tab === "impostazioni" }) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
   content.replaceChildren(...[shown].flat().filter(Boolean));
 }
 
@@ -5676,7 +5697,7 @@ function artifactShares(data, dir = "") {
 }
 
 /** Who pushes, who reviews, whether it waits: rows that save as they change. */
-function artifactPermissions(data) {
+function artifactPermissions(data, { settings = false } = {}) {
   const { folder } = data;
   const save = async (changes, row) => {
     try {
@@ -5713,20 +5734,17 @@ function artifactPermissions(data) {
     if (event.target === all) for (const input of writers.querySelectorAll('input:not([value="*"])')) { input.disabled = all.checked; input.checked = all.checked || folder.writers.includes(input.value); }
     await save({ writers: chosen }, writersRow);
   });
-  const people = (data.people || []).filter((person) => person.role !== "owner");
+  const people = (data.people || []).filter((person) => person.id !== folder.ownerId && person.id !== S.data.currentUser?.id);
   const memberAccess = h("div", { class: "artifact-team-access stack-sm" });
   const accessLevels = [["none", "Nessun accesso"], ["read", "Lettura"], ["write", "Caricamento e modifica"]];
   const drawMemberAccess = () => {
     const policy = folder.memberAccess || { default: "write", users: {} };
-    const defaults = h("select", { "aria-label": "Accesso predefinito del team" }, accessLevels.map(([value, label]) => h("option", { value, selected: value === policy.default }, label)));
     const choose = async (changes) => {
       for (const control of memberAccess.querySelectorAll("select")) control.disabled = true;
       await save({ memberAccess: changes }, memberAccessRow);
       drawMemberAccess();
     };
-    defaults.addEventListener("change", () => choose({ ...policy, default: defaults.value }));
     memberAccess.replaceChildren(
-      h("div", { class: "artifact-team-default" }, h("div", {}, h("b", {}, "Accesso predefinito"), h("small", { class: "muted" }, "Vale anche per i nuovi membri del team.")), defaults),
       people.length ? h("div", { class: "artifact-team-list" }, people.map((person) => {
         const reviewer = folder.reviewers.includes(person.id);
         const selected = reviewer ? "write" : Object.hasOwn(policy.users, person.id) ? policy.users[person.id] : "inherit";
@@ -5743,6 +5761,14 @@ function artifactPermissions(data) {
   };
   const memberAccessRow = data.canManage && folder.memberAccess ? setRow("Membri del team", "Scegli chi può vedere, scaricare o modificare i file. Tu e i revisori avete sempre accesso completo.", memberAccess, { stack: true }) : null;
   if (memberAccessRow) drawMemberAccess();
+  const defaultAccess = h("select", { disabled: !data.canManage, "aria-label": tr("Accesso predefinito del team") }, accessLevels.map(([value, label]) => h("option", { value, selected: value === folder.memberAccess?.default }, label)));
+  const defaultRow = data.canManage && folder.memberAccess ? setRow("Accesso predefinito", "Vale anche per i nuovi membri del team. Le eccezioni si gestiscono in Permessi.", defaultAccess, { cls: "artifact-default-row" }) : null;
+  defaultAccess.addEventListener("change", async () => {
+    defaultAccess.disabled = true;
+    await save({ memberAccess: { ...folder.memberAccess, default: defaultAccess.value } }, defaultRow);
+    defaultAccess.value = folder.memberAccess.default;
+    defaultAccess.disabled = !data.canManage;
+  });
   const reviewers = !data.canManage ? null : people.length ? h("div", { class: "set-switches" }, people.map((person) => h("label", { class: "switch" },
     h("input", { type: "checkbox", value: person.id, checked: folder.reviewers.includes(person.id) }), h("span", { class: "rocker" }),
     h("span", { class: "switch-text" }, raw(person.name), h("small", { class: "mono" }, raw(person.email || "")))))) : h("p", { class: "muted small" }, "Nessun altro entra in questo spazio: per ora rivedi solo tu.");
@@ -5753,10 +5779,9 @@ function artifactPermissions(data) {
   const removeRow = data.canManage ? setRow("Elimina la cartella", "Con tutte le versioni e i link. I file restano solo nei backup della notte.", armedButton("Elimina", "Conferma: elimina tutto", { onconfirm: async () => {
     if (await guard(api(`/api/artifacts/folders/${folder.id}`, { method: "DELETE" }), "Cartella eliminata")) location.hash = "#/artefatti";
   } })) : null;
-  return [
-    panel({ icon: "edit", title: "La cartella" }, setRows(titleRow, descriptionRow)),
-    panel({ icon: "shield", title: "Permessi", hint: editable ? null : "Li cambiano il proprietario e i revisori della cartella." }, setRows(directRow, writersRow, memberAccessRow, reviewersRow, removeRow)),
-  ];
+  return settings
+    ? panel({ icon: "sliders", title: "Impostazioni" }, setRows(titleRow, descriptionRow, defaultRow, directRow, removeRow))
+    : panel({ icon: "shield", title: "Permessi", hint: editable ? null : "Li cambiano il proprietario e i revisori della cartella." }, setRows(writersRow, memberAccessRow, reviewersRow));
 }
 
 /** One changed file, opened: the lines it lost and gained, or the two pictures side by side. */
@@ -6315,65 +6340,36 @@ function subscriptionPlanLabel(plan) {
   return ({ free: "Free", pro: "Pro", plus: "Plus", max: "Max", team: "Team", enterprise: "Enterprise", business: "Business", self_serve_business_prolite: "Business" })[plan] || (/\s/.test(plan) ? plan : tr("Abbonamento attivo"));
 }
 
-/**
- * Settings → Permissions: the people in the chats the owner lets put the agents to work
- * on their computers, on every agent or on the ones chosen, so the agents stop asking
- * the owner for the go-ahead each time. Every change is saved at once; members only read.
- */
-function permissionsPane() {
+/** Each agent's owner grants operational access independently of private panel access. */
+function agentPermissionsPane(agent) {
   const body = h("div", { class: "stack" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
-  let data = null;
-  let busy = false;
-  const grants = () => data.people.filter((person) => person.agents.length).map(({ id, name, agents }) => ({ id, name, agents }));
-  const save = async (next) => {
-    if (busy) return;
-    busy = true;
-    for (const control of body.querySelectorAll("button, select")) control.disabled = true;
-    try {
-      data = await api("/api/permissions", { method: "PUT", body: { grants: next } });
-      toast("Permessi aggiornati");
-    } catch (error) { toast(error.message, true); }
-    busy = false;
-    draw();
-  };
-  const change = (id, agents) => save([...grants().filter((grant) => grant.id !== id), ...(agents.length ? [{ id, agents }] : [])]);
-  const where = (person) => h("small", {}, icon(TRANSPORTS[person.transport]?.icon || "user"), raw(TRANSPORTS[person.transport]?.label || person.transport),
-    person.last ? raw(` · ${tr("ultimo messaggio")} ${new Date(person.last).toLocaleDateString(LOCALE, { day: "numeric", month: "short" })}`) : null);
-  const row = (person) => {
-    const all = person.agents.includes("*");
-    const agents = S.data.agents;
-    const chip = (label, on, onclick) => h("button", { type: "button", class: `chip${on ? " on" : ""}`, "aria-pressed": String(on), disabled: !data.canManage, onclick }, label);
-    const toggle = (agent) => {
-      const chosen = all ? agents.map((item) => item.id) : person.agents;
-      change(person.id, chosen.includes(agent.id) ? chosen.filter((id) => id !== agent.id) : [...chosen, agent.id]);
-    };
-    return h("div", { class: "permission" },
-      h("div", { class: "permission-who" }, h("span", { class: "access-user-mark" }, icon("user")),
-        h("div", { class: "grow" }, h("b", {}, raw(person.name)), where(person)),
-        data.canManage ? btn("", { icon: "trash", cls: "ghost", title: tr("Togli il permesso a {name}", { name: person.name }), onclick: () => change(person.id, []) }) : null),
-      h("div", { class: "chips", role: "group", "aria-label": tr("Agenti che {name} può far lavorare", { name: person.name }) },
-        chip(tr("Tutti gli agenti"), all, () => !all && change(person.id, ["*"])),
-        agents.map((agent) => chip(raw(agent.name), all || person.agents.includes(agent.id), () => toggle(agent)))));
-  };
+  let data, busy = false;
   const draw = () => {
-    const granted = data.people.filter((person) => person.agents.length);
-    const others = data.people.filter((person) => !person.agents.length);
-    const pick = h("select", { "aria-label": tr("Persona da autorizzare") },
-      h("option", { value: "" }, others.length ? "Scegli una persona…" : "Nessun altro ha scritto nei canali"),
-      others.map((person) => h("option", { value: person.id }, raw(`${person.name} · ${TRANSPORTS[person.transport]?.label || person.transport}`))));
-    const add = btn("Autorizza", { icon: "plus", cls: "primary", disabled: !others.length, onclick: () => {
-      if (!pick.value) { pick.focus(); return; }
-      change(pick.value, ["*"]);
-    } });
-    body.replaceChildren(
-      granted.length ? h("div", { class: "permissions" }, granted.map(row))
-        : h("p", { class: "access-no-rules" }, "Per ora solo tu fai lavorare gli agenti sul loro computer: per gli altri ti chiedono il via libera."),
-      data.canManage ? h("div", { class: "access-add" }, pick, add)
-        : h("p", { class: "access-note" }, icon("info"), h("span", {}, "Solo l'owner dà e toglie i permessi.")));
+    body.replaceChildren(...[
+      h("p", { class: "lead agent-permission-note" }, "Le persone autorizzate possono conversare con questo agente, usare la sua memoria nelle risposte e affidargli lavori. Gli accessi privati al pannello restano al proprietario."),
+      data.people.length ? h("div", { class: "agent-permissions" }, data.people.map((person) => {
+        const control = h("input", { type: "checkbox", checked: person.inherent || person.allowed, disabled: busy || !data.canManage || person.inherent, "aria-label": tr("Autorizza {name}", { name: person.name }) });
+        control.addEventListener("change", async () => {
+          if (busy) return;
+          const allowed = control.checked;
+          busy = true;
+          draw();
+          try {
+            data = await api(`/api/agents/${agent.id}/permissions`, { method: "PUT", body: { id: person.id, allowed } });
+            toast("Permessi aggiornati");
+          } catch (error) { toast(error.message, true); }
+          busy = false;
+          draw();
+        });
+        return h("label", { class: "agent-permission" }, h("span", { class: "access-user-mark" }, icon(TRANSPORTS[person.transport]?.icon || "user")),
+          h("span", { class: "grow" }, h("b", {}, raw(person.name)), h("small", {}, raw(TRANSPORTS[person.transport]?.label || person.transport), person.inherent ? tr(" · referente dell'agente") : person.last ? raw(` · ${tr("ultimo messaggio")} ${new Date(person.last).toLocaleDateString(LOCALE)}`) : null)),
+          h("span", { class: "switch" }, control, h("span", { class: "rocker" })));
+      })) : h("p", { class: "access-no-rules" }, "Le persone compaiono dopo aver scritto in un canale dell'agente o al suo bot."),
+      data.canManage ? null : h("p", { class: "access-note" }, icon("info"), "Solo il proprietario dell'agente cambia le autorizzazioni.")].filter(Boolean));
   };
-  api("/api/permissions").then((value) => { data = value; draw(); })
-    .catch((error) => body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))));
-  return panel({ icon: "user", title: "Chi può far lavorare gli agenti", hint: "Oltre a te: le persone che scrivono nei canali e possono chiedere agli agenti un lavoro sul loro computer senza che ti chiedano il via libera." }, body);
+  api(`/api/agents/${agent.id}/permissions`).then((value) => { data = value; draw(); })
+    .catch((error) => body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), raw(error.message))));
+  return panel({ icon: "shield", title: "Autorizzazioni", hint: tr("Chi può parlare e affidare lavori a {name}.", { name: agent.name }) }, body);
 }
 
 function instanceAccessPanel() {
@@ -6756,6 +6752,7 @@ function keyState(provider) {
  * and an entry opens its page alone, with a way back.
  */
 function renderSettings() {
+  if (route()[1] === "permessi") { location.hash = "#/agenti"; return; }
   const settings = S.data.settings;
   const manage = S.data.access?.canManage !== false;
   let current = "";
@@ -7029,7 +7026,6 @@ function renderSettings() {
   page("domini", mailDomainsPane());
 
   /* ---------- Persone ---------- */
-  page("permessi", permissionsPane());
   page("accesso", instanceAccessPanel());
   const keys = h("textarea", { class: "mono", placeholder: "ssh-ed25519 AAAA… telefono", "aria-label": tr("Chiavi SSH"), disabled: !manage }, settings.sshKeys.join("\n"));
   const keysRow = setRow("Altre chiavi", "Una per riga. Valgono già le chiavi che entrano nella macchina host: qui aggiungi le altre. Si salvano quando esci dal campo.", keys, { stack: true });
@@ -7043,7 +7039,6 @@ function renderSettings() {
 
   /* ---------- the list ---------- */
   const doc = S.data.doc || {};
-  const people = (settings.permissions || []).length;
   const keyCount = settings.sshKeys.length;
   entries = [
     { id: "contesto", group: "Contesto", label: "Contesto degli agenti", mark: "book", href: "#/contesto", state: () => [null, tr("istruzioni e file che tutti leggono")] },
@@ -7060,7 +7055,6 @@ function renderSettings() {
     } },
     { id: "github", group: "Agenti", label: "GitHub", mark: "github", state: () => [null, S.data.settings.githubOrg || tr("le app nel tuo account")] },
     { id: "domini", group: "Agenti", label: "Domini", mark: "globe", state: () => [null, tr("Account Resend e domini email")] },
-    { id: "permessi", group: "Persone", label: "Permessi", mark: "user", state: () => [null, people ? (people === 1 ? tr("1 persona oltre a te") : tr("{count} persone oltre a te", { count: people })) : tr("solo tu")] },
     { id: "accesso", group: "Persone", label: "Accesso", mark: "shield", state: () => [null, tr("chi entra nella tua Cora")] },
     { id: "ssh", group: "Persone", label: "Chiavi SSH", mark: "key", state: () => [null, keyCount ? (keyCount === 1 ? tr("1 chiave in più") : tr("{count} chiavi in più", { count: keyCount })) : tr("solo quelle dell'host")] },
     ...(S.data.artifacts?.space ? [{ id: "spazio", group: "Generale", label: "Spazio", mark: "layers", state: () => {
