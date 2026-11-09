@@ -327,8 +327,19 @@ test("owner isolation hides private platform resources from other members and th
   const subscription = f.app.store.createSubscription({ provider: "claude", label: "PRIVATE_ACCOUNT", connectedBy: { id: f.alice.user.id, name: "alice" } });
   const connection = { id: "gc_1111222233334444", email: "alice@private.test", agents: [agent.id], connectedBy: f.alice.user.id };
   f.app.store.setValue("googleConnectors", [connection]);
-  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "alice-private", description: "PRIVATE_FOLDER" } })).data;
+  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "alice-private", description: "PRIVATE_FOLDER", policy: "direct" } })).data;
   assert.equal(folder.memberAccess.default, "none");
+  const uploaded = await fetch(f.base + "/api/artifacts/folders/" + folder.id + "/blobs", { method: "POST", headers: { ...f.alice.headers, "X-Cora": "1" }, body: "PRIVATE_ARTIFACT_CONTENT" });
+  assert.equal(uploaded.status, 201); const blob = await uploaded.json();
+  const published = await f.request(f.alice, "/api/artifacts/folders/" + folder.id + "/upload", { method: "POST", body: { files: [{ path: "private.md", sha: blob.sha }] } });
+  assert.equal(published.status, 201); const commit = published.data.commit;
+  const filePath = "/api/artifacts/commits/" + commit.id + "/files/private.md";
+  assert.equal(await (await fetch(f.base + filePath, { headers: f.alice.headers })).text(), "PRIVATE_ARTIFACT_CONTENT");
+  f.app.artifacts.shareSuffix = "--owner-fixture.usecora.test";
+  const link = f.app.artifacts.createShare(folder.id, { label: "alice-document", view: "files", access: { mode: "people", emails: ["guest@external.test"], domains: [], members: false }, createdBy: { kind: "user", id: f.alice.user.id, name: "alice" } });
+  const linkPolicy = structuredClone(link.access);
+  const linkTarget = { kind: "share", share: link, folder: f.app.store.artifactFolder(folder.id) };
+  assert.equal(f.app.artifacts.allows(linkTarget, { email: "guest@external.test", via: "email" }), true);
   const legacy = f.app.artifacts.createFolder({ path: "alice-legacy-private", description: "PRIVATE_LEGACY_FOLDER", createdBy: { kind: "user", id: f.alice.user.id, name: "alice" } });
   delete legacy.ownerId; legacy.memberAccess = { default: "write", users: {} }; f.app.store.writeArtifactFolder(legacy);
   assert.equal((await f.request(f.alice, "/api/artifacts/folders/" + legacy.id)).status, 200);
@@ -352,6 +363,7 @@ test("owner isolation hides private platform resources from other members and th
     assert.equal((await f.request(actor, "/api/connectors/" + connection.id, { method: "DELETE" })).status, 403);
     assert.deepEqual((await f.request(actor, "/api/artifacts")).data.folders, []);
     assert.equal((await f.request(actor, "/api/artifacts/folders/" + folder.id)).status, 403);
+    for (const path of [filePath, filePath + "?download=1", "/api/artifacts/commits/" + commit.id, "/api/artifacts/commits/" + commit.id + "/objects/" + blob.sha, "/api/artifacts/commits/" + commit.id + "/view?path=private.md"]) assert.equal((await fetch(f.base + path, { headers: actor.headers })).status, 403, path);
     assert.deepEqual((await f.request(actor, "/api/secrets")).data.secrets, []);
     assert.equal((await f.request(actor, "/api/secrets/ALICE_FIXTURE_KEY", { method: "DELETE" })).status, 404);
     const denied = await fetch(f.base + "/api/files/" + file.id, { headers: actor.headers });
@@ -385,6 +397,9 @@ test("owner isolation hides private platform resources from other members and th
   } finally { abort.abort(); await reading; }
   await f.request(f.alice, "/api/artifacts/folders/" + folder.id, { method: "PUT", body: { memberAccess: { default: "none", users: { [f.bob.user.id]: "read" } } } });
   assert.equal((await f.request(f.bob, "/api/artifacts/folders/" + folder.id)).status, 200);
+  assert.equal(await (await fetch(f.base + filePath, { headers: f.bob.headers })).text(), "PRIVATE_ARTIFACT_CONTENT");
+  assert.deepEqual(f.app.store.artifactShare(link.id).access, linkPolicy, "internal sharing does not alter link permissions");
+  assert.equal(f.app.artifacts.allows(linkTarget, { email: f.bob.user.email, via: "email" }), false, "internal access does not grant access through an independently restricted link");
   assert.equal((await f.request(f.admin, "/api/artifacts/folders/" + folder.id)).status, 403);
   await f.request(f.alice, "/api/artifacts/folders/" + folder.id, { method: "PUT", body: { memberAccess: { default: "read", users: {} } } });
   assert.ok(f.app.artifacts.foldersFor(f.app.store.agent(bobAgent.id)).some((item) => item.folder === folder.path));
@@ -392,6 +407,8 @@ test("owner isolation hides private platform resources from other members and th
   assert.equal((await f.request(f.admin, "/api/artifacts/folders/" + folder.id)).data.canReview, false);
   await f.request(f.alice, "/api/artifacts/folders/" + folder.id, { method: "PUT", body: { memberAccess: { default: "none", users: {} } } });
   assert.equal((await f.request(f.bob, "/api/artifacts/folders/" + folder.id)).status, 403);
+  assert.equal((await fetch(f.base + filePath, { headers: f.bob.headers })).status, 403);
+  assert.deepEqual(f.app.store.artifactShare(link.id).access, linkPolicy, "internal revocation does not alter link permissions");
 });
 
 test("an agent CLI cannot inherit owner Brain links, database access or other agents' GitHub credentials", async (t) => {

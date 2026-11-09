@@ -16,6 +16,8 @@ Every Brain page starts private. The Sharing section offers only the owner and t
 
 Artifact folders also start private in this mode. Folder owners may explicitly grant member read/upload access, reviewer access or named-agent capabilities. A wildcard agent capability applies only to the folder owner's agents. Vault wildcard grants likewise stay within the secret owner's agents. An explicit recipient grant remains a separate permission.
 
+Internal file visibility and external share links use independent permissions. Creating a link never grants panel access to its recipients. Granting or revoking internal access does not change an existing link's recipients, limits or expiration. The internal listing, file/preview/download routes and underlying object routes all check the folder permission.
+
 ## External source
 
 An agent may select an external Brain instead of internal knowledge. Configure it in Agent → Memory → Source using an HTTPS link serving one of these representations:
