@@ -404,6 +404,14 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     return agent ? knowledge.ownerId(agent) : "";
   };
   const ownsEntry = (entry, viewer) => !knowledge?.ownerMemory || privateOwner(entry) === viewer?.id || (!privateOwner(entry) && !entry.text && !entry.item && !entry.trace && !entry.agentId && !entry.id);
+  const quotaAgentsFor = (viewer) => knowledge?.agentsFor(viewer) || store.agents();
+  const usesQuotaAccount = (agent, record) => String(agent.model || store.settings.defaultModel || "").startsWith(`${record.provider}/`)
+    && (record.server || agent.subscriptionId === record.id || (record.resident && store.settings.useResidentSubscriptions && !agent.subscriptionId));
+  const canReadQuota = (record, viewer) => Boolean(record && (!knowledge?.ownerMemory || quotaAgentsFor(viewer).some((agent) => usesQuotaAccount(agent, record)
+    && (record.server || (record.connectedBy?.id && knowledge.ownerId(agent) === record.connectedBy.id)))));
+  const quotaAccountsFor = (viewer) => subscriptions.list().filter((record) => canReadQuota(record, viewer)).map(({ id, provider, label, email, plan, status, resident, installed }) =>
+    ({ id, provider, label, email, plan, status, resident, installed, usage: subscriptions.usage.get(id) }));
+  const providerQuotasFor = (viewer) => viewer.role === "owner" ? subscriptions.usage.connections().filter((record) => canReadQuota(record, viewer)) : [];
   const checkAgentMemory = (id, viewer) => {
     if (knowledge?.ownerMemory && !knowledge.canManage(store.agent(id), viewer)) throw new HttpError(403, "Questi dati appartengono al proprietario dell'agente.");
   };
@@ -710,7 +718,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key), soniox: Boolean(voice?.enabled), deepseek: Boolean(llm.deepseek?.key) },
         doc: { installed: Boolean(brain.doc?.installed), ...(brain.doc?.installed ? brain.doc.activity() : {}) },
         subscriptions: subscriptions.list().filter((entry) => !knowledge?.ownerMemory || entry.connectedBy?.id === user.id),
-        providerUsage: user.role === "owner" ? subscriptions.usage.connections() : [],
+        quotaAccounts: quotaAccountsFor(user),
+        providerUsage: providerQuotasFor(user),
         boxImage: { name: config.boxImage, ready: imageReady },
         timezone: config.timezone,
         artifacts: artifacts ? { reviews: artifacts.reviewsFor(user).length, ...(user.role === "owner" ? { space: artifacts.space() } : {}) } : null,
@@ -725,8 +734,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     const subscriptionMatch = /^\/api\/subscriptions\/(sub_[a-f0-9]{12})(?:\/(login|code|cancel|check|usage))?$/.exec(path);
     if (subscriptionMatch) {
       const [, id, action] = subscriptionMatch;
+      if (action === "usage" && method === "GET") {
+        if (!canReadQuota(store.subscription(id), user)) throw new HttpError(404, "subscription non trovata");
+        return send(res, 200, subscriptions.usage.get(id));
+      }
       if (!store.subscription(id) || (knowledge?.ownerMemory && store.subscription(id).connectedBy?.id !== user.id)) throw new HttpError(404, "subscription non trovata");
-      if (action === "usage" && method === "GET") return send(res, 200, await subscriptions.usage.get(id));
       if (!action && method === "GET") return send(res, 200, subscriptions.view(id));
       if (!action && method === "DELETE") {
         await subscriptions.remove(id);
@@ -742,7 +754,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     const providerUsageMatch = /^\/api\/providers\/(ollama|deepseek)\/usage$/.exec(path);
     if (providerUsageMatch && method === "GET") {
-      if (user.role !== "owner" || !subscriptions.usage.record(`provider_${providerUsageMatch[1]}`)) throw new HttpError(404, "collegamento non trovato");
+      if (user.role !== "owner" || !canReadQuota(subscriptions.usage.record(`provider_${providerUsageMatch[1]}`), user)) throw new HttpError(404, "collegamento non trovato");
       return send(res, 200, subscriptions.usage.get(`provider_${providerUsageMatch[1]}`));
     }
     const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter|typesafe|soniox|deepseek)\/key$/.exec(path);

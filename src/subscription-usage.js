@@ -149,15 +149,21 @@ export class SubscriptionUsage {
   }
 
   start(interval = INTERVAL) {
-    if (this.timer || this.closed) return;
-    void this.refreshAll();
-    this.timer = setInterval(() => { void this.refreshAll(); }, interval);
-    this.timer.unref();
+    if (this.started || this.closed) return;
+    this.started = true;
+    const cycle = async () => {
+      await this.refreshAll();
+      if (!this.closed) { this.timer = setTimeout(cycle, interval); this.timer.unref(); }
+    };
+    void cycle();
   }
 
   async refreshAll() {
     if (this.closed) return;
-    const records = [...this.store.subscriptions(), ...this.providerRecords()].filter((record) => record.status === "ready" && (!record.resident || this.store.settings.useResidentSubscriptions));
+    const agents = this.store.agents();
+    const records = [...this.store.subscriptions(), ...this.providerRecords()].filter((record) => record.status === "ready" && (!record.resident || this.store.settings.useResidentSubscriptions)
+      && agents.some((agent) => String(agent.model || this.store.settings.defaultModel || "").startsWith(`${record.provider}/`)
+        && (record.server || agent.subscriptionId === record.id || (record.resident && !agent.subscriptionId))));
     await Promise.allSettled(records.map((record) => this.refresh(record.id)));
     if (!this.closed && records.length) this.emit();
   }
@@ -223,7 +229,7 @@ export class SubscriptionUsage {
 
   async close() {
     this.closed = true;
-    clearInterval(this.timer);
+    clearTimeout(this.timer);
     for (const entry of this.pending.values()) entry.controller.abort();
     this.drain();
     await Promise.allSettled([...this.pending.values()].map((entry) => entry.promise));

@@ -322,7 +322,14 @@ test("Gemini connects through Google's manual authorization and keeps each subsc
   assert.equal(new Set(runs.map((run) => run.scope)).size, 2);
   assert.ok(runs.every((run) => run.directory === join(home, "subscriptions", accounts.find((record) => run.account.startsWith(record.id)).id) && run.inheritedKeys.length === 0));
   const state = (await request("/api/state")).data;
-  assert.deepEqual(state.models.filter((model) => model.provider === "gemini").map((model) => model.id), ["gemini/gemini-4-argon-high", "gemini/gemini-3.8-flash-medium"]);
+  assert.deepEqual(state.models.filter((model) => model.provider === "gemini").map((model) => model.id), ["gemini/gemini-4-argon-high", "gemini/gemini-3.8-flash-medium", "gemini/claude-opus-5-5-high", "gemini/claude-sonnet-5-5-low", "gemini/gpt-oss-120b-medium"]);
+  assert.equal(state.models.find((model) => model.id === "gemini/claude-opus-5-5-high").vision, true);
+  assert.equal(state.models.find((model) => model.id === "gemini/gpt-oss-120b-medium").vision, false);
+  for (const model of ["gemini/claude-sonnet-5-5-low", "gemini/gpt-oss-120b-medium"]) {
+    const result = await app.llm.runAgent({ ...options, model, subscriptionId: accounts[0].id });
+    assert.equal(result.text, `Identity: ${accounts[0].id}@example.test`);
+    assert.ok(identity.calls().at(-1).argv.includes(model.slice("gemini/".length)), "the third-party model runs through the same Google profile");
+  }
   const panel = panelHarness({ language: "en", fetch: async () => { throw new Error("unexpected request"); } });
   panel.run(`S.data = ${JSON.stringify(state)}`);
   const picker = panel.run(`(() => { const p = subscriptionPicker(${JSON.stringify(accounts[0].id)}); p.setProvider("gemini"); return { text: p.node.textContent, value: p.value() }; })()`);

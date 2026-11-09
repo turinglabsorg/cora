@@ -80,6 +80,7 @@ class Element {
   }
   get elements() { return Object.fromEntries(this.fields.map((field) => [field.attributes.name, field])); }
   scrollIntoView() {}
+  focus() { let root = this; while (root.parent) root = root.parent; root.activeElement = this; }
   remove() {
     if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
     this.parent = null;

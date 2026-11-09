@@ -122,6 +122,7 @@ const STATE_LABEL = {
 };
 
 const ICONS = {
+  swap: '<path d="M4 7h16l-4-4M20 17H4l4 4"/>',
   archive: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M4.5 9v9.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M10 13h4"/>',
   folder: '<path d="M3.5 7.5a2 2 0 0 1 2-2h3.8l2 2.5h7.2a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
   commit: '<circle cx="12" cy="12" r="3.5"/><path d="M3 12h5.5M15.5 12H21"/>',
@@ -311,7 +312,12 @@ function skeletonLine(cls = "") {
 }
 
 function skeleton(kind = "rows", count = 3) {
-  const content = kind === "heat"
+  const content = kind === "quotas"
+    ? [h("div", { class: "quota-tabs", "aria-hidden": "true" }, Array.from({ length: 5 }, () => skeletonLine("sk-quota-tab"))),
+      h("div", { class: "quota-account-head" }, h("div", { class: "grow stack-sm" }, skeletonLine("sk-label"), skeletonLine("sk-caption"))),
+      h("div", { class: "quota-windows" }, Array.from({ length: 2 }, () => h("div", { class: "quota-window" },
+        h("div", { class: "quota-window-label" }, skeletonLine("sk-label"), skeletonLine("sk-total")), skeletonLine("sk-quota-meter"), skeletonLine("sk-caption"))))]
+    : kind === "heat"
     ? [h("div", { class: "heat-head" }, skeletonLine("sk-label"), skeletonLine("sk-total")),
       skeletonLine("sk-heat"), skeletonLine("sk-caption")]
     : Array.from({ length: count }, (_, index) => kind === "chat"
@@ -449,7 +455,7 @@ async function loadState() {
   const data = await api("/api/state");
   if (S.revoked) return null;
   S.data = data;
-  if (S.quotaPanel?.node.isConnected) S.quotaPanel.apply([...(data.subscriptions || []), ...(data.providerUsage || [])]);
+  if (S.quotaPanel?.node.isConnected) S.quotaPanel.apply([...(data.quotaAccounts || data.subscriptions || []), ...(data.providerUsage || [])]);
   updateLamp();
   return S.data;
 }
@@ -1039,9 +1045,24 @@ function usagePanels(agents) {
   return { global, individual };
 }
 
+function quotaAgents(record) {
+  return S.data.agents.filter((agent) => String(agent.model || S.data.settings?.defaultModel || "").startsWith(`${record.provider}/`)
+    && (record.server || agent.subscriptionId === record.id || (record.resident && !agent.subscriptionId)));
+}
+
+function quotaAccounts() {
+  return [...new Map([...(S.data.quotaAccounts || S.data.subscriptions || []), ...(S.data.providerUsage || [])].map((record) => [record.id, record])).values()]
+    .filter((record) => record.status === "ready" && record.installed !== false && record.usage?.issue !== "AUTH_REQUIRED"
+      && (!record.resident || S.data.settings?.useResidentSubscriptions) && quotaAgents(record).length);
+}
+
+function quotaSignature(records) {
+  return JSON.stringify([S.data.currentUser?.id, records.map(({ id, provider, label, email }) => [id, provider, label, email]), S.data.agents.map(({ id, name, model, subscriptionId }) => [id, name, model, subscriptionId])]);
+}
+
 function subscriptionUsagePanel() {
-  const records = [...(S.data.subscriptions || []), ...(S.data.providerUsage || [])].filter((record) => record.status === "ready" && (!record.resident || S.data.settings?.useResidentSubscriptions));
-  const signature = JSON.stringify([S.data.currentUser?.id, records.map(({ id, provider, label, email }) => [id, provider, label, email]), S.data.agents.map(({ id, model, subscriptionId }) => [id, model, subscriptionId])]);
+  const records = quotaAccounts(), signature = quotaSignature(records);
+  if (!records.length) { S.quotaPanel = null; return { node: null, start: () => {} }; }
   if (S.quotaPanel?.signature === signature) { S.quotaPanel.apply(records); return S.quotaPanel; }
   const body = h("div", { class: "quota-accounts" });
   const tabs = h("div", { class: "quota-tabs", role: "tablist", "aria-label": "Abbonamenti" });
@@ -1065,12 +1086,13 @@ function subscriptionUsagePanel() {
     const stale = data?.stale || windows.some((item) => item.resetsAt && Date.parse(item.resetsAt) <= Date.now());
     const state = loading ? h("div", { class: "quota-status", role: "status" }, h("span", { class: "subscription-spinner", "aria-hidden": "true" }), "Lettura delle quote…")
       : data.state !== "ready" || stale ? h("p", { class: "quota-status muted", role: "status" }, issues[data.issue] || (stale ? "Ultima lettura; in attesa di aggiornamento." : "In attesa del servizio quote.")) : null;
-    const assigned = S.data.agents.filter((agent) => (agent.subscriptionId || (record.resident ? record.id : "")) === record.id && agent.model?.startsWith(`${record.provider}/`)).length;
+    const assigned = quotaAgents(record);
     slot.setAttribute("aria-busy", loading ? "true" : "false");
     slot.replaceChildren(...[
       h("header", { class: "quota-account-head" },
-        h("div", { class: "grow" }, h("h3", {}, raw(record.label || names[record.provider])), record.server ? null : h("p", {}, raw(names[record.provider]), record.email ? raw(` · ${record.email}`) : null)),
-        badge(record.server ? tr("Account dello spazio") : assigned === 1 ? tr("1 agente") : tr("{count} agenti", { count: assigned }))),
+        h("div", { class: "grow" }, h("h3", {}, raw(record.label || names[record.provider])),
+          h("p", {}, raw(record.email || names[record.provider]), assigned.length ? raw(` · ${assigned.map((agent) => agent.name).join(", ")}`) : null)),
+        badge(record.server ? tr("Account dello spazio") : assigned.length === 1 ? tr("1 agente") : tr("{count} agenti", { count: assigned.length }))),
       windows.length ? h("div", { class: `quota-windows${stale ? " stale" : ""}` }, windows.map((item) => {
         const available = 100 - Math.min(100, Math.max(0, Number(item.usedPercent) || 0));
         const label = item.kind === "weekly" ? tr("Settimana") : item.kind === "monthly" ? tr("Mese") : item.kind === "session" ? tr("Sessione · 5 ore") : tr("Finestra · {minutes} min", { minutes: item.minutes || "—" });
@@ -1095,14 +1117,15 @@ function subscriptionUsagePanel() {
   for (const record of records) {
     const title = `${labels[record.provider]} · ${record.label}${record.email ? ` · ${record.email}` : ""}`;
     const duplicates = records.filter((item) => item.provider === record.provider);
-    const index = duplicates.length > 1 ? ` ${duplicates.findIndex((item) => item.id === record.id) + 1}` : "";
+    const identity = duplicates.length > 1 ? record.email || record.label : "";
     const button = h("button", { class: "quota-tab", type: "button", role: "tab", id: `quota-tab-${record.id}`, "aria-controls": `quota-${record.id}`, "aria-label": title, title,
       onclick: () => select(record.id), onkeydown: (event) => {
         if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
         event.preventDefault();
         const at = records.findIndex((item) => item.id === record.id), next = event.key === "Home" ? 0 : event.key === "End" ? records.length - 1 : (at + (event.key === "ArrowLeft" ? -1 : 1) + records.length) % records.length;
         select(records[next].id); buttons.get(records[next].id).focus();
-      } }, icon(SUBSCRIPTION_ICONS[record.provider] || (record.provider === "ollama" ? "globe" : "chip")), h("span", {}, raw(labels[record.provider] + index)));
+      } }, icon(SUBSCRIPTION_ICONS[record.provider] || (record.provider === "ollama" ? "globe" : "chip")),
+      h("span", { class: "quota-tab-label" }, h("span", {}, raw(labels[record.provider])), identity ? h("small", { class: "quota-tab-account" }, raw(identity)) : null));
     const slot = h("article", { class: "quota-account", id: `quota-${record.id}`, role: "tabpanel", "aria-labelledby": `quota-tab-${record.id}`, "data-subscription": record.id });
     slots.set(record.id, slot); buttons.set(record.id, button); body.append(slot); tabs.append(button); paint(record, record.usage);
   }
@@ -1117,30 +1140,67 @@ function subscriptionUsagePanel() {
       do {
         requested = false; checkedAt = Date.now();
         await Promise.all(records.map(async (record) => {
-          try { const data = await api(record.server ? `/api/providers/${record.provider}/usage` : `/api/subscriptions/${record.id}/usage`); if (body.isConnected) { const current = [...(S.data.subscriptions || []), ...(S.data.providerUsage || [])].find((item) => item.id === record.id); if (current) current.usage = data; paint(record, data); } }
+          try { const data = await api(record.server ? `/api/providers/${record.provider}/usage` : `/api/subscriptions/${record.id}/usage`); if (body.isConnected) { const current = [...(S.data.quotaAccounts || S.data.subscriptions || []), ...(S.data.providerUsage || [])].find((item) => item.id === record.id); if (current) current.usage = data; paint(record, data); } }
           catch { if (body.isConnected) paint(record, { ...snapshots.get(record.id), state: "error", issue: "unavailable", stale: true }); }
         }));
       } while (requested && body.isConnected);
-    })().finally(() => { pending = null; });
+    })().finally(() => { pending = null; if (body.isConnected && quotaSignature(quotaAccounts()) !== signature) renderAgents(); });
     return pending;
   };
-  const node = panel({ icon: "chart", title: "Quote e saldi", hint: "Disponibilità e saldi degli account. Aggiornamento ogni minuto.", cls: "subscription-usage" }, records.length ? tabs : null, body);
+  const node = panel({ icon: "chart", title: "Quote e saldi", hint: "Aggiornamento ogni minuto.", cls: "subscription-usage" }, records.length ? tabs : null, body);
   node.refreshQuota = update;
-  S.quotaPanel = { signature, node, refresh: update, apply: (updated) => { for (const record of updated) if (slots.has(record.id)) paint(record, record.usage); },
+  S.quotaPanel = { signature, node, refresh: update, apply: (updated) => {
+    if (node.isConnected && quotaSignature(quotaAccounts()) !== signature) { renderAgents(); return; }
+    for (const record of updated) if (slots.has(record.id)) paint(record, record.usage);
+  },
     start: () => { if (Date.now() - checkedAt >= 60000) void update(); if (tabs.scrollWidth > tabs.clientWidth) requestAnimationFrame(() => revealSelection(tabs)); S.timers.push(setInterval(update, 60000)); } };
   return S.quotaPanel;
+}
+
+function usageOverviewMode() {
+  if (S.usageView) return S.usageView;
+  try { return localStorage.getItem("cora.usageView") === "quotas" ? "quotas" : "usage"; } catch { return "usage"; }
+}
+
+function usageOverview(usage, subscriptions) {
+  const global = panel({ icon: "chart", title: "Consumi globali", hint: "Tutti gli agenti, giorno per giorno.", actions: heatLegend() }, usage.global);
+  const quotas = subscriptions.node;
+  const root = h("div", { class: "usage-overview" }, global, quotas);
+  if (!quotas) return root;
+  const switches = [global, quotas].map((node) => {
+    let actions = node.querySelector(".panel-actions");
+    if (!actions) { actions = h("div", { class: "panel-actions" }); node.querySelector(".panel-head").append(actions); }
+    actions.querySelector(".usage-toggle")?.remove();
+    const button = btn("", { icon: "swap", cls: "ghost usage-toggle", title: "Alterna consumi e quote", onclick: () => {
+      S.usageView = global.hidden ? "usage" : "quotas";
+      try { localStorage.setItem("cora.usageView", S.usageView); } catch {}
+      select(); switches[global.hidden ? 1 : 0].focus({ preventScroll: true });
+    } });
+    actions.append(button); return button;
+  });
+  const select = () => {
+    const showQuotas = usageOverviewMode() === "quotas";
+    global.hidden = showQuotas; quotas.hidden = !showQuotas;
+    for (const button of switches) {
+      button.setAttribute("aria-pressed", String(showQuotas));
+      button.setAttribute("title", tr(showQuotas ? "Mostra consumi globali" : "Mostra quote e saldi"));
+    }
+    const rail = quotas.querySelector(".quota-tabs");
+    if (showQuotas && rail.scrollWidth > rail.clientWidth) requestAnimationFrame(() => revealSelection(rail));
+  };
+  select(); return root;
 }
 
 function renderAgents() {
   const agents = S.data.agents;
   const usage = usagePanels(agents);
   const subscriptions = subscriptionUsagePanel();
+  const heading = pageHead("Agenti"); heading.classList.add("agents-page-head");
   shell([
-    pageHead("Agenti", tr("{on} in onda su {total}.", { on: agents.filter((agent) => agent.enabled).length, total: agents.length }), [btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary" })]),
+    heading,
     requestsStrip(),
-    panel({ icon: "chart", title: "Consumi globali", hint: "Tutti gli agenti, giorno per giorno.", actions: heatLegend() }, usage.global),
-    subscriptions.node,
-    panel({ icon: "users", title: "Gli agenti", hint: "Tocca un agente per aprire la chat; da lì impostazioni, memoria, routine e desktop." },
+    usageOverview(usage, subscriptions),
+    panel({ icon: "users", title: "Gli agenti", cls: "agent-roster", actions: btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary", title: "Nuovo agente" }) },
       agents.length ? h("div", { class: "rows" }, agents.map((agent) => {
         // One platform: how it writes there; several: where it is.
         const kinds = agentPlatforms(agent);
@@ -7389,10 +7449,13 @@ function bootSkeleton() {
   const [section] = route();
   const title = BOOT_TITLES[section] || "Agenti";
   if (title === "Agenti") {
+    const heading = pageHead("Agenti"); heading.classList.add("agents-page-head");
     return [[
-      pageHead("Agenti", skeletonLine("sk-caption")),
-      panel({ icon: "chart", title: "Consumi globali" }, skeleton("heat")),
-      panel({ icon: "users", title: "Gli agenti" }, skeleton()),
+      heading,
+      usageOverviewMode() === "quotas"
+        ? panel({ icon: "chart", title: "Quote e saldi", hint: "Aggiornamento ogni minuto.", cls: "subscription-usage", actions: btn("", { icon: "swap", title: "Alterna consumi e quote", cls: "ghost usage-toggle", disabled: true }) }, skeleton("quotas"))
+        : panel({ icon: "chart", title: "Consumi globali", actions: btn("", { icon: "swap", title: "Alterna consumi e quote", cls: "ghost usage-toggle", disabled: true }) }, skeleton("heat")),
+      panel({ icon: "users", title: "Gli agenti", cls: "agent-roster", actions: btn("", { icon: "plus", title: "Nuovo agente", cls: "primary only-icon", disabled: true }) }, skeleton()),
       panel({ icon: "chart", title: "Consumi per agente" }, skeleton("heat")),
     ], title];
   }

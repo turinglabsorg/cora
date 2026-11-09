@@ -1,9 +1,12 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Alterna consumi e quote": "Switch usage and quotas",
+  "Mostra consumi globali": "Show global usage",
+  "Mostra quote e saldi": "Show quotas and balances",
   "Quote degli abbonamenti": "Subscription quotas",
   "Quote e saldi": "Quotas and balances",
-  "Disponibilità e saldi degli account. Aggiornamento ogni minuto.": "Account allowances and balances. Updated every minute.",
+  "Aggiornamento ogni minuto.": "Updated every minute.",
   "Account dello spazio": "Space account",
   "Saldo disponibile": "Available balance",
   "Bonus": "Granted credit",

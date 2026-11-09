@@ -104,6 +104,7 @@ describe("subscription usage", () => {
     f.app.subscriptions.usage.now = () => time;
     const record = f.app.store.createSubscription({ provider: "claude", label: "Alice Claude", connectedBy: { id: f.alice.user.id } });
     f.app.store.updateSubscription(record.id, { status: "ready" });
+    f.app.store.createAgent({ name: "Alice quota", model: "claude/test", subscriptionId: record.id, brainOwnerId: f.alice.user.id, enabled: false, tools: false });
     const path = `/api/subscriptions/${record.id}/usage`;
     assert.equal((await f.request(f.bob, path)).status, 404);
     assert.equal((await f.request(f.admin, path)).status, 404); assert.equal(reads, 0);
@@ -126,6 +127,70 @@ describe("subscription usage", () => {
     await f.app.subscriptions.usage.refresh(record.id);
     assert.equal((await f.request(f.alice, path)).data.state, "ready"); assert.equal(reads, 3);
     assert.equal(f.app.store.subscription(record.id).status, "ready");
+  });
+
+  test("private quota and global token APIs include only the viewer's agents, including warm legacy caches", async (t) => {
+    const f = await knowledgeWorld({ subscriptionUsageIntervalMs: 0, subscriptionUsageReader: async () => claude });
+    t.after(f.close);
+    const records = [];
+    for (const [actor, tokens] of [[f.alice, 100], [f.bob, 9000]]) {
+      const record = f.app.store.createSubscription({ provider: "claude", label: actor.user.name, connectedBy: { id: actor.user.id } });
+      f.app.store.updateSubscription(record.id, { status: "ready" });
+      const agent = f.app.store.createAgent({ name: actor.user.name, model: "claude/test", subscriptionId: record.id, brainOwnerId: actor.user.id, enabled: false, tools: false });
+      const trace = f.app.traces.start({ agentId: agent.id, kind: "chat", channelId: "web", model: agent.model });
+      trace.spent({ in: tokens - 10, out: 10 }); trace.finish({ status: "done", output: "PASS" });
+      records.push({ record, agent, actor, tokens });
+    }
+    const legacy = f.app.store.createSubscription({ provider: "claude", label: "Legacy connection", connectedBy: { id: f.alice.user.id } });
+    f.app.store.updateSubscription(legacy.id, { status: "ready" });
+    f.app.store.createAgent({ name: "Bob legacy", model: "claude/test", subscriptionId: legacy.id, brainOwnerId: f.bob.user.id, enabled: false, tools: false });
+    await f.app.subscriptions.usage.refreshAll();
+    for (const { actor, record, agent, tokens } of records) {
+      const state = (await f.request(actor, "/api/state")).data;
+      assert.deepEqual(state.quotaAccounts.map(item => item.id), [record.id]);
+      assert.equal(state.quotaAccounts[0].usage.windows.length, 4);
+      assert.ok(state.subscriptions.every(item => !Object.hasOwn(item, "usage")), "management metadata cannot bypass the quota scope");
+      const usage = (await f.request(actor, "/api/usage")).data.usage;
+      assert.deepEqual(usage.map(item => item.agentId), [agent.id]);
+      assert.equal(usage[0].tokensIn + usage[0].tokensOut, tokens);
+      for (const other of records.filter(item => item.actor !== actor)) assert.equal((await f.request(actor, `/api/subscriptions/${other.record.id}/usage`)).status, 404);
+      assert.equal((await f.request(actor, `/api/subscriptions/${legacy.id}/usage`)).status, 404);
+    }
+    assert.deepEqual((await f.request(f.admin, "/api/usage")).data.usage, []);
+    assert.deepEqual((await f.request(f.admin, "/api/state")).data.quotaAccounts, []);
+    const metadata = (await f.request(f.alice, `/api/subscriptions/${legacy.id}`)).data;
+    assert.equal(Object.hasOwn(metadata, "usage"), false);
+    assert.equal(f.app.subscriptions.usage.get(legacy.id).windows.length, 4, "denial holds even with a populated cache");
+  });
+
+  test("Agents identifies multiple accounts by email, deduplicates shared assignments and hides unused connections", async (t) => {
+    const f = await subscriptionApp(t);
+    const accounts = [];
+    for (const email of ["first@example.test", "second@example.test", "unused@example.test"]) {
+      const record = f.app.store.createSubscription({ provider: "claude", label: "Claude" });
+      f.app.store.updateSubscription(record.id, { status: "ready", email }); accounts.push(record);
+    }
+    for (const [index, name] of [[0, "One"], [0, "Two"], [1, "Three"]]) f.app.store.createAgent({ name, model: "claude/test", subscriptionId: accounts[index].id, enabled: false, tools: false });
+    f.app.subscriptions.usage.read = async () => claude;
+    await f.app.subscriptions.usage.refreshAll();
+    assert.equal(f.app.subscriptions.usage.get(accounts[2].id).fetchedAt, null, "unused accounts are not polled");
+    const panel = panelHarness({ hash: "#/agenti", fetch: async (path, options = {}) => {
+      const response = await f.request(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
+    panel.run('S.usageView = "quotas"');
+    const boot = panel.run("boot()");
+    assert.ok(panel.app.querySelector(".sk-quotas"), "the quota preference reserves the compact quota outline");
+    await boot;
+    const quota = panel.app.querySelector(".subscription-usage");
+    assert.equal(quota.querySelector(".quota-tabs").querySelectorAll("button").length, 2);
+    assert.match(quota.querySelector(".quota-tabs").textContent, /first@example.test.*second@example.test/);
+    assert.doesNotMatch(quota.textContent, /unused@example.test/);
+    assert.match(quota.querySelector("article").textContent, /One.*Two/);
+    f.app.store.updateSubscription(accounts[1].id, { status: "disconnected" });
+    const state = (await f.request("/api/state")).data;
+    panel.run(`S.data = ${JSON.stringify(state)}; renderAgents()`);
+    assert.equal(panel.app.querySelector(".quota-tabs").querySelectorAll("button").length, 1);
   });
 
   test("invalidates in-flight reads on reconnect and bounds provider concurrency", async (t) => {
@@ -179,6 +244,7 @@ describe("subscription usage", () => {
     const f = await subscriptionApp(t);
     const record = f.app.store.createSubscription({ provider: "codex", label: "Background account" });
     f.app.store.updateSubscription(record.id, { status: "ready" });
+    f.app.store.createAgent({ name: "Background", model: "codex/test", subscriptionId: record.id, enabled: false, tools: false });
     const usage = f.app.subscriptions.usage; let reads = 0, time = Date.now();
     usage.now = () => time;
     usage.read = async () => { reads++; return { rateLimits: { primary: { usedPercent: 87, windowDurationMins: 10080 } } }; };
@@ -201,6 +267,21 @@ describe("subscription usage", () => {
     await usage.close();
   });
 
+  test("minute service waits for a slow backend cycle before scheduling the next one", async (t) => {
+    const f = await subscriptionApp(t), gate = Promise.withResolvers(), completed = Promise.withResolvers();
+    const record = f.app.store.createSubscription({ provider: "codex", label: "Slow background account" });
+    f.app.store.updateSubscription(record.id, { status: "ready" });
+    f.app.store.createAgent({ name: "Background", model: "codex/test", subscriptionId: record.id, enabled: false, tools: false });
+    let reads = 0, notifications = 0;
+    f.app.subscriptions.usage.read = async () => { reads++; await gate.promise; return { rateLimits: { primary: { usedPercent: 87 } } }; };
+    f.app.subscriptions.usage.emit = () => { notifications++; completed.resolve(); };
+    f.app.subscriptions.usage.start(20);
+    await waitFor(() => reads === 1); await sleep(70);
+    gate.resolve(); await completed.promise; await sleep(1);
+    assert.equal(reads, 1); assert.equal(notifications, 1, "a slow cycle produces one update without overlapping timers");
+    await f.app.subscriptions.usage.close();
+  });
+
   test("backend reads Ollama allowances and DeepSeek balances once, while server finances stay owner-only", async (t) => {
     const calls = [];
     const server = http.createServer((req, res) => {
@@ -215,7 +296,9 @@ describe("subscription usage", () => {
     const endpoint = `http://127.0.0.1:${server.address().port}`;
     const f = await knowledgeWorld({ subscriptionUsageIntervalMs: 0, ollamaKey: "synthetic-ollama-key", deepseekKey: "synthetic-deepseek-key", deepseekApi: endpoint, ollamaBalanceApi: endpoint + "/api/balance" });
     t.after(f.close);
+    const owner = (await f.request(f.admin, "/api/state")).data.currentUser.id;
     for (const provider of ["ollama", "deepseek"]) {
+      f.app.store.createAgent({ name: provider, model: `${provider}/test`, brainOwnerId: owner, enabled: false, tools: false });
       assert.equal((await f.request(f.alice, `/api/providers/${provider}/usage`)).status, 404);
       assert.equal((await f.request(f.admin, `/api/providers/${provider}/usage`)).status, 200);
     }
@@ -241,6 +324,7 @@ describe("subscription usage", () => {
   test("Agents includes Ollama residual percentage and DeepSeek balances in one selected account", async (t) => {
     const f = await subscriptionApp(t);
     f.app.llm.ollamaKey = "synthetic-ollama-key"; f.app.llm.deepseek.key = "synthetic-deepseek-key";
+    for (const provider of ["ollama", "deepseek"]) f.app.store.createAgent({ name: provider, model: `${provider}/test`, enabled: false, tools: false });
     f.app.subscriptions.usage.read = async (record) => record.provider === "ollama"
       ? { included: { balance_usd: 3, allowance_usd: 100, period: { until: reset } }, purchased: { balance_usd: 25 } }
       : { balance_infos: [{ currency: "CNY", total_balance: "110.00", granted_balance: "10.00", topped_up_balance: "100.00" }] };
@@ -263,9 +347,12 @@ describe("subscription usage", () => {
     const f = await subscriptionApp(t);
     const record = f.app.store.createSubscription({ provider: "gemini", label: "Google personale" });
     const codex = f.app.store.createSubscription({ provider: "codex", label: "ChatGPT personale" });
-    for (const item of [record, codex]) f.app.store.updateSubscription(item.id, { status: "ready" });
+    for (const item of [record, codex]) {
+      f.app.store.updateSubscription(item.id, { status: "ready" });
+      f.app.store.createAgent({ name: item.label, model: `${item.provider}/test`, subscriptionId: item.id, enabled: false, tools: false });
+    }
     const gate = Promise.withResolvers(); let reads = 0, cacheRequests = 0;
-    f.app.subscriptions.usage.read = async (item) => { reads++; await gate.promise; return item.provider === "gemini" ? gemini : { rateLimits: { secondary: { usedPercent: 87, windowDurationMins: 10080, resetsAt: 1794859200 } } }; };
+    f.app.subscriptions.usage.read = async (item, signal) => { reads++; await Promise.race([gate.promise, new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }))]); return item.provider === "gemini" ? gemini : { rateLimits: { secondary: { usedPercent: 87, windowDurationMins: 10080, resetsAt: 1794859200 } } }; };
     const background = f.app.subscriptions.usage.refreshAll();
     const panel = panelHarness({ hash: "#/agenti", fetch: async (path, options = {}) => {
       if (/subscriptions.*usage$/.test(path)) cacheRequests++;
@@ -273,6 +360,10 @@ describe("subscription usage", () => {
       return { ok: response.status < 400, status: response.status, json: async () => response.data };
     } });
     await panel.run("boot()");
+    const overview = panel.app.querySelector(".usage-overview");
+    assert.equal(overview.querySelectorAll("section").filter(node => !node.hidden).length, 1);
+    overview.querySelector(".usage-toggle").click();
+    assert.equal(panel.app.querySelector(".subscription-usage").hidden, false);
     assert.match(panel.app.textContent, /Lettura delle quote/); assert.doesNotMatch(panel.app.textContent, /null|undefined/);
     const mounted = panel.app.querySelector(".quota-accounts"), quota = panel.app.querySelector(".subscription-usage");
     const tabs = quota.querySelector(".quota-tabs").querySelectorAll("button");
@@ -286,6 +377,10 @@ describe("subscription usage", () => {
     assert.equal(Number(selected.querySelector("progress").value), 13);
     assert.equal(tabs[1].getAttribute("aria-selected"), "true");
     const meter = selected.querySelector("progress"), before = cacheRequests;
+    quota.querySelector(".usage-toggle").click();
+    overview.querySelector(".usage-toggle").click();
+    assert.equal(overview.querySelectorAll("section").filter(node => !node.hidden).length, 1);
+    assert.equal(selected.querySelector("progress"), meter, "switching views keeps the account and meter mounted");
     for (let i = 0; i < 5; i++) await panel.run("renderAgents()");
     assert.equal(panel.app.querySelector(".quota-accounts"), mounted);
     assert.equal(selected.querySelector("progress"), meter, "identical snapshots never reconstruct the account");
@@ -671,6 +766,15 @@ test("Gemini quota errors distinguish Argon, shared limits and unknown capacity 
     assert.match(text, /Gemini 4 Argon.*weekly usage limit/);
     assert.match(text, /shared Gemini model group/);
     assert.doesNotMatch(text, /Other Gemini models|97%|94%/);
+  });
+  await t.test("Claude and GPT limits use their own Antigravity pool", async () => {
+    for (const [model, label] of [["claude-sonnet-5-5-low", /Claude Sonnet 5.5/], ["gpt-oss-120b-medium", /GPT-OSS 120B/]]) {
+      f.app.store.updateAgent(agent.id, { model: `gemini/${model}` });
+      const text = await ask({ geminiUsage: usage([group("Gemini Models", [bucket("weekly", .97)]), group("Claude and GPT models", [bucket("5h", 0)])]) });
+      assert.match(text, label); assert.match(text, /limite di cinque ore/);
+      assert.match(text, /quota condivisa di Claude e GPT in Antigravity/); assert.match(text, /97% settimanale/);
+    }
+    f.app.store.updateAgent(agent.id, { model: "gemini/gemini-4-argon-high" });
   });
   await t.test("a failed quota lookup reports unknown capacity", async () => {
     const text = await ask({ geminiUsageFailed: true });
@@ -2230,9 +2334,12 @@ describe("panel auth", () => {
     try {
       const boot = panel.run("boot()");
       assert.ok(panel.app.querySelectorAll(".loading-skeleton").length, "startup reserves space before the state arrives");
+      assert.equal(panel.app.querySelector(".sk-quotas"), null, "startup reserves only the selected usage view");
       await boot;
       assert.deepEqual(panel.app.querySelectorAll("h2").map((node) => node.textContent), ["Global usage", "Quotas and balances", "The agents", "Usage by agent"]);
       assert.equal(paths.filter((path) => path === "/api/usage").length, 1, "both panels share one request");
+      assert.ok(panel.app.querySelector(".agent-roster").querySelector(".panel-actions").querySelector("a"), "creation belongs in the roster header");
+      assert.doesNotMatch(panel.app.querySelector(".page-head").textContent, /on air|Nuovo agente|New agent/);
       assert.ok(!paths.some((path) => path.includes("/rooms/")), "opening the app never opens the lounge");
       assert.equal(panel.app.querySelectorAll(".loading-skeleton").length, 3, "one chart skeleton globally and one per agent");
       usageReady.resolve();

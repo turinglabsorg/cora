@@ -28,7 +28,7 @@ if (provider === "gemini" && argv.includes("/usage")) {
   line({ status: account ? "SUCCESS" : "ERROR", response: account ? "Account: " + account.email : "", error: account ? "" : "authentication required" });
   process.exit(account ? 0 : 1);
 } else if (provider === "gemini" && argv[0] === "models") {
-  process.stdout.write(saved() ? "gemini-4-argon-high       Gemini 4 Argon (High)\\ngemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)\\n" : "authentication required");
+  process.stdout.write(saved() ? "gemini-4-argon-high       Gemini 4 Argon (High)\\ngemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)\\nclaude-opus-5-5-high      Claude Opus 5.5 (High)\\nclaude-sonnet-5-5-low     Claude Sonnet 5.5 (Low)\\ngpt-oss-120b-medium      GPT-OSS 120B (Medium)\\n" : "authentication required");
   process.exit(saved() ? 0 : 1);
 } else if (provider === "gemini" && argv.includes("/logout")) {
   fs.rmSync(marker, { force: true }); process.exit(0);

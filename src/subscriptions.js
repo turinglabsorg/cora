@@ -199,7 +199,6 @@ export class Subscriptions {
     return {
       ...record,
       installed: this.installed(record.provider),
-      ...(this.usage ? { usage: this.usage.get(id) } : {}),
       ...(login ? { login: { url: login.url, userCode: login.userCode, manualCode: ["claude", "gemini"].includes(record.provider), expiresAt: login.expiresAt,
         phase: login.codeSubmitted ? "verifying" : login.url ? "authorizing" : "preparing" } } : {}),
     };
@@ -489,7 +488,7 @@ export class Subscriptions {
       if (code !== 0) return [];
       const models = new Map();
       for (const line of output.replace(/\x1b\[[0-9;]*m/g, "").split("\n")) {
-        const match = line.match(/^\s*[*·-]?\s*(gemini-[a-z0-9.-]+)\s+(.+?)\s*$/i);
+        const match = line.match(/^\s*[*·-]?\s*((?:gemini|claude|gpt)-[a-z0-9.-]+)\s+(.+?)\s*$/i);
         if (match) models.set(match[1], { name: match[1], label: match[2] });
       }
       return [...models.values()];

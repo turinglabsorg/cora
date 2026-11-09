@@ -448,7 +448,7 @@ export class LLM {
       for (const model of MUSE_MODELS) models.push({ id: `muse/${model.name}`, provider: "muse", label: model.label, tools: true, vision: false, thinking: false });
     }
     if (available.gemini) {
-      for (const model of await this.subscriptions?.geminiModels() || []) models.push({ ...model, id: `gemini/${model.name}`, provider: "gemini", tools: true, vision: true, thinking: true });
+      for (const model of await this.subscriptions?.geminiModels() || []) models.push({ ...model, id: `gemini/${model.name}`, provider: "gemini", tools: true, vision: !/^gpt-oss-/i.test(model.name), thinking: true });
     }
     if (available.ollama) {
       // One place decides what a model is and what it can do, asking the model when the
@@ -555,7 +555,7 @@ export class LLM {
     const known = (await this.listModels({ host })).find((item) => item.id === model);
     if (known) return known;
     const { provider } = splitModel(model);
-    return { id: model, provider, tools: true, vision: provider !== "ollama", thinking: false };
+    return { id: model, provider, tools: true, vision: provider !== "ollama" && !/^gemini\/gpt-oss-/i.test(model), thinking: false };
   }
 
   /**
