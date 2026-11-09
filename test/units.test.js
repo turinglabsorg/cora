@@ -658,7 +658,7 @@ test("Artefatti, Registro: who opened, viewed and downloaded what through the li
   const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   await panel.navigate(`#/artefatti/${folder.id}/registro`);
   await settle();
-  assert.deepEqual(panel.app.querySelector(".tabs").querySelectorAll("a").map((tab) => tab.attributes.href.split("/").at(-1)), ["file", "commit", "condivisione", "registro", "permessi"]);
+  assert.deepEqual(panel.app.querySelector(".tabs").querySelectorAll("a").map((tab) => tab.attributes.href.split("/").at(-1)), ["file", "commit", "condivisione", "registro", "permessi", "impostazioni"]);
   const lines = () => panel.app.querySelectorAll(".log-row").map((row) => row.querySelector(".log-text").children[0].textContent);
   assert.deepEqual(lines(), [
     "giulia@cliente.it ha scaricato docs/report.pdf",

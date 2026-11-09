@@ -16,6 +16,8 @@ An agent can instead select an exclusive external Brain through `GET|PUT /api/ag
 
 See `docs/owner-knowledge.md` for the API and source format. Integration coverage is in `test/cora.test.js`, using real isolated PGlite schemas from `test/knowledge-fixtures.js`; browser verification follows source switching, owner isolation, explicit sharing, revocation and the desktop/phone section rails.
 
+The agent's Settings rail (`#/agent/:id/impostazioni/:section`, with legacy Profile URLs preserved) uses mounted `sectionWorkspace()` panes for identity, character, listening, voice, permissions and service accounts. Identity controls retain one native form through their `form` attribute; account forms remain independent and drafts survive section changes. The Telegram group's Listening action activates the current workspace's listening tab before scrolling. Folder Settings holds default member access; named recipients, writers and reviewers remain in Permissions.
+
 ## Layout
 
 - **Managed default mail domain:** `CORA_MAIL_DOMAIN` may select a verified managed Resend domain for future agents. `GET /api/mail/domains` exposes `defaultDomain` and keeps one entry with that account's actual readiness/DNS state. A managed default still goes through `checkDomain()` on assignment; being the configured default never bypasses verification. Existing agent addresses remain selected until explicitly reassigned. Integration coverage is in `test/cora.test.js`.
