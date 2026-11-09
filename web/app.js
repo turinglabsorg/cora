@@ -1169,7 +1169,8 @@ function brainPanel(agent) {
     placeholder: "provider/modello, es. orcarouter/deepseek/deepseek-v4.1-flash",
   });
   const subscription = subscriptionPicker(agent.subscriptionId);
-  const left = h("div", { class: "harness-list", role: "radiogroup", "aria-label": "Harness" });
+  const harnessInput = h("select", { "aria-label": "Harness" });
+  const harnessHint = h("small", { class: "muted" });
   const right = h("div", { class: "stack-sm brain-side" });
 
   custom.addEventListener("input", () => {
@@ -1207,24 +1208,19 @@ function brainPanel(agent) {
     place = next ? placeOfModel(next) : next === "" ? placeOfModel(fallback) : "";
     problem = "";
     subscription.setProvider(SUBSCRIPTION_HARNESSES.includes(key) && harnessReady(key) ? key : "");
-    drawLeft();
+    drawHarness();
     drawRight();
   };
+  harnessInput.addEventListener("change", () => chooseHarness(harnessInput.value));
 
-  function drawLeft() {
-    left.replaceChildren(...Object.entries(HARNESSES).map(([key, item]) => {
+  function drawHarness() {
+    harnessInput.replaceChildren(...Object.entries(HARNESSES).map(([key, item]) => {
       const ready = harnessReady(key);
-      const on = key === harness;
-      return h("button", {
-        type: "button", class: `harness-row${on ? " on" : ""}${ready ? "" : " off"}`, role: "radio",
-        "aria-checked": String(on), onclick: () => chooseHarness(key),
-      },
-        h("span", { class: "harness-led", "aria-hidden": "true" }),
-        h("span", { class: "harness-text" },
-          // DeepSeek Harness can be installed and still lack its key: the flag says which.
-          h("span", { class: "harness-name" }, tr(item.label), ready ? null : h("span", { class: "harness-flag" }, tr(key === "deepseek" && S.data.providers?.deepseekInstalled ? "senza chiave" : "non installato"))),
-          h("span", { class: "harness-hint" }, tr(item.hint))));
+      const status = ready ? "" : tr(key === "deepseek" && S.data.providers?.deepseekInstalled ? "senza chiave" : "non installato");
+      return h("option", { value: key, selected: key === harness }, raw(tr(item.label) + (status ? ` · ${status}` : "")));
     }));
+    harnessInput.value = harness;
+    harnessHint.textContent = tr(HARNESSES[harness].hint);
   }
 
   function modelRow(model, { subtitle = "", fit = null, selected = false, quiet = false, sees = true }) {
@@ -1402,19 +1398,18 @@ function brainPanel(agent) {
   };
 
   subscription.setProvider(SUBSCRIPTION_HARNESSES.includes(harness) && harnessReady(harness) ? harness : "");
-  drawLeft();
+  drawHarness();
   drawRight();
   loadHardware();
 
   const node = h("div", { class: "brain" },
-      h("div", { class: "brain-main" },
-        h("div", { class: "stack-sm" }, h("span", { class: "label" }, "Harness"), left),
-        h("div", { class: "stack-sm" }, h("span", { class: "label" }, "Modello"), right)),
+      setRows(setRow("Harness", "Chi guida il modello e gli passa gli strumenti.", h("div", { class: "stack-sm brain-harness" }, harnessInput, harnessHint), { stack: true })),
+      h("div", { class: "stack-sm" }, h("span", { class: "label" }, "Modello"), right),
       modelInput, hostInput);
   node.refreshModels = () => {
     if (harness !== "gemini") return;
     if (!chosen) { chosen = opening(harness) || ""; modelInput.value = chosen; place = "cloud"; }
-    drawLeft();
+    drawHarness();
     drawRight();
   };
   return {
@@ -1431,19 +1426,27 @@ function effortSelect(agent) {
       h("option", { value, selected: (agent.effort || (agent.think ? "high" : "")) === value }, label)));
 }
 
-/** The Cervello tab: the two columns, plus what the brain does once it has a model. */
 function brainTab(agent) {
   const brain = brainPanel(agent);
-  const form = h("form", { class: "stack" },
-    panel({ icon: "chip", title: "Cervello", hint: "Chi guida il ciclo, dove gira il modello e quale." }, brain.node),
-    panel({ icon: "spark", title: "Come pensa", hint: "Quanto si ferma a ragionare e cosa ha per le mani." },
-      setRows(
-        setRow("Ragionamento", "Quanto pensa prima di rispondere: più alto è più accurato ma più lento.", effortSelect(agent)),
-        setRow("Usa il suo computer", "Un desktop Linux tutto suo, che vedi anche tu.", switchInput("tools", "", agent.tools ?? true)))),
+  const model = panel({ icon: "chip", title: "Modello e account", hint: "Chi guida il ciclo, dove gira il modello e quale." }, brain.node);
+  const reasoning = panel({ icon: "spark", title: "Ragionamento" }, setRows(
+    setRow("Ragionamento", "Quanto pensa prima di rispondere: più alto è più accurato ma più lento.", effortSelect(agent))));
+  const computer = panel({ icon: "monitor", title: "Computer" }, setRows(
+    setRow("Usa il suo computer", "Un desktop Linux tutto suo, che vedi anche tu.", switchInput("tools", "", agent.tools ?? true))));
+  const form = h("form", { id: `agent-brain-${agent.id}`, class: "agent-settings-save" },
     h("div", { class: "savebar" }, h("span", { class: "spacer" }), btn("Salva", { icon: "check", type: "submit", cls: "primary" })));
+  for (const pane of [model, reasoning, computer]) {
+    for (const input of pane.querySelectorAll("input, select, textarea")) input.setAttribute("form", form.id);
+  }
+  const workspace = sectionWorkspace({ title: "Cervello", base: `#/agent/${agent.id}/cervello`, current: route()[3], entries: [
+    ["modello", "Modello e account", "chip", "Harness, modello e abbonamento", [model]],
+    ["ragionamento", "Ragionamento", "spark", "Quanto pensa prima di rispondere", [reasoning]],
+    ["computer", "Computer", "monitor", "Desktop e strumenti", [computer]],
+  ] });
+  workspace.querySelector(".email-workspace-detail").append(form);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!brain.validate()) return;
+    if (!brain.validate()) { workspace.selectSection("modello"); return; }
     const data = new FormData(form);
     const body = {
       model: pickedModel(data, "model"),
@@ -1457,7 +1460,7 @@ function brainTab(agent) {
     await loadState();
     renderAgent();
   });
-  return form;
+  return workspace;
 }
 
 function modelSelect(name, current, { allowDefault = true, harness = "" } = {}) {
@@ -2989,6 +2992,7 @@ async function renderAgent() {
     }
   } });
   const compact = tab === "chat";
+  const workspaceTab = ["email", "memoria", "impostazioni", "cervello", "routine"].includes(tab);
   shell([
     h("section", { class: `hero${compact ? " compact" : ""}`, vars: { "--ring": agent.color || "#f2a93b" } },
       avatar(agent, compact ? "" : "lg"),
@@ -3006,9 +3010,9 @@ async function renderAgent() {
       return h("a", { href: `#/agent/${agent.id}/${key}`, class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, count) : null);
     })),
     slot,
-  ], { title: agent.name, back: ["email", "memoria", "impostazioni"].includes(tab) && sub ? `#/agent/${agent.id}/${tab}` : sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : ["email", "memoria", "impostazioni"].includes(tab) ? "email" : "" });
+  ], { title: agent.name, back: workspaceTab && sub ? `#/agent/${agent.id}/${tab}` : sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : workspaceTab ? "email" : "" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const isCurrent = () => slot.isConnected && (["email", "memoria", "impostazioni"].includes(tab) ? location.hash.startsWith(`#/agent/${agent.id}/${tab}`) : location.hash === view);
+  const isCurrent = () => slot.isConnected && (workspaceTab ? location.hash.startsWith(`#/agent/${agent.id}/${tab}`) : location.hash === view);
   let body;
   if (tab === "memoria") body = await memoryTab(agent);
   else if (tab === "routine") body = await routineTab(agent, routines);
@@ -3116,6 +3120,7 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
     show(ids[next]); tabs.get(ids[next]).focus();
   });
   show(current, false);
+  root.selectSection = show;
   return root;
 }
 
@@ -3187,7 +3192,7 @@ function memoryItem(agent, memory, brain = false) {
       } })));
 }
 
-function routineForm(agent, routine = {}) {
+function routineForm(agent, routine = {}, { onCancel, onSaved } = {}) {
   const isNew = !routine.id;
   let kind = routine.kind || "routine";
   const localDate = (date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -3245,7 +3250,7 @@ function routineForm(agent, routine = {}) {
       setRow("Compito", "Cosa deve fare, dove guardare, cosa riportare.", h("textarea", { name: "prompt", class: "tall", required: true, placeholder: "Cosa deve fare, dove guardare, cosa riportare. Se non c'è niente da dire può restare in silenzio." }, routine.prompt || ""), { stack: true }),
       setRow("Attiva", "Spenta resta in elenco ma non parte.", switchInput("enabled", "", routine.enabled ?? true))),
     h("div", { class: "row end" },
-      isNew ? null : btn("Annulla", { icon: "close", href: `#/agent/${agent.id}/routine`, cls: "ghost" }),
+      isNew ? null : btn("Annulla", { icon: "close", ...(onCancel ? { onclick: onCancel } : { href: `#/agent/${agent.id}/routine` }), cls: "ghost" }),
       submit));
   drawTiming();
   form.addEventListener("submit", async (event) => {
@@ -3258,6 +3263,7 @@ function routineForm(agent, routine = {}) {
     submit.disabled = false;
     if (!saved) return;
     await loadState();
+    if (onSaved) { onSaved(saved); return; }
     location.hash = `#/agent/${agent.id}/routine`;
     renderAgent();
   });
@@ -3273,15 +3279,18 @@ function taskTime(iso) {
 async function routineTab(agent, routines) {
   const params = new URLSearchParams(location.hash.split("?")[1] || "");
   const editing = params.get("edit");
-  if (editing) {
-    const routine = routines.find((item) => item.id === editing);
-    if (routine) return routineForm(agent, routine);
-  }
-  const archived = params.get("view") === "archive";
-  const navigation = h("nav", { class: "segmented task-switch", "aria-label": "Attività programmate" },
-    h("a", { href: `#/agent/${agent.id}/routine`, class: archived ? "" : "on", "aria-current": archived ? null : "page" }, icon("clock"), "In programma"),
-    h("a", { href: `#/agent/${agent.id}/routine?view=archive`, class: archived ? "on" : "", "aria-current": archived ? "page" : null }, icon("book"), "Archivio"));
-  if (archived) return [navigation, routineArchive(agent)];
+  const base = `#/agent/${agent.id}/routine`;
+  let workspace, archive;
+  const editor = h("div", { class: "stack", hidden: true });
+  const archiveSlot = h("div", { class: "stack" });
+  const createSlot = h("div", { class: "stack" });
+  const closeEditor = () => { editor.hidden = true; scheduled.hidden = false; };
+  const saved = () => { closeEditor(); drawTasks(); workspace.selectSection("programma"); };
+  const edit = (routine) => {
+    editor.replaceChildren(routineForm(agent, routine, { onCancel: closeEditor, onSaved: saved }));
+    editor.hidden = false; scheduled.hidden = true;
+    workspace?.selectSection("programma");
+  };
   const items = () => S.data.routines.filter((routine) => routine.agentId === agent.id).sort((a, b) => Date.parse(a.nextRunAt || "9999-01-01") - Date.parse(b.nextRunAt || "9999-01-01")).map((routine) => {
     const reminder = routine.kind === "reminder";
     const status = routine.running ? tag("in corso", "agent")
@@ -3296,7 +3305,7 @@ async function routineTab(agent, routines) {
           btn("", { icon: "play", cls: "sm", title: reminder && ["blocked", "unverified", "error", "interrupted", "stopped"].includes(routine.lastStatus) ? "Riprova" : "Esegui ora", disabled: routine.running, onclick: async () => {
             if (await guard(api(`/api/routines/${routine.id}/run`, { method: "POST" }), "Attività avviata")) scheduleRefresh();
           } }),
-          btn("", { icon: "edit", cls: "sm", title: "Modifica", href: `#/agent/${agent.id}/routine?edit=${routine.id}` }),
+          btn("", { icon: "edit", cls: "sm", title: "Modifica", onclick: () => edit(routine) }),
           btn("", { icon: routine.enabled ? "pause" : "power", cls: "sm", title: routine.enabled ? "Metti in pausa" : "Riattiva", onclick: async () => {
             if (await guard(api(`/api/routines/${routine.id}`, { method: "PUT", body: { enabled: !routine.enabled } }))) { await loadState(); drawTasks(); }
           } }),
@@ -3310,15 +3319,32 @@ async function routineTab(agent, routines) {
   const taskList = h("div", { class: "stack-sm" });
   function drawTasks() {
     const rows = items();
-    taskList.replaceChildren(...(rows.length ? rows : [empty("clock", "Nessuna attività in programma. Creane una qui sotto.")]));
+    taskList.replaceChildren(...(rows.length ? rows : [empty("clock", "Nessuna attività in programma. Apri Nuova attività per crearne una.")]));
+    const tab = [...document.querySelectorAll(".tabs a")].find((node) => node.getAttribute("href") === base);
+    const count = tab?.querySelector(".count");
+    if (!rows.length) count?.remove();
+    else if (count) count.textContent = rows.length;
+    else tab?.append(h("i", { class: "count" }, rows.length));
   }
   drawTasks();
   S.taskRefresh = () => { if (taskList.isConnected) drawTasks(); };
-  return [
-    navigation,
-    panel({ icon: "clock", title: "Routine e reminder", hint: "Le routine si ripetono. I reminder si archiviano dopo un successo verificato." }, taskList),
-    routineForm(agent),
-  ];
+  const scheduled = panel({ icon: "clock", title: "In programma", hint: "Le routine si ripetono. I reminder si archiviano dopo un successo verificato." }, taskList);
+  const create = () => routineForm(agent, {}, { onSaved: () => { createSlot.replaceChildren(create()); saved(); } });
+  createSlot.append(create());
+  const current = params.get("view") === "archive" ? "archivio" : editing ? "programma" : route()[3];
+  if (params.has("view") || editing) history.replaceState(null, "", base + "/" + (current || "programma"));
+  workspace = sectionWorkspace({ title: "Routine e reminder", base, current, entries: [
+    ["programma", "In programma", "clock", "Routine e reminder attivi", [scheduled, editor]],
+    ["nuova", "Nuova attività", "plus", "Crea una routine o un reminder", [createSlot]],
+    ["archivio", "Archivio", "book", "Esecuzioni, risultati e verifiche", [archiveSlot]],
+  ], onSelect: (id) => {
+    if (id !== "archivio") return;
+    if (!archive) { archive = routineArchive(agent); archiveSlot.append(archive); }
+    else archive.refresh();
+  } });
+  const routine = routines.find((item) => item.id === editing);
+  if (routine) edit(routine);
+  return workspace;
 }
 
 function routineArchive(agent = null) {
@@ -3367,6 +3393,7 @@ function routineArchive(agent = null) {
     } finally { if (current === generation) results.setAttribute("aria-busy", "false"); }
   }
   load();
+  root.refresh = load;
   return root;
 }
 

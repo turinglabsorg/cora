@@ -980,6 +980,53 @@ test("device-code flows keep their mounted steps when returning to Cora", async 
   }
 });
 
+test("routine workspaces retain independent drafts and archive filters through real API saves", async () => {
+  const f = await knowledgeWorld();
+  try {
+    const agent = (await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Routine workspace", tools: false } })).data;
+    const routine = (await f.request(f.alice, `/api/agents/${agent.id}/routines`, { method: "POST", body: {
+      name: "Daily briefing", schedule: "0 9 * * *", prompt: "Check updates.", channelId: `web-${agent.id}`, enabled: false,
+    } })).data;
+    const panel = panelHarness({ language: "en", hash: `#/agent/${agent.id}/routine`, fetch: (path, options) => fetch(f.base + path, { ...options, headers: { ...options?.headers, ...f.alice.headers } }) });
+    await panel.run("boot()");
+    const sections = panel.app.querySelector(".email-workspace-nav").querySelectorAll("button");
+    assert.deepEqual(sections.map((node) => node.querySelector("b").textContent), ["Scheduled", "New task", "Archive"]);
+    const create = panel.app.querySelector("form");
+    sections[1].click();
+    create.elements.name.value = "Draft reminder";
+    create.elements.prompt.value = "Review the project.";
+    create.elements.channelId.value = `web-${agent.id}`;
+    const reminder = create.querySelectorAll(".task-kind")[1];
+    reminder.dispatch("click", { currentTarget: reminder });
+    create.elements.runAt.value = "2050-01-01T09:00";
+    sections[0].click();
+    panel.app.querySelector(".routine").querySelectorAll("button").find((node) => node.getAttribute("title") === "Edit").click();
+    const edit = panel.app.querySelectorAll("form").find((node) => node !== create);
+    edit.elements.name.value = "Updated briefing";
+    sections[1].click();
+    assert.equal(create.elements.name.value, "Draft reminder");
+    sections[0].click();
+    assert.equal(edit.elements.name.value, "Updated briefing");
+    edit.dispatch("submit");
+    await waitFor(() => f.app.store.routine(routine.id).name === "Updated briefing");
+    await waitFor(() => edit.parent.hidden);
+    assert.equal(create.elements.name.value, "Draft reminder", "saving another task preserves the creation draft");
+    sections[2].click();
+    const search = panel.app.querySelectorAll("input").find((node) => node.getAttribute("aria-label") === "Search the archive");
+    const mode = panel.app.querySelectorAll("select").find((node) => node.getAttribute("aria-label") === "Show");
+    search.value = "briefing"; mode.value = "archive"; mode.dispatch("change");
+    await waitFor(() => panel.app.querySelector(".task-history-count"));
+    sections[1].click(); sections[2].click();
+    assert.equal(search.value, "briefing"); assert.equal(mode.value, "archive");
+    sections[1].click(); create.dispatch("submit");
+    const saved = await waitFor(() => f.app.store.routines(agent.id).find((item) => item.name === "Draft reminder"));
+    assert.equal(saved.kind, "reminder");
+    assert.equal(saved.prompt, "Review the project.");
+    await waitFor(() => panel.run("location.hash").endsWith("/programma"));
+    assert.ok(panel.app.querySelectorAll(".routine").some((node) => node.textContent.includes(saved.name)));
+  } finally { await f.close(); }
+});
+
 test("subscription preparation shows progress and keeps Settings and agent drafts mounted for every provider", async (t) => {
   const fixture = await subscriptionApp(t);
   for (const provider of ["claude", "codex", "grok", "muse", "gemini"]) {
@@ -4154,19 +4201,23 @@ describe("what runs the models", () => {
     assert.equal(agent.tools, true);
     await waitFor(() => panel.run(`S.data.agents.some((item) => item.id === "${agent.id}")`));
     await panel.navigate(`#/agent/${agent.id}/cervello`);
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 8);
+    await waitFor(() => panel.app.querySelector(".brain-harness"));
     assert.ok(panel.app.textContent.includes("Claude Code"));
   });
 
-  test("the brain is its own tab: a harness on the left, where the model runs on the right", async () => {
+  test("the brain workspace saves model choices across reasoning and computer sections", async () => {
+    const signedIn = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    const session = signedIn.headers.get("set-cookie").split(";")[0];
     // It starts in the cloud, so a save that changed nothing could not pass for one that did.
     const agent = app.store.createAgent({ name: "Cervellone", model: "ollama/test-model-big:cloud", tools: false, chattiness: 0 });
-    const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
+    const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: session } }) });
     await panel.run("boot()");
     await panel.navigate(`#/agent/${agent.id}/cervello`);
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 8);
-    assert.deepEqual(panel.app.querySelectorAll(".harness-row").map((node) => node.querySelector(".harness-name").textContent),
-      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Antigravity CLI", "Hermes", "DeepSeek Harnessno key"], "every harness, as a list and not a dropdown; dsh is here without its key");
+    await waitFor(() => panel.app.querySelector(".brain-harness"));
+    assert.deepEqual(panel.app.querySelector(".brain-harness").querySelectorAll("option").map((node) => node.textContent),
+      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Antigravity CLI", "Hermes", "DeepSeek Harness · no key"]);
+    const sections = panel.app.querySelector(".email-workspace-nav").querySelectorAll("button");
+    assert.deepEqual(sections.map((node) => node.querySelector("b").textContent), ["Model and account", "Reasoning", "Computer"]);
     // It opens on the side the agent is already on: the cloud.
     const places = panel.app.querySelector(".segmented");
     assert.deepEqual(places.children.map((node) => node.textContent), ["On this machine", "In the cloud"]);
@@ -4181,8 +4232,16 @@ describe("what runs the models", () => {
 
     // Choosing one and saving sends only the brain's half of the agent.
     here.click();
+    sections[1].click();
+    panel.app.querySelector("form").elements.effort.value = "high";
+    sections[2].click();
+    panel.app.querySelector("form").elements.tools.checked = true;
+    sections[0].click();
+    assert.equal(panel.app.querySelector("form").elements.model.value, "ollama/test-model");
     panel.app.querySelector("form").dispatch("submit");
     await waitFor(() => app.store.agent(agent.id).model === "ollama/test-model");
+    assert.equal(app.store.agent(agent.id).effort, "high");
+    assert.equal(app.store.agent(agent.id).tools, true);
     assert.equal(app.store.agent(agent.id).name, "Cervellone", "the profile is a different tab and a different save");
   });
 
@@ -4216,14 +4275,13 @@ describe("what runs the models", () => {
       return reply({});
     } });
     await panel.run("boot()");
-    await waitFor(() => panel.app.querySelectorAll(".harness-row").length === 8);
+    await waitFor(() => panel.app.querySelector(".brain-harness"));
     const side = () => panel.app.querySelector(".brain-side");
-    const row = (name) => panel.app.querySelectorAll(".harness-row").find((node) => node.querySelector(".harness-name").textContent.startsWith(name));
-    assert.ok(!row("Cora's harness").querySelector(".harness-flag"), "a missing router does not make Cora's harness missing");
-    assert.equal(row("Codex").querySelector(".harness-flag").textContent, "not installed");
-    assert.equal(row("Grok Build").querySelector(".harness-flag").textContent, "not installed", "a machine without Grok says so instead of hiding it");
-    assert.equal(row("Antigravity CLI").querySelector(".harness-flag").textContent, "not installed");
-    assert.equal(row("DeepSeek Harness").querySelector(".harness-flag").textContent, "not installed");
+    const harness = panel.app.querySelector(".brain-harness").querySelector("select");
+    const row = (name) => harness.querySelectorAll("option").find((node) => node.textContent.startsWith(name));
+    const choose = (key) => { harness.value = key; harness.dispatch("change"); };
+    assert.equal(row("Cora's harness").textContent, "Cora's harness", "a missing router does not make Cora's harness missing");
+    for (const name of ["Codex", "Grok Build", "Antigravity CLI", "DeepSeek Harness"]) assert.match(row(name).textContent, /not installed/);
 
     // Its own cloud: listed, but not choosable, and the default that points there neither.
     panel.app.querySelector(".segmented").children[1].click();
@@ -4233,12 +4291,12 @@ describe("what runs the models", () => {
     assert.equal(fallback.attributes.title, "is not among this machine's models", "a default that is not here is said to be not here");
 
     // Claude Code opens on one of its own models, never on Cora's default.
-    row("Claude Code").click();
+    choose("claude");
     const chosen = side().querySelectorAll(".model-row").find((node) => node.className.split(" ").includes("on"));
     assert.equal(chosen.querySelector(".row-title").textContent.replace("chosen", ""), "Sonnet 5.5");
 
     // Codex is not here: what it needs, no list to pick from, and no save.
-    row("Codex").click();
+    choose("codex");
     assert.match(side().querySelector(".notice").textContent, /Codex is not installed on this machine/);
     assert.equal(side().querySelectorAll(".model-row").length, 0);
     panel.app.querySelector("form").dispatch("submit");

@@ -1,6 +1,16 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Cerca": "Search",
+  "Modello e account": "Model and account",
+  "Harness, modello e abbonamento": "Harness, model and subscription",
+  "Chi guida il modello e gli passa gli strumenti.": "What runs the model and gives it tools.",
+  "Quanto pensa prima di rispondere": "How much it thinks before replying",
+  "Desktop e strumenti": "Desktop and tools",
+  "Routine e reminder attivi": "Active routines and reminders",
+  "Crea una routine o un reminder": "Create a routine or reminder",
+  "Esecuzioni, risultati e verifiche": "Runs, results and verification",
+  "Nessuna attività in programma. Apri Nuova attività per crearne una.": "No scheduled tasks. Open New task to create one.",
   "Verifica dell'autorizzazione…": "Verifying authorization…",
   "Verifica del collegamento…": "Checking connection…",
   "Annullamento dell'accesso…": "Cancelling sign-in…",

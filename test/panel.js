@@ -11,8 +11,18 @@ class Element {
     this.listeners = {};
     this.style = { setProperty() {} };
     // A browser's text fields start empty, never undefined.
-    if (tag === "input" || tag === "textarea") this.value = "";
+    if (tag === "input") this.value = "";
   }
+  get value() {
+    if (this._value !== undefined) return this._value;
+    if (this.tagName === "textarea") return this.textContent;
+    if (this.tagName === "select") {
+      const options = this.querySelectorAll("option");
+      const chosen = options.find((option) => option.selected) || options[0];
+      return chosen?.value ?? chosen?.textContent ?? "";
+    }
+  }
+  set value(value) { this._value = value; }
   get className() { return this.attributes.class || ""; }
   set className(value) { this.attributes.class = value; }
   get id() { return this.attributes.id || ""; }
@@ -54,6 +64,17 @@ class Element {
         walk(child);
       }
     };
+    if (this.tagName === "form" && this.id && this.isConnected) {
+      let root = this;
+      while (root.parent) root = root.parent;
+      walk(root);
+      return out.filter((field) => {
+        if (field.attributes.form) return field.attributes.form === this.id;
+        let parent = field.parent;
+        while (parent && parent.tagName !== "form") parent = parent.parent;
+        return parent === this;
+      });
+    }
     walk(this);
     return out;
   }
