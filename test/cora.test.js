@@ -2,6 +2,7 @@ import { googleConnectorFixture } from "./google-connector-fixtures.js";
 import { EmailChannel } from "../src/email-channel.js";
 import { mailWorld } from "./mail-fixtures.js";
 import { knowledgeWorld } from "./knowledge-fixtures.js";
+import { invitationWorld } from "./invitation-fixtures.js";
 import assert from "node:assert/strict";
 import { createECDH, createDecipheriv, createPublicKey, createHmac, createHash, hkdfSync, randomBytes, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -978,6 +979,73 @@ test("device-code flows keep their mounted steps when returning to Cora", async 
     assert.match(before.textContent, /TEST-ONLY/);
     await fixture.request(`/api/subscriptions/${created.data.id}/cancel`, { method: "POST" });
   }
+});
+
+test("access invitations send only owner-authorized recipients and preserve private resource permissions", async () => {
+  const f = await invitationWorld();
+  try {
+    const address = "guest@invite.test";
+    const previous = f.app.store.accessPolicy();
+    const privateAgent = (await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Private colleague", tools: false } })).data;
+    const saved = await f.request(f.admin, "/api/access", { method: "PUT", body: { emails: [...previous.emails, address] } });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.data.invitations.find((item) => item.email === address).status, "sent");
+    assert.equal(f.messages.length, 1);
+    assert.deepEqual(f.messages[0].to, [address]);
+    assert.ok(f.messages[0].text.includes(f.cloudBase + "/go/invitation-test"));
+    assert.ok(f.messages[0].text.includes(address));
+    assert.match(f.messages[0].html, /href="http:\/\/127\.0\.0\.1:\d+\/go\/invitation-test"/);
+    assert.doesNotMatch(f.messages[0].text, /pass=|token=/);
+    const access = await f.request(f.admin, "/api/access");
+    assert.equal(access.data.canInvite, true);
+    assert.deepEqual(Object.keys(access.data.invitations.find((item) => item.email === address)).sort(), ["attemptedAt", "email", "sentAt", "status"]);
+    await f.request(f.admin, "/api/access", { method: "PUT", body: { emails: saved.data.emails, domains: ["company.test"] } });
+    assert.equal(f.messages.length, 1, "domain grants and existing addresses send no invitations");
+    assert.equal((await f.request(f.alice, "/api/access/invitations", { method: "POST", body: { email: address } })).status, 403);
+    assert.equal((await f.request(f.admin, "/api/access/invitations", { method: "POST", body: { email: "not-authorized@invite.test" } })).status, 400);
+    const arbitrary = await fetch(f.cloudBase + "/spaces/invitation-test/invitations", { method: "POST", body: new URLSearchParams({ nonce: "A".repeat(43), to: "attacker@invite.test" }) });
+    assert.equal(arbitrary.status, 403);
+    const wrongKey = signPass(passKeys("another fixture signing key with enough entropy").privateKey, { aud: "invitation:invitation.test", nonce: "A".repeat(43) });
+    assert.equal((await f.request(f.admin, "/api/cloud/invitation", { method: "POST", body: { pass: wrongKey } })).status, 403);
+    assert.equal((await f.request(f.admin, "/api/access/invitations", { method: "POST", body: { email: address } })).status, 200);
+    assert.equal(f.messages.length, 2);
+    const guestLogin = await fetch(f.base + "/auth/cloud?pass=" + encodeURIComponent(signPass(f.keys.privateKey, { aud: "invitation.test", sub: "invited-guest", email: address, emailVerified: true, role: "member" })), { redirect: "manual" });
+    const guest = { headers: { Cookie: guestLogin.headers.get("set-cookie").split(";")[0] } };
+    assert.equal((await f.request(guest, "/api/me")).data.user.role, "member");
+    assert.equal((await f.request(guest, `/api/agents/${privateAgent.id}/memories`)).status, 403);
+    assert.equal((await f.request(guest, "/api/access")).status, 403);
+    await f.request(f.admin, "/api/access", { method: "PUT", body: { emails: previous.emails } });
+    assert.equal((await f.request(guest, "/api/me")).data.authed, false);
+    assert.equal((await f.request(f.admin, "/api/access/invitations", { method: "POST", body: { email: address } })).status, 400);
+    assert.equal(f.messages.length, 2);
+  } finally { await f.close(); }
+});
+
+test("invitation delivery failures retain admission and a pending resend never duplicates the provider request", async () => {
+  const f = await invitationWorld();
+  try {
+    const address = "retry@invite.test", previous = f.app.store.accessPolicy();
+    f.state.fail = true;
+    const first = await f.request(f.admin, "/api/access", { method: "PUT", body: { emails: [...previous.emails, address] } });
+    assert.equal(first.status, 200);
+    assert.ok(first.data.emails.includes(address));
+    assert.equal(first.data.invitations.find((item) => item.email === address).status, "uncertain");
+    assert.equal(f.messages.length, 0);
+    f.state.fail = false;
+    const gate = Promise.withResolvers(); f.state.wait = gate.promise;
+    const resend = f.request(f.admin, "/api/access/invitations", { method: "POST", body: { email: address } });
+    await waitFor(() => { const record = f.app.store.value("accessInvitations")[address]; return record?.status === "sending" && record.nonceHash === ""; });
+    const duplicate = f.request(f.admin, "/api/access/invitations", { method: "POST", body: { email: address } });
+    try {
+      const pending = (await f.request(f.admin, "/api/access")).data;
+      assert.equal(pending.invitations.find((item) => item.email === address).status, "sending");
+      assert.doesNotMatch(JSON.stringify(pending), /nonceHash|expiresAt/);
+    } finally { gate.resolve(); }
+    assert.equal((await resend).status, 200);
+    assert.equal((await duplicate).status, 200);
+    assert.equal(f.messages.length, 1);
+    assert.equal((await f.request(f.admin, "/api/access")).data.invitations.find((item) => item.email === address).status, "sent");
+  } finally { await f.close(); }
 });
 
 test("routine workspaces retain independent drafts and archive filters through real API saves", async () => {
@@ -4238,11 +4306,13 @@ describe("what runs the models", () => {
     panel.app.querySelector("form").elements.tools.checked = true;
     sections[0].click();
     assert.equal(panel.app.querySelector("form").elements.model.value, "ollama/test-model");
-    panel.app.querySelector("form").dispatch("submit");
+    const saveForm = panel.app.querySelector("form");
+    saveForm.dispatch("submit");
     await waitFor(() => app.store.agent(agent.id).model === "ollama/test-model");
     assert.equal(app.store.agent(agent.id).effort, "high");
     assert.equal(app.store.agent(agent.id).tools, true);
     assert.equal(app.store.agent(agent.id).name, "Cervellone", "the profile is a different tab and a different save");
+    await waitFor(() => panel.app.querySelector("form") !== saveForm);
   });
 
   test("a harness this machine cannot run says what it needs, and is never saved", async () => {

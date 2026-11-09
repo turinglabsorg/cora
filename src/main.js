@@ -313,6 +313,7 @@ export function startCora(overrides = {}) {
     tgBots.stop();
     slack.stop();
     skBots.stop();
+    await web.stopInvitations();
     const closed = new Promise((resolve) => web.server.close(resolve));
     web.server.closeAllConnections?.();
     await closed;

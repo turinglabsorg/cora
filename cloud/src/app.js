@@ -6,6 +6,7 @@ import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { passKeys, signPass } from "../../src/pass.js";
 import { createMailer } from "./mail.js";
+import { sendSpaceInvitation } from "./invitation-mail.js";
 import { OAuth, pkce } from "./oauth.js";
 import { proxyRequest, proxyUpgrade } from "./proxy.js";
 import { PROVIDERS } from "./store.js";
@@ -244,6 +245,14 @@ export function createCloud({ config, store, endpoints = {}, log = () => {} }) {
       return res.end(JSON.stringify({ domain, publicKey: keys.publicKey }));
     }
     if (path.startsWith("/assets/") && (method === "GET" || method === "HEAD") && asset(res, path.slice("/assets/".length))) return;
+    const invitation = /^\/spaces\/([a-z0-9-]+)\/invitations$/.exec(path);
+    if (invitation && method === "POST") {
+      const form = await readForm(req, 1024);
+      const space = store.space(invitation[1]);
+      const result = await sendSpaceInvitation({ space, nonce: form.nonce, audience: space ? spaceAudience(space) : "", origin: origin.origin, privateKey: keys.privateKey, mailer, allowSend });
+      res.writeHead(result.status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      return res.end(JSON.stringify(result));
+    }
     if (path === "/connectors/google/start" && method === "GET") {
       try { return redirect(res, googleConnector.start(Object.fromEntries(url.searchParams))); }
       catch { return html(res, 409, "Google connection unavailable. Return to Cora and try again."); }

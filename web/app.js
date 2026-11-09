@@ -6446,30 +6446,43 @@ function instanceAccessPanel() {
     h("div", { class: "grow" }, h("b", {}, raw(current?.name || current?.email || "Owner")), current?.email ? h("small", {}, raw(current.email)) : null),
     badge(current?.role === "member" ? "Utente" : "Owner", "on"));
   if (!S.data.access?.canManage) return panel({ icon: "shield", title: "Accesso all'istanza", hint: "Il tuo account e i permessi di questa Cora." }, identity,
-    h("p", { class: "lead" }, "Puoi lavorare con gli agenti e usare tutte le funzioni operative. L'owner gestisce chi può entrare."));
+    h("p", { class: "lead" }, "Puoi usare le tue risorse e quelle condivise con te. L'owner gestisce chi può entrare."));
   const body = h("div", { class: "stack" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  const feedback = h("p", { class: "access-progress", role: "status", "aria-live": "polite", hidden: true });
+  const invitationStates = { not_sent: "Invito non ancora inviato", sending: "Invio dell'invito…", sent: "Invito inviato", failed: "Invito non inviato. Puoi riprovare.", uncertain: "Invio non confermato. Controlla prima di reinviare.", unavailable: "Inviti e-mail non disponibili su questa istanza.", blocked: "Accesso revocato: riabilitalo per inviare l'invito." };
   let data;
   let busy = false;
-  const update = async (fn) => {
+  const update = async (fn, email = "") => {
     if (busy) return;
     busy = true;
+    feedback.hidden = false;
+    feedback.replaceChildren(icon(email ? "mail" : "refresh"), h("span", {}, email ? "Invio dell'invito…" : "Aggiornamento accessi…"));
     for (const button of body.querySelectorAll("button")) button.disabled = true;
-    try { await fn(); data = await api("/api/access"); draw(); toast("Accessi aggiornati"); }
+    try {
+      await fn(); data = await api("/api/access"); draw();
+      const invitation = email && data.invitations?.find((item) => item.email === email.toLowerCase());
+      toast(invitation ? invitationStates[invitation.status] || invitationStates.uncertain : "Accessi aggiornati", Boolean(invitation && invitation.status !== "sent"));
+    }
     catch (error) { toast(error.message, true); }
-    finally { busy = false; for (const button of body.querySelectorAll("button")) button.disabled = false; }
+    finally { busy = false; feedback.hidden = true; for (const button of body.querySelectorAll("button")) button.disabled = false; }
   };
   const rules = (kind, title, hint, placeholder) => {
     const input = h("input", { type: kind === "emails" ? "email" : "text", "aria-label": kind === "emails" ? "Email da autorizzare" : "Dominio da autorizzare", placeholder, autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
-    const add = btn(kind === "emails" ? "Autorizza" : "Aggiungi", { icon: "plus", onclick: () => {
+    const add = btn(kind === "emails" ? data.canInvite ? "Autorizza e invita" : "Autorizza" : "Aggiungi", { icon: "plus", onclick: () => {
       const value = input.value.trim();
       if (!value) { input.focus(); return; }
-      update(() => api("/api/access", { method: "PUT", body: { [kind]: [...data[kind], value] } }));
+      update(() => api("/api/access", { method: "PUT", body: { [kind]: [...data[kind], value] } }), kind === "emails" ? value : "");
     } });
     input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); add.click(); } });
     return h("section", { class: "set-section access-rules" }, h("span", { class: "label" }, title), h("p", { class: "muted" }, hint),
       h("div", { class: "access-add" }, input, add),
-      h("ul", {}, data[kind].length ? data[kind].map((value) => h("li", { class: "access-rule" }, icon(kind === "domains" ? "globe" : "user"), h("span", { class: "grow" }, raw((kind === "domains" ? "@" : "") + value)),
-        btn("", { icon: "close", cls: "ghost", title: tr("Rimuovi {value}", { value }), onclick: () => update(() => api("/api/access", { method: "PUT", body: { [kind]: data[kind].filter((entry) => entry !== value) } })) })))
+      h("ul", {}, data[kind].length ? data[kind].map((value) => {
+        const invitation = kind === "emails" ? data.invitations?.find((item) => item.email === value) : null;
+        return h("li", { class: `access-rule${kind === "emails" ? " access-invitation" : ""}` }, icon(kind === "domains" ? "globe" : "user"),
+          h("span", { class: "grow" }, h("span", {}, raw((kind === "domains" ? "@" : "") + value)), kind === "emails" ? h("small", { class: invitation?.status === "sent" ? "ok-text" : "muted" }, invitationStates[invitation?.status || "not_sent"], invitation?.sentAt ? raw(` · ${fmtTime(invitation.sentAt, true)}`) : null) : null),
+          kind === "emails" && data.canInvite && invitation?.status !== "blocked" ? btn(invitation?.status === "sent" ? "Reinvia invito" : "Invia invito", { icon: "mail", cls: "sm ghost access-invite-send", onclick: () => update(() => api("/api/access/invitations", { method: "POST", body: { email: value } }), value) }) : null,
+          btn("", { icon: "close", cls: "ghost access-rule-remove", title: tr("Rimuovi {value}", { value }), onclick: () => update(() => api("/api/access", { method: "PUT", body: { [kind]: data[kind].filter((entry) => entry !== value) } })) }));
+      })
         : h("li", { class: "access-no-rules" }, kind === "domains" ? "Nessun dominio autorizzato." : "Nessun indirizzo aggiunto.")));
   };
   const actions = { "sign-in": "Accesso effettuato", settings: "Impostazioni aggiornate", agent: "Agente modificato", message: "Messaggio inviato", connections: "Collegamenti aggiornati", "access-policy": "Accessi aggiornati", context: "Contesto aggiornato", artifacts: "Artefatti aggiornati" };
@@ -6482,9 +6495,9 @@ function instanceAccessPanel() {
       badge(user.role === "owner" ? "Owner" : user.blocked ? "Revocato" : user.allowed ? "Utente" : "Non autorizzato", user.allowed ? "on" : ""),
       user.role === "owner" ? null : btn(user.blocked ? "Riabilita" : "Revoca accesso", { cls: user.blocked ? "ghost" : "ghost danger", onclick: () => update(() => api(`/api/access/users/${user.id}`, { method: "PUT", body: { blocked: !user.blocked } })) }))));
     body.replaceChildren(
-      h("p", { class: "lead" }, "Gli utenti ammessi hanno gli stessi permessi operativi. Solo l'owner può autorizzare o revocare gli accessi."),
+      h("p", { class: "lead" }, "L'owner autorizza e revoca l'accesso allo spazio. Agenti, Brain e file seguono i rispettivi permessi."),
       rules("domains", "Domini autorizzati", "Ammetti tutti gli account con un indirizzo verificato di questi domini.", "es. azienda.it"),
-      rules("emails", "Singole persone", "Autorizza una persona senza aprire l'accesso a tutto il suo dominio.", "nome@azienda.it"),
+      rules("emails", "Singole persone", data.canInvite ? "Ogni nuova persona riceve un invito con link dello spazio e istruzioni di accesso." : "Autorizza una persona senza aprire l'accesso a tutto il suo dominio.", "nome@azienda.it"),
       h("p", { class: "access-note" }, icon("info"), "Quando un utente perde l'autorizzazione, si chiudono anche le sue sessioni aperte. L'owner conserva sempre l'accesso."),
       h("section", { class: "set-section access-people" }, h("span", { class: "label" }, "Utenti di questa istanza"),
         h("p", { class: "muted" }, "Ogni persona mantiene la propria identità, anche nei messaggi agli agenti."), users),
@@ -6501,7 +6514,7 @@ function instanceAccessPanel() {
     catch (error) { toast(error.message, true); }
     finally { refresh.disabled = false; }
   } });
-  return panel({ icon: "shield", title: "Accesso all'istanza", hint: "Scegli chi può entrare nella tua Cora.", actions: refresh }, body);
+  return panel({ icon: "shield", title: "Accesso all'istanza", hint: "Scegli chi può entrare nella tua Cora.", actions: refresh }, feedback, body);
 }
 
 /** The connections, by name: what each account or key is for, and whether it works here. */

@@ -5,6 +5,7 @@ import net from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { AccessInvitations } from "./access-invitations.js";
 import { drawnAvatar } from "./avatar.js";
 import { passLedger, verifyPass } from "./pass.js";
 import { shareHosts } from "./share-host.js";
@@ -189,6 +190,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     login: `${config.cloudUrl.replace(/\/$/, "")}/go/${config.cloudSpace}`,
     logout: `${config.cloudUrl.replace(/\/$/, "")}/logout`,
   } : null;
+  const invitations = new AccessInvitations({ store, cloud, space: config.cloudSpace });
   const firstUse = passLedger();
   // A share's own address: answered before anything of the panel, which never runs there.
   const shares = shareHosts({ config, store, artifacts, vault, cloud, firstUse, sessionKey, activity });
@@ -652,12 +654,22 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (path === "/api/access" || path.startsWith("/api/access/")) {
       if (user.role !== "owner") throw new HttpError(403, "solo l'owner può gestire gli accessi");
       if (path === "/api/access" && method === "GET") return send(res, 200, {
-        ...store.accessPolicy(), users: store.panelUsers().map((entry) => ({ ...entry, allowed: store.allowsPanelUser({ ...entry, emailVerified: true }) })), audit: store.accessAudit(),
+        ...store.accessPolicy(), invitations: invitations.view(), canInvite: Boolean(cloud), users: store.panelUsers().map((entry) => ({ ...entry, allowed: store.allowsPanelUser({ ...entry, emailVerified: true }) })), audit: store.accessAudit(),
       });
       if (path === "/api/access" && method === "PUT") {
+        const previous = new Set(store.accessPolicy().emails);
         const policy = store.updateAccessPolicy(await readJson(req, 16384));
         invalidateConnections();
-        return send(res, 200, policy);
+        invitations.prune();
+        const blocked = new Set(store.panelUsers().filter((person) => person.blocked).map((person) => person.email));
+        const added = policy.emails.filter((email) => !previous.has(email) && !blocked.has(email));
+        for (let offset = 0; offset < added.length; offset += 4) await Promise.all(added.slice(offset, offset + 4).map((email) => invitations.send(email, user)));
+        return send(res, 200, { ...policy, invitations: invitations.view() });
+      }
+      if (path === "/api/access/invitations" && method === "POST") {
+        const body = await readJson(req, 1024);
+        await invitations.send(body.email, user);
+        return send(res, 200, { invitations: invitations.view() });
       }
       const member = /^\/api\/access\/users\/([a-zA-Z0-9_-]{1,160})$/.exec(path);
       if (member && method === "PUT") {
@@ -1812,6 +1824,14 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       moveLegacyCookie(req, res);
       if (url.pathname === "/auth/cloud" || url.pathname === "/auth/link") return signInFrom(req, res, url);
       if (url.pathname === "/api/cloud/access" && req.method === "POST") return await cloudAccess(req, res);
+      if (url.pathname === "/api/cloud/invitation" && req.method === "POST") {
+        if (!cloud) throw new HttpError(404, "not found");
+        const body = await readJson(req, 8192);
+        const fields = verifyPass(cloud.key, body.pass, { audience: `invitation:${cloud.audience}` });
+        const invitation = fields && firstUse(fields) && invitations.claim(fields.nonce);
+        if (!invitation) throw new HttpError(403, "invito non autorizzato");
+        return send(res, 200, invitation);
+      }
       if (url.pathname === "/api/cloud/notice" && req.method === "POST") return await cloudNotice(req, res);
       if (url.pathname === "/api/cloud/share-access" && req.method === "POST") return await cloudShareAccess(req, res);
       if (url.pathname === "/api/events") return events(req, res);
@@ -1891,5 +1911,5 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   /** Someone has the panel open and visible (the page drops its event stream when hidden). */
   const watching = () => clients.size > 0;
 
-  return { server, broadcast, watching };
+  return { server, broadcast, watching, stopInvitations: () => invitations.stop() };
 }

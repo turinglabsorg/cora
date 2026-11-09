@@ -1,5 +1,5 @@
 /**
- * The cloud's mail: only the sign-in links that open a share. Resend sends them from
+ * The cloud's transactional mail: share sign-in links and space invitations. Resend sends them from
  * usecora.space when its key is there; otherwise ambox (an agent mailbox with an
  * HTTP API). Without either nothing is sent, and the page a visitor sees says the
  * same either way.

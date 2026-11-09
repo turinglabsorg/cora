@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { startCora } from "../src/main.js";
 import { fakeDocker, fakeOllama, tempHome } from "./helpers.js";
 
-export async function knowledgeWorld(overrides = {}) {
+export async function knowledgeWorld(overrides = {}, { cloudLoginPass = "" } = {}) {
   const previousReply = fakeOllama.current;
   const state = { answer: () => ({ content: "PASS" }) };
   const ollama = await fakeOllama((body) => {
@@ -20,7 +20,8 @@ export async function knowledgeWorld(overrides = {}) {
   await app.ready; await app.companyBrain.ready;
   app.librarian.requestRun = () => false;
   const base = "http://127.0.0.1:" + app.server.address().port;
-  const login = await fetch(base + "/api/login", { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ password: "fixture-password" }) });
+  const login = cloudLoginPass ? await fetch(base + "/auth/cloud?pass=" + encodeURIComponent(cloudLoginPass), { redirect: "manual" })
+    : await fetch(base + "/api/login", { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ password: "fixture-password" }) });
   const admin = { headers: { Cookie: login.headers.get("set-cookie").split(";")[0] } };
   const policy = app.store.accessPolicy(); app.store.updateAccessPolicy({ emails: [...policy.emails, "alice@owner.test", "bob@owner.test"] });
   const actors = Object.fromEntries(["alice", "bob"].map((name) => {

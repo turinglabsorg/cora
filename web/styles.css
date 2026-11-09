@@ -655,6 +655,20 @@ input.num { width: 92px; text-align: right; font-family: var(--mono); }
 .access-rule > .ico { color: var(--muted); width: 16px; height: 16px; }
 .access-rule .grow { overflow-wrap: anywhere; }
 .access-rule .btn { min-height: 44px; }
+.access-progress { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.access-progress[hidden] { display: none; }
+.access-invitation { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto 44px; gap: 10px; }
+.access-invitation .grow small { display: block; margin-top: 5px; line-height: 1.5; }
+.access-invitation .ok-text { color: var(--green); }
+.access-invitation .access-rule-remove { grid-column: 4; }
+@media (max-width: 600px) {
+  .access-add input[type=email] { flex-basis: 100%; }
+  .access-add:has(input[type=email]) .btn { width: 100%; justify-content: center; }
+  .access-invitation { grid-template-columns: 16px minmax(0, 1fr) 44px; align-items: start; }
+  .access-invitation > .ico { margin-top: 10px; }
+  .access-invitation .access-rule-remove { grid-column: 3; grid-row: 1; }
+  .access-invitation .access-invite-send { grid-column: 2; justify-self: start; }
+}
 .access-no-rules { color: var(--faint); font-size: 12px; }
 .access-note { display: flex; gap: 8px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
 .access-note .ico { width: 16px; height: 16px; margin-top: 2px; }
