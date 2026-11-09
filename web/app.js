@@ -2518,7 +2518,7 @@ async function agentEmailTab(agent, isCurrent = () => true) {
     h("p", { class: "muted" }, mailbox?.status === "blocked" ? "La casella non è ancora pronta. Puoi riprovare assegnandole un indirizzo qui sotto." : "L'agente avrà una casella tutta sua, per inviare e ricevere email.");
   const identity = panel({ icon: "mail", title: "La sua email", hint: "Puoi scrivere all'agente a questo indirizzo e chiedergli di usare la sua casella.", actions: ready ? tag("Attiva", "ok") : null }, address,
     ready ? h("p", { class: "muted" }, "L'agente usa questo indirizzo quando gli chiedi di inviare posta.") : null);
-  if (!data.available) return [identity, emailChannelPane(agent), panel({ icon: "info", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))];
+  if (!data.available) return agentEmailWorkspace(agent, [identity, panel({ icon: "info", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))]);
   const local = h("input", { type: "text", name: "local", required: true, minlength: 3, maxlength: 32, pattern: "[a-z0-9][a-z0-9\\-]{1,30}[a-z0-9]", autocomplete: "off", autocapitalize: "none", spellcheck: false, "aria-label": "Nome dell'indirizzo", value: ready ? mailbox.email.split("@")[0] : agent.name.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32), placeholder: "nico" });
   const usable = data.domains.filter((domain) => domain.ready);
   const domain = h("select", { name: "domain", required: true, "aria-label": "Dominio email" }, usable.map((item) => h("option", { value: item.name, selected: ready && mailbox.email.endsWith(`@${item.name}`) }, raw(item.name))));
@@ -2544,7 +2544,79 @@ async function agentEmailTab(agent, isCurrent = () => true) {
     feedback, h("div", { class: "row" }, btn("Gestisci domini", { icon: "globe", href: "#/settings/domini", cls: "ghost" }), h("span", { class: "spacer" }), submit));
   const previous = mailbox?.previousEmails?.length ? panel({ icon: "archive", title: "Indirizzi precedenti", hint: "Restano all'agente, insieme alla posta già ricevuta." },
     mailbox.previousEmails.map((email) => h("div", { class: "mail-address previous" }, h("code", {}, raw(email)), emailCopy(email)))) : null;
-  return [identity, emailChannelPane(agent), panel({ icon: "edit", title: "Personalizza indirizzo", hint: "Scegli il nome e uno dei domini pronti per inviare e ricevere." }, form), previous];
+  return agentEmailWorkspace(agent, [identity, panel({ icon: "edit", title: "Personalizza indirizzo", hint: "Scegli il nome e uno dei domini pronti per inviare e ricevere." }, form), previous]);
+}
+
+function agentEmailWorkspace(agent, mailboxPanels) {
+  const entries = [
+    ["casella", "Casella", "mail", "Indirizzo e dominio"],
+    ["ricezione", "Ricezione e regole", "radio", "Ascolto e resoconti"],
+    ["invio", "Invio e firma", "send", "Mittente, risposte e aperture"],
+    ["recap", "Recap email", "archive", "Ricevute, inviate e bozze"],
+  ];
+  const panes = new Map(entries.map(([id]) => [id, h("section", { class: "email-section stack", role: "tabpanel", id: `email-pane-${agent.id}-${id}`, "aria-labelledby": `email-tab-${agent.id}-${id}`, hidden: true })]));
+  const tabs = new Map();
+  let current = entries.some(([id]) => id === route()[3]) ? route()[3] : "";
+  const detail = h("div", { class: "email-workspace-detail" }, btn("Email", { icon: "back", cls: "sm ghost email-section-back", onclick: () => show("") }), [...panes.values()]);
+  const nav = h("nav", { class: "email-workspace-nav rail-nav", role: "tablist", "aria-label": "Sezioni email", "aria-orientation": "vertical" },
+    h("span", { class: "rail-group" }, "Email"), entries.map(([id, title, mark, hint]) => {
+      const tab = h("button", { class: "rail-item", type: "button", role: "tab", id: `email-tab-${agent.id}-${id}`, "aria-controls": `email-pane-${agent.id}-${id}`, onclick: () => show(id) },
+        h("span", { class: "rail-mark" }, icon(mark)), h("span", { class: "rail-name" }, h("b", {}, title), h("small", {}, hint)), icon("next", "rail-go"));
+      tabs.set(id, tab); return tab;
+    }));
+  const root = h("div", { class: "email-workspace email-channel" }, nav, detail);
+  function show(id, update = true) {
+    current = id;
+    root.classList.toggle("open", Boolean(current));
+    for (const [key, pane] of panes) pane.hidden = key !== (current || "casella");
+    for (const [key, tab] of tabs) {
+      tab.classList.toggle("active", key === (current || "casella"));
+      tab.setAttribute("aria-selected", String(key === (current || "casella")));
+      tab.tabIndex = key === (current || "casella") ? 0 : -1;
+    }
+    detail.scrollTop = 0;
+    if (update) {
+      history.replaceState(null, "", `#/agent/${agent.id}/email${current ? `/${current}` : ""}`);
+      const back = document.querySelector(".appbar a.icon-btn");
+      if (back) back.setAttribute("href", current ? `#/agent/${agent.id}/email` : "#/agenti");
+    }
+  }
+  const rules = emailChannelPane(agent, (sections) => {
+    panes.get("ricezione").replaceChildren(sections.rules);
+    panes.get("invio").replaceChildren(...sections.sending);
+    panes.get("recap").replaceChildren(sections.recap);
+  }, () => root.isConnected);
+  panes.get("casella").replaceChildren(...mailboxPanels.filter(Boolean));
+  panes.get("ricezione").append(rules);
+  panes.get("invio").append(panel({}, skeleton()));
+  panes.get("recap").append(panel({}, skeleton()));
+  nav.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const ids = entries.map(([id]) => id), at = ids.indexOf(current || "casella");
+    const next = event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1 : (at + (event.key === "ArrowDown" ? 1 : -1) + ids.length) % ids.length;
+    show(ids[next]); tabs.get(ids[next]).focus();
+  });
+  show(current, false);
+  return root;
+}
+
+function emailSettingsTabs(controls, agentsPanel, feedback) {
+  const definitions = [["ricezione", "Ricezione", [0, 1, 3, 4]], ["resoconti", "Resoconti", [2]], ["risposte", "Risposte e aperture", [5, 6, 7]], ["agenti", "Agenti", []]];
+  const pages = new Map(definitions.map(([id, , rows]) => [id, h("div", { class: "stack", role: "tabpanel", hidden: true }, id === "agenti" ? agentsPanel : setRows(...rows.map((index) => controls[index])))]));
+  const buttons = new Map();
+  const tabs = h("div", { class: "segmented email-settings-tabs", role: "tablist", "aria-label": "Sezioni email" }, definitions.map(([id, title]) => {
+    const button = btn(title, { onclick: () => show(id) });
+    button.setAttribute("role", "tab"); buttons.set(id, button); return button;
+  }));
+  function show(id, update = true) {
+    for (const [key, page] of pages) page.hidden = key !== id;
+    for (const [key, button] of buttons) { button.classList.toggle("on", key === id); button.setAttribute("aria-selected", String(key === id)); }
+    if (update) history.replaceState(null, "", `#/settings/email/${id}`);
+  }
+  const initial = definitions.some(([id]) => id === route()[2]) ? route()[2] : "ricezione";
+  show(initial, false);
+  return panel({ icon: "mail", title: "E-mail", hint: "Dall'arrivo della posta al resoconto nel canale scelto." }, h("div", { class: "stack" }, tabs, [...pages.values()], feedback));
 }
 
 function connectorsPane() {
@@ -2592,7 +2664,7 @@ function connectorsPane() {
   return slot;
 }
 
-function emailChannelPane(agent = null) {
+function emailChannelPane(agent = null, onSections = null, isCurrent = null) {
   const endpoint = agent ? `/api/agents/${agent.id}/email` : "/api/mail/channel";
   const slot = h("div", { class: "stack email-channel", "aria-busy": "true" }, panel({ icon: "mail", title: agent ? "Ricezione e regole" : "E-mail" }, h("p", { role: "status", class: "muted" }, "Carico la posta…")));
   const select = (label, options, value, save) => {
@@ -2604,7 +2676,7 @@ function emailChannelPane(agent = null) {
     slot.setAttribute("aria-busy", "true");
     try {
       let data = await api(endpoint);
-      if (!slot.isConnected) return;
+      if (!(isCurrent ? isCurrent() : slot.isConnected)) return;
       const rules = agent ? data.overrides : data.settings, effective = agent ? data.effective : data.settings;
       const feedback = h("p", { role: "status", class: "mail-feedback" });
       const controls = [];
@@ -2661,7 +2733,8 @@ function emailChannelPane(agent = null) {
       const track = select("Traccia aperture", [...(agent ? [["inherit", "Eredita regole generali"]] : []), ["true", "Attiva"], ["false", "Disattiva"]], agent && rules.track == null ? "inherit" : String(effective.track), (value, input) => save({ track: value === "inherit" ? null : value === "true" }, input));
       controls.push(setRow("Traccia aperture", "Il caricamento dell'immagine è un indizio di apertura, non una conferma di lettura.", track, { stack: true }));
       if (!data.canManage) for (const row of controls) for (const input of row.querySelectorAll("input,select,textarea")) input.disabled = true;
-      const content = [panel({ icon: "mail", title: agent ? "Ricezione e regole" : "E-mail", hint: agent ? "Le preferenze di questo agente, insieme alle regole dello spazio." : "Dall'arrivo della posta al resoconto nel canale scelto." }, setRows(...controls), feedback)];
+      const receiving = agent ? [controls[0], controls[1], controls[2], controls[4]] : controls;
+      const content = [panel({ icon: "mail", title: agent ? "Ricezione e regole" : "E-mail", hint: agent ? "Le preferenze di questo agente, insieme alle regole dello spazio." : "Dall'arrivo della posta al resoconto nel canale scelto." }, setRows(...receiving), feedback)];
       if (agent) {
         const sender = h("select", { "aria-label": "Mittente delle email", disabled: !data.canManage }, h("option", { value: "" }, "La casella dell'agente"),
           (data.senders || []).map((item) => h("option", { value: item.id, selected: rules.senderId === item.id }, raw(item.email))));
@@ -2691,8 +2764,17 @@ function emailChannelPane(agent = null) {
         content.push(panel({ icon: "users", title: "Caselle degli agenti", hint: "Le regole personali e il recap si trovano nella pagina Email di ogni agente." },
           h("div", { class: "email-agent-list" }, data.agents.map((item) => h("a", { class: "email-agent-row", href: `#/agent/${item.id}/email` }, raw(item.name), h("span", { class: "muted" }, tr("{received} ricevute · {sent} inviate", { received: item.received, sent: item.sent })), icon("chevron"))))));
       }
-      slot.replaceChildren(...content); slot.setAttribute("aria-busy", "false");
-    } catch (error) { slot.setAttribute("aria-busy", "false"); slot.replaceChildren(panel({ icon: "alert", title: "Email non disponibile" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
+      if (agent && onSections) {
+        onSections({ rules: content[0], sending: [content[1], panel({ icon: "sliders", title: "Risposte e aperture" }, setRows(controls[3], controls[5])), content[2]], recap: content[3] });
+      } else if (!agent) slot.replaceChildren(emailSettingsTabs(controls, content[1], feedback));
+      else slot.replaceChildren(...content);
+      slot.setAttribute("aria-busy", "false");
+    } catch (error) {
+      slot.setAttribute("aria-busy", "false");
+      const failure = () => panel({ icon: "alert", title: "Email non disponibile" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }));
+      if (onSections) onSections({ rules: failure(), sending: [failure()], recap: failure() });
+      else slot.replaceChildren(failure());
+    }
   }
   Promise.resolve().then(load);
   return slot;
@@ -2705,16 +2787,16 @@ function emailRecap(agent, initial) {
   function draw() {
     const summary = data.summary, status = data.status;
     const modes = [["all", "Tutte"], ["received", "Ricevute"], ["sent", "Inviate"], ["draft", "Bozze"]];
-    const picker = h("div", { class: "segmented", role: "group", "aria-label": "Filtra email" }, modes.map(([id, label]) => btn(label, { cls: filter === id ? "active" : "", onclick: () => { filter = id; draw(); } })));
+    const picker = h("div", { class: "segmented", role: "group", "aria-label": "Filtra email" }, modes.map(([id, label]) => btn(label, { cls: filter === id ? "on" : "", onclick: () => { filter = id; draw(); } })));
     const messages = data.recent.filter((item) => filter === "all" || item.direction === filter);
     body.replaceChildren(h("div", { class: "email-totals" }, [[summary.received, "Ricevute"], [summary.sent, "Inviate"], [summary.draft, "Bozze"]].map(([value, label]) => h("div", {}, h("strong", {}, raw(value)), h("span", {}, label)))),
-      h("div", { class: "row wrap" }, picker, h("span", { class: "spacer" }), btn("Aggiorna posta", { icon: "refresh", cls: "sm ghost", onclick: async (event) => {
+      h("div", { class: "row" }, picker, h("span", { class: "spacer" }), btn("Aggiorna posta", { icon: "refresh", cls: "sm ghost", onclick: async (event) => {
         const button = event.currentTarget; button.disabled = true;
         try { data = await api(`/api/agents/${agent.id}/email/refresh`, { method: "POST" }); draw(); }
         catch (error) { toast(error.message, true); button.disabled = false; }
       } })),
       status?.error ? h("p", { class: "err-text", role: "status" }, raw(tr(status.error))) : h("p", { class: "muted" }, status?.checkedAt ? tr("Ultimo controllo: {date}", { date: new Date(status.checkedAt).toLocaleString(LANG) }) : "Il primo controllo partirà automaticamente."),
-      status?.partial ? h("p", { class: "muted" }, "Sono mostrate le email più recenti.") : null,
+      status?.partial ? h("p", { class: "muted" }, "Sono mostrate le email più recenti.") : "",
       h("div", { class: "email-ledger" }, messages.length ? messages.map((item) => h("article", { class: "email-ledger-row" },
         h("div", { class: "email-ledger-main" }, icon(item.direction === "received" ? "mail" : "send"), h("div", {}, h("strong", {}, raw(item.subject || tr("Senza oggetto"))), h("p", { class: "muted" }, raw(item.direction === "received" ? item.from : (item.to || []).join(", "))))),
         h("div", { class: "email-ledger-meta" }, tag(item.opened ? "Apertura rilevata" : stateLabel[item.status] || "Ricevuta", item.opened ? "ok" : ["error", "interrupted", "uncertain"].includes(item.status) ? "agent" : ""), h("time", { datetime: item.at }, raw(new Date(item.at).toLocaleString(LANG))),
@@ -2843,9 +2925,9 @@ async function renderAgent() {
       return h("a", { href: `#/agent/${agent.id}/${key}`, class: key === tab ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, count) : null);
     })),
     slot,
-  ], { title: agent.name, back: sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : "" });
+  ], { title: agent.name, back: tab === "email" && sub ? `#/agent/${agent.id}/email` : sub ? `#/agent/${agent.id}/ragionamento` : "#/agenti", mode: compact ? "chat" : tab === "email" ? "email" : "" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const isCurrent = () => slot.isConnected && location.hash === view;
+  const isCurrent = () => slot.isConnected && (tab === "email" ? location.hash.startsWith(`#/agent/${agent.id}/email`) : location.hash === view);
   let body;
   if (tab === "memoria") body = await memoryTab(agent);
   else if (tab === "routine") body = await routineTab(agent, routines);

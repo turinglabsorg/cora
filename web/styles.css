@@ -1944,6 +1944,26 @@ a.share-stats:hover { color: var(--amber); }
   .email-channel .segmented { width: 100%; }
   .email-channel .segmented button { flex: 1; padding-left: 8px; padding-right: 8px; }
 }
-.email-channel .row.wrap { flex-wrap: wrap; }
 .email-channel .segmented { min-width: 0; max-width: 100%; }
 .email-channel .segmented .btn { min-width: 0; }
+
+.email-workspace { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 24px; align-items: start; min-width: 0; }
+.email-workspace-nav { position: sticky; top: 0; }
+.email-workspace .rail-name b, .email-workspace .rail-name small { white-space: normal; overflow-wrap: anywhere; }
+.email-workspace-detail, .email-section { min-width: 0; }
+.email-section[hidden], .email-settings-tabs ~ [hidden] { display: none; }
+.email-section-back { display: none; }
+.email-settings-tabs { display: flex; flex-wrap: wrap; align-self: flex-start; max-width: 100%; }
+.email-settings-tabs .btn { min-width: 0; }
+@media (max-width: 899px) {
+  .email-workspace { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .email-workspace.open > .email-workspace-nav, .email-workspace:not(.open) > .email-workspace-detail { display: none; }
+  .email-workspace-nav { position: static; }
+  .email-section-back { display: inline-flex; margin-bottom: 16px; }
+  .email-workspace .rail-go { display: block; }
+  .email-settings-tabs { width: 100%; }
+  .email-settings-tabs .btn { flex: 1 1 40%; }
+}
+.email-workspace .rail-item { grid-template-columns: 30px minmax(0, 1fr) 16px; }
+
+@media (max-width: 480px) { .mode-email .tabs { margin: 0 -12px; padding: 2px 12px; } }

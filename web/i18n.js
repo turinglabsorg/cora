@@ -1,6 +1,15 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Casella": "Mailbox",
+  "Indirizzo e dominio": "Address and domain",
+  "Ascolto e resoconti": "Listening and reports",
+  "Invio e firma": "Sending and signature",
+  "Mittente, risposte e aperture": "Sender, replies and opens",
+  "Ricevute, inviate e bozze": "Received, sent and drafts",
+  "Sezioni email": "Email sections",
+  "Resoconti": "Reports",
+  "Risposte e aperture": "Replies and opens",
   "Sono mostrate le email più recenti.": "The most recent emails are shown.",
   "Collegamento Google in preparazione.": "Google connection is being prepared.",
   "Connettori": "Connectors",

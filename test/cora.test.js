@@ -5559,6 +5559,35 @@ describe("email channel", () => {
     assert.equal(restarted.summary(f.agent).received, 61);
   });
 
+  test("the agent email page separates its sections and keeps drafts while switching tabs", async (t) => {
+    const f = await emailWorld(t);
+    const state = (await f.call("/api/state")).data;
+    const panel = panelHarness({ language: "en", fetch: async (path, init = {}) => {
+      const response = await f.call(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
+    panel.run(`S.data=${JSON.stringify(state)}; location.hash=${JSON.stringify(`#/agent/${f.agent.id}/email`)}; globalThis.history={replaceState(_a,_b,path){location.hash=path;}}; document.getElementById("app").replaceChildren(agentEmailWorkspace(S.data.agents[0],[h("p",{},"Mailbox identity")]));`);
+    await waitFor(() => panel.run(`Boolean(document.getElementById("app").querySelector('textarea'))`));
+    const result = panel.run(`(() => {
+      const root=document.getElementById("app");
+      const tabs=root.querySelectorAll(".rail-item");
+      const panes=()=>root.querySelectorAll(".email-section").filter(item=>!item.hidden).map(item=>item.attributes.id.split("-").at(-1));
+      const first=panes();
+      tabs[1].click();
+      const rules=root.querySelectorAll("textarea")[0];rules.value="Keep this draft";
+      tabs[2].click();const sending=panes();
+      tabs[1].click();const kept=rules.value;
+      tabs[3].click();
+      return {first,sending,kept,last:panes(),hash:location.hash,tabCount:tabs.length};
+    })()`);
+    assert.deepEqual(result.first,["casella"]);
+    assert.deepEqual(result.sending,["invio"]);
+    assert.equal(result.kept,"Keep this draft");
+    assert.deepEqual(result.last,["recap"]);
+    assert.equal(result.hash,`#/agent/${f.agent.id}/email/recap`);
+    assert.equal(result.tabCount,4);
+  });
+
   test("an older mail service shows the recent recap and keeps its recovery boundary for a later upgrade", async (t) => {
     const f = await emailWorld(t);
     f.state.legacy = true;
