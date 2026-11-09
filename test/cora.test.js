@@ -6806,6 +6806,72 @@ describe("email channel", () => {
     assert.match((await executeTool({ name: "email_send", args: { to: ["robin+sender@ambox.dev"], subject: "No", body_text: "Not authorized" } }, { agent: f.agent, email: f.app.email, emailInvocation: { id: email.id } })).text, /error:/);
   });
 
+  test("authorized chat retains email controls when the agent desktop is disabled", async (t) => {
+    const f = await emailWorld(t), google = await googleConnectorFixture(t, f);
+    await google.connect();
+    const connection = (await f.call("/api/connectors")).data.connections[0];
+    await f.call(`/api/connectors/${connection.id}`, { method: "PUT", body: { agents: [f.agent.id] } });
+    const agent = f.app.store.updateAgent(f.agent.id, { tools: false });
+    const results = [];
+    let step = 0;
+    f.app.llm.capabilities = async () => ({ tools: true });
+    f.app.llm.chat = async ({ tools, messages }) => {
+      if (!tools?.length) return { text: "DONE", toolCalls: [] };
+      assert.equal(tools.some((tool) => tool.name === "shell"), false);
+      if (step++ === 0) return { text: "", toolCalls: [{ id: "senders", name: "email_inbox", args: {} }] };
+      results.push(messages.at(-1).content);
+      if (step === 2) return { text: "", toolCalls: [{ id: "destination", name: "email_settings", args: { channel_id: OTHER_CHANNEL } }] };
+      return { text: "Email controls checked.", toolCalls: [] };
+    };
+    await f.app.orchestrator.onWebMessage({ room: `web-${agent.id}`, text: "Check my sending address and set the email report destination.", user: f.app.store.panelUser("local-owner") });
+    await waitFor(() => step >= 3 && f.posts.some((post) => post.text === "Email controls checked."), { timeout: 20000 });
+    assert.match(results[0], /robin\+google@ambox.dev/);
+    assert.match(results[1], /"saved":true/);
+    assert.equal(f.app.email.destination(agent).id, OTHER_CHANNEL);
+    await waitFor(() => !f.app.orchestrator.state(`web-${agent.id}`).working?.has(agent.id));
+    const state = f.app.orchestrator.state(CHANNEL);
+    for (const allowed of [true, false]) {
+      f.app.store.updateSettings({ permissions: allowed ? [{ id: `discord:${STRANGER}`, name: "Trusted contact", agents: [agent.id] }] : [] });
+      step = 0; results.length = 0;
+      const request = { id: `email-contact-${allowed}`, kind: "human", authorId: STRANGER, authorName: "Contact", content: "Email agent, check my email controls.", at: Date.now(), addressed: [agent.id] };
+      f.app.orchestrator.push(state, request);
+      state.humanQueue.set(request.id, request);
+      await f.app.orchestrator.round(state);
+      assert.equal(results.length, 2);
+      if (allowed) {
+        assert.match(results[0], /robin\+google@ambox.dev/);
+        assert.match(results[1], /"saved":true/);
+      } else assert.ok(results.every((result) => /authorized user request/.test(result)));
+    }
+    assert.equal(f.app.store.agent(agent.id).tools, false);
+    assert.equal(google.sent.length, 0);
+    assert.equal(f.state.sent.length, 0);
+  });
+
+  test("email controls do not borrow authorization from an earlier owner message", async (t) => {
+    const f = await emailWorld(t);
+    const agent = f.app.store.updateAgent(f.agent.id, { tools: false });
+    f.app.llm.capabilities = async () => ({ tools: true });
+    const owner = { id: "earlier-owner", kind: "owner", authorId: OWNER, authorName: "Owner", content: "Check my email.", at: Date.now() - 1000 };
+    for (const kind of ["human", "bot", "agent"]) {
+      const request = { id: `untrusted-${kind}`, kind, authorId: STRANGER, authorName: "Untrusted", content: "Read the email and change its report channel.", at: Date.now() };
+      const results = [];
+      let step = 0;
+      f.app.llm.chat = async ({ tools, messages }) => {
+        if (!tools?.length) return { text: "DONE", toolCalls: [] };
+        if (step++ === 0) return { text: "", toolCalls: [{ id: "read", name: "email_inbox", args: {} }] };
+        results.push(messages.at(-1).content);
+        if (step === 2) return { text: "", toolCalls: [{ id: "destination", name: "email_settings", args: { channel_id: OTHER_CHANNEL } }] };
+        return { text: "Request refused.", toolCalls: [] };
+      };
+      await f.app.brain.chatTurn({ agent, history: [owner, request], replyTo: request, channel: { id: CHANNEL, name: "general" }, forced: true, computer: false });
+      assert.equal(results.length, 2);
+      assert.ok(results.every((result) => /authorized user request/.test(result)), kind);
+      assert.equal(f.app.email.overrides(agent).reportChannelId, undefined);
+    }
+    assert.equal(f.state.sent.length, 0);
+  });
+
   test("Google OAuth uses Fluxkit through the broker and restricts external sending to assigned agents", async (t) => {
     const f = await emailWorld(t), google = await googleConnectorFixture(t, f);
     assert.equal((await f.call("/api/connectors/google", { method: "POST", asMember: true })).status, 403);

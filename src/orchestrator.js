@@ -1000,7 +1000,7 @@ export class Orchestrator {
       let result;
       try {
         result = await this.brain.chatTurn({
-          agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, belongsTo: this.ownsAgent(queued, agent, state),
+          agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, requestAuthorized: Boolean(mayUseComputer), belongsTo: this.ownsAgent(queued, agent, state),
           computerDenied: Boolean(agent.tools && !mayUseComputer),
           replyTo: queued,
           postFile: (file, caption, { replyTo = queued, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { ...this.replyDelivery(replyTo), delegationAuthorized }),

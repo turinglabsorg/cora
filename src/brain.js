@@ -407,7 +407,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     return `Le tue ultime conversazioni in altri posti. È la stessa conversazione con le stesse persone, solo su un'altra superficie: quello che vi siete detti lì vale anche qui.\n${blocks.join("\n")}`;
   }
 
-  async chatTurn({ agent, history, channel, forced, computer, authorized = false, belongsTo = false, computerDenied = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
+  async chatTurn({ agent, history, channel, forced, computer, authorized = false, requestAuthorized = false, belongsTo = false, computerDenied = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
     if (this.knowledge?.resetAt) history = history.filter((message) => this.knowledge.afterReset(message));
     const transcript = formatTranscript(history, agent, this.timezone);
     const last = replyTo || history[history.length - 1];
@@ -430,10 +430,10 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const request = replyTo || history.filter((item) => item.kind === "owner" || item.kind === "human").at(-1);
     const requestIndex = request ? history.findIndex((item) => item.id === request.id) : -1;
     const goalContext = requestIndex > 0 ? formatTranscript(history.slice(0, requestIndex).filter((item) => ["owner", "human", "agent"].includes(item.kind)).slice(-6).map((item) => ({ ...item, content: String(item.content || "").slice(0, 2000) })), agent, this.timezone, { dates: true }).slice(-6000) : "";
-    const requester = computer && request && (request.kind === "owner" || request.kind === "human")
+    const requester = (computer || requestAuthorized) && request && (request.kind === "owner" || request.kind === "human")
       ? { kind: request.kind === "owner" ? "owner" : "authorized", id: String(request.authorId || ""), name: String(request.authorName || "") } : null;
     const turn = (prompt) => this.loop({
-      agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled, requester, replyTo,
+      agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled, requester, replyTo, requestAuthorized,
       maxSteps: computer ? TASK_STEPS : CHAT_STEPS, deadline: Date.now() + (computer ? TASK_DEADLINE_MS : CHAT_DEADLINE_MS),
       imageMessages: [...history.filter((item) => ["owner", "human"].includes(item.kind) && (!item.addressed?.length || item.addressed.includes(agent.id))).slice(-12), ...(last && !history.includes(last) ? [last] : [])], task: Boolean(computer),
       goalRequest: request?.content || "", goalContext,
@@ -627,7 +627,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     }
   }
 
-  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, imageMessages = [], task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null, requester = null, replyTo = null }) {
+  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, imageMessages = [], task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null, requester = null, replyTo = null, requestAuthorized = false }) {
     const selectedBrain = this.knowledge ? this.knowledge.forAgent(agent) : agent.brainSource === "external" ? null : this.companyBrain;
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
@@ -738,7 +738,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const ctx = {
       agent, attachments, boxes: this.boxes, store: this.store, memory: this.memory, channelId: channel.id, postFile: postFile ? (file, caption) => postFile(file, caption, { replyTo, traceId: trace.id }) : null, log: this.log, push: this.push, companyBrain: selectedBrain, knowledge: this.knowledge, gitAttribution: this.gitAttribution,
       // Who asked, when a person did: only then may an agent open a new artifact folder.
-      artifacts: this.artifacts, artifactUserId: transportOf(channel.id) === "web" ? replyTo?.authorId || requester?.id || "" : "", vault: this.vault, requester, mailAuthorized: Boolean(computer), email: this.email, emailInvocation: channel.emailInvocation || null, traceId: trace.id, messageOwner: this.knowledge?.ownerMemory ? (text) => this.messagePersonFor?.(agent, text) || Promise.resolve(false) : this.messageOwner,
+      artifacts: this.artifacts, artifactUserId: transportOf(channel.id) === "web" ? replyTo?.authorId || requester?.id || "" : "", vault: this.vault, requester, mailAuthorized: Boolean(computer || requestAuthorized), email: this.email, emailInvocation: channel.emailInvocation || null, traceId: trace.id, messageOwner: this.knowledge?.ownerMemory ? (text) => this.messagePersonFor?.(agent, text) || Promise.resolve(false) : this.messageOwner,
       openThread: this.openThread ? (options) => this.openThread(agent, channel.id, options) : null,
       threadFor: this.threadFor ? (threadId) => this.threadFor(agent, threadId) : null,
       // The question goes where this conversation is, not to a separate place.
