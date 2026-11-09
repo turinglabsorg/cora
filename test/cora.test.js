@@ -373,6 +373,26 @@ test("artifact upload permissions are rechecked after streaming and while a comm
   assert.equal(app.store.artifactCommits(folder.id).length, 0);
 });
 
+test("a managed default email domain keeps its real provider status and never bypasses verification", async (t) => {
+  const f = await mailWorld(t);
+  const account = (await f.call("/api/mail/accounts", { method: "POST", body: { name: "Default account", key: f.keyA } })).data;
+  const domain = (await f.call("/api/mail/domains", { method: "POST", body: { name: "team-default.test", accountId: account.id } })).data;
+  f.app.mailDomains.defaultDomain = domain.name;
+  f.app.boxes.mailbox.domain = domain.name;
+  const view = (await f.call("/api/mail/domains")).data;
+  assert.equal(view.defaultDomain, domain.name);
+  assert.equal(view.domains.filter((item) => item.name === domain.name).length, 1);
+  assert.equal(view.domains[0].accountName, "Default account");
+  assert.equal(view.domains[0].ready, false);
+  const agent = f.app.store.createAgent({ name: "Default Domain", tools: true, model: "ollama/test-model" });
+  assert.equal((await f.call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: "default-agent", domain: domain.name } })).status, 409);
+  f.state.dnsReady.add(domain.name);
+  assert.equal((await f.call(`/api/mail/domains/${domain.id}/verify`, { method: "POST" })).data.ready, true);
+  await f.app.boxes.ensureMailbox(agent);
+  assert.match(f.app.store.value(`agentMailbox:${agent.id}`).email, /@team-default\.test$/);
+  assert.equal((await f.call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: "default-agent", domain: domain.name } })).status, 200);
+});
+
 test("Claude OAuth keeps the current authorization form when returning from the provider page", async (t) => {
   const fixture = await subscriptionApp(t);
   const created = await fixture.request("/api/subscriptions", { method: "POST", body: { provider: "claude", label: "Claude OAuth" } });

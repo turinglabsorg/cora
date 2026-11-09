@@ -37,8 +37,8 @@ export class MailDomains {
   }
   view() {
     const data = this.data();
-    const legacy = this.available && this.defaultDomain ? [{ id: "default", name: this.defaultDomain, accountId: "", accountName: "Cora", legacy: true, ready: true, relayReady: true, records: [] }] : [];
-    return { available: this.available, accounts: data.accounts, domains: [...legacy, ...data.domains.map((domain) => ({ ...domain, ready: domain.ready && data.accounts.some((account) => account.id === domain.accountId && account.ready), accountName: data.accounts.find((account) => account.id === domain.accountId)?.name || "Resend" }))] };
+    const legacy = this.available && this.defaultDomain && !data.domains.some((domain) => domain.name === this.defaultDomain) ? [{ id: "default", name: this.defaultDomain, accountId: "", accountName: "Cora", legacy: true, ready: true, relayReady: true, records: [] }] : [];
+    return { available: this.available, defaultDomain: this.defaultDomain, accounts: data.accounts, domains: [...legacy, ...data.domains.map((domain) => ({ ...domain, ready: domain.ready && data.accounts.some((account) => account.id === domain.accountId && account.ready), accountName: data.accounts.find((account) => account.id === domain.accountId)?.name || "Resend" }))] };
   }
 
   async json(url, { token, method = "GET", body } = {}, provider = false) {
@@ -192,7 +192,7 @@ export class MailDomains {
     if (!/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(local)) throw new MailError(400, "Usa da 3 a 32 lettere minuscole, numeri o trattini, iniziando e finendo con una lettera o un numero.");
     if (!agent.enabled || !agent.tools) throw new MailError(409, "Accendi l'agente e il suo computer prima di assegnargli un'email.");
     const managed = this.data().domains.find((item) => item.name === domain);
-    if (domain !== this.defaultDomain && (!managed || !(await this.checkDomain(managed.id)).ready)) throw new MailError(409, "Scegli un dominio verificato per invio e ricezione.");
+    if (managed ? !(await this.checkDomain(managed.id)).ready : domain !== this.defaultDomain) throw new MailError(409, "Scegli un dominio verificato per invio e ricezione.");
     const email = `${local}@${domain}`;
     if (this.store.agents().some((item) => {
       const mailbox = this.store.value(`agentMailbox:${item.id}`, null);
