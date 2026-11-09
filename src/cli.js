@@ -145,7 +145,9 @@ export async function runGemini({ bin, model, system, prompt, mcp, toolNames, wo
     if (out.timedOut) throw new Error(`gemini: no answer within ${Math.round(timeoutMs / 1000)}s`);
     if (!final || out.code !== 0 || final.status !== "SUCCESS") {
       if (/authentication required|authentication failed|not signed in/i.test(`${final?.error || ""} ${out.stderr}`)) throw new Error("gemini: not signed in, collega la subscription");
-      throw new Error(`gemini: ${String(final?.error || "Antigravity non ha completato la richiesta").slice(0, 240)}`);
+      const error = new Error(`gemini: ${String(final?.error || "Antigravity non ha completato la richiesta").slice(0, 240)}`);
+      if (/individual quota reached|usage limit reached/i.test(String(final?.error || ""))) Object.assign(error, { code: "GEMINI_QUOTA_EXHAUSTED", model });
+      throw error;
     }
     texts.finish(final.response);
     const usage = final.usage || {};

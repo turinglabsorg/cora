@@ -650,8 +650,10 @@ if (flavor === "claude" && argv[0] === "auth" && argv[1] === "status") {
   process.exit(0);
 }
 if (flavor === "gemini" && argv.includes("/usage")) {
-  process.stdout.write(JSON.stringify({ status: "SUCCESS", response: "Account: fixture@example.test" }));
-  process.exit(0);
+  const options = fs.existsSync(${JSON.stringify(control)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(control)}, "utf8")) : {};
+  if (options.geminiUsage || options.geminiUsageFailed) fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ flavor: "gemini-usage", argv, home: process.env.HOME, scope: process.env.ANTIGRAVITY_CREDENTIAL_SCOPE }) + "\\n");
+  process.stdout.write(JSON.stringify(options.geminiUsage || { status: "SUCCESS", response: "Account: fixture@example.test" }));
+  process.exit(options.geminiUsageFailed ? 1 : 0);
 }
 if (flavor === "gemini" && argv[0] === "models") {
   process.stdout.write("gemini-4-argon-high  Gemini 4 Argon (High)\\ngemini-3.8-flash-medium  Gemini 3.8 Flash (Medium)\\n");

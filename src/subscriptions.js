@@ -6,6 +6,7 @@ import { ValidationError } from "./store.js";
 import { onPath } from "./llm.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS } from "./harnesses.js";
 import { geminiScope, prepareGeminiProfile } from "./gemini-profile.js";
+import { geminiQuotaMessage } from "./gemini-quota.js";
 
 const LOGIN_MS = 10 * 60 * 1000;
 const BROWSER_HELPER = fileURLToPath(new URL("./subscription-browser.js", import.meta.url));
@@ -127,8 +128,9 @@ class CodexAccount {
 
 /** The database selects an identity; the official CLI owns its protected credentials. */
 export class Subscriptions {
-  constructor({ store, claudeBin, codexBin, grokBin = "grok", museBin = "muse", geminiBin = "agy", residentDirectories = {}, emit = () => {} }) {
+  constructor({ store, claudeBin, codexBin, grokBin = "grok", museBin = "muse", geminiBin = "agy", timezone = "UTC", residentDirectories = {}, emit = () => {} }) {
     this.store = store;
+    this.timezone = timezone;
     this.residentOverrides = residentDirectories;
     this.residentDirectories = Object.fromEntries(SUBSCRIPTION_PROVIDERS.map((provider) => [provider, residentDirectories[provider] || HARNESSES[provider].resident()]));
     this.bins = { claude: claudeBin, codex: codexBin, grok: grokBin, muse: museBin, gemini: geminiBin };
@@ -540,6 +542,17 @@ export class Subscriptions {
       signal?.throwIfAborted();
       return await execute(this.environment(record), Boolean(record.resident));
     } catch (error) {
+      if (provider === "gemini" && error.code === "GEMINI_QUOTA_EXHAUSTED") {
+        signal?.throwIfAborted();
+        let usage;
+        try {
+          const { code, output } = await this.geminiCommand(record, ["--settings", '{"disableSlashCommands":false}', "-p", "/usage", "--output-format", "json"], signal);
+          if (code === 0) { const data = JSON.parse(output); if (data.status === "SUCCESS") usage = data; }
+        } catch {}
+        signal?.throwIfAborted();
+        error.message = geminiQuotaMessage({ model: error.model, usage, language: this.store.settings.language, timezone: this.timezone });
+        error.userMessage = error.message;
+      }
       if (AUTH_FAILURE.test(error.message || "")) this.changed(id, { status: "disconnected" });
       if (error.code === "ISOLATION_UNAVAILABLE") this.changed(id, { status: "error", issue: "isolation" });
       throw error;

@@ -344,6 +344,75 @@ test("router image messages use the actual JPEG and GIF MIME types for incoming 
   assert.equal(sent.messages[2].content[1].image_url.url, "data:image/gif;base64," + gif);
 });
 
+test("Gemini quota errors distinguish Argon, shared limits and unknown capacity in delivered chat replies", async (t) => {
+  const network = await fakeDiscord(), native = fakeCli();
+  const f = await knowledgeWorld({ discordToken: "fixture-discord-quota", discordApi: network.url, geminiBin: native.gemini, timezone: "Europe/Rome" });
+  t.after(async () => { await f.close(); await network.close(); });
+  f.app.store.updateSettings({ transport: "discord", transports: ["discord"], guildIds: [GUILD], ownerIds: [OWNER] });
+  const account = f.app.store.createSubscription({ provider: "gemini", label: "Quota", connectedBy: { id: f.alice.user.id, name: "Alice" } });
+  f.app.store.updateSubscription(account.id, { status: "ready" });
+  const agent = f.app.store.createAgent({ name: "QuotaAgent", model: "gemini/gemini-4-argon-high", subscriptionId: account.id, tools: false, brainOwnerId: f.alice.user.id, ownerId: "discord:" + OWNER, channelIds: [CHANNEL], chattiness: 0 });
+  await waitFor(() => f.app.discord.state === "ready");
+  const bucket = (window, remaining_fraction) => ({ window, remaining_fraction, reset_time: "2026-11-16T16:06:40Z" });
+  const group = (name, buckets) => ({ name, buckets });
+  const usage = groups => ({ status: "SUCCESS", command: { data: { groups } } });
+  const separate = usage([group("Gemini Models", [bucket("weekly", 0.974), bucket("5h", 0.935)]), group("Gemini 4 Argon", [bucket("weekly", 0)])]);
+  let turn = 0;
+  const ask = async (options, language = "it") => {
+    f.app.store.updateSettings({ language });
+    native.set({ reply: "", error: "Individual quota reached. Resets in 166h32m5s.", ...options });
+    const before = network.state.webhookPosts.length;
+    const beforeRuns = native.calls().filter(call => call.flavor === "gemini").length;
+    network.say({ content: `@QuotaAgent, continua il controllo ${++turn}.` });
+    const post = await waitFor(() => network.state.webhookPosts.slice(before).find(post => post.username === agent.name), { what: "a readable quota reply" });
+    await waitFor(() => f.app.orchestrator.quiet());
+    assert.equal(f.app.store.subscription(account.id).status, "ready", "quota exhaustion does not disconnect the account");
+    assert.ok(!f.app.subscriptions.running.has(account.id));
+    assert.equal(native.calls().filter(call => call.flavor === "gemini").length - beforeRuns, 1, "quota errors never retry the model, including English messages about capacity");
+    assert.doesNotMatch(post.content, /upgrade|Individual quota reached|non riesco a rispondere/i);
+    return post.content;
+  };
+  await t.test("a Pro Argon limit preserves the full reset and the other Gemini quotas", async () => {
+    const text = await ask({ geminiUsage: separate });
+    assert.match(text, /Gemini 4 Argon.*limite settimanale/);
+    assert.match(text, /16 nov 2026.*17:06.*Europe\/Rome/);
+    assert.match(text, /altri modelli Gemini.*97% settimanale.*94% su cinque ore/);
+    assert.ok(text.length > 180, "the whole explanation survives the ordinary error-message cap");
+    const lookup = native.calls().find(call => call.flavor === "gemini-usage");
+    const run = native.calls().find(call => call.flavor === "gemini");
+    assert.equal(lookup.home, run.env.HOME); assert.equal(lookup.scope, run.scope);
+    assert.equal(native.calls().filter(call => call.flavor === "gemini").length, 1, "quota exhaustion never retries the model");
+  });
+  await t.test("an interrupted task reports the same distinction while resuming", async () => {
+    const trace = f.app.store.trace(f.app.store.traces(agent.id).find(trace => trace.status === "error").id);
+    const before = network.state.webhookPosts.length;
+    await assert.rejects(f.app.orchestrator.resumeTask(agent, trace), /Gemini 4 Argon.*limite settimanale/);
+    const text = network.state.webhookPosts.slice(before).find(post => /altri modelli Gemini/.test(post.content))?.content;
+    assert.match(text, /97% settimanale.*94% su cinque ore/);
+    assert.match(text, /Ripristino:/);
+  });
+  await t.test("shared Gemini quota is identified without inventing Flash capacity", async () => {
+    const text = await ask({ geminiUsage: usage([group("Gemini Models", [bucket("weekly", 0), bucket("5h", 0)])]) }, "en");
+    assert.match(text, /Gemini 4 Argon.*weekly usage limit/);
+    assert.match(text, /shared Gemini model group/);
+    assert.doesNotMatch(text, /Other Gemini models|97%|94%/);
+  });
+  await t.test("a failed quota lookup reports unknown capacity", async () => {
+    const text = await ask({ geminiUsageFailed: true });
+    assert.match(text, /Gemini 4 Argon.*limite di utilizzo/);
+    assert.match(text, /Non ho potuto verificare la quota residua/);
+    assert.doesNotMatch(text, /97%|94%|Ripristino:/);
+  });
+  await t.test("inconsistent provider counters are stated instead of treating them as exhausted", async () => {
+    for (const language of ["it", "en"]) {
+      const text = await ask({ geminiUsage: usage([null, group("Gemini Models", [null, bucket("weekly", 0.97), bucket("5h", 0.94)]), group("Gemini 4 Argon", [bucket("weekly", 0.5)])]) }, language);
+      assert.match(text, language === "en" ? /quota counters still show capacity/ : /contatori mostrano ancora disponibilità/);
+      assert.match(text, /97%.*94%/);
+      assert.doesNotMatch(text, /limite settimanale|weekly usage limit|Ripristino:|Resets:/);
+    }
+  });
+});
+
 test("Discord images reach Gemini through Cora attachment tools without a false vision denial", async (t) => {
   const network = await fakeDiscord(), native = fakeCli();
   const f = await knowledgeWorld({ discordToken: "fixture-discord-vision", discordApi: network.url, geminiBin: native.gemini });

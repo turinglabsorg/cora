@@ -20,4 +20,6 @@ Streaming output supplies the final response, intermediate text and token usage.
 
 API keys and cloud-provider overrides are excluded from the subscription environment. API-key mode and automatic use of purchased AI credits are disabled. Subscription capacity remains subject to Google's plan limits.
 
+Quota errors identify the selected model and query the official CLI's `/usage` command with the same managed account. The reply distinguishes a separate Argon weekly pool from the shared Gemini pool, includes the reported reset in the instance's time zone and reports the remaining quota of the other pool. Missing counters are explicitly unknown; contradictory provider counters are reported as such. These checks consume no model tokens, do not retry an exhausted model, disconnect the account, switch models or enable purchased credits. Chat and interrupted-task replies retain the complete explanation instead of the ordinary short error excerpt.
+
 References: [authentication](https://antigravity.google/docs/install), [headless mode](https://antigravity.google/docs/cli/headless/), [custom agents](https://antigravity.google/docs/subagents/), [MCP](https://antigravity.google/docs/mcp/), [plan limits](https://antigravity.google/docs/plans/).

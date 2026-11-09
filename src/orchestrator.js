@@ -1011,7 +1011,7 @@ export class Orchestrator {
         });
       } catch (error) {
         this.log({ type: "error", agentId: agent.id, channelId: state.id, text: error.message });
-        if (isForced) result = { text: `(non riesco a rispondere: ${error.message.slice(0, 180)})` };
+        if (isForced) result = { text: error.userMessage || `(non riesco a rispondere: ${error.message.slice(0, 180)})` };
         else return;
       } finally {
         working.stop();
@@ -1232,9 +1232,10 @@ export class Orchestrator {
     state.working ??= new Set();
     state.working.add(agent.id);
     this.log({ type: "settings", agentId: agent.id, channelId: state.id, text: "riprende il lavoro interrotto dal riavvio" });
+    let replyTo;
     try {
       await this.ensureHistory(state);
-      const replyTo = trace.steps?.findLast((step) => step.replyTo)?.replyTo
+      replyTo = trace.steps?.findLast((step) => step.replyTo)?.replyTo
         || state.history.findLast((item) => ["human", "owner"].includes(item.kind) && item.at <= Date.parse(trace.startedAt));
       const english = this.store.settings.language === "en";
       await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.", undefined, undefined, this.replyDelivery(replyTo));
@@ -1247,6 +1248,9 @@ export class Orchestrator {
       });
       if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId, this.replyDelivery(result.replyTo || replyTo));
       this.acknowledge(state, agent.id, result.handledMessageIds || []);
+    } catch (error) {
+      if (error.userMessage) await this.postAs(agent, state, error.userMessage, undefined, undefined, this.replyDelivery(replyTo)).catch(() => {});
+      throw error;
     } finally {
       state.working.delete(agent.id);
       this.threadWork.delete(state.id, agent.id);

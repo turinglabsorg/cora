@@ -611,7 +611,7 @@ export class LLM {
         return await once();
       } catch (error) {
         runSignal?.throwIfAborted();
-        if (attempt >= RETRIES || used || !TRANSIENT.test(String(error.message || ""))) throw error;
+        if (error.code === "GEMINI_QUOTA_EXHAUSTED" || attempt >= RETRIES || used || !TRANSIENT.test(String(error.message || ""))) throw error;
         onStep?.({ type: "note", text: `${error.message} — riprovo (${attempt + 1}/${RETRIES}).` });
         await wait(RETRY_WAIT_MS * (attempt + 1));
       }
