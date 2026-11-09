@@ -795,7 +795,13 @@ process.stdin.on("end", async () => {
       line({ type: "tool_result", callId: "toolu_1", status: "completed", result: record.output });
     }
     line({ type: "text", text: answer });
-    line({ type: "status", phase: "step_end", turn: 1, step: 1, usage: { inputTokens: 90, outputTokens: 11, totalTokens: 101 } });
+    const usages = control.dshUsages || [{ inputTokens: 90, outputTokens: 11, totalTokens: 101 }];
+    for (let index = 0; index < usages.length; index += 1) {
+      line({ type: "status", phase: "step_start", turn: 1, step: index + 1 });
+      line({ type: "status", phase: "step_end", turn: 1, step: index + 1, ...(usages[index] ? { usage: usages[index] } : {}) });
+    }
+    if (control.dshPauseMs) await new Promise(resolve => setTimeout(resolve, control.dshPauseMs));
+    if (control.dshError) { line({ type: "error", message: "fixture dsh error" }); process.exit(1); }
     line({ type: "status", phase: "turn_end", turn: 1, reason: { kind: "completed" } });
     line({ type: "final", text: answer });
   } else if (flavor === "muse") {

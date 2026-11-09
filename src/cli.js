@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { geminiSettings } from "./gemini-profile.js";
+import { deepSeekUsage, emptyMeter, mergeMeter } from "./usage.js";
 
 export const MCP_SCRIPT = fileURLToPath(new URL("./mcp-server.js", import.meta.url));
 const SECRET_ENV = ["DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OLLAMA_API_KEY", "ORCAROUTER_API_KEY", "TYPESAFE_API_KEY", "SONIOX_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CORA_ADMIN_PASSWORD", "CORA_SESSION_KEY", "CORA_VAULT_KEY", "CORA_MAIL_REGISTRATION_TOKEN", "VAPID_KEY", "BRAIN_DATABASE_URL", "CORA_BRAIN_DATABASE_URL", "CORO_BRAIN_DATABASE_URL"];
@@ -364,7 +365,7 @@ function dshScript(bin) {
  * key: Cora's tools arrive over MCP and dsh's own are off. `home` is Cora's own
  * DSH_HOME, never the owner's, and nothing is sent to DeepSeek's telemetry.
  */
-export async function runDeepSeek({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", home, apiKey, signal }) {
+export async function runDeepSeek({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, onUsage, effort = "", home, apiKey, signal }) {
   if (!apiKey) throw new Error("deepseek: la chiave DeepSeek non è collegata");
   const script = dshScript(bin);
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
@@ -378,7 +379,9 @@ export async function runDeepSeek({ bin, model, system, prompt, mcp, toolNames, 
   };
   const input = `<istruzioni_di_sistema>\n${system}\n</istruzioni_di_sistema>\n\n${prompt}`;
   const texts = textSteps(onStep);
-  const used = { in: 0, out: 0 };
+  const used = { in: 0, out: 0, meter: emptyMeter() };
+  const started = new Map();
+  const completed = new Set();
   let final = null;
   let failure = "";
   const onLine = (line) => {
@@ -388,9 +391,16 @@ export async function runDeepSeek({ bin, model, system, prompt, mcp, toolNames, 
       onStep?.(String(event.text || "").trim() ? { type: "thinking", text: event.text } : { type: "thinking", hidden: true });
     } else if (event.type === "text" && String(event.text || "").trim()) texts.text(event.text);
     else if (event.type === "tool_call") texts.flush();
+    else if (event.type === "status" && event.phase === "step_start") started.set(`${event.turn}:${event.step}`, Date.now());
     else if (event.type === "status" && event.phase === "step_end") {
-      used.in += Number(event.usage?.inputTokens) || 0;
-      used.out += Number(event.usage?.outputTokens) || 0;
+      const key = `${event.turn}:${event.step}`;
+      if (completed.has(key)) return;
+      completed.add(key);
+      const usage = deepSeekUsage(model, event.usage, { startedAt: started.get(key) ?? Date.now(), endedAt: Date.now() });
+      used.in += usage.in;
+      used.out += usage.out;
+      mergeMeter(used.meter, usage.meter);
+      onUsage?.(usage);
     } else if (event.type === "status" && event.phase === "turn_end" && event.reason?.kind === "error") failure = String(event.reason.error?.message || "error");
     else if (event.type === "error") failure = String(event.message || "error");
     else if (event.type === "final") final = event;
@@ -403,7 +413,7 @@ export async function runDeepSeek({ bin, model, system, prompt, mcp, toolNames, 
     if (out.code !== 0 || !final) throw new Error(`deepseek: ${(failure || out.stderr.replace(/^dsh: /gm, "") || `exit ${out.code}`).trim().slice(-240)}`);
     if (!text.trim()) throw new Error(`deepseek: ${model} returned no content`);
     texts.finish(text);
-    return { text, usage: used };
+    return { text, usage: used, usageStreamed: Boolean(onUsage) };
   } finally {
     rmSync(patchFile, { force: true });
   }

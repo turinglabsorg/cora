@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { emptyMeter, mergeMeter } from "./usage.js";
 
 /** A task can run for hours: the trace keeps the latest steps, and saves them as it goes. */
 const MAX_STEPS = 300;
@@ -57,6 +58,7 @@ class Trace {
     // What the turn cost, added up over every model call it made.
     this.tokensIn = 0;
     this.tokensOut = 0;
+    this.meter = emptyMeter();
     // The goal this turn worked toward, when it had one.
     this.goal = "";
     this.savedAt = Date.now();
@@ -65,8 +67,13 @@ class Trace {
 
   /** Count what a model call used. Harnesses that report nothing leave this at zero. */
   spent(usage) {
+    if (!usage) return;
     this.tokensIn += Number(usage?.in) || 0;
     this.tokensOut += Number(usage?.out) || 0;
+    mergeMeter(this.meter, usage.meter);
+    this.owner.store.saveTrace(this);
+    this.savedAt = Date.now();
+    this.owner.emit({ type: "trace", event: "usage", trace: this.summary() });
   }
 
   add(step) {
@@ -103,7 +110,7 @@ class Trace {
     return {
       id: this.id, agentId: this.agentId, kind: this.kind, channelId: this.channelId, model: this.model,
       startedAt: this.startedAt, endedAt: this.endedAt, status: this.status, stepCount: this.steps.length + this.dropped,
-      tokensIn: this.tokensIn, tokensOut: this.tokensOut, goal: this.goal,
+      tokensIn: this.tokensIn, tokensOut: this.tokensOut, meter: structuredClone(this.meter), goal: this.goal,
       tools: [...new Set(this.steps.filter((step) => step.type === "tool").map((step) => step.name))],
       output: this.output.slice(0, 240), error: this.error,
     };

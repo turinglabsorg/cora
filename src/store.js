@@ -7,6 +7,7 @@ import { plainKeys } from "./box.js";
 import { cleanGithubOrg } from "./github-apps.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS, isSubscriptionProvider } from "./harnesses.js";
 import { VOICE_LANGUAGES } from "./voice.js";
+import { aggregateMeters } from "./usage.js";
 
 export const SHARED = "_shared";
 export const CONTEXT_LIMITS = { fileChars: 30000, totalChars: 60000, files: 20 };
@@ -462,6 +463,7 @@ function traceRow(row, full) {
     tools: row.tools ? row.tools.split(",") : [],
     tokensIn: row.tokens_in || 0,
     tokensOut: row.tokens_out || 0,
+    meter: row.meter ? JSON.parse(row.meter) : null,
     goal: row.goal || "",
     output: full ? row.output : row.output.slice(0, 240),
     error: row.error,
@@ -485,6 +487,7 @@ export class Store {
     for (const column of ["tokens_in", "tokens_out"]) {
       try { this.db.exec(`ALTER TABLE traces ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`); } catch {}
     }
+    try { this.db.exec("ALTER TABLE traces ADD COLUMN meter TEXT"); } catch {}
     // The goal a task worked toward: the column is new, so older traces get it back from their "Obiettivo" notes.
     try {
       this.db.exec("ALTER TABLE traces ADD COLUMN goal TEXT NOT NULL DEFAULT ''");
@@ -1332,9 +1335,10 @@ export class Store {
   goalUsage(agentId, limit = 30) {
     return this.stmt(`SELECT goal, channel_id, COUNT(*) AS turns, SUM(tokens_in) AS tokens_in, SUM(tokens_out) AS tokens_out,
         MIN(started_at) AS first, MAX(started_at) AS last,
+        json_group_array(json_object('model', model, 'meter', json(meter))) AS meters,
         (SELECT status FROM traces l WHERE l.agent_id = t.agent_id AND l.goal = t.goal AND IFNULL(l.channel_id, '') = IFNULL(t.channel_id, '') ORDER BY l.started_at DESC LIMIT 1) AS status
       FROM traces t WHERE agent_id = ? AND goal <> '' GROUP BY goal, channel_id ORDER BY last DESC LIMIT ?`).all(agentId, limit)
-      .map((row) => ({ goal: row.goal, channelId: row.channel_id, turns: row.turns, tokensIn: row.tokens_in || 0, tokensOut: row.tokens_out || 0, first: row.first, last: row.last, status: row.status }));
+      .map((row) => ({ goal: row.goal, channelId: row.channel_id, turns: row.turns, tokensIn: row.tokens_in || 0, tokensOut: row.tokens_out || 0, meter: aggregateMeters(JSON.parse(row.meters)), first: row.first, last: row.last, status: row.status }));
   }
 
   saveTrace(trace) {
@@ -1344,11 +1348,12 @@ export class Store {
       systemHash = createHash("sha256").update(trace.system).digest("hex");
       this.stmt("INSERT OR IGNORE INTO trace_systems(hash, text) VALUES (?, ?)").run(systemHash, trace.system);
     }
-    this.stmt(`INSERT OR REPLACE INTO traces(id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, system_hash, prompt, steps, output, error, tokens_in, tokens_out, goal)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    this.stmt(`INSERT OR REPLACE INTO traces(id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, system_hash, prompt, steps, output, error, tokens_in, tokens_out, goal, meter)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       trace.id, trace.agentId, trace.kind, trace.channelId || null, trace.model || "", trace.startedAt, trace.endedAt || null, trace.status,
       trace.steps.length + (trace.dropped || 0), tools, systemHash, trace.prompt || "", JSON.stringify(trace.steps), trace.output || "", trace.error || "",
       Number(trace.tokensIn) || 0, Number(trace.tokensOut) || 0, String(trace.goal || "").slice(0, 600),
+      trace.meter ? JSON.stringify(trace.meter) : null,
     );
     if (trace.status !== "running" && Math.random() < 0.05) this.pruneTraces(trace.agentId);
   }
@@ -1360,15 +1365,15 @@ export class Store {
 
   traces(agentId, limit = 50, { goal = null } = {}) {
     if (goal !== null) {
-      return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal FROM traces WHERE agent_id = ? AND goal = ? ORDER BY started_at DESC LIMIT ?")
+      return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal, meter FROM traces WHERE agent_id = ? AND goal = ? ORDER BY started_at DESC LIMIT ?")
         .all(agentId, goal, limit).map((row) => traceRow(row, false));
     }
-    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal FROM traces WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?")
+    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal, meter FROM traces WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?")
       .all(agentId, limit).map((row) => traceRow(row, false));
   }
 
   recentTraces(limit = 12) {
-    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal FROM traces ORDER BY started_at DESC LIMIT ?")
+    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal, meter FROM traces ORDER BY started_at DESC LIMIT ?")
       .all(limit).map((row) => traceRow(row, false));
   }
 

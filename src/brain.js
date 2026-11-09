@@ -1061,10 +1061,10 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       if (this.llm.isAgentic(model)) {
         const run = (input) => this.llm.runAgent({
           model, subscriptionId: agent.subscriptionId, system, prompt: input, tools, execute: runTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
-          signal: controller.signal, host: agent.ollamaHost || "",
+          signal: controller.signal, host: agent.ollamaHost || "", onUsage: (usage) => trace.spent(usage),
         });
         let result = await run(currentPrompt());
-        trace.spent(result.usage);
+        if (!result.usageStreamed) trace.spent(result.usage);
         let final = result.text;
         for (let next = await nextStep(final); next; next = await nextStep(result.text)) {
           if (next.kind !== "goal") nudges += 1;
@@ -1073,7 +1073,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
           trace.add({ type: "note", text: `Cora harness: ${HARNESS_NOTES[next.kind] || "lo rimando al lavoro"}.` });
           if (halted) break;
           result = await run(`${currentPrompt()}\n\n[Messaggi successivi del proprietario]\n${ownerSaid.join("\n") || "(nessuno)"}\n\n[Azioni già eseguite: non ripeterle]\n${did.slice(-40).join("\n")}\n\n[Il tuo turno precedente si è chiuso con: «${cleanReply(result.text, agent) || "(niente)"}»]\n\n${next.prompt}`);
-          trace.spent(result.usage);
+          if (!result.usageStreamed) trace.spent(result.usage);
           if (next.kind === "confirm" && isDone(result.text)) break;
           final = result.text;
         }

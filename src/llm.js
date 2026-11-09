@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { runClaude, runCodex, runDeepSeek, runGemini, runGrok, runHermes, runMuse } from "./cli.js";
 import { isSubscriptionProvider } from "./harnesses.js";
 import { imageMime } from "./images.js";
+import { routerUsage } from "./usage.js";
 
 const REQUEST_TIMEOUT_MS = 240000;
 
@@ -562,7 +563,7 @@ export class LLM {
    * A full agent turn on a subscription CLI. `tools` are cora's tool definitions,
    * `execute(name, args)` runs one of them; both reach the CLI through MCP.
    */
-  async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, effort = "", goal = "", signal, host = "" }) {
+  async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, onUsage, effort = "", goal = "", signal, host = "" }) {
     const { provider, name } = splitModel(model);
     subscriptionId ||= this.subscriptions?.defaultId(provider);
     if (isSubscriptionProvider(provider) && (!this.subscriptions || !subscriptionId)) throw new Error("subscription da collegare");
@@ -577,7 +578,7 @@ export class LLM {
       };
       const run = tools.length ? this.bridge.register({ tools, execute: watched, ttlMs: timeoutMs + 60000 }) : null;
       const options = {
-        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, effort, goal, signal: runSignal,
+        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, onUsage, effort, goal, signal: runSignal,
       };
       try {
         if (isSubscriptionProvider(provider)) {
@@ -731,8 +732,23 @@ export class LLM {
     }
     const message = data.choices?.[0]?.message || {};
     const text = Array.isArray(message.content) ? message.content.map((part) => part.text || "").join("") : message.content || "";
+    const usage = { ...data.usage };
+    const requestId = response.headers.get("x-orca-request-id");
+    if (usage.cost == null && requestId) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const receipt = await fetch(`${router.url}/generation?${new URLSearchParams({ id: requestId })}`, {
+            headers: { Authorization: `Bearer ${router.key}` },
+            signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(2000)]),
+          });
+          if (receipt.status === 404 && attempt < 2) { await wait(200 * (attempt + 1)); continue; }
+          if (receipt.ok) usage.cost = (await receipt.json())?.data?.total_cost;
+        } catch {}
+        break;
+      }
+    }
     return {
-      usage: { in: Number(data.usage?.prompt_tokens) || 0, out: Number(data.usage?.completion_tokens) || 0 },
+      usage: routerUsage(usage, "OrcaRouter"),
       text,
       thinking: message.reasoning_content || message.reasoning || "",
       toolCalls: (message.tool_calls || []).map((call) => ({ id: call.id || callId(), name: call.function?.name, args: parseArgs(call.function?.arguments) })),

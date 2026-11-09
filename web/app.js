@@ -884,6 +884,32 @@ function agentCard(agent, index) {
       btn("", { icon: "bulb", href: `#/agent/${agent.id}/ragionamento`, cls: "sm", title: "Ragionamento" })));
 }
 
+function costLabel(items) {
+  const totals = new Map();
+  let estimated = false, partial = false;
+  for (const item of items) {
+    partial ||= Boolean(item.meter?.unpriced || (!item.meter?.costs?.length && /^(deepseek|orcarouter)\//.test(item.model || "")));
+    for (const cost of item.meter?.costs || []) {
+      const total = totals.get(cost.currency) || { amount: 0, max: 0 };
+      total.amount += cost.amount; total.max += cost.maxAmount ?? cost.amount;
+      totals.set(cost.currency, total); estimated ||= cost.estimated;
+    }
+  }
+  if (!totals.size) return partial ? tr("Costo non disponibile") : "";
+  const money = (amount, currency) => `${amount > 0 && amount < 0.0001 ? "<" : ""}${new Intl.NumberFormat(LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(amount > 0 && amount < 0.0001 ? 0.0001 : amount)} ${currency}`;
+  const cost = [...totals].map(([currency, value]) => value.max > value.amount * 1.0000001 ? `${money(value.amount, currency)}–${money(value.max, currency)}` : money(value.amount, currency)).join(" + ");
+  return tr(estimated ? "Costo stimato: {cost}" : "Costo: {cost}", { cost }) + (partial ? ` · ${tr("parziale")}` : "");
+}
+
+function usageLine(item) {
+  const cost = costLabel([item]);
+  const steps = item.meter?.modelSteps;
+  const sources = [...new Set((item.meter?.costs || []).filter((cost) => cost.estimated).map((cost) => `${cost.source} (${cost.version})`))];
+  return h("span", { class: "row-usage" },
+    steps !== null && steps !== undefined ? h("span", {}, raw(`${item.meter?.unknownModelSteps ? "≥ " : ""}${tr(steps === 1 ? "1 passaggio del modello" : "{count} passaggi del modello", { count: steps })}`)) : null,
+    cost ? h("span", { class: "usage-cost", title: sources.length ? tr("Stima dalle tariffe pubblicate. Un intervallo include le possibili fasce orarie; gli addebiti definitivi sono nel provider.") + " " + sources.join(", ") : undefined }, raw(cost)) : null);
+}
+
 function traceRow(trace, { withAgent = false } = {}) {
   const agent = S.data.agents.find((item) => item.id === trace.agentId);
   const [label, cls] = TRACE_STATUS[trace.status] || [trace.status, ""];
@@ -896,6 +922,7 @@ function traceRow(trace, { withAgent = false } = {}) {
     lead,
     h("span", { class: "grow" },
       h("span", { class: "row-meta" }, withAgent && agent ? h("b", {}, raw(agent.name)) : null, tag(TRACE_KIND[trace.kind] || trace.kind), tag(label, cls), raw(`${spent}${traceWhere(trace)} · ${fmtTime(trace.startedAt, true)} · ${duration(trace)}`)),
+      usageLine(trace),
       h("span", { class: "row-text" }, trace.error || trace.output ? raw(trace.error || trace.output) : trace.status === "running" ? "…" : "(niente)"),
       trace.tools?.length ? h("span", { class: "row-tools" }, trace.tools.map((tool) => h("span", {}, icon("tool"), tool))) : null),
     icon("next", "chev"));
@@ -4043,7 +4070,8 @@ function goalGroup(agent, item) {
       h("span", { class: "goal-total" }, h("b", {}, total ? shortTokens(total) : "—"), h("small", {}, "token")),
       h("span", { class: "grow" },
         h("span", { class: "row-meta" }, tag("Obiettivo", "agent"), tag(label, cls),
-          raw(`${tr(item.turns === 1 ? "1 turno" : "{count} turni", { count: item.turns })} · ${tr("{in} in · {out} out", { in: shortTokens(item.tokensIn), out: shortTokens(item.tokensOut) })} · ${traceWhere(item)} · ${fmtTime(item.last, true)}`)),
+          raw(`${tr(item.turns === 1 ? "1 esecuzione" : "{count} esecuzioni", { count: item.turns })} · ${tr("{in} in · {out} out", { in: shortTokens(item.tokensIn), out: shortTokens(item.tokensOut) })} · ${traceWhere(item)} · ${fmtTime(item.last, true)}`)),
+        usageLine(item),
         h("span", { class: "goal-text" }, raw(item.goal))),
       icon("next", "chev")),
     turns);
@@ -4063,8 +4091,8 @@ async function tracesTab(agent, isCurrent = () => true) {
   let pending = null;
   S.live = (entry) => {
     if (entry.type !== "trace" || entry.event === "step" || entry.trace.agentId !== agent.id) return;
-    clearTimeout(pending);
-    pending = setTimeout(() => { if (route()[2] === "ragionamento" && !route()[3]) renderAgent(); }, 1500);
+    if (pending) return;
+    pending = setTimeout(() => { pending = null; if (route()[2] === "ragionamento" && !route()[3]) renderAgent(); }, 1500);
   };
   // One list, newest first: a goal stands for all the turns that worked toward it, the other turns stand alone.
   const groups = goals?.goals || [];
@@ -4075,11 +4103,12 @@ async function tracesTab(agent, isCurrent = () => true) {
   ].sort((a, b) => b.at - a.at);
   const spent = groups.reduce((sum, item) => sum + item.tokensIn + item.tokensOut, 0)
     + (list || []).filter((trace) => !grouped(trace)).reduce((sum, trace) => sum + (trace.tokensIn || 0) + (trace.tokensOut || 0), 0);
-  const provider = (agent.model || S.data.settings.defaultModel).split("/")[0];
-  const hint = provider === "claude"
-    ? "Ogni turno, anche quando passa, e gli obiettivi con tutti i turni che ci hanno lavorato. Claude Code mostra i passi e gli strumenti, non il testo del ragionamento."
-    : "Ogni turno, anche quando passa: cosa ha letto, cosa ha pensato, gli strumenti e la risposta. Un obiettivo raccoglie tutti i turni che ci hanno lavorato.";
-  return panel({ icon: "bulb", title: "Ragionamento", hint, actions: spent ? h("span", { class: "reasoning-total" }, h("b", {}, shortTokens(spent)), h("small", {}, "token")) : null },
+  const visible = [...groups, ...(list || []).filter((trace) => !grouped(trace))];
+  const cost = costLabel(visible);
+  const hint = "Un obiettivo raccoglie le esecuzioni di Cora. Ogni esecuzione può contenere molti passaggi del modello. I costi API si aggiornano con il consumo; i dati storici mancanti restano non disponibili.";
+  return panel({ icon: "bulb", title: "Ragionamento", hint, actions: h("span", { class: "reasoning-totals" },
+    spent ? h("span", { class: "reasoning-total" }, h("b", {}, shortTokens(spent)), h("small", {}, "token")) : null,
+    cost ? h("span", { class: "usage-cost" }, raw(cost)) : null) },
     items.length ? h("div", { class: "reasoning-list" }, items.map((item) => item.node())) : empty("bulb", "Ancora nessun turno registrato."));
 }
 
@@ -4107,6 +4136,7 @@ async function traceDetail(agent, traceId, isCurrent = () => true) {
   if (!isCurrent()) return null;
   if (!trace) return panel({ icon: "alert", title: "Ragionamento non trovato" }, btn("Tutti i turni", { icon: "back", href: `#/agent/${agent.id}/ragionamento` }));
   const startedAt = Date.parse(trace.startedAt);
+  const usageSlot = h("div", { class: "trace-usage" }, usageLine(trace), h("small", {}, raw(tr("{in} in · {out} out", { in: shortTokens(trace.tokensIn || 0), out: shortTokens(trace.tokensOut || 0) }))));
   const stepsLog = h("div", { class: "steps-log" });
   let lastHidden = false;
   const addStep = (step) => {
@@ -4121,6 +4151,8 @@ async function traceDetail(agent, traceId, isCurrent = () => true) {
     S.live = (entry) => {
       if (entry.type !== "trace") return;
       if (entry.event === "step" && entry.traceId === trace.id) addStep(entry.step);
+      if (entry.event === "usage" && entry.trace.id === trace.id) usageSlot.replaceChildren(
+        usageLine(entry.trace), h("small", {}, raw(tr("{in} in · {out} out", { in: shortTokens(entry.trace.tokensIn || 0), out: shortTokens(entry.trace.tokensOut || 0) }))));
       if (entry.event === "end" && entry.trace.id === trace.id) renderAgent();
     };
   }
@@ -4132,6 +4164,7 @@ async function traceDetail(agent, traceId, isCurrent = () => true) {
     btn("Tutti i turni", { icon: "back", href: `#/agent/${agent.id}/ragionamento`, cls: "ghost sm back-link" }),
     panel({ icon: trace.kind === "sleep" ? "moon" : trace.kind === "routine" ? "clock" : "chat", title: `${tr(TRACE_KIND[trace.kind] || trace.kind)} · ${traceWhere(trace)}`, hint: tr("{time} · {duration} · {count} passi", { time: fmtTime(trace.startedAt, true), duration: duration(trace), count: trace.steps.length }),
       actions: h("span", { class: "badges" }, tag(label, cls), tag(modelLabel(trace.model, { short: true }))) },
+      usageSlot,
       h("h3", { class: "label" }, "Passi"),
       stepsLog,
       h("h3", { class: "label" }, trace.status === "pass" ? "Risposta (ha deciso di passare)" : "Risposta"),

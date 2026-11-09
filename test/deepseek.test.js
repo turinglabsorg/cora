@@ -27,7 +27,8 @@ test("an agent on DeepSeek Harness runs on the instance's own DeepSeek key, with
     return { content: "PASS" };
   });
   const cli = fakeCli();
-  cli.set({ reply: "Me lo segno.", tool: "remember", args: { fact: "Sam beve il caffè amaro" }, thinking: "Lo salvo in memoria." });
+  cli.set({ reply: "Me lo segno.", tool: "remember", args: { fact: "Sam beve il caffè amaro" }, thinking: "Lo salvo in memoria.",
+    dshUsages: [{ inputTokens: 90, cacheReadTokens: 900, outputTokens: 11, totalTokens: 1001 }, { inputTokens: 10, cacheReadTokens: 1000, outputTokens: 9, totalTokens: 1019 }] });
   const home = tempHome();
   const seed = new Store(home);
   seed.updateSettings({ guildIds: [GUILD], ownerIds: [OWNER] });
@@ -71,6 +72,12 @@ test("an agent on DeepSeek Harness runs on the instance's own DeepSeek key, with
   const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Dee"), { what: "Dee's answer" });
   assert.match(post.content, /^Me lo segno\. \[/, "the answer comes from dsh's final event, after the tool ran");
   assert.ok(app.store.memories(dee.id).some((memory) => /caffè amaro/.test(memory.text)), "remember ran through Cora's bridge");
+  const trace = (await call(`/api/agents/${dee.id}/traces`)).data[0];
+  assert.equal(trace.tokensIn, 2000, "cached input is included exactly once, alongside uncached input");
+  assert.equal(trace.tokensOut, 20);
+  assert.equal(trace.meter.modelSteps, 2, "one Cora execution contains two native model steps");
+  assert.equal(trace.meter.costs[0].estimated, true);
+  assert.ok(trace.meter.costs[0].amount > 0);
 
   const run = cli.calls().find((item) => item.flavor === "dsh");
   const patch = run.argv[run.argv.indexOf("--patch") + 1];

@@ -1535,6 +1535,12 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .reasoning-total { display: inline-flex; align-items: baseline; gap: 6px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--well); }
 .reasoning-total b { font: 600 15px/1 var(--display); color: var(--amber); letter-spacing: -0.02em; }
 .reasoning-total small { font: 400 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.reasoning-totals { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.row-usage { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font: 400 11px/1.6 var(--mono); }
+.row-usage:empty { display: none; }
+.usage-cost { color: var(--amber); font: 400 11px/1.6 var(--mono); overflow-wrap: anywhere; }
+.trace-usage { display: grid; gap: 4px; }
+.trace-usage > small { color: var(--muted); font-family: var(--mono); }
 .goal-row { min-width: 0; border-bottom: 1px solid var(--line); }
 .goal-row > summary { display: flex; align-items: center; gap: 14px; min-width: 0; padding: 12px 2px; cursor: pointer; list-style: none; }
 .goal-row > summary::-webkit-details-marker { display: none; }
