@@ -4086,30 +4086,61 @@ function goalGroup(agent, item) {
 }
 
 async function tracesTab(agent, isCurrent = () => true) {
-  const [list, goals] = await Promise.all([guard(api(`/api/agents/${agent.id}/traces`)), guard(api(`/api/agents/${agent.id}/goals`))]);
+  const read = () => Promise.all([guard(api(`/api/agents/${agent.id}/traces`)), guard(api(`/api/agents/${agent.id}/goals`))]);
+  const initial = await read();
   if (!isCurrent()) return null;
-  let pending = null;
-  S.live = (entry) => {
-    if (entry.type !== "trace" || entry.event === "step" || entry.trace.agentId !== agent.id) return;
-    if (pending) return;
-    pending = setTimeout(() => { pending = null; if (route()[2] === "ragionamento" && !route()[3]) renderAgent(); }, 1500);
+  const content = h("div", { class: "reasoning-list" });
+  const totals = h("span", { class: "reasoning-totals" });
+  const rows = new Map();
+  const paint = ([list, goals]) => {
+    const groups = goals?.goals || [];
+    const grouped = (trace) => trace.goal && groups.some((item) => item.goal === trace.goal && (item.channelId || "") === (trace.channelId || ""));
+    const ungrouped = (list || []).filter((trace) => !grouped(trace));
+    const items = [
+      ...groups.map(item => ({ key: JSON.stringify([item.goal, item.channelId || ""]), at: Date.parse(item.last) || 0, item, goal: true })),
+      ...ungrouped.map(item => ({ key: item.id, at: Date.parse(item.startedAt) || 0, item })),
+    ].sort((a, b) => b.at - a.at);
+    const next = items.map(({ key, item, goal }) => {
+      let node = goal ? rows.get(key) : null;
+      if (node) {
+        const summary = node.querySelector("summary"), focused = document.activeElement === summary;
+        const updated = goalGroup(agent, item).querySelector("summary");
+        summary.replaceWith(updated);
+        if (focused) updated.focus();
+        for (const link of node.querySelectorAll(".row-link")) {
+          const trace = (list || []).find(trace => link.getAttribute("href")?.endsWith(`/ragionamento/${trace.id}`));
+          if (trace) link.replaceWith(traceRow(trace));
+        }
+      } else node = goal ? goalGroup(agent, item) : traceRow(item);
+      rows.set(key, node);
+      return node;
+    });
+    for (const key of rows.keys()) if (!items.some(item => item.key === key)) rows.delete(key);
+    if (!next.length || content.childElementCount !== next.length || next.some((node, index) => content.children[index] !== node)) {
+      content.replaceChildren(...(next.length ? next : [empty("bulb", "Ancora nessun turno registrato.")]));
+    }
+    const visible = [...groups, ...ungrouped];
+    const spent = visible.reduce((sum, item) => sum + (item.tokensIn || 0) + (item.tokensOut || 0), 0);
+    const cost = costLabel(visible);
+    totals.replaceChildren(...[
+      spent ? h("span", { class: "reasoning-total" }, h("b", {}, shortTokens(spent)), h("small", {}, "token")) : null,
+      cost ? h("span", { class: "usage-cost" }, raw(cost)) : null,
+    ].filter(Boolean));
   };
-  // One list, newest first: a goal stands for all the turns that worked toward it, the other turns stand alone.
-  const groups = goals?.goals || [];
-  const grouped = (trace) => trace.goal && groups.some((item) => item.goal === trace.goal && (item.channelId || "") === (trace.channelId || ""));
-  const items = [
-    ...groups.map((item) => ({ at: Number(item.last) || Date.parse(item.last) || 0, node: () => goalGroup(agent, item) })),
-    ...(list || []).filter((trace) => !grouped(trace)).map((trace) => ({ at: Number(trace.startedAt) || Date.parse(trace.startedAt) || 0, node: () => traceRow(trace) })),
-  ].sort((a, b) => b.at - a.at);
-  const spent = groups.reduce((sum, item) => sum + item.tokensIn + item.tokensOut, 0)
-    + (list || []).filter((trace) => !grouped(trace)).reduce((sum, trace) => sum + (trace.tokensIn || 0) + (trace.tokensOut || 0), 0);
-  const visible = [...groups, ...(list || []).filter((trace) => !grouped(trace))];
-  const cost = costLabel(visible);
+  paint(initial);
+  let pending = null, refreshing = false, again = false;
+  const refresh = async () => {
+    if (refreshing) { again = true; return; }
+    refreshing = true;
+    try { const data = await read(); if (isCurrent() && data.every(Boolean)) paint(data); }
+    finally { refreshing = false; if (again && isCurrent()) { again = false; pending = setTimeout(() => { pending = null; void refresh(); }, 1500); } }
+  };
+  S.live = (entry) => {
+    if (entry.type !== "trace" || entry.event === "step" || entry.trace.agentId !== agent.id || pending) return;
+    pending = setTimeout(() => { pending = null; if (isCurrent()) void refresh(); }, 1500);
+  };
   const hint = "Un obiettivo raccoglie le esecuzioni di Cora. Ogni esecuzione può contenere molti passaggi del modello. I costi API si aggiornano con il consumo; i dati storici mancanti restano non disponibili.";
-  return panel({ icon: "bulb", title: "Ragionamento", hint, actions: h("span", { class: "reasoning-totals" },
-    spent ? h("span", { class: "reasoning-total" }, h("b", {}, shortTokens(spent)), h("small", {}, "token")) : null,
-    cost ? h("span", { class: "usage-cost" }, raw(cost)) : null) },
-    items.length ? h("div", { class: "reasoning-list" }, items.map((item) => item.node())) : empty("bulb", "Ancora nessun turno registrato."));
+  return panel({ icon: "bulb", title: "Ragionamento", hint, actions: totals }, content);
 }
 
 function stepEl(step, startedAt) {
