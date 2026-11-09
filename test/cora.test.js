@@ -617,6 +617,140 @@ beforeEach(async () => {
   discord.state.botPosts.length = 0;
 });
 
+async function panelMcpWorld(t, overrides = {}) {
+  const f = await knowledgeWorld(overrides); t.after(f.close);
+  const issue = async (actor, body = {}) => {
+    const response = await f.request(actor, "/api/mcp/tokens", { method: "POST", body: { name: "Integration client", ...body } });
+    assert.equal(response.status, 201); return response.data;
+  };
+  const rpc = async (access, method, params = {}, extra = {}) => {
+    const response = await fetch(f.base + "/mcp", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...(access ? { Authorization: `Bearer ${access.token}` } : {}), ...extra.headers }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), ...extra.options });
+    const text = await response.text(); return { status: response.status, data: text ? JSON.parse(text) : null, headers: response.headers };
+  };
+  const invoke = (access, args) => rpc(access, "tools/call", { name: "cora_request", arguments: args });
+  return { ...f, issue, rpc, invoke };
+}
+
+test("external configuration MCP uses personal hashed credentials and the current panel identity", async (t) => {
+  const f = await panelMcpWorld(t), alice = await f.issue(f.alice), bob = await f.issue(f.bob);
+  assert.equal((await f.rpc(null, "initialize")).status, 401);
+  const initialize = await f.rpc(alice, "initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "fixture", version: "1" } });
+  assert.equal(initialize.status, 200); assert.equal(initialize.data.result.protocolVersion, "2025-11-25");
+  assert.equal(initialize.data.result.serverInfo.name, "cora-panel");
+  const tools = (await f.rpc(alice, "tools/list")).data.result.tools;
+  assert.deepEqual(tools.map(tool => tool.name), ["cora_state", "cora_configurations", "cora_request"]);
+  const state = (await f.rpc(alice, "tools/call", { name: "cora_state", arguments: { userId: f.bob.user.id, role: "owner" } }, { headers: f.admin.headers })).data.result;
+  assert.equal(state.structuredContent.data.currentUser.id, f.alice.user.id);
+  assert.equal(state.structuredContent.data.currentUser.role, "member");
+  const stored = JSON.stringify(f.app.store.value("panelMcpTokens"));
+  assert.ok(!stored.includes(alice.token) && !stored.includes(bob.token));
+  const view = await f.request(f.alice, "/api/mcp/tokens");
+  assert.equal(view.data.tokens.length, 1); assert.equal(view.data.tokens[0].id, alice.id);
+  assert.ok(!JSON.stringify(view.data).includes(alice.token)); assert.ok(!JSON.stringify(view.data).includes('"hash"'));
+  assert.equal((await f.request(f.alice, `/api/mcp/tokens/${bob.id}`, { method: "DELETE" })).status, 404);
+  assert.equal((await f.rpc(bob, "ping")).status, 200);
+  assert.equal((await f.request(f.alice, `/api/mcp/tokens/${alice.id}`, { method: "DELETE" })).status, 200);
+  assert.equal((await f.rpc(alice, "ping")).status, 401);
+  assert.equal((await f.rpc({ token: "invalid" }, "ping", {}, { headers: f.admin.headers })).status, 401, "panel cookies cannot replace MCP bearer authentication");
+});
+
+test("external configuration MCP preserves private ownership, shared-agent grants and their revocation", async (t) => {
+  const f = await panelMcpWorld(t), alice = await f.issue(f.alice), bob = await f.issue(f.bob), admin = await f.issue(f.admin);
+  const created = (await f.invoke(alice, { method: "POST", path: "/api/agents", body: { name: "MCP agent", tools: false, enabled: false, brainOwnerId: f.bob.user.id, ownerIds: ["discord:forged"] } })).data.result;
+  assert.equal(created.structuredContent.status, 201); const agent = created.structuredContent.data;
+  assert.equal(agent.brainOwnerId, f.alice.user.id);
+  assert.deepEqual(agent.ownerIds, []);
+  for (const access of [bob, admin]) assert.equal((await f.invoke(access, { path: `/api/agents/${agent.id}` })).data.result.structuredContent.status, 403);
+  const update = await f.invoke(alice, { method: "PUT", path: `/api/agents/${agent.id}`, body: { personality: "Configured through the actual panel API" } });
+  assert.equal(update.data.result.isError, false); assert.equal(f.app.store.agent(agent.id).personality, "Configured through the actual panel API");
+  const other = f.app.store.createAgent({ name: "Still private", brainOwnerId: f.alice.user.id, tools: false, enabled: false });
+  const ownership = (await f.invoke(alice, { path: `/api/agents/${agent.id}/owners` })).data.result.structuredContent.data;
+  assert.equal((await f.invoke(alice, { method: "PUT", path: `/api/agents/${agent.id}/owners`, body: { users: [f.alice.user.id, f.bob.user.id], contacts: [], version: ownership.version } })).data.result.structuredContent.status, 200);
+  assert.equal((await f.invoke(bob, { path: `/api/agents/${agent.id}` })).data.result.structuredContent.status, 200);
+  assert.equal((await f.invoke(bob, { path: `/api/agents/${other.id}` })).data.result.structuredContent.status, 403);
+  assert.equal((await f.invoke(bob, { path: `/api/brain?ownerId=${f.alice.user.id}` })).data.result.structuredContent.status, 200);
+  const current = (await f.invoke(alice, { path: `/api/agents/${agent.id}/owners` })).data.result.structuredContent.data;
+  assert.equal((await f.invoke(alice, { method: "PUT", path: `/api/agents/${agent.id}/owners`, body: { users: [f.alice.user.id], contacts: [], version: current.version } })).data.result.structuredContent.status, 200);
+  assert.equal((await f.invoke(bob, { path: `/api/agents/${agent.id}` })).data.result.structuredContent.status, 403);
+  assert.equal((await f.invoke(bob, { path: `/api/brain?ownerId=${f.alice.user.id}` })).data.result.structuredContent.status, 403);
+  assert.equal((await f.rpc(bob, "ping")).status, 200, "revoking a resource does not affect another user's own MCP identity");
+});
+
+test("external configuration MCP restricts owner operations, read-only keys, expired keys and revoked admission", async (t) => {
+  const f = await panelMcpWorld(t), alice = await f.issue(f.alice), admin = await f.issue(f.admin), reader = await f.issue(f.admin, { readOnly: true });
+  const before = JSON.stringify(f.app.store.settings);
+  for (const path of ["/api/settings", "/api/providers/soniox/key", "/api/slack/config-token", "/api/subscriptions/resident/check"]) {
+    const reply = (await f.invoke(alice, { method: path.includes("check") ? "POST" : "PUT", path, body: { language: "en", key: "fixture-not-a-real-key", role: "owner" } })).data.result;
+    assert.equal(reply.isError, true); assert.equal(reply.structuredContent.status, 403, path);
+  }
+  assert.equal(JSON.stringify(f.app.store.settings), before);
+  assert.equal((await f.invoke(reader, { method: "PUT", path: "/api/settings", body: { language: "en" } })).data.result.structuredContent.status, 403);
+  assert.deepEqual((await f.rpc(reader, "tools/list")).data.result.tools.find(tool => tool.name === "cora_request").inputSchema.properties.method.enum, ["GET"]);
+  assert.equal((await f.invoke(admin, { method: "PUT", path: "/api/settings", body: { language: "en" } })).data.result.structuredContent.status, 200);
+  assert.equal(f.app.store.settings.language, "en");
+  f.app.store.updateAccessPolicy({ domains: [], emails: ["bob@owner.test"] });
+  assert.equal((await f.rpc(alice, "ping")).status, 401);
+  f.app.store.updateAccessPolicy({ domains: [], emails: ["alice@owner.test", "bob@owner.test"] });
+  assert.equal((await f.rpc(alice, "ping")).status, 200);
+  const records = f.app.store.value("panelMcpTokens"); records.find(record => record.id === alice.id).expiresAt = new Date(Date.now() - 1000).toISOString(); f.app.store.setValue("panelMcpTokens", records);
+  assert.equal((await f.rpc(alice, "ping")).status, 401);
+  assert.equal((await f.rpc(admin, "ping")).status, 200);
+});
+
+test("external configuration MCP validates its transport and cannot proxy external, authentication or recursive routes", async (t) => {
+  const f = await panelMcpWorld(t), access = await f.issue(f.alice);
+  assert.equal((await f.rpc(access, "ping", {}, { headers: { Origin: "https://untrusted.test" } })).status, 403);
+  assert.equal((await f.rpc(access, "ping", {}, { headers: { Origin: "null" } })).status, 403);
+  assert.equal((await f.rpc(access, "ping", {}, { headers: { "MCP-Protocol-Version": "invalid" } })).status, 400);
+  assert.equal((await f.rpc(access, "ping", {}, { headers: { "Content-Type": "text/plain" } })).status, 415);
+  assert.equal((await f.rpc(access, "ping", {}, { headers: { Accept: "text/event-stream" } })).status, 406);
+  assert.equal((await fetch(f.base + "/mcp", { headers: { Authorization: `Bearer ${access.token}`, Accept: "text/event-stream" } })).status, 405);
+  for (const path of ["/api/mcp/tokens", "/api/login", "/api/events", "/api/cloud/access", "/api/agents/../mcp/tokens"]) assert.equal((await f.invoke(access, { path })).data.result.structuredContent.status, 403, path);
+  for (const path of ["https://external.test/api/settings", "//external.test/api/settings", "/api/../../outside", "/api/agents\\../settings"]) assert.equal((await f.invoke(access, { path })).data.error.code, -32602, path);
+  const notification = await fetch(f.base + "/mcp", { method: "POST", headers: { Authorization: `Bearer ${access.token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+  assert.equal(notification.status, 202); assert.equal(await notification.text(), "");
+  const guide = (await f.rpc(access, "tools/call", { name: "cora_configurations", arguments: { area: "email" } })).data.result;
+  assert.deepEqual(JSON.parse(guide.content[0].text).areas.map(area => area.id), ["email"]);
+});
+
+test("external configuration MCP panel keeps personal drafts and one-time masked tokens until saved or revoked", async (t) => {
+  const f = await panelMcpWorld(t);
+  await f.issue(f.bob, { name: "Bob private client" });
+  const panel = panelHarness({ language: "en", hash: "#/settings/mcp", fetch: async (path, options = {}) => {
+    const response = await f.request(f.alice, path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  const pane = panel.run("(() => { const pane = panelMcpPane(); app.append(pane); return pane; })()");
+  await pane.readyMcp;
+  assert.match(pane.textContent, /The client will act as alice/);
+  assert.ok(!pane.textContent.includes("Bob private client"));
+  const form = pane.querySelector("form"), name = form.elements.mcpName, days = form.elements.mcpDays;
+  name.value = "Personal work client"; days.value = "0";
+  form.dispatch("submit");
+  await waitFor(() => /Choose a valid MCP lifetime/.test(pane.textContent));
+  assert.equal(name.value, "Personal work client", "a refused creation preserves the draft");
+  days.value = "30"; form.elements.mcpReadOnly.checked = true; form.dispatch("submit");
+  const receipt = pane.querySelector(".mcp-secret"), token = receipt.querySelector("input");
+  await waitFor(() => Boolean(token.value) && !name.disabled);
+  assert.equal(token.type, "password"); assert.equal(receipt.hidden, false);
+  assert.ok(!pane.textContent.includes(token.value), "the token is not a text node");
+  const created = f.app.store.value("panelMcpTokens").find(record => record.userId === f.alice.user.id);
+  assert.equal(created.readOnly, true);
+  name.value = "Next client draft";
+  const buttons = () => pane.querySelectorAll("button");
+  buttons().find(button => /Reload/.test(button.textContent)).click();
+  await waitFor(() => pane.querySelectorAll(".mcp-token-row").length === 1);
+  assert.equal(name.value, "Next client draft"); assert.ok(token.value); assert.equal(receipt.hidden, false);
+  buttons().find(button => /I saved the token/.test(button.textContent)).click();
+  assert.equal(token.value, ""); assert.equal(receipt.hidden, true);
+  const row = pane.querySelector(".mcp-token-row"), revoke = row.querySelector("button");
+  revoke.click(); assert.match(revoke.textContent, /Confirm revocation/);
+  assert.equal((await f.request(f.alice, "/api/mcp/tokens")).data.tokens.length, 1);
+  revoke.click(); await waitFor(() => f.app.store.value("panelMcpTokens").length === 1);
+  await waitFor(() => /You have no MCP access yet/.test(pane.textContent));
+  assert.equal((await f.request(f.bob, "/api/mcp/tokens")).data.tokens.length, 1);
+});
+
 test("shared agent owners gain its Brain, memories, conversation and quotas without other private agents, and revocation closes every API", async (t) => {
   const f = await knowledgeWorld({ subscriptionUsageIntervalMs: 0, subscriptionUsageReader: async () => ({ five_hour: { utilization: 20 } }) }); t.after(f.close);
   const record = f.app.store.createSubscription({ provider: "claude", label: "Alice account", connectedBy: { id: f.alice.user.id } });

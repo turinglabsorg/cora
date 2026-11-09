@@ -219,6 +219,18 @@ In **Settings → Access**, the owner can authorize verified email domains or in
 
 Google/GitHub sign-in remains on usecora.space. Membership is checked by the target instance using signed identity claims, and permissions never carry across instances. Messages to agents retain the authenticated person's name and identity. The user list records first visit and last activity, with a recent activity history for the owner.
 
+### External configuration agents (MCP)
+
+Open **Settings → External agents (MCP)** to connect another agent to the panel. Each admitted person creates their own access token, names the client and chooses a lifetime (up to one year) and optional read-only access. Copy the endpoint into a Streamable HTTP client and supply the token in its secure Bearer-token field, or through `Authorization: Bearer <token>`. The token is shown once; only its hash is stored by Cora. Keep it out of URLs, prompts and shared client configuration. Revoke individual clients from the same page.
+
+The endpoint is `https://<instance>/mcp`. It accepts JSON-RPC POST requests, supports MCP versions `2025-11-25`, `2025-06-18` and `2025-03-26`, and requires no server session or SSE connection. Start with `initialize`, then `tools/list`:
+
+- `cora_state` reads the caller's current panel identity and visible configuration.
+- `cora_configurations` lists configuration areas and API paths, optionally filtered by `area`.
+- `cora_request` invokes a JSON panel API with `method`, a relative `/api/…` path and optional object `body`. For example, read `{"path":"/api/agents/<id>"}` before updating `{"method":"PUT","path":"/api/agents/<id>","body":{"personality":"…"}}`. Native HTTP status and response data are returned together; a refused operation is a tool error.
+
+These are panel configuration tools, separate from the internal per-turn MCP server used by Cora's agents. Requests resolve the token creator's current identity and admission every time. Space administration remains owner-only, and private agents, Brains, accounts and files retain their existing ownership and sharing rules; an administrator's cookie cannot override the token identity. Read-only tokens reject every write. Expiry, admission removal and revocation take effect immediately. Authentication/bootstrap routes, event streams and MCP-token issuance are excluded from the tools. Browser requests must have the instance's own Origin when an Origin header is present.
+
 ### Reminders and history
 
 Open an agent’s **Routines and reminders** tab to create a recurring routine or a one-time reminder. A reminder uses an exact date/time rather than cron. It runs once when due; an independent, tool-free verification checks the actual tool results and delivered reply before Cora automatically archives it. This verification also works with Claude and Codex subscriptions and remains active when goal mode is off.

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { AccessInvitations } from "./access-invitations.js";
+import { PanelMcp } from "./panel-mcp.js";
 import { drawnAvatar } from "./avatar.js";
 import { passLedger, verifyPass } from "./pass.js";
 import { shareHosts } from "./share-host.js";
@@ -435,11 +436,25 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     boxes.ensure(agent).catch((error) => activity({ type: "error", agentId: agent.id, text: `desktop: ${error.message}` }));
   };
 
-  async function api(req, res, url) {
+  const panelMcp = new PanelMcp({
+    store, dispatch: (req, res, url, user) => api(req, res, url, user),
+    publicOrigin: config.publicHost ? `https://${config.publicHost}` : cloud ? `https://${cloud.audience}` : "",
+    insecure: config.insecureCookies === true,
+    authorize: (user, method, url) => {
+      const agentId = /^\/api\/agents\/([\w-]+)(?:\/|$)/.exec(url.pathname)?.[1];
+      if (agentId && !knowledge?.canManage(store.agent(agentId), user)) throw new HttpError(403, "Agente privato.");
+      const routineId = /^\/api\/routines\/(rt_[\w-]+)(?:\/|$)/.exec(url.pathname)?.[1];
+      const routine = routineId && store.routine(routineId);
+      if (routine && !knowledge?.canManage(store.agent(routine.agentId), user)) throw new HttpError(404, "Routine non trovata.");
+      if (user.role !== "owner" && method !== "GET" && (url.pathname === "/api/subscriptions/resident/check" || !/^\/api\/(?:agents|routines|brain|subscriptions|connectors|artifacts|secrets|rooms|push)(?:\/|$)/.test(url.pathname))) throw new HttpError(403, "Solo il proprietario gestisce le impostazioni dello spazio.");
+    },
+  });
+
+  async function api(req, res, url, actingUser = null) {
     const path = url.pathname;
     const method = req.method;
     if (path === "/api/me" && method === "GET") {
-      const user = sessionUser(req);
+      const user = actingUser || sessionUser(req);
       return send(res, 200, { authed: Boolean(user), ...(user ? { user } : {}), cloud: cloud ? { login: cloud.login, logout: cloud.logout } : null });
     }
     if (path === "/api/login" && method === "POST") {
@@ -454,14 +469,22 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       return send(res, 200, { ok: true }, { "Set-Cookie": sessionCookie() });
     }
-    const user = sessionUser(req);
+    const user = actingUser ? store.panelUser(actingUser.id) : sessionUser(req);
     if (!user) throw new HttpError(401, "login richiesto");
+    if (actingUser && !store.allowsPanelUser({ ...user, emailVerified: true })) throw new HttpError(401, "Accesso revocato.");
     if (!["GET", "HEAD"].includes(method) && path !== "/api/logout") {
       const action = path.startsWith("/api/secrets") ? "secrets" : path.startsWith("/api/artifacts") ? "artifacts" : path.startsWith("/api/context") ? "context" : path.startsWith("/api/access") ? "access-policy" : path.startsWith("/api/permissions") ? "permissions" : path.startsWith("/api/brain") ? "brain" : path.startsWith("/api/rooms") ? "message" : path.startsWith("/api/agents") ? "agent" : path.startsWith("/api/subscriptions") || path.startsWith("/api/providers") ? "connections" : "settings";
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
     const scopedAgent = /^\/api\/agents\/([\w-]+)(?:\/|$)/.exec(path);
     if (scopedAgent && knowledge?.ownerMemory) checkAgentMemory(scopedAgent[1], user);
+    if (path === "/api/mcp/tokens") {
+      if (method === "GET") return send(res, 200, panelMcp.view(user, req));
+      if (method === "POST") return send(res, 201, panelMcp.create(user, await readJson(req, 4096)));
+      throw new HttpError(405, "Metodo non supportato.");
+    }
+    const mcpToken = /^\/api\/mcp\/tokens\/([a-f0-9]{16})$/.exec(path);
+    if (mcpToken && method === "DELETE") { panelMcp.revoke(user, mcpToken[1]); return send(res, 200, { ok: true }); }
     if (path === "/api/logout" && method === "POST") {
       const token = sessionValue(req).value.split(".")[1];
       if (token) store.deletePanelSession(sessionHash(token));
@@ -1874,6 +1897,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       // A request page posts a plain form: it checks its own origin, and the link is the key.
       if (url.pathname.startsWith("/send/")) return await vaultPages(req, res, url);
+      if (url.pathname === "/mcp") return await panelMcp.handle(req, res, readJson);
       if (req.method !== "GET" && req.method !== "HEAD") {
         if (req.headers["x-cora"] !== "1") throw new HttpError(403, "missing X-Cora header");
         const origin = req.headers.origin;

@@ -3040,6 +3040,78 @@ function connectorsPane() {
   return slot;
 }
 
+function panelMcpPane() {
+  const endpoint = h("input", { type: "text", class: "mono", readonly: true, "aria-label": "Indirizzo MCP" });
+  const name = h("input", { type: "text", name: "mcpName", required: true, maxlength: 80, placeholder: "es. Agente di lavoro", autocomplete: "off" });
+  const days = h("select", { name: "mcpDays", "aria-label": "Durata dell’accesso MCP" }, [7, 30, 90, 365].map(value => h("option", { value, selected: value === 90 }, raw(tr("{count} giorni", { count: value })))));
+  const readOnly = switchInput("mcpReadOnly", "Solo lettura", false, "Permette di consultare le configurazioni senza modificarle.");
+  const token = h("input", { type: "password", class: "mono", readonly: true, autocomplete: "off", "aria-label": "Token MCP creato" });
+  const feedback = h("p", { role: "status", class: "muted" });
+  const rows = h("div", { class: "mcp-token-list" }, h("p", { class: "muted", role: "status" }, "Carico gli accessi MCP…"));
+  const identity = h("p", { class: "muted" });
+  let saving = false;
+  const copy = async (input) => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(input.value);
+      else { input.focus(); input.select(); if (!document.execCommand("copy")) throw new Error("copy"); }
+      toast("Copiato");
+    } catch { input.focus(); input.select(); toast("Copia il valore dal campo selezionato.", true); }
+  };
+  const reveal = btn("Mostra", { icon: "eye", cls: "ghost", onclick: () => { const hidden = token.type === "password"; token.type = hidden ? "text" : "password"; reveal.textContent = tr(hidden ? "Nascondi" : "Mostra"); } });
+  const receipt = h("div", { class: "mcp-secret stack-sm", hidden: true },
+    h("b", {}, "Salva il token prima di chiudere questa pagina"),
+    h("p", {}, "Lo mostriamo solo ora. Incollalo nel campo token o nelle impostazioni sicure del tuo client."),
+    h("div", { class: "mcp-key-controls" }, token, reveal, btn("Copia token", { icon: "copy", cls: "primary", onclick: () => copy(token) })),
+    btn("Ho salvato il token", { icon: "check", cls: "ghost", onclick: () => { token.value = ""; token.type = "password"; receipt.hidden = true; submit.disabled = false; } }));
+  const submit = btn("Crea accesso MCP", { icon: "plus", cls: "primary", type: "submit" });
+  const form = h("form", { class: "mcp-create stack-sm" },
+    h("div", { class: "mcp-create-fields" }, field("Nome del client", name), field("Durata", days)), readOnly,
+    h("div", { class: "row end" }, submit));
+  const root = h("div", { class: "stack panel-mcp" },
+    panel({ icon: "link", title: "Agenti esterni (MCP)", hint: "Configura Cora da un altro agente con i tuoi permessi." },
+      identity, h("p", { class: "muted" }, "Le operazioni dello spazio restano riservate al proprietario. Le risorse private seguono proprietari e condivisioni."),
+      setRows(setRow("Indirizzo MCP", "Nel client scegli HTTP o Streamable HTTP e incolla questo indirizzo.", h("div", { class: "mcp-key-controls" }, endpoint, btn("Copia indirizzo", { icon: "copy", cls: "ghost", onclick: () => copy(endpoint) })), { stack: true }),
+        setRow("Autenticazione", "Usa un token personale creato qui sotto.", codeLine("Authorization: Bearer <token>"), { stack: true }))),
+    panel({ icon: "key", title: "I tuoi accessi MCP", hint: "Un accesso per ogni client: puoi revocarlo quando vuoi.", actions: btn("Ricarica", { icon: "refresh", cls: "ghost", onclick: () => load() }) },
+      form, receipt, feedback, rows));
+  const date = value => value && Number.isFinite(Date.parse(value)) ? new Intl.DateTimeFormat(LOCALE, { dateStyle: "medium" }).format(new Date(value)) : "—";
+  async function load() {
+    try {
+      const data = await api("/api/mcp/tokens");
+      if (!root.isConnected) return;
+      endpoint.value = data.endpoint;
+      identity.textContent = tr("Il client agirà come {name}.", { name: data.user.name });
+      rows.replaceChildren(...(data.tokens.length ? data.tokens.map(record => {
+        let armed = false;
+        const revoke = btn("Revoca", { icon: "unlink", cls: "ghost danger", onclick: async () => {
+          if (!armed) { armed = true; revoke.textContent = tr("Conferma revoca"); return; }
+          revoke.disabled = true; feedback.textContent = "";
+          try { await api(`/api/mcp/tokens/${record.id}`, { method: "DELETE" }); if (token.value.startsWith(`cora_mcp_${record.id}.`)) { token.value = ""; receipt.hidden = true; submit.disabled = false; } await load(); }
+          catch (error) { feedback.className = "err-text"; feedback.textContent = tr(error.message); revoke.disabled = false; }
+        } });
+        const expired = !(Date.parse(record.expiresAt) > Date.now());
+        return h("article", { class: "mcp-token-row", "data-token-id": record.id },
+          h("div", { class: "stack-sm" }, h("b", {}, raw(record.name)), h("div", { class: "row" }, tag(expired ? "Scaduto" : "Valido", expired ? "err" : "ok"), tag(record.readOnly ? "Solo lettura" : "Lettura e modifiche")),
+            h("small", {}, raw(tr("Scade il {date}", { date: date(record.expiresAt) }))),
+            h("small", {}, record.lastUsedAt ? raw(tr("Ultimo accesso: {date}", { date: fmtTime(record.lastUsedAt, true) })) : tr("Mai usato"))), revoke);
+      }) : [h("p", { class: "muted" }, "Non hai ancora accessi MCP. Crea il primo per collegare un client.")]));
+    } catch (error) { rows.replaceChildren(h("p", { class: "err-text", role: "alert" }, raw(tr(error.message)))); }
+  }
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (saving || token.value) return;
+    saving = true; feedback.textContent = "";
+    for (const input of [name, days, readOnly.querySelector("input"), submit]) input.disabled = true;
+    try {
+      const data = await api("/api/mcp/tokens", { method: "POST", body: { name: name.value.trim(), days: Number(days.value), readOnly: readOnly.querySelector("input").checked } });
+      token.value = data.token; token.type = "password"; reveal.textContent = tr("Mostra"); receipt.hidden = false; name.value = ""; await load();
+    } catch (error) { feedback.className = "err-text"; feedback.textContent = tr(error.message); }
+    finally { saving = false; for (const input of [name, days, readOnly.querySelector("input")]) input.disabled = false; submit.disabled = Boolean(token.value); }
+  });
+  root.readyMcp = Promise.resolve().then(load);
+  return root;
+}
+
 function emailChannelPane(agent = null, onSections = null, isCurrent = null) {
   const endpoint = agent ? `/api/agents/${agent.id}/email` : "/api/mail/channel";
   const slot = h("div", { class: "stack email-channel", "aria-busy": "true" }, panel({ icon: "mail", title: agent ? "Ricezione e regole" : "E-mail" }, h("p", { role: "status", class: "muted" }, "Carico la posta…")));
@@ -7183,6 +7255,7 @@ function renderSettings() {
 
   page("email", emailChannelPane());
   page("connettori", connectorsPane());
+  page("mcp", panelMcpPane());
 
   /* ---------- Canali ---------- */
   const listenRow = (kind) => platformControls(kind);
@@ -7467,6 +7540,7 @@ function renderSettings() {
     ...["discord", "telegram", "slack"].map((kind) => ({ id: kind, group: "Canali", label: TRANSPORTS[kind].label, mark: TRANSPORTS[kind].icon, state: () => channelState(kind) })),
     { id: "email", group: "Canali", label: "E-mail", mark: "mail", state: () => [null, tr("Ricezione e regole")] },
     { id: "connettori", group: "Connettori", label: "Connettori", mark: "link", state: () => [null, tr("Google e account esterni")] },
+    { id: "mcp", group: "Connettori", label: "Agenti esterni (MCP)", mark: "terminal", state: () => [null, tr("Configura Cora da un altro agente")] },
     { id: "server", group: "Abbonamenti", label: "Account del server", mark: "monitor", state: () => [null, settings.useResidentSubscriptions ? tr("in uso per chi non sceglie") : tr("non usati")] },
     ...providers.map((provider) => ({ id: provider, group: "Abbonamenti", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
     ...CONNECTION_KEYS.map(([provider, name, mark]) => ({ id: provider, group: "Chiavi API", label: name, mark, state: () => keyState(provider) })),

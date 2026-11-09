@@ -2048,6 +2048,27 @@ a.share-stats:hover { color: var(--amber); }
   .connector-empty { padding: 20px; }
 }
 @media (prefers-reduced-motion: reduce) { .connector-card { transition: none; } }
+.panel-mcp .panel-body > p { margin: 0; }
+.panel-mcp .muted { color: var(--muted); }
+.mcp-create { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.mcp-create-fields { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 16px; }
+.mcp-key-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.mcp-key-controls input { flex: 1; min-width: 160px; width: 100%; min-height: 44px; }
+.mcp-key-controls .btn { min-height: 44px; }
+.mcp-secret { padding: 18px; border: 1px solid var(--amber-line); border-radius: var(--r-md); background: var(--amber-wash); }
+.mcp-secret[hidden], .panel-mcp [role="status"]:empty { display: none; }
+.mcp-secret p { margin: 0; color: var(--muted); }
+.mcp-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; padding: 18px 0; }
+.mcp-token-row + .mcp-token-row { border-top: 1px solid var(--line); }
+.mcp-token-row b { font-weight: 600; overflow-wrap: anywhere; }
+.mcp-token-row small { color: var(--muted); font: 400 11px/1.5 var(--mono); }
+.mcp-token-row .stack-sm { gap: 6px; }
+.mcp-token-row .btn { min-height: 44px; }
+@media (max-width: 600px) {
+  .mcp-create-fields { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .mcp-key-controls input { flex-basis: 100%; }
+  .mcp-secret { padding: 14px; }
+}
 .email-section-back { display: none; }
 .email-settings-tabs { display: flex; flex-wrap: wrap; align-self: flex-start; max-width: 100%; }
 .email-settings-tabs .btn { min-width: 0; }
