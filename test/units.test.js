@@ -7,7 +7,7 @@ import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
 import { appManifest } from "../src/slack-bots.js";
 import { SlackApps } from "../src/slack-apps.js";
-import { listenExit, listenersLeaving, mentions, spokenTo, tagged } from "../src/orchestrator.js";
+import { idleDecline, listenExit, listenersLeaving, mentions, spokenTo, tagged } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { drawAvatar } from "../src/avatar.js";
 import { encodePng, pngSize } from "../src/png.js";
@@ -1119,4 +1119,9 @@ describe("who leaves a conversation", () => {
     assert.equal(listenExit("Non ti sto dicendo di smettere di ascoltare"), false);
     assert.deepEqual(listenersLeaving("Non ti sto dicendo di smettere di ascoltare", agents), []);
   });
+});
+
+test("the answers that decline the thirty-minute question", () => {
+  for (const text of ["no", "No ciao a dopo", "no grazie", "ciao!", "a dopo", "vai pure", "basta così", "nope", "<@123> no"]) assert.ok(idleDecline(text), text);
+  for (const text of ["sì", "si resta", "no aspetta", "no, resta qui", "no ma continua", "ok", "nonna", "ciaone resta", ""]) assert.ok(!idleDecline(text), text);
 });

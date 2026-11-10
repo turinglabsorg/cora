@@ -4227,6 +4227,32 @@ describe("talking with the agents", () => {
     assert.equal(reminders().length, 2);
   });
 
+  test("a no or a goodbye to the thirty-minute question ends the listening, and the farewell does not restart the count", async () => {
+    const THREAD = "1599000000000000796";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle goodbye" });
+    await sleep(100);
+    replies.set("Olga", () => ({ content: "Resto qui." }));
+    const reminders = () => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && /30 minuti/.test(item.content));
+    const said = () => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === "Olga").map((item) => item.content);
+    discord.say({ content: "@Olga, ascolta qui", channel: THREAD });
+    await waitFor(() => said().length === 1);
+    await quiet();
+    discord.say({ content: "no grazie, ho capito", channel: THREAD });
+    await waitFor(() => said().length === 2);
+    await quiet();
+    assert.deepEqual(app.orchestrator.engagements[THREAD]?.ids, [olga.id], "a no without the question does not end the listening");
+    const focus = app.orchestrator.engagements[THREAD];
+    await app.orchestrator.checkEngagements(focus.at + 30 * 60000);
+    assert.equal(reminders().length, 1);
+    discord.say({ content: "no ciao a dopo", channel: THREAD });
+    await waitFor(() => said().includes("Ho smesso di ascoltare questa conversazione."), { what: "Olga leaving" });
+    await quiet();
+    assert.equal(said().filter((text) => text === "Resto qui.").length, 2, "the goodbye gets no other answer");
+    assert.equal(app.orchestrator.engagements[THREAD] || null, null);
+    await app.orchestrator.checkEngagements(Date.now() + 90 * 60000);
+    assert.equal(reminders().length, 1, "nobody asks again after the goodbye");
+  });
+
   test("an agent at work is never asked whether it still wants to listen, and its own answers restart the count", async () => {
     const THREAD = "1599000000000000794";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle at work" });

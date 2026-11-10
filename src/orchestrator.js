@@ -86,6 +86,18 @@ export function listenExit(text) {
   return LISTEN_EXIT.test(value);
 }
 
+/**
+ * The answer to the thirty-minute question. "Devo rimanere in ascolto?" answered "no" or with a
+ * goodbye is an exit for whoever was listening; anything that asks to stay, or says more, is not.
+ */
+const IDLE_STAY = /\b(?:si|resta|restate|rimani|rimanete|ascolta|ascoltate|continua|continuate|procedi|aspetta|yes|stay|keep|wait)\b/u;
+const IDLE_DECLINE = /^(?:no|nope|non\s+serve|non\s+c'?e\s+bisogno|puoi\s+andare|potete\s+andare|vai\s+pure|andate\s+pure|ciao|a\s+dopo|a\s+domani|alla\s+prossima|basta|bye|goodbye|no\s+thanks|you\s+can\s+go)\b/u;
+
+export function idleDecline(text) {
+  const value = normalize(text).replace(/<@!?\d+>|@\S+/g, " ").replace(/[^\p{L}\p{N}'\s]/gu, " ").replace(/\s+/g, " ").trim();
+  return Boolean(value) && IDLE_DECLINE.test(value) && !IDLE_STAY.test(value);
+}
+
 function mentionPositions(text, name) {
   const escaped = escapeName(name);
   const positions = [];
@@ -606,7 +618,10 @@ export class Orchestrator {
     const candidates = available.filter((agent) => previous.includes(agent.id) || named.includes(agent.id));
     // Ask the model only so a slow judgment still holds the turn; it does not choose who leaves.
     if (previous.length && listenExit(item.content)) await this.brain.disengagement({ message: item.content, agents: candidates, history: state.history.filter((entry) => entry.id !== item.id) });
-    const leaving = listenersLeaving(item.content, candidates);
+    const exits = listenersLeaving(item.content, candidates);
+    // A "no" to the thirty-minute question lets go of whoever it was asked for, or of those it tags.
+    const declined = !exits.length && state.focus?.remindedAt && idleDecline(item.content) ? (named.length ? named : previous).filter((id) => previous.includes(id)) : [];
+    const leaving = exits.length ? exits : declined;
     // The answer to an agent's question comes from whoever it asked: the owner, or the person the agent belongs to.
     const askedBy = state.request ? this.store.agent(state.request.agentId) : null;
     const asked = state.request && !item.others?.length && (item.kind === "owner" || this.ownsAgent(item, askedBy, state)) ? state.request : null;
