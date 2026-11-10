@@ -301,9 +301,9 @@ export class KeyConnectors {
   }
 
   /** Runs a connector tool for an agent: Cora takes the key from the vault, the agent gets only the service's answer. */
-  async runTool(agent, name, args = {}, { readFile = null } = {}) {
+  async runTool(agent, name, args = {}, { readFile = null, writeFile = null } = {}) {
     const connector = connectorForTool(name), tool = toolFor(name);
-    if (connector?.kind === "google") return this.google ? this.google.runTool(agent, name, args || {}, { readFile }) : { text: "error: Google is not available on this Cora" };
+    if (connector?.kind === "google") return this.google ? this.google.runTool(agent, name, args || {}, { readFile, writeFile }) : { text: "error: Google is not available on this Cora" };
     const record = connector && this.record(connector.id);
     if (!connector || !record || record.status !== "connected") return { text: `error: ${connector?.name || name} is not connected: the owner connects it in Connettori` };
     if (!this.vault?.enabled || !this.allowed(record, connector, agent)) return { text: `error: you are not authorised for ${connector.name}: the owner picks the agents in its card in Connettori` };
@@ -319,7 +319,7 @@ export class KeyConnectors {
         if (!answer.status) throw new Error(`${connector.name} does not answer: try again shortly`);
         return answer;
       };
-      const base = { token, request, api: this.api(), record, readFile };
+      const base = { token, request, api: this.api(), record, readFile, writeFile };
       result = { data: await tool.run(args || {}, connector.context ? connector.context(base) : base) };
     } catch (error) {
       result = { error: error.message };

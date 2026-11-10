@@ -34,6 +34,7 @@ export const config = {
   gitAttribution: setting("GIT_ATTRIBUTION") !== "0",
   gitCoauthorEmail: setting("GIT_COAUTHOR_EMAIL") || CORA_GIT_COAUTHOR_EMAIL,
   googleConnectorEnabled: setting("GOOGLE_CONNECTOR_ENABLED") === "1",
+  googleConnectorAccess: setting("GOOGLE_CONNECTOR_ACCESS") === "mail" ? "mail" : "send",
   mailEndpoint: (setting("MAIL_ENDPOINT") || "https://ambox.dev").replace(/\/$/, ""),
   mailDomain: setting("MAIL_DOMAIN") || "",
   mailNamespace: setting("MAIL_NAMESPACE") || "",

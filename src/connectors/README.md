@@ -6,8 +6,9 @@ panel under **Connettori**.
 
 The person pastes what the service gives them. Cora checks it against the service,
 seals it in the vault and lets the owner choose which agents may use it. Those agents
-then get **one Cora tool per connector** (`linear`, `asana`, `canva`, `google_email`) on
-the Cora MCP server.
+then get **one Cora tool per action** on the Cora MCP server (`asana_create_task`,
+`linear_comment`, `canva_export_design`, `gmail_search`, …), plus one generic call per service
+(`asana_api`, `linear_graphql`, `canva_api`, `gmail_api`) for what no action covers.
 Cora adds the key to every call itself. The agent never sees the key, does not need
 `curl` or `secret_import`, and does not have to work out the API on its own. An agent
 that is not authorised for a connector does not even see its tool.
@@ -18,15 +19,19 @@ that is not authorised for a connector does not even see its tool.
 | --- | --- |
 | `index.js` | The registry: the list of connectors, in the order the panel shows them, and the catalogue the panel reads. |
 | `key-connectors.js` | `KeyConnectors`: connect, verify, authorise agents, disconnect, and run the agents' tools. |
-| `linear.js` | Linear: a personal API key; tool `linear` sends one GraphQL query or mutation. |
-| `asana.js` | Asana: a personal access token or an OAuth app; tool `asana` makes one REST call (method + path + body). |
-| `canva.js` | Canva: an OAuth integration authorised by the owner; tool `canva` makes one Connect API call. |
-| `google.js` | Google: accounts connected through Cora's OAuth broker (`GoogleConnector`); tool `google_email` lists the accounts and sends from one. |
+| `tooling.js` | Helpers shared by the actions: `fail` (a refusal the agent reads), `count`, `list`, `pick` (by id or name), `localFile` (a file from the agent's computer). |
+| `linear.js` | Linear: a personal API key; 15 `linear_` actions (issues, comments, projects, cycles, labels, states) and `linear_graphql`. |
+| `asana.js` | Asana: a personal access token or an OAuth app; 17 `asana_` actions (tasks, subtasks, sections, comments, attachments, projects) and `asana_api`. |
+| `canva.js` | Canva: an OAuth integration authorised by the owner; 20 `canva_` actions (designs, exports, uploads, folders, brand templates, comments) and `canva_api`. |
+| `google.js` | Google: accounts connected through Cora's OAuth broker (`GoogleConnector`); 14 `gmail_` actions (send, reply, search, read, attachments, labels, archive, drafts) and `gmail_api`. |
 
 Google is `kind: "google"`: its card has its own flow in the panel (one card, several
-accounts, agents chosen per account), and `GoogleConnector` serves its tool, which
-`KeyConnectors` hands over to it. The broker grants `gmail.send` only, so `google_email`
-sends but cannot read an inbox.
+accounts, agents chosen per account), and `GoogleConnector` serves its tools, which
+`KeyConnectors` hands over to it. The broker asks Google for `gmail.send`, `gmail.compose`
+and `gmail.modify`; each account keeps the scopes it actually granted, and each `gmail_`
+action declares `needs` (send, draft, read, change): an agent sees an action only when one
+of its accounts allows it. Accounts connected before keep `gmail.send` only until they are
+reconnected.
 
 ## The panel reads the catalogue from here
 
@@ -47,12 +52,16 @@ the UI, so add the English for each new text there.
      secret: "CORA_ACME_KEY",  // the vault name of the key agents work with
      appSecrets: [],           // optional: vault names for an app's client ID and secret
      label: "workspace",       // what the account is called in the card
-     tool: "acme",             // optional: the agent tool's name; leave it out for no tool
      oauth: { /* optional: authorise an app with the owner's account, see below */ },
      card: { /* the catalogue card and the forms, see below */ },
-     definition(record) { /* the tool: { name, description, parameters } */ },
-     summarize(args) { /* one line for the activity log: never the key, never a body */ },
-     async run(args, { token, request, api }) { /* returns { data } or { error } */ },
+     tools: [{                 // one entry per action an agent may take
+       name: "acme_create_item",
+       description: "Acme: create an item in a project …",   // or (record) => "…"
+       parameters: { type: "object", properties: { /* JSON Schema */ }, required: [] },
+       summarize(args) { /* optional: one line for the activity log, never a key or a body */ },
+       async run(args, ctx) { /* returns the data the agent reads; fail("…") to refuse */ },
+     }],
+     context(ctx) { return { ...ctx, acme: client(ctx) }; },  // optional: a client every run shares
    };
    ```
 
@@ -61,9 +70,9 @@ the UI, so add the English for each new text there.
    is stored (see `checkLinear` and `checkAsana`): a wrong key is refused at once, with a
    message the person understands, and nothing reaches the vault.
 4. **Add the English** for the card's texts in `web/i18n.js`.
-5. **Test it** in `test/key-connectors.test.js` against a fake service: connecting it, a
-   refused key, and the tool reading and writing for an authorised agent but not appearing
-   for the others.
+5. **Test it** in `test/connector-<service>.test.js` against a fake service: every action,
+   the refusals, and the tools not appearing for an agent that is not authorised. Then try
+   the actions live on a test project of the real service, and remove what the test made.
 
 ## The card
 
@@ -92,20 +101,29 @@ card: {
 }
 ```
 
-## Writing the tool
+## Writing the actions
 
-- **One tool per service**, not one per endpoint. Every tool description is sent with
-  every turn of every authorised agent, so keep it short and give a few real examples
-  of the calls agents need most (read, create, update, comment).
+- **One tool per action an agent takes**, named `<service>_<verb>_<thing>`, plus one generic
+  call (`<service>_api`) for the rest. Let agents name things as people do: resolve a
+  project, team, label or state by name (`pick` in `tooling.js`) and refuse an ambiguous
+  name with the candidates, so the agent can choose.
+- Keep descriptions short and concrete: every description travels with every turn of every
+  authorised agent. Say what is final (a send, a delete) and whose name the action carries.
+- **Files** come from the agent's computer through `ctx.readFile` (`localFile`), and go to it
+  through `ctx.writeFile` (inside `/home/agent/work` only): an agent never pastes bytes.
+- `run` gets `ctx` with `token`, `request`, `api`, `record`, `readFile`, `writeFile`, plus what
+  `context` adds. It returns plain data; `fail(message)` refuses with a message the agent
+  reads as `error: …`.
 - **Use `request`, never `fetch`.** `request(url, { method, headers, body })` answers
   `{ status, data }` and throws only when the service does not answer. Put the key into
   the headers yourself, from `token`.
 - **Take base URLs from `api`**, so tests can point them at a fake service. Add new ones
   to `KeyConnectors` (constructor and `runTool`).
-- **Refuse bad input** with `{ error }`: no host in a path, no `..`, only the methods the
+- **Refuse bad input** with `fail`: no host in a path, no `..`, only the methods the
   service has.
-- **Return the service's own JSON** in `{ data }`. Cora turns it into text, cuts it at
-  40,000 characters and removes the key if a service ever echoes it.
+- **Return compact data**: the fields an agent needs, not the service's whole object. Cora
+  turns it into text, cuts it at 40,000 characters and removes the key if a service ever
+  echoes it.
 - Agents act **as the account that made the key**. Say so in the description, so an agent
   knows whose name its comments and tasks will carry.
 

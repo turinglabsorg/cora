@@ -161,7 +161,7 @@ export function startCora(overrides = {}) {
   // Where the owner reviews the brain: the address people reach this Cora on.
   const instanceUrl = cfg.publicHost ? `https://${cfg.publicHost}` : cfg.cloudUrl && cfg.cloudSpace ? `https://${cfg.cloudSpace}.${new URL(cfg.cloudUrl).host}` : "";
   orchestrator.instanceUrl = instanceUrl;
-  const googleConnector = new GoogleConnector({ store, enabled: cfg.googleConnectorEnabled !== false, broker: cfg.googleConnectorBroker || (cfg.cloudUrl && cfg.cloudSpace ? "https://connect.fluxkit.dev" : ""), space: cfg.cloudSpace, storeSecret, tokenFor, ...(cfg.gmailApi ? { api: cfg.gmailApi } : {}) });
+  const googleConnector = new GoogleConnector({ store, enabled: cfg.googleConnectorEnabled !== false, access: cfg.googleConnectorAccess, broker: cfg.googleConnectorBroker || (cfg.cloudUrl && cfg.cloudSpace ? "https://connect.fluxkit.dev" : ""), space: cfg.cloudSpace, storeSecret, tokenFor, ...(cfg.gmailApi ? { api: cfg.gmailApi } : {}) });
   const email = new EmailChannel({ store, boxes, channels, orchestrator, instanceUrl, key: cfg.sessionKey || cfg.adminPassword, log: activity, googleConnector });
   brain.email = email;
   orchestrator.email = email;

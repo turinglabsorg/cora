@@ -484,7 +484,7 @@ export async function executeTool(call, ctx) {
     }
     if (ctx.connectors?.handles(call.name)) {
       if (!ctx.mailAuthorized && !["owner", "authorized"].includes(ctx.requester?.kind)) return { text: "error: connectors work on the owner's accounts: they run only for an authorized request" };
-      return await ctx.connectors.runTool(agent, call.name, args, { readFile: async (path) => { await boxes.ensure(agent); return boxes.readFile(agent.id, path); } });
+      return await ctx.connectors.runTool(agent, call.name, args, { readFile: async (path) => { await boxes.ensure(agent); return boxes.readFile(agent.id, path); }, writeFile: async (path, bytes) => { await boxes.ensure(agent); return boxes.writeFile(agent.id, path, bytes); } });
     }
     if (call.name.startsWith("email_") && !ctx.mailAuthorized && !["owner", "authorized"].includes(ctx.requester?.kind) && !ctx.emailInvocation) return { text: "error: mailbox access requires an authorized user request" };
     switch (call.name) {

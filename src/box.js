@@ -622,6 +622,24 @@ export class Boxes {
     return result.stdout;
   }
 
+  /** Saves bytes as a file on the agent's computer, inside /home/agent/work only, creating its folders; never through a symlink out of it. */
+  async writeFile(agentId, path, bytes) {
+    if (!String(path).startsWith("/home/agent/work/") || String(path).includes("\0")) throw new Error("save files inside /home/agent/work");
+    const result = await runProcess(this.docker, this.execArgs(agentId, ["python3", "-c", `import os,pathlib,sys
+root=pathlib.Path("/home/agent/work").resolve(strict=True)
+path=pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True,exist_ok=True)
+parent=path.parent.resolve(strict=True)
+if not parent.is_relative_to(root) or path.is_symlink(): sys.exit("path must be inside /home/agent/work")
+data=sys.stdin.buffer.read()
+temporary=parent/(".incoming-"+os.urandom(6).hex())
+with open(temporary,"wb") as file: file.write(data)
+os.replace(temporary,parent/path.name)
+print(len(data))`, String(path)]), { input: Buffer.from(bytes), timeoutMs: 60000 });
+    if (result.code !== 0) throw new Error(result.stderr.trim().split("\n").at(-1)?.slice(0, 300) || `cannot write ${path}`);
+    return { path, bytes: Number(result.stdout.toString("utf8").trim()) };
+  }
+
   /**
    * What a push would send: `{kind, root, marker, files: [{path, size, sha256}], skipped, refused, tooMany}`.
    * The listing is only a claim: Cora checks every path and size itself.
