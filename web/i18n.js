@@ -740,6 +740,7 @@ export const EN = {
   "App Slack aggiornate": "Slack apps updated",
   "Nome, descrizione e immagine passano all'app Slack appena si collega.": "Name, description and image reach the Slack app as soon as it connects.",
   "Slack non ha preso l'ultimo aggiornamento: {error}.": "Slack did not take the last update: {error}.",
+  "L'app è sul suo account Slack: nome e immagine li aggiorna chi la gestisce.": "The app stays on its own Slack account: the person who manages it updates the name and picture.",
   "Nome, descrizione e immagine seguono il pannello: allineati {time}.": "Name, description and image follow the panel: in line {time}.",
   "Refresh token di configurazione": "Configuration refresh token",
   "Incolla un nuovo refresh token per sostituirlo": "Paste a new refresh token to replace it",

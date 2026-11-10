@@ -2707,8 +2707,9 @@ function slackAppSync(agent, bot) {
   } });
   const line = !record ? tr("Nome, descrizione e immagine passano all'app Slack appena si collega.")
     : record.error ? tr("Slack non ha preso l'ultimo aggiornamento: {error}.", { error: record.error })
-      : tr("Nome, descrizione e immagine seguono il pannello: allineati {time}.", { time: fmtTime(record.at, true) });
-  return h("div", { class: `slack-app-sync${record?.error ? " err" : ""}` }, icon(record?.error ? "alert" : "check"), h("span", { class: "grow" }, raw(line)), button);
+      : record.separate ? tr("L'app è sul suo account Slack: nome e immagine li aggiorna chi la gestisce.")
+        : tr("Nome, descrizione e immagine seguono il pannello: allineati {time}.", { time: fmtTime(record.at, true) });
+  return h("div", { class: `slack-app-sync${record?.error ? " err" : ""}` }, icon(record?.error ? "alert" : record?.separate ? "slack" : "check"), h("span", { class: "grow" }, raw(line)), button);
 }
 
 /** Settings → Canali → Slack: the configuration token that lets every app follow the panel. */

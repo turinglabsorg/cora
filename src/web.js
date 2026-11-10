@@ -438,13 +438,17 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     boxes.ensure(agent).catch((error) => activity({ type: "error", agentId: agent.id, text: `desktop: ${error.message}` }));
   };
 
+  // Slack and Telegram apps belong to the agent, like a bot created on its own account.
+  // The space owner can connect either one for anybody. Private brains stay with their proprietors.
+  const ownerTransport = (person, pathname) => person?.role === "owner" && /^\/api\/agents\/[\w-]+\/(?:slack-bot|telegram-bot|slack-app)$/.test(pathname);
+
   const panelMcp = new PanelMcp({
     store, dispatch: (req, res, url, user) => api(req, res, url, user),
     publicOrigin: config.publicHost ? `https://${config.publicHost}` : cloud ? `https://${cloud.audience}` : "",
     insecure: config.insecureCookies === true,
     authorize: (user, method, url) => {
       const agentId = /^\/api\/agents\/([\w-]+)(?:\/|$)/.exec(url.pathname)?.[1];
-      if (agentId && !knowledge?.canManage(store.agent(agentId), user)) throw new HttpError(403, "Agente privato.");
+      if (agentId && !knowledge?.canManage(store.agent(agentId), user) && !ownerTransport(user, url.pathname)) throw new HttpError(403, "Agente privato.");
       const routineId = /^\/api\/routines\/(rt_[\w-]+)(?:\/|$)/.exec(url.pathname)?.[1];
       const routine = routineId && store.routine(routineId);
       if (routine && !knowledge?.canManage(store.agent(routine.agentId), user)) throw new HttpError(404, "Routine non trovata.");
@@ -479,7 +483,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
     const scopedAgent = /^\/api\/agents\/([\w-]+)(?:\/|$)/.exec(path);
-    if (scopedAgent && knowledge?.ownerMemory) checkAgentMemory(scopedAgent[1], user);
+    if (scopedAgent && knowledge?.ownerMemory && !ownerTransport(user, path)) checkAgentMemory(scopedAgent[1], user);
     if (path === "/api/mcp/tokens") {
       if (method === "GET") return send(res, 200, panelMcp.view(user, req));
       if (method === "POST") return send(res, 201, panelMcp.create(user, await readJson(req, 4096)));
@@ -1087,6 +1091,23 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const seed = String(url.searchParams.get("seed") || "").replace(/[^\w-]/g, "").slice(0, 40) || "cora";
       const color = String(url.searchParams.get("color") || "").toLowerCase();
       return send(res, 200, drawnAvatar(seed, /^#[0-9a-f]{6}$/.test(color) ? color : "#e8a33d"), { "Content-Type": "image/png", "Cache-Control": "private, max-age=86400" });
+    }
+
+    if (path === "/api/transport-accounts" && method === "GET") {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega gli account Slack e Telegram degli agenti.");
+      const heard = channels.list()[0]?.id || "";
+      const slackChannel = slackIds(heard)?.channelId || store.settings.slackChannelIds[0];
+      const telegramChat = telegramChatId(heard) || store.settings.telegramChatIds[0];
+      const accounts = [];
+      for (const agent of store.agents()) {
+        accounts.push({
+          id: agent.id,
+          name: agent.name,
+          slackBot: skBots ? await skBots.status(agent, slackChannel) : null,
+          telegramBot: tgBots ? await tgBots.status(agent, telegramChat) : null,
+        });
+      }
+      return send(res, 200, { agents: accounts });
     }
 
     if (path === "/api/agents" && method === "POST") {

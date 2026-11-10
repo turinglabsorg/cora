@@ -5,6 +5,7 @@ import { DIRECT_MESSAGE_INTENTS, Discord, LISTENING_INTENTS, splitMessage } from
 import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
 import { appManifest } from "../src/slack-bots.js";
+import { SlackApps } from "../src/slack-apps.js";
 import { mentions, spokenTo, tagged } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { drawAvatar } from "../src/avatar.js";
@@ -1011,4 +1012,28 @@ test("platforms on together: each agent has a row per platform, and Settings off
   slack.querySelector("button").click();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(puts[1], { path: "/api/settings", body: { transports: ["discord", "telegram", "slack"], transport: "discord" } });
+});
+
+describe("slack app on its own account", () => {
+  test("no_permission keeps the app separate instead of failing the space", async () => {
+    const saved = {};
+    const apps = new SlackApps({
+      store: { value: () => saved.slackApps || {}, setValue: (_key, value) => { saved.slackApps = value; } },
+      apiBase: "https://slack.test/api",
+      refreshToken: "xoxe-test",
+    });
+    apps.token = async () => "access";
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => ({ status: 200, headers: { get: () => null }, json: async () => ({ ok: false, error: "no_permission" }) });
+    try {
+      const record = await apps.syncNow({ key: "agent", botToken: "xoxb-test", name: "Pippo" }, false);
+      assert.equal(record.error, "");
+      assert.equal(record.separate, true);
+      assert.equal(saved.slackApps.agent.separate, true);
+      const again = await apps.syncNow({ key: "agent", botToken: "xoxb-test", name: "Pippo" }, false);
+      assert.equal(again, saved.slackApps.agent);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });

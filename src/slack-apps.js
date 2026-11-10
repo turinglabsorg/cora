@@ -155,12 +155,16 @@ export class SlackApps {
         record.iconUrl = iconUrl;
       }
     } catch (error) {
-      record.error = error.message;
+      // One space token cannot manage an app created on someone else's Slack account. The app still runs on its own tokens.
+      if (error.slack === "no_permission") record.separate = true;
+      else record.error = error.message;
     }
     this.store.setValue("slackApps", { ...this.store.value("slackApps", {}), [key]: record });
     this.log?.(record.error
       ? { type: "warning", text: `app Slack ${name}: ${record.error}` }
-      : { type: "slack", text: `app Slack ${name}: nome, descrizione e immagine allineati al pannello` });
+      : record.separate
+        ? { type: "slack", text: `app Slack ${name}: resta sul suo account` }
+        : { type: "slack", text: `app Slack ${name}: nome, descrizione e immagine allineati al pannello` });
     return record;
   }
 }

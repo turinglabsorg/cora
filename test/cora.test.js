@@ -673,8 +673,39 @@ test("external configuration MCP preserves private ownership, shared-agent grant
   assert.equal((await f.invoke(alice, { method: "PUT", path: `/api/agents/${agent.id}/owners`, body: { users: [f.alice.user.id], contacts: [], version: current.version } })).data.result.structuredContent.status, 200);
   assert.equal((await f.invoke(bob, { path: `/api/agents/${agent.id}` })).data.result.structuredContent.status, 403);
   assert.equal((await f.invoke(bob, { path: `/api/brain?ownerId=${f.alice.user.id}` })).data.result.structuredContent.status, 403);
-  assert.equal((await f.rpc(bob, "ping")).status, 200, "revoking a resource does not affect another user's own MCP identity");
+  assert.equal((await f.rpc(bob, "ping")).status, 200, "revoking a resource does not affect another user\'s own MCP identity");
 });
+
+test("the space owner connects Slack and Telegram apps for someone else's agent without opening the private agent", async (t) => {
+  const f = await panelMcpWorld(t), alice = await f.issue(f.alice), bob = await f.issue(f.bob), admin = await f.issue(f.admin);
+  const created = (await f.invoke(alice, { method: "POST", path: "/api/agents", body: { name: "Transport agent", tools: false, enabled: false } })).data.result;
+  assert.equal(created.structuredContent.status, 201);
+  const agent = created.structuredContent.data;
+  assert.equal((await f.invoke(admin, { path: `/api/agents/${agent.id}` })).data.result.structuredContent.status, 403);
+  assert.equal((await f.invoke(admin, { method: "PUT", path: `/api/agents/${agent.id}`, body: { personality: "closed" } })).data.result.structuredContent.status, 403);
+  const roster = (await f.invoke(admin, { path: "/api/transport-accounts" })).data.result;
+  assert.equal(roster.structuredContent.status, 200);
+  const row = roster.structuredContent.data.agents.find((item) => item.id === agent.id);
+  assert.equal(row.name, "Transport agent");
+  assert.equal(row.personality, undefined);
+  assert.equal(row.core, undefined);
+  assert.equal(row.slackBot.state, "missing-token");
+  assert.equal(row.telegramBot.state, "missing-token");
+  assert.equal(JSON.stringify(roster.structuredContent.data).includes("xoxb-"), false);
+  assert.equal((await f.invoke(bob, { path: "/api/transport-accounts" })).data.result.structuredContent.status, 403);
+  const telegram = await f.invoke(admin, { method: "PUT", path: `/api/agents/${agent.id}/telegram-bot`, body: { token: "not-a-token" } });
+  assert.equal(telegram.data.result.structuredContent.status, 400);
+  assert.match(telegram.data.result.structuredContent.data.error, /BotFather/);
+  assert.equal((await f.invoke(bob, { method: "PUT", path: `/api/agents/${agent.id}/telegram-bot`, body: { token: "not-a-token" } })).data.result.structuredContent.status, 403);
+  const slack = await f.invoke(admin, { method: "PUT", path: `/api/agents/${agent.id}/slack-bot`, body: { botToken: "nope", appToken: "nope" } });
+  assert.equal(slack.data.result.structuredContent.status, 400);
+  assert.match(slack.data.result.structuredContent.data.error, /xoxb-/);
+  assert.equal((await f.invoke(bob, { method: "PUT", path: `/api/agents/${agent.id}/slack-bot`, body: { botToken: "nope", appToken: "nope" } })).data.result.structuredContent.status, 403);
+  const sync = await f.invoke(admin, { method: "POST", path: `/api/agents/${agent.id}/slack-app` });
+  assert.equal(sync.data.result.structuredContent.status, 409);
+  assert.equal((await f.invoke(alice, { method: "PUT", path: `/api/agents/${agent.id}/telegram-bot`, body: { token: "not-a-token" } })).data.result.structuredContent.status, 400);
+});
+
 
 test("external configuration MCP restricts owner operations, read-only keys, expired keys and revoked admission", async (t) => {
   const f = await panelMcpWorld(t), alice = await f.issue(f.alice), admin = await f.issue(f.admin), reader = await f.issue(f.admin, { readOnly: true });
