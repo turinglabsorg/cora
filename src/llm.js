@@ -317,7 +317,8 @@ export class LLM {
       ollamaCloud: Boolean(this.ollamaKey) || Boolean(this.cloudAccount?.signedIn),
       orcarouter: Boolean(this.routers.orcarouter.key),
       hermes: onPath(this.hermes.bin),
-      deepseek: onPath(this.deepseek.bin) && Boolean(this.deepseek.key),
+      // dsh is the harness; which key it runs on is the agent's choice, its own or the space one.
+      deepseek: onPath(this.deepseek.bin),
       deepseekInstalled: onPath(this.deepseek.bin),
     };
   }
@@ -688,7 +689,11 @@ export class LLM {
           }
           return await runHermes({ bin: this.hermes.bin, ...options, home: endpoint.home, baseUrl: endpoint.baseUrl, model: endpoint.model, apiKey: endpoint.key });
         }
-        if (provider === "deepseek") return await runDeepSeek({ bin: this.deepseek.bin, ...options, home: this.deepseek.home, apiKey: this.deepseek.key });
+        if (provider === "deepseek") {
+          const apiKey = credentialId ? (this.credentials?.secret(credentialId) || "") : this.deepseek.key;
+          if (!apiKey) throw new Error(credentialId ? "chiave API non trovata" : "manca la chiave DeepSeek dello space");
+          return await runDeepSeek({ bin: this.deepseek.bin, ...options, home: this.deepseek.home, apiKey });
+        }
         throw new Error(`${provider} is not a CLI provider`);
       } finally {
         run?.dispose();

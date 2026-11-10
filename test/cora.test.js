@@ -2791,7 +2791,7 @@ describe("agents in Discord", () => {
     assert.ok(state.data.models.some((model) => model.id === "claude/claude-opus-5-5"));
     assert.ok(state.data.models.some((model) => model.id === "codex/gpt-6-sol"));
     assert.ok(!state.data.models.some((model) => model.id === "codex/hidden"));
-    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, gemini: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true, deepseek: false, deepseekInstalled: true }, "dsh is here, its key is not");
+    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, gemini: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true, deepseek: true, deepseekInstalled: true }, "dsh is here; its key is chosen agent by agent");
   });
 
   test("creates two agents through the API", async () => {
@@ -5119,7 +5119,7 @@ describe("what runs the models", () => {
     await panel.navigate(`#/agent/${agent.id}/cervello`);
     await waitFor(() => panel.app.querySelector(".brain-harness"));
     assert.deepEqual(panel.app.querySelector(".brain-harness").querySelectorAll("option").map((node) => node.textContent),
-      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Antigravity CLI", "Hermes", "DeepSeek Harness · no key"]);
+      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Antigravity CLI", "Hermes", "DeepSeek Harness"]);
     const sections = panel.app.querySelector(".email-workspace-nav").querySelectorAll("button");
     assert.deepEqual(sections.map((node) => node.querySelector("b").textContent), ["Model and account", "Reasoning", "Computer"]);
     // It opens on the side the agent is already on: the cloud.

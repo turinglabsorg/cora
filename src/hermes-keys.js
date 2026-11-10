@@ -29,3 +29,16 @@ export function hermesKeyBackend(model) {
 export function hermesRemoteModel(model) {
   return String(model || "").split("/").slice(2).join("/");
 }
+
+/**
+ * The key a model id needs: a keyed Hermes end (`hermes/ollama/...`,
+ * `hermes/deepseek/...`) or DeepSeek Harness itself (`deepseek/...`), which
+ * runs on dsh with the person's DeepSeek key or the space one.
+ * Empty means the model runs on the machine, on a subscription, or on the
+ * space's own router key.
+ */
+export function modelKeyBackend(model) {
+  const backend = hermesKeyBackend(model);
+  if (backend) return backend;
+  return String(model || "").split("/")[0] === "deepseek" ? "deepseek" : "";
+}
