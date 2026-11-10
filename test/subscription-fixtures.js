@@ -20,7 +20,7 @@ if (!directory) process.exit(9);
 const marker = path.join(directory, "fixture-account.json");
 const state = () => JSON.parse(fs.readFileSync(${JSON.stringify(control)}, "utf8"));
 const saved = () => { try { return JSON.parse(fs.readFileSync(marker, "utf8")); } catch { return null; } };
-const save = () => { const account = { email: path.basename(directory) + "@example.test", planType: "pro", type: "chatgpt" }; fs.writeFileSync(marker, JSON.stringify(account)); return account; };
+const save = () => { const account = { email: state().email || path.basename(directory) + "@example.test", planType: "pro", type: "chatgpt" }; fs.writeFileSync(marker, JSON.stringify(account)); return account; };
 const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 if (provider === "gemini" && argv.includes("/usage")) {
   const account = saved();

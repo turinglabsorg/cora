@@ -57,7 +57,7 @@ export function startCora(overrides = {}) {
   const telegram = new Telegram({ token: cfg.telegramToken, apiBase: cfg.telegramApi, pollTimeout: cfg.telegramPollTimeout, chats: store.value("telegramChats", []) });
   const slack = new Slack({ botToken: cfg.slackToken, appToken: cfg.slackAppToken, apiBase: cfg.slackApi });
   const bridge = new ToolBridge();
-  const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, grokBin: cfg.grokBin, museBin: cfg.museBin, geminiBin: cfg.geminiBin, timezone: cfg.timezone, residentDirectories: cfg.residentDirectories, emit: (event) => web?.broadcast(event) });
+  const subscriptions = new Subscriptions({ store, claudeBin: cfg.claudeBin, codexBin: cfg.codexBin, grokBin: cfg.grokBin, museBin: cfg.museBin, geminiBin: cfg.geminiBin, timezone: cfg.timezone, residentDirectories: cfg.residentDirectories, ownerScoped: cfg.ownerMemory === true, emit: (event) => web?.broadcast(event) });
   const llm = new LLM({
     ollamaUrl: cfg.ollamaUrl,
     ollamaKey: cfg.ollamaKey,
@@ -285,7 +285,7 @@ export function startCora(overrides = {}) {
     }
   });
 
-  const ready = Promise.all([bridge.start(), store.settings.useResidentSubscriptions ? subscriptions.discoverResidents() : Promise.resolve()]).then(() => new Promise((resolve) => web.server.listen(cfg.port, cfg.host, resolve)));
+  const ready = Promise.all([bridge.start(), (store.settings.useResidentSubscriptions ? subscriptions.discoverResidents() : Promise.resolve()).then(() => subscriptions.consolidate())]).then(() => new Promise((resolve) => web.server.listen(cfg.port, cfg.host, resolve)));
   ready.then(() => {
     if (overrides.subscriptionUsageIntervalMs !== 0) subscriptions.usage.start(overrides.subscriptionUsageIntervalMs);
     console.log(`> cora on http://${cfg.host}:${web.server.address().port}`);
