@@ -200,9 +200,10 @@ test("authorised agents work on Linear and Asana through their Cora tools, and n
   await f.call("/api/connectors/keys/asana", { method: "PUT", body: { agents: [f.agent.id] } });
   const tools = connectors.toolsFor(f.agent);
   const names = tools.map((tool) => tool.name);
-  assert.equal(names[0], "linear_graphql");
+  assert.equal(names[0], "linear_teams");
+  assert.ok(names.includes("linear_create_issue") && names.includes("linear_comment") && names.includes("linear_graphql"), "Linear gives one tool per action plus the fallback");
   assert.ok(names.includes("asana_create_task") && names.includes("asana_comment") && names.includes("asana_api"), "Asana gives one tool per action plus the fallback");
-  assert.ok(names.slice(1).every((name) => name.startsWith("asana_")));
+  assert.ok(names.every((name) => name.startsWith("linear_") || name.startsWith("asana_")));
   assert.match(tools[0].description, /workspace turinglabs, acting as Sebastiano/);
   assert.match(tools.find((tool) => tool.name === "asana_workspaces").description, /Turing Labs \(gid 2\)/);
   for (const tool of tools) assert.equal(tool.parameters.type, "object", `${tool.name} has a JSON Schema`);
@@ -270,7 +271,7 @@ test("the panel draws the catalogue and the forms from src/connectors, so a new 
     return { ok: response.status < 400, status: response.status, json: async () => response.data };
   } });
   const served = (await f.call("/api/connectors")).data.catalog;
-  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tools[0]]), [["google", "google", "google_email"], ["linear", "key", "linear_graphql"], ["asana", "key", "asana_workspaces"], ["canva", "key", "canva_api"]]);
+  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tools[0]]), [["google", "google", "google_email"], ["linear", "key", "linear_teams"], ["asana", "key", "asana_workspaces"], ["canva", "key", "canva_api"]]);
   assert.ok(served.find((item) => item.id === "asana").tools.length > 10, "the catalogue lists every Asana action");
   assert.equal(served.find((item) => item.id === "linear").secret, "CORA_LINEAR_KEY");
   const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
