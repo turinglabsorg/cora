@@ -157,6 +157,10 @@ export class SlackBots {
         this.syncApp(this.store.agent(agentId)).catch(() => {});
       });
       client.on("joined", () => this.forgetMembership(agentId));
+      client.on("channels", () => {
+        this.forgetMembership(agentId);
+        this.onChannels?.();
+      });
       client.on("status", (status) => {
         if (status.state === "error") {
           entry.error = status.error;

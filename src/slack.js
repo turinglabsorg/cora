@@ -145,9 +145,17 @@ export class Slack extends EventEmitter {
     }
     const event = envelope.payload?.event;
     if (!event) return;
-    if (event.type === "message") this.emit("message", event);
-    else if (event.type === "channel_left" || event.type === "group_left") this.channels.delete(event.channel);
-    else if (event.type === "member_joined_channel" && event.user === this.user?.id) this.emit("joined", event.channel);
+    if (event.type === "message") {
+      // A join message is how some workspaces say the app was invited, besides member_joined_channel.
+      if ((event.subtype === "channel_join" || event.subtype === "group_join") && event.user === this.user?.id) this.noteJoined(event.channel).catch(() => {});
+      this.emit("message", event);
+      return;
+    }
+    if (event.type === "channel_left" || event.type === "group_left" || (event.type === "member_left_channel" && event.user === this.user?.id)) {
+      this.forgetChannel(event.channel);
+      return;
+    }
+    if (event.type === "member_joined_channel" && event.user === this.user?.id) this.noteJoined(event.channel).catch(() => {});
   }
 
   onClose(ws, code) {
@@ -234,9 +242,52 @@ export class Slack extends EventEmitter {
     return Boolean(this.user && (event?.user === this.user.id || (event?.bot_id && event.bot_id === this.user.botId)));
   }
 
+  /** Channels this app is in, direct messages aside: what the panel and the listeners compare. */
+  channelStamp() {
+    return [...this.channels.values()]
+      .filter((channel) => channel?.id && !channel.direct && !isDirectChannel(channel.id))
+      .map((channel) => [channel.id, channel.name, channel.private ? "1" : "0"].join("|"))
+      .sort()
+      .join(";");
+  }
+
+  emitChannelsIfChanged(before) {
+    if (this.channelStamp() !== before) this.emit("channels");
+  }
+
+  forgetChannel(channelId) {
+    if (!channelId || !this.channels.has(channelId)) return;
+    const before = this.channelStamp();
+    this.channels.delete(channelId);
+    this.emitChannelsIfChanged(before);
+  }
+
+  /** The app was just put in a channel: learn its name and say so only when the list actually changed. */
+  async noteJoined(channelId) {
+    if (!channelId) return null;
+    const before = this.channelStamp();
+    this.channels.delete(channelId);
+    const entry = await this.loadChannel(channelId);
+    if (!entry) {
+      this.channels.set(channelId, {
+        id: channelId,
+        name: channelId,
+        guildId: this.team?.id || "",
+        guildName: this.team?.name || "Slack",
+        thread: false,
+        private: true,
+      });
+    }
+    this.emit("joined", channelId);
+    this.emitChannelsIfChanged(before);
+    return this.channels.get(channelId) || null;
+  }
+
   /** The conversations this app is actually in: the Slack answer to "which channels can it see". */
   async listChannels() {
+    const before = this.channelStamp();
     const out = [];
+    const seen = new Set();
     let cursor = "";
     do {
       const page = await this.request("users.conversations", {
@@ -252,10 +303,18 @@ export class Slack extends EventEmitter {
           private: Boolean(channel.is_private),
         };
         this.channels.set(channel.id, entry);
+        seen.add(channel.id);
         out.push(entry);
       }
       cursor = page.response_metadata?.next_cursor || "";
     } while (cursor);
+    // A channel missing from the answer is one the app left, even if the leave event never arrived.
+    for (const id of [...this.channels.keys()]) {
+      const entry = this.channels.get(id);
+      if (!entry || entry.direct || isDirectChannel(id)) continue;
+      if (!seen.has(id)) this.channels.delete(id);
+    }
+    this.emitChannelsIfChanged(before);
     return out;
   }
 

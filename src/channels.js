@@ -136,6 +136,42 @@ export class Channels {
     return null;
   }
 
+  /** Every channel a connected Slack app is in: the main app and each agent's, direct messages aside. */
+  slackCatalog() {
+    const seen = new Map();
+    const add = (channel) => {
+      if (!channel?.id || channel.direct || isDirectChannel(channel.id)) return;
+      const current = seen.get(channel.id);
+      const name = channel.name || channel.id;
+      if (!current || (current.name === current.id && name !== channel.id)) {
+        seen.set(channel.id, {
+          id: channel.id,
+          name,
+          guildId: channel.guildId || current?.guildId || "",
+          guildName: channel.guildName || current?.guildName || "",
+          thread: false,
+          private: Boolean(channel.private || current?.private),
+        });
+      }
+    };
+    for (const channel of this.slack?.status()?.channels || []) add(channel);
+    for (const [, entry] of this.skBots?.clients || []) {
+      for (const channel of entry.client?.status()?.channels || []) add(channel);
+    }
+    return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  }
+
+  /** Ask every connected app which channels it is in, then return that union. */
+  async refreshSlackCatalog() {
+    const jobs = [];
+    if (this.slack?.botToken) jobs.push(this.slack.listChannels().catch(() => []));
+    for (const [, entry] of this.skBots?.clients || []) {
+      if (entry.client?.botToken) jobs.push(entry.client.listChannels().catch(() => []));
+    }
+    await Promise.all(jobs);
+    return this.slackCatalog();
+  }
+
   /** Channels of every platform switched on that the cora listens to. */
   list() {
     const out = [];
@@ -147,8 +183,9 @@ export class Channels {
     }
     if (this.on("slack")) {
       const team = this.slack?.team;
+      const catalog = this.slackCatalog();
       out.push(...this.store.settings.slackChannelIds.map((channelId) => {
-        const info = this.slackInfo(channelId);
+        const info = catalog.find((channel) => channel.id === channelId) || this.slackInfo(channelId);
         return {
           id: slackChannel(channelId),
           name: info?.name || channelId,

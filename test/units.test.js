@@ -1014,6 +1014,23 @@ test("platforms on together: each agent has a row per platform, and Settings off
   assert.deepEqual(puts[1], { path: "/api/settings", body: { transports: ["discord", "telegram", "slack"], transport: "discord" } });
 });
 
+describe("slack channel switches", () => {
+  test("turning a channel off saves the ones still on", async () => {
+    const puts = [];
+    const panel = panelHarness({ fetch: async (path, options = {}) => {
+      if (options.method === "PUT") puts.push(JSON.parse(options.body));
+      return { ok: true, status: 200, json: async () => ({ slackChannelIds: ["C0ON"] }) };
+    } });
+    panel.run(`S.data = { settings: { slackChannelIds: ["C0ON", "C0OFF"] } }`);
+    const list = panel.run(`switchList([{ id: "C0ON", name: "#on" }, { id: "C0OFF", name: "#off" }], ["C0ON", "C0OFF"], "slackChannelIds", () => ({ querySelector() { return null; } }))`);
+    const off = list.querySelectorAll("input").find((input) => input.value === "C0OFF");
+    off.checked = false;
+    list.dispatch("change");
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(puts, [{ slackChannelIds: ["C0ON"] }]);
+  });
+});
+
 describe("slack app on its own account", () => {
   test("no_permission keeps the app separate instead of failing the space", async () => {
     const saved = {};

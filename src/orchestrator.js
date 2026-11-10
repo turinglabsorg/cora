@@ -849,6 +849,7 @@ export class Orchestrator {
 
   /** Slack delivers only what happens while the socket is open: on connect, pick up what was missed. */
   async catchUpSlack() {
+    await this.channels.refreshSlackCatalog().catch(() => {});
     for (const channel of this.channels.list()) {
       const info = this.channels.info(channel.id);
       const state = this.state(channel.id);

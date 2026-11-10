@@ -549,8 +549,9 @@ function connectEvents() {
       }
       return;
     }
-    if (entry.type === "telegram-chats") {
-      if (route()[0] === "settings" && !document.activeElement?.matches("input, textarea, select")) {
+    if (entry.type === "slack-channels" || entry.type === "telegram-chats") {
+      const here = entry.type === "slack-channels" ? route()[1] === "slack" : true;
+      if (route()[0] === "settings" && here && !document.activeElement?.matches("input, textarea, select")) {
         const view = location.hash, keepLogin = subscriptionLoginActive();
         guard(loadState()).then(() => {
           if (location.hash !== view) return;
@@ -825,7 +826,7 @@ function banners() {
   if (info.state === "missing-token") out.push(h("a", { class: "banner err", href: "#/settings" }, icon("key"), h("span", {}, h("b", {}, info.kind === "telegram" ? "Telegram senza token. " : "Nessuno ascolta Discord. "), info.kind === "telegram" ? "Incolla il token del bot (da BotFather) nelle impostazioni." : "Attiva «Message Content Intent» nella pagina Bot dell'app Discord di almeno un agente: Cora ascolterà con quel bot.")));
   else if (info.state === "error") out.push(h("a", { class: "banner err", href: "#/settings" }, icon("alert"), h("span", {}, h("b", {}, `${info.label}: `), raw(info.error))));
   if (info.kind === "slack" && info.state !== "missing-token" && !S.data.settings.slackChannelIds.length) {
-    out.push(h("a", { class: "banner", href: "#/settings" }, icon("info"), h("span", {}, h("b", {}, "Nessun canale Slack acceso. "), "Invita le app nei canali e accendili nelle impostazioni.")));
+    out.push(h("a", { class: "banner", href: "#/settings/slack" }, icon("info"), h("span", {}, h("b", {}, "Nessun canale Slack acceso. "), "Invita un'app in un canale: compare qui e lo accendi.")));
   }
   if (info.kind === "telegram" && info.state !== "missing-token" && !S.data.settings.telegramChatIds.length) {
     out.push(h("a", { class: "banner", href: "#/settings" }, icon("info"), h("span", {}, h("b", {}, "Nessuna chat Telegram accesa. "), "Aggiungi il bot a un gruppo e accendi la chat nelle impostazioni.")));
@@ -7269,8 +7270,9 @@ function switchList(items, chosen, key, row) {
     h("span", { class: "rocker" }),
     h("span", { class: "switch-text" }, raw(item.name), item.sub ? h("small", { class: item.mono ? "mono" : "" }, item.sub) : null))));
   list.addEventListener("change", async () => {
-    const on = [...list.querySelectorAll("input")].filter((input) => input.checked);
-    if (!(await saveSettings({ [key]: on.map((input) => input.value) }, row()))) {
+    const inputs = [...list.querySelectorAll("input")];
+    const ids = inputs.filter((input) => input.checked).map((input) => input.value);
+    if (!(await saveSettings({ [key]: ids }, row()))) {
       await loadState();
       renderSettings();
     }
@@ -7428,10 +7430,13 @@ function renderSettings() {
 
   const slack = S.data.slack || { state: "missing-token", channels: [], error: "" };
   const refreshChannels = btn("Aggiorna canali", { icon: "refresh", cls: "sm ghost", onclick: async () => {
-    if (await guard(api("/api/slack/channels"), "Canali aggiornati")) {
-      await loadState();
-      renderSettings();
-    }
+    refreshChannels.disabled = true;
+    const fresh = await guard(api("/api/slack/channels"), "Canali aggiornati");
+    refreshChannels.disabled = false;
+    if (!fresh) return;
+    if (S.data?.slack) S.data.slack.channels = fresh;
+    await loadState();
+    renderSettings();
   } });
   let slackRow;
   page("slack",
@@ -7450,7 +7455,7 @@ function renderSettings() {
             slackTokenForm({ path: "/api/slack/token", ok: "App Slack collegata" })), { stack: true }))),
     panel({ icon: "radio", title: "Ascolto", hint: "I canali accesi, e chi può far usare il computer agli agenti.", actions: refreshChannels },
       setRows(
-        slackRow = setRow("Canali", slack.channels?.length ? "Le app sentono solo i canali accesi." : "Invita un'app in un canale (/invite): il canale compare qui e lo accendi.",
+        slackRow = setRow("Canali", slack.channels?.length ? "Le app sentono solo i canali accesi." : "Invita un'app in un canale: compare qui e lo accendi.",
           slack.channels?.length ? switchList(slack.channels.map((channel) => ({ id: channel.id, name: `#${channel.name}`, sub: tr(channel.private ? "canale privato" : "canale pubblico") })), settings.slackChannelIds, "slackChannelIds", () => slackRow) : null, { stack: true }),
         ownersRow("slackOwnerIds", "ID utente Slack. Se è vuoto diventa proprietario chi possiede il workspace, appena scrive."))),
     panel({ icon: "user", title: "Aspetto delle app", hint: "Nome, descrizione e immagine di ogni app seguono il pannello." }, slackAppsField()));

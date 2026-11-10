@@ -5761,14 +5761,16 @@ describe("agents in Slack", () => {
     assert.equal(switched.data.transport, "slack");
     await waitFor(() => app.slack.state === "ready", { what: "the Slack socket" });
     await waitFor(() => app.discord.state === "stopped", { what: "Discord off" });
+    await waitFor(async () => ((await call("/api/state")).data.slack.channels.some((channel) => channel.id === SLACK_CHANNEL && channel.name === "generale")), { what: "the channel the app is already in" });
     const state = (await call("/api/state")).data;
     assert.equal(state.slack.user.username, "cora");
     assert.equal(state.slack.team.name, "Dopamina");
-    assert.deepEqual(state.channels, [], "no Slack channel is allowed yet");
+    assert.ok(state.slack.channels.some((channel) => channel.id === SLACK_CHANNEL && channel.name === "generale"));
+    assert.deepEqual(state.channels, [], "no Slack channel is switched on yet");
     assert.equal(app.store.settings.slackTeamId, "T0000000001");
   });
 
-  test("a channel is heard only once allowed, the workspace owner becomes the owner, and the agent answers with its own app", async () => {
+  test("a channel is heard only once switched on, the workspace owner becomes the owner, and the agent answers with its own app", async () => {
     silvia = (await call("/api/agents", { method: "POST", body: { name: "Silvia", model: "ollama/test-model", chattiness: 0, tools: false } })).data;
     slack.addApp({ botToken: SILVIA_BOT, appToken: SILVIA_APP, id: "U0000000101", name: "silvia", channels: [SLACK_CHANNEL] });
     assert.match((await call(`/api/agents/${silvia.id}/slack-bot`, { method: "PUT", body: { botToken: MAIN_BOT, appToken: MAIN_APP } })).data.error, /app principale/);
@@ -5786,7 +5788,7 @@ describe("agents in Slack", () => {
     });
     slack.say({ text: "@Silvia, ci sei?" });
     await sleep(1500);
-    assert.equal(slack.postsIn(SLACK_CHANNEL).length, 0, "a channel that is not allowed is ignored");
+    assert.equal(slack.postsIn(SLACK_CHANNEL).length, 0, "a channel that is not switched on is ignored");
 
     await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL] } });
     const channels = (await call("/api/state")).data.channels;
@@ -5803,6 +5805,51 @@ describe("agents in Slack", () => {
     const [summary] = (await call(`/api/agents/${silvia.id}/traces`)).data;
     const trace = (await call(`/api/traces/${summary.id}`)).data;
     assert.match(trace.system, /In questo momento parlate su Slack, nello spazio "Dopamina"\./);
+    await quiet();
+  });
+
+  test("a private channel only an agent's app is in shows up on its own, is heard once switched on, and stays off once switched off", async () => {
+    const PRIVATE = "C0PRIVATE01";
+    slack.state.channels.set(PRIVATE, { id: PRIVATE, name: "refracto-dev", is_private: true });
+    slack.invite(SILVIA_BOT, PRIVATE);
+    await waitFor(async () => {
+      const state = (await call("/api/state")).data;
+      return state.slack.channels.some((channel) => channel.id === PRIVATE && channel.private && channel.name === "refracto-dev")
+        && !state.channels.some((channel) => channel.id === `sl:${PRIVATE}`);
+    }, { what: "the private channel in the panel, still off" });
+
+    replies.set("Silvia", () => ({ content: "Ci sono, nel canale privato." }));
+    slack.say({ text: "@Silvia, ci sei nel privato?", channel: PRIVATE });
+    await sleep(800);
+    assert.equal(slack.postsIn(PRIVATE).length, 0, "a channel that is not switched on is ignored");
+
+    await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL, PRIVATE] } });
+    slack.say({ text: "@Silvia, ci sei nel privato?", channel: PRIVATE });
+    const post = await waitFor(() => slack.postsIn(PRIVATE)[0], { what: "Silvia in the private channel" });
+    assert.equal(post.app, "silvia");
+    assert.equal(post.text, "Ci sono, nel canale privato.");
+
+    await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL] } });
+    slack.state.posts.length = 0;
+    slack.say({ text: "@Silvia, ancora?", channel: PRIVATE });
+    await sleep(800);
+    assert.equal(slack.postsIn(PRIVATE).length, 0, "switching the channel off keeps it off");
+    const listed = await call("/api/slack/channels");
+    const again = (await call("/api/state")).data;
+    assert.deepEqual(listed.data.map((channel) => channel.id).sort(), again.slack.channels.map((channel) => channel.id).sort(), "refresh and the panel read the same list");
+    assert.ok(listed.data.some((channel) => channel.id === PRIVATE && channel.private));
+    assert.ok(!again.channels.some((channel) => channel.id === `sl:${PRIVATE}`), "a switched-off channel is listed and not heard");
+
+    slack.join(SILVIA_BOT, SLACK_OTHER_CHANNEL);
+    const refreshed = await call("/api/slack/channels");
+    assert.ok(refreshed.data.some((channel) => channel.id === SLACK_OTHER_CHANNEL && channel.name === "clienti"), "refresh sees a channel whose join event was missed");
+    assert.deepEqual(refreshed.data.map((channel) => channel.id).sort(), ((await call("/api/state")).data.slack.channels.map((channel) => channel.id).sort()));
+
+    slack.state.apps.get(SILVIA_BOT).channels.delete(SLACK_OTHER_CHANNEL);
+    slack.leave(SILVIA_BOT, PRIVATE);
+    await waitFor(async () => !((await call("/api/state")).data.slack.channels.some((channel) => channel.id === PRIVATE)), { what: "leaving drops the channel without a manual refresh" });
+    const afterLeave = await call("/api/slack/channels");
+    assert.ok(!afterLeave.data.some((channel) => channel.id === PRIVATE || channel.id === SLACK_OTHER_CHANNEL), "refresh drops a channel whose leave event was missed");
     await quiet();
   });
 
@@ -7716,6 +7763,7 @@ describe("agent character sheet", () => {
     name.value = "Identita due";
     form.dispatch("submit");
     await waitFor(() => app.store.agent(agent.id)?.name === "Identita due", { what: "the identity save" });
+    await waitFor(() => panel.app.querySelectorAll("form").every((node) => node !== form), { what: "the panel to redraw after the save" });
     assert.equal(app.store.agent(agent.id).character, null);
     assert.equal(app.store.agent(agent.id).personality, "Solo storia.");
     const prompt = app.brain.systemPrompt(app.store.agent(agent.id), { place: "", computer: false });

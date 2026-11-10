@@ -768,7 +768,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         transports: channels.enabled,
         discord: discord.status(),
         telegram: telegram.status(),
-        slack: slack ? { ...slack.status(), apps: slackApps?.status() || null, appSync: slackApps?.configured ? slackApps.record("main") : null } : null,
+        slack: slack ? { ...slack.status(), channels: channels.slackCatalog(), apps: slackApps?.status() || null, appSync: slackApps?.configured ? slackApps.record("main") : null } : null,
         channels: channels.list(),
         discordChannels: discord.listChannels(store.settings.guildIds),
         guilds: discord.status().guilds,
@@ -1041,12 +1041,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { records: await syncSlackApps() });
     }
     if (path === "/api/slack/channels" && method === "GET" && slack) {
-      const channelsSeen = new Map();
-      for (const channel of await slack.listChannels().catch(() => [])) channelsSeen.set(channel.id, channel);
-      for (const agent of store.agents()) {
-        for (const channel of await (skBots?.channelsFor(agent.id) || [])) if (!channelsSeen.has(channel.id)) channelsSeen.set(channel.id, channel);
-      }
-      return send(res, 200, [...channelsSeen.values()]);
+      return send(res, 200, await channels.refreshSlackCatalog());
     }
     if (path === "/api/hardware" && method === "GET") {
       // Asking the cards costs a process: a few seconds of memory is plenty for a panel.

@@ -1162,6 +1162,31 @@ export async function fakeSlack() {
     join(botToken, channelId) {
       state.apps.get(botToken)?.channels.add(channelId);
     },
+    /** Deliver one event to one app, or to every app already in that channel. */
+    deliver(event, { botToken = "" } = {}) {
+      for (const [socket, token] of state.sockets) {
+        const app = [...state.apps.values()].find((entry) => entry.appToken === token);
+        if (!app) continue;
+        if (botToken && app.botToken !== botToken) continue;
+        if (!botToken && event.channel && !app.channels.has(event.channel)) continue;
+        envelope += 1;
+        socket.write(encodeFrame(JSON.stringify({ envelope_id: `env-${envelope}`, type: "events_api", payload: { event } })));
+      }
+    },
+    /** The app is invited: it can see the channel, and Slack tells its socket. */
+    invite(botToken, channelId) {
+      const app = state.apps.get(botToken);
+      if (!app) throw new Error("no app");
+      app.channels.add(channelId);
+      this.deliver({ type: "member_joined_channel", user: app.id, channel: channelId, channel_type: "C" }, { botToken });
+    },
+    /** The app leaves, and Slack tells its socket. */
+    leave(botToken, channelId) {
+      const app = state.apps.get(botToken);
+      if (!app) throw new Error("no app");
+      app.channels.delete(channelId);
+      this.deliver({ type: "channel_left", channel: channelId }, { botToken });
+    },
     /** A file someone shares (an audio clip, say), as it appears in a message's `files`. */
     file(name, data, mimetype, extra = {}) {
       state.files.set(name, data);

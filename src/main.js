@@ -235,6 +235,12 @@ export function startCora(overrides = {}) {
     orchestrator.onSlackMessage(event).catch((error) => activity({ type: "error", text: `slack: ${error.message}` }));
   });
   slack.on("status", (status) => web.broadcast({ type: "slack", state: status.state, error: status.error }));
+  const publishSlackChannels = () => {
+    if (stopping) return;
+    web.broadcast({ type: "slack-channels" });
+  };
+  slack.on("channels", publishSlackChannels);
+  skBots.onChannels = publishSlackChannels;
   slack.on("ready", () => {
     if (stopping) return;
     activity({ type: "slack", text: `connessa come @${slack.user?.name} su ${slack.team?.name || "Slack"}` });
@@ -283,6 +289,10 @@ export function startCora(overrides = {}) {
     if (companyBrain.enabled) (knowledge.ownerMemory ? Promise.all(knowledge.ownerIds().map((id) => knowledge.ownerBrain(id).notes())).then((sets) => sets.flat()) : companyBrain.notes()).then((notes) => {
       if (!stopping && notes.length) librarian.requestRun({ reason: "memorie in attesa" });
     }).catch(() => { if (!stopping) activity({ type: "error", text: "bibliotecario: il brain non risponde" }); });
+    slackCatalogTimer = setInterval(() => {
+      if (stopping || !channels.on("slack")) return;
+      channels.refreshSlackCatalog().catch(() => {});
+    }, 60000);
     botTimer = setInterval(() => {
       orchestrator.checkEngagements().catch((error) => activity({ type: "error", text: `ascolto: ${error.message}` }));
       bots.sync();
@@ -303,11 +313,13 @@ export function startCora(overrides = {}) {
   });
 
   let botTimer = null;
+  let slackCatalogTimer = null;
   const stop = async () => {
     stopping = true;
     clearTimeout(catchUpTimer);
     clearTimeout(resumeFallback);
     clearInterval(botTimer);
+    clearInterval(slackCatalogTimer);
     scheduler.stop();
     github.stop();
     await email.stop();
