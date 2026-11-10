@@ -7663,7 +7663,7 @@ describe("agent character sheet", () => {
     assert.match(otherPrompt, /- Carattere A: Analista · Strutturato · Persone/);
   });
 
-  test("the profile sliders switch the character on, preview the prompt and save it", async (t) => {
+  test("the profile shows the character sliders for an agent saved before the sheet, with no free-text field", async (t) => {
     const login = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
     cookie = login.headers.get("set-cookie").split(";")[0];
     const agent = app.store.createAgent({ name: "Cursori", model: "ollama/test-model", enabled: false, tools: false, personality: "Nota libera." });
@@ -7673,16 +7673,13 @@ describe("agent character sheet", () => {
     await panel.navigate(`#/agent/${agent.id}/impostazioni`);
     const fieldNamed = (tag, name) => panel.app.querySelectorAll(tag).find((node) => node.attributes.name === name);
     await waitFor(() => fieldNamed("input", "char-analysis"), { what: "the character sliders" });
-    const toggle = fieldNamed("input", "characterOn");
-    const notes = fieldNamed("textarea", "personality");
-    assert.equal(Boolean(toggle.checked), false, "an agent saved before the character starts with it off");
-    assert.equal(notes.value, "Nota libera.");
-    toggle.checked = true;
-    toggle.dispatch("change");
+    assert.equal(fieldNamed("input", "characterOn"), undefined, "there is no sheet switch: the sliders are always there");
+    assert.equal(fieldNamed("textarea", "personality"), undefined, "the old free-text personality field is gone");
+    const preview = panel.app.querySelector(".character-preview");
+    assert.match(preview.textContent, /Tipo: \*\*Versatile\*\* · Stile: \*\*Adattivo · Bilanciato\*\*/);
     const analysis = fieldNamed("input", "char-analysis");
     analysis.value = "18";
     analysis.dispatch("input");
-    const preview = panel.app.querySelector(".character-preview");
     assert.match(preview.textContent, /Tipo: \*\*Analista\*\* · Stile: \*\*Adattivo · Bilanciato\*\*/);
     assert.match(preview.textContent, /Analisi 18/);
     assert.match(preview.textContent, /\*\*Il tuo limite\.\*\* Analizzo troppo/);
@@ -7692,10 +7689,11 @@ describe("agent character sheet", () => {
     await waitFor(() => app.store.agent(agent.id).character?.enabled === true, { what: "the character saved" });
     assert.equal(app.store.agent(agent.id).character.scores.analysis, 18);
     assert.equal(app.store.agent(agent.id).character.method, 10);
-    assert.equal(app.store.agent(agent.id).personality, "Nota libera.");
+    assert.equal(app.store.agent(agent.id).personality, "Nota libera.", "removing the field from the panel keeps the story the agent had");
     const savedPrompt = app.brain.systemPrompt(app.store.agent(agent.id), { place: "", computer: false });
     assert.match(savedPrompt, /### Scheda del carattere/);
     assert.match(savedPrompt, /Analisi 18/);
+    assert.match(savedPrompt, /Nota libera\./);
     await waitFor(() => panel.app.querySelectorAll("form").every((node) => node !== form), { what: "the panel to redraw after the save" });
   });
 });

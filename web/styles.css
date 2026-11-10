@@ -2148,7 +2148,6 @@ a.share-stats:hover { color: var(--amber); }
 .fader:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px var(--amber-glow); }
 
 .character-sheet { display: flex; flex-direction: column; gap: 18px; padding-top: 4px; }
-.character-sheet[hidden] { display: none; }
 .character-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .character-badge-label { font: 500 10px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); }
 .character-badge {
@@ -2175,7 +2174,6 @@ a.share-stats:hover { color: var(--amber); }
   border-radius: var(--r-md); background: var(--well); color: var(--muted);
   font: 400 11px/1.65 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.character-notes { margin-top: 2px; }
 @media (max-width: 600px) {
   .character-stats { grid-template-columns: minmax(0, 1fr); gap: 12px; }
 }

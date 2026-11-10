@@ -2249,9 +2249,6 @@ function characterPanel(agent) {
     ...(initial || {}),
     scores: { ...CHARACTER_DEFAULT.scores, ...(initial?.scores || {}) },
   };
-  const toggle = switchInput("characterOn", "", initial ? initial.enabled !== false : !agent.id);
-  const toggleInput = toggle.querySelector("input");
-  toggleInput.setAttribute("aria-label", tr("Scheda del carattere"));
 
   const traitInputs = {};
   const traitValues = {};
@@ -2279,13 +2276,6 @@ function characterPanel(agent) {
   const typeBadge = h("span", { class: "character-badge" });
   const styleBadge = h("span", { class: "character-badge" });
   const preview = h("pre", { class: "character-preview" });
-  const notesLabel = h("span", { class: "label" });
-  const notesHint = h("small", {});
-  const notes = h("label", { class: "field character-notes" },
-    notesLabel,
-    // The value is a property, not a text child: the panel's test DOM reads it like a browser does.
-    h("textarea", { name: "personality", class: "tall", value: agent.personality || "", placeholder: tr("Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…") }),
-    notesHint);
 
   const sheet = h("div", { class: "character-sheet" },
     h("div", { class: "character-badges" },
@@ -2305,10 +2295,12 @@ function characterPanel(agent) {
       h("div", { class: "character-preview-head" }, h("span", { class: "label" }, tr("Prompt generato")), h("small", {}, tr("In italiano, la lingua in cui parla l'agente."))),
       preview));
 
+  // No off switch: every agent, including the ones saved before the sheet
+  // existed, shows its traits, and saving writes them as its character.
   function read() {
     return {
       version: 1,
-      enabled: Boolean(toggleInput.checked),
+      enabled: true,
       scores: Object.fromEntries(CHARACTER_TRAITS.map((trait) => [trait.key, Number(traitInputs[trait.key].value)])),
       method: Number(methodInput.value),
       focus: Number(focusInput.value),
@@ -2323,21 +2315,12 @@ function characterPanel(agent) {
     styleBadge.textContent = style.label;
     methodValue.textContent = style.method.label;
     focusValue.textContent = style.focus.label;
-    preview.textContent = characterSheet(character) || tr("Scheda spenta: il carattere resta il testo libero qui sotto.");
-    sheet.hidden = !character.enabled;
-    notesLabel.textContent = character.enabled ? tr("Storia e note") : tr("Carattere");
-    notesHint.textContent = character.enabled
-      ? tr("Quello che la scheda non cattura: fatti, persone, abitudini.")
-      : tr("Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri.");
+    preview.textContent = characterSheet(character);
   }
 
-  toggleInput.addEventListener("change", draw);
   draw();
 
-  const node = panel({ icon: "spark", title: "Carattere", hint: "Sei tratti e due assi scrivono il «Chi sei» dell'agente; il prompt si riscrive mentre li muovi." },
-    setRows(setRow("Scheda del carattere", "Il «Chi sei» viene generato da qui. Quello che scrivi sotto resta come storia.", toggle)),
-    sheet,
-    notes);
+  const node = panel({ icon: "spark", title: "Carattere", hint: "Sei tratti e due assi scrivono il «Chi sei» dell'agente; il prompt si riscrive mentre li muovi." }, sheet);
   return { node, value: read };
 }
 
@@ -2421,7 +2404,8 @@ function agentForm(agent, { only = "" } = {}) {
       platformsOff: [...(agent.platformsOff || []).filter((kind) => !platformsOn().includes(kind)), ...platformsOn().filter((kind) => form.elements[`platform-${kind}`] && !form.elements[`platform-${kind}`].checked)],
       ...(form.elements.ownerId ? { ownerId: form.elements.ownerId.value } : {}),
       enabled: form.elements.enabled.checked,
-      personality: data.get("personality"),
+      // The old free-text personality is not edited here any more: an update that does not mention it keeps it.
+      ...(data.has("personality") ? { personality: data.get("personality") } : {}),
       character: characterPane.value(),
       // A voice select left disabled (no Soniox yet) keeps what the agent had.
       voice: data.has("voice") ? data.get("voice") : agent.voice || "",
