@@ -1,5 +1,5 @@
 import { EN } from "./i18n.js";
-import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, characterType } from "./character.js";
+import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, characterType, shouldWriteCharacter } from "./character.js";
 
 const LANGS = { it: "Italiano", en: "English" };
 const LANG = (() => {
@@ -2242,6 +2242,25 @@ function agentOwnerPanel(agent) {
  * the server prompts with is imported here, so the preview is the text the
  * agent will really receive — no second generator to drift.
  */
+function legacyStory(agent) {
+  const story = String(agent?.personality || "").trim();
+  if (!story || !agent?.id) return null;
+  const on = Boolean(agent.character?.enabled);
+  const row = h("div", { class: "character-legacy" },
+    h("p", {}, on
+      ? "Una storia precedente è conservata e non entra nel prompt."
+      : "Una storia precedente è ancora il «Chi sei». Salva il Carattere: da lì comandano gli slider e la storia esce dal prompt."),
+    btn("Togli la storia", { cls: "sm ghost", onclick: async () => {
+      const saved = await guard(api(`/api/agents/${agent.id}`, { method: "PUT", body: { personality: "" } }), "Storia tolta");
+      if (!saved) return;
+      agent.personality = "";
+      const live = S.data?.agents?.find((item) => item.id === agent.id);
+      if (live) live.personality = "";
+      row.remove();
+    }}));
+  return row;
+}
+
 function characterPanel(agent) {
   const initial = agent.character && typeof agent.character === "object" ? agent.character : null;
   const start = {
@@ -2293,10 +2312,11 @@ function characterPanel(agent) {
         h("div", { class: "character-poles" }, h("span", {}, tr("Risultato")), h("span", {}, tr("Bilanciato")), h("span", {}, tr("Persone"))))),
     h("div", { class: "character-preview-box" },
       h("div", { class: "character-preview-head" }, h("span", { class: "label" }, tr("Prompt generato")), h("small", {}, tr("In italiano, la lingua in cui parla l'agente."))),
-      preview));
+      preview),
+    legacyStory(agent));
 
-  // No off switch: every agent, including the ones saved before the sheet
-  // existed, shows its traits, and saving writes them as its character.
+  // No off switch: the sliders are always visible. They are written only when
+  // this section is saved, so Identità, Ascolto and Voce leave the sheet alone.
   function read() {
     return {
       version: 1,
@@ -2313,8 +2333,8 @@ function characterPanel(agent) {
     const style = characterStyle(character);
     typeBadge.textContent = characterType(character.scores).title;
     styleBadge.textContent = style.label;
-    methodValue.textContent = style.method.label;
-    focusValue.textContent = style.focus.label;
+    methodValue.textContent = `${character.method} · ${style.method.label}`;
+    focusValue.textContent = `${character.focus} · ${style.focus.label}`;
     preview.textContent = characterSheet(character);
   }
 
@@ -2406,7 +2426,7 @@ function agentForm(agent, { only = "" } = {}) {
       enabled: form.elements.enabled.checked,
       // The old free-text personality is not edited here any more: an update that does not mention it keeps it.
       ...(data.has("personality") ? { personality: data.get("personality") } : {}),
-      character: characterPane.value(),
+      ...(shouldWriteCharacter({ isNew, section: route()[3] }) ? { character: characterPane.value() } : {}),
       // A voice select left disabled (no Soniox yet) keeps what the agent had.
       voice: data.has("voice") ? data.get("voice") : agent.voice || "",
       voiceLanguage: data.has("voiceLanguage") ? data.get("voiceLanguage") : agent.voiceLanguage || "",

@@ -36,11 +36,35 @@ const TYPES = {
   warmth: { name: "Connettore", essence: "scaldi la conversazione, tieni insieme le persone e sai come dire le cose." },
 };
 
-const VERSATILE = {
-  name: "Versatile",
-  essence: "nessun tratto domina, e scegli di volta in volta quello che serve.",
-  ideal: "Capire il momento e scegliere il tratto giusto.",
-  flaw: "Nessun tratto ti sbilancia: il rischio è restare nella media.",
+const VERSATILE = { name: "Versatile" };
+
+// Six equal traits are Versatile at every height. Only the true middle is "average".
+const VERSATILE_LEVELS = {
+  high: {
+    essence: "ogni tratto è al massimo e nessuno passa davanti agli altri.",
+    ideal: "Tenere alta ogni qualità e scegliere comunque da dove partire.",
+    flaw: "Quando tutto è al massimo, niente ti dice da dove partire.",
+  },
+  good: {
+    essence: "ogni tratto è alto e non ne sacrifichi uno per farne vincere un altro.",
+    ideal: "Restare intero: nessuna qualità viene lasciata indietro.",
+    flaw: "Senza un tratto guida, la scelta di dove spingere arriva tardi.",
+  },
+  mid: {
+    essence: "nessun tratto domina, e scegli di volta in volta quello che serve.",
+    ideal: "Capire il momento e scegliere il tratto giusto.",
+    flaw: "Nessun tratto ti sbilancia: il rischio è restare nella media.",
+  },
+  low: {
+    essence: "ogni tratto è tenuto basso e non ne alzi uno sopra gli altri.",
+    ideal: "Non forzare un tratto che non ti appartiene.",
+    flaw: "Nessun tratto ti sostiene: il rischio è restare fermo.",
+  },
+  veryLow: {
+    essence: "ogni tratto è al minimo e non ne usi uno per compensare gli altri.",
+    ideal: "Non fingere un carattere che non c'è.",
+    flaw: "Al minimo su tutto, non hai un tratto a cui appoggiarti.",
+  },
 };
 
 const TRAIT_LINES = {
@@ -112,6 +136,28 @@ const FOCUS = [
   { label: "Persone", line: "Metti le persone davanti al risultato: spieghi, rassicuri, cerchi la soluzione che non lascia indietro nessuno." },
 ];
 
+// The badge stays on three labels. The sentence moves inside each label, so a slider
+// in the old 8–13 plateau changes the prompt instead of sitting still.
+const METHOD_LINES = [
+  { max: 3, line: "Ti muovi quasi solo di istinto: le procedure rigide ti stanno strette e, se la situazione cambia, cambi con lei senza guardare la regola." },
+  { max: 7, line: "Ti muovi per istinto e improvvisazione: quando la situazione cambia, cambi con lei; le procedure rigide ti stanno strette." },
+  { max: 9, line: "Non ti leghi a un metodo fisso: decidi di volta in volta, e nel dubbio vince l'istinto." },
+  { max: 11, line: "Non ti leghi a un metodo fisso: decidi di volta in volta, tra regola e istinto." },
+  { max: 13, line: "Non ti leghi a un metodo fisso: decidi di volta in volta, e nel dubbio vince la regola." },
+  { max: 16, line: "Segui metodo e regole, lasciandoti un margine quando il contesto non coincide con la procedura." },
+  { max: 20, line: "Segui metodo e regole: prima capisci il contesto, poi agisci come è già stato deciso; la prevedibilità per te è una forma di rispetto." },
+];
+
+const FOCUS_LINES = [
+  { max: 3, line: "Il risultato viene prima di tutto: vai dritto all'obiettivo, anche quando la risposta è scomoda, e una mediazione ti sembra una perdita di tempo." },
+  { max: 7, line: "Metti il risultato davanti al resto: vai dritto all'obiettivo, anche quando la risposta è scomoda, e preferisci una risposta netta a una mediazione." },
+  { max: 9, line: "Persone e risultato contano quasi uguale, con un passo verso il risultato." },
+  { max: 11, line: "Persone e risultato contano uguale: ascolti, ma non dimentichi l'obiettivo." },
+  { max: 13, line: "Persone e risultato contano quasi uguale, con un passo verso le persone." },
+  { max: 16, line: "Metti le persone davanti, senza dimenticare il risultato: spieghi e cerchi una soluzione che non lasci indietro nessuno." },
+  { max: 20, line: "Metti le persone davanti al risultato: spieghi, rassicuri, cerchi la soluzione che non lascia indietro nessuno." },
+];
+
 function clampTrait(value) {
   const number = value == null || value === "" ? NaN : Math.round(Number(value));
   return Number.isFinite(number) ? Math.min(TRAIT_MAX, Math.max(TRAIT_MIN, number)) : 10;
@@ -139,13 +185,21 @@ function ranked(scores) {
   return [...CHARACTER_TRAITS].sort((a, b) => (scores[b.key] - scores[a.key]) || (CHARACTER_TRAITS.indexOf(a) - CHARACTER_TRAITS.indexOf(b)));
 }
 
-/** The type comes from the highest trait; six equal traits are a Versatile rather than an arbitrary pick. */
+function joinIt(items) {
+  if (items.length <= 1) return items[0] || "";
+  if (items.length === 2) return `${items[0]} e ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} e ${items[items.length - 1]}`;
+}
+
+/** The type comes from the highest trait. A tie names every trait that shares it, and six equal traits are Versatile. */
 export function characterType(scores) {
   const clean = normalizedScores(scores);
   const rankedTraits = ranked(clean);
-  const allEqual = new Set(CHARACTER_TRAITS.map((trait) => clean[trait.key])).size === 1;
-  if (allEqual) return { main: null, second: null, title: VERSATILE.name };
-  return { main: rankedTraits[0], second: rankedTraits[1], title: TYPES[rankedTraits[0].key].name };
+  const top = clean[rankedTraits[0].key];
+  const leaders = rankedTraits.filter((trait) => clean[trait.key] === top);
+  if (leaders.length === CHARACTER_TRAITS.length) return { main: null, second: null, leaders, title: VERSATILE.name };
+  if (leaders.length > 1) return { main: null, second: null, leaders, title: leaders.map((trait) => TYPES[trait.key].name).join(" · ") };
+  return { main: rankedTraits[0], second: rankedTraits[1], leaders, title: TYPES[rankedTraits[0].key].name };
 }
 
 function styleBand(value) {
@@ -153,10 +207,18 @@ function styleBand(value) {
   return score <= 7 ? 0 : score <= 13 ? 1 : 2;
 }
 
-/** The 3×3 style of the two axes: how it works and what it puts first. */
+function axisLine(score, bands) {
+  const n = clampTrait(score);
+  for (const band of bands) if (n <= band.max) return band.line;
+  return bands[bands.length - 1].line;
+}
+
+/** The 3×3 style of the two axes: how it works and what it puts first. The label is the wide band; the line moves inside it. */
 export function characterStyle(character) {
-  const method = METHOD[styleBand(character?.method)];
-  const focus = FOCUS[styleBand(character?.focus)];
+  const methodScore = clampTrait(character?.method);
+  const focusScore = clampTrait(character?.focus);
+  const method = { label: METHOD[styleBand(methodScore)].label, line: axisLine(methodScore, METHOD_LINES) };
+  const focus = { label: FOCUS[styleBand(focusScore)].label, line: axisLine(focusScore, FOCUS_LINES) };
   return { method, focus, label: `${method.label} · ${focus.label}` };
 }
 
@@ -166,6 +228,35 @@ function traitBand(score) {
   if (score <= 5) return "veryLow";
   if (score <= 9) return "low";
   return "";
+}
+
+function levelBand(score) {
+  const n = clampTrait(score);
+  if (n >= 17) return "high";
+  if (n >= 14) return "good";
+  if (n <= 5) return "veryLow";
+  if (n <= 9) return "low";
+  return "mid";
+}
+
+function tieProfile(leaders, score) {
+  if (leaders.length === 2) {
+    const [a, b] = leaders;
+    const secondFlaw = FLAWS[b.key];
+    return {
+      essence: `${TYPES[a.key].essence} ${TYPES[b.key].essence}`,
+      ideal: `${IDEALS[a.key]} ${IDEALS[b.key]}`,
+      flaw: `${FLAWS[a.key].replace(/\.$/, "")}; ${secondFlaw.charAt(0).toLowerCase()}${secondFlaw.slice(1)}`,
+    };
+  }
+  const names = leaders.map((trait) => TYPES[trait.key].name);
+  return {
+    essence: `${joinIt(names)} sono pari in cima, a ${score}, e restano insieme.`,
+    ideal: "Scegliere sul momento tra i tratti messi allo stesso livello.",
+    flaw: levelBand(score) === "mid"
+      ? "Nessuno di questi tratti ti sbilancia: il rischio è restare nella media."
+      : "Il rischio è non scegliere da quale di questi tratti partire.",
+  };
 }
 
 function speechFor(scores) {
@@ -183,23 +274,47 @@ function speechFor(scores) {
 export function characterSheet(character) {
   if (!character || !character.enabled) return "";
   const scores = normalizedScores(character.scores);
-  const { main, second, title } = characterType(scores);
+  const { main, second, title, leaders } = characterType(scores);
   const style = characterStyle(character);
-  const type = main ? TYPES[main.key] : VERSATILE;
+  const methodScore = clampTrait(character.method);
+  const focusScore = clampTrait(character.focus);
 
-  // The dominant trait is the type's own sentence; the second adds its band
-  // only when it is not average, so a neutral sheet stays short.
-  const extra = main ? TRAIT_LINES[second.key][traitBand(scores[second.key])] : "";
-  const ideal = main ? IDEALS[main.key] : VERSATILE.ideal;
-  const flaw = main ? FLAWS[main.key] : VERSATILE.flaw;
+  let essence;
+  let ideal;
+  let flaw;
+  let extra = "";
+  if (!main && leaders.length === CHARACTER_TRAITS.length) {
+    const copy = VERSATILE_LEVELS[levelBand(scores[leaders[0].key])];
+    essence = copy.essence;
+    ideal = copy.ideal;
+    flaw = copy.flaw;
+  } else if (!main) {
+    const copy = tieProfile(leaders, scores[leaders[0].key]);
+    essence = copy.essence;
+    ideal = copy.ideal;
+    flaw = copy.flaw;
+  } else {
+    essence = TYPES[main.key].essence;
+    ideal = IDEALS[main.key];
+    flaw = FLAWS[main.key];
+    const secondScore = scores[second.key];
+    const band = traitBand(secondScore);
+    if (band) {
+      extra = ranked(scores)
+        .filter((trait) => trait.key !== main.key && scores[trait.key] === secondScore)
+        .map((trait) => TRAIT_LINES[trait.key][band])
+        .filter(Boolean)
+        .join(" ");
+    }
+  }
+
   const traits = CHARACTER_TRAITS.map((trait) => `${trait.label} ${scores[trait.key]}`).join(" · ");
-
   return [
     "### Scheda del carattere",
-    `Tipo: **${title}** · Stile: **${style.label}**`,
+    `Tipo: **${title}** · Stile: **${style.label}** · Metodo ${methodScore} · Focus ${focusScore}`,
     traits,
     "",
-    `**Come sei.** Il tuo tipo è **${type.name}**: ${type.essence}${extra ? ` ${extra}` : ""} ${style.method.line} ${style.focus.line}`,
+    `**Come sei.** Il tuo tipo è **${title}**: ${essence}${extra ? ` ${extra}` : ""} ${style.method.line} ${style.focus.line}`,
     `**Come parli.** ${speechFor(scores)}`,
     `**Ti muove.** ${ideal}`,
     `**Il tuo limite.** ${flaw}`,
@@ -213,12 +328,16 @@ export function characterTagline(character) {
   return `${title} · ${characterStyle(character).label}`;
 }
 
-/** What goes under `## Chi sei`: the generated sheet, then the owner's free story. */
+/** What goes under `## Chi sei`. An enabled sheet commands it; the old free story stays stored and is not appended. */
 export function agentPersona(agent) {
   const sheet = characterSheet(agent?.character);
-  const free = String(agent?.personality || "").trim();
-  if (!free) return sheet;
-  return sheet ? `${sheet}\n\n### Storia e note\n${free}` : free;
+  if (sheet) return sheet;
+  return String(agent?.personality || "").trim();
+}
+
+/** Identity, listening and voice must not turn the sheet on. Only a new agent, or a save from Carattere, writes it. */
+export function shouldWriteCharacter({ isNew = false, section = "" } = {}) {
+  return Boolean(isNew) || section === "carattere";
 }
 
 /** The one-line description other agents see: the sheet's tagline, or the first line of the story. */

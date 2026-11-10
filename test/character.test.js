@@ -9,6 +9,7 @@ import {
   characterStyle,
   characterType,
   sanitizeCharacter,
+  shouldWriteCharacter,
 } from "../src/character.js";
 import { Store } from "../src/store.js";
 import { tempHome } from "./helpers.js";
@@ -62,13 +63,54 @@ test("the generated sheet carries type, style, every trait and a limit", () => {
   assert.equal(characterSheet({ ...makeSheet(BASE), enabled: false }), "", "a character switched off adds nothing to the prompt");
 });
 
-test("the agent's persona is the sheet followed by its free story", () => {
+test("an enabled sheet commands the prompt and leaves the old story out of it", () => {
   const character = makeSheet({ analysis: 18, prudence: 14 });
-  assert.match(agentPersona({ character, personality: "Ha lavorato con Seb dal 2024." }), /Scheda del carattere[\s\S]*Ha lavorato con Seb dal 2024\.$/);
+  const persona = agentPersona({ character, personality: "Ha lavorato con Seb dal 2024." });
+  assert.match(persona, /Scheda del carattere/);
+  assert.doesNotMatch(persona, /Ha lavorato con Seb/);
+  assert.doesNotMatch(persona, /Storia e note/);
   assert.equal(agentPersona({ character: null, personality: "Solo storia." }), "Solo storia.");
+  assert.equal(agentPersona({ character: { ...character, enabled: false }, personality: "Solo storia." }), "Solo storia.");
   assert.equal(agentTagline({ character, personality: "Solo storia." }), "Analista · Adattivo · Bilanciato");
   assert.equal(agentTagline({ personality: "Prima riga.\nSeconda." }), "Prima riga.");
   assert.equal(agentTagline({}), "");
+});
+
+test("a tie names every leading trait, and six traits at the ceiling are not called average", () => {
+  const all = (n) => Object.fromEntries(CHARACTER_TRAITS.map((trait) => [trait.key, n]));
+  const tie = characterType({ ...all(10), analysis: 18, prudence: 18 });
+  assert.equal(tie.title, "Analista · Custode");
+  assert.equal(tie.main, null);
+  const tied = characterSheet(makeSheet({ ...all(10), analysis: 18, prudence: 18 }));
+  assert.match(tied, /Tipo: \*\*Analista · Custode\*\*/);
+  assert.match(tied, /scomponi i problemi/);
+  assert.match(tied, /ascolti, soppesi/);
+  const top = characterSheet(makeSheet(all(20)));
+  assert.match(top, /Versatile/);
+  assert.match(top, /al massimo/);
+  assert.doesNotMatch(top, /restare nella media/);
+  assert.match(characterSheet(makeSheet(all(10))), /restare nella media/);
+  assert.doesNotMatch(characterSheet(makeSheet(all(1))), /restare nella media/);
+});
+
+test("method and focus change the prompt inside the old flat middle", () => {
+  const all = Object.fromEntries(CHARACTER_TRAITS.map((trait) => [trait.key, 10]));
+  const sheet = (method, focus) => characterSheet(makeSheet(all, { method, focus }));
+  assert.match(sheet(8, 10), /nel dubbio vince l'istinto/);
+  assert.match(sheet(13, 10), /nel dubbio vince la regola/);
+  assert.match(sheet(10, 8), /passo verso il risultato/);
+  assert.match(sheet(10, 13), /passo verso le persone/);
+  assert.notEqual(sheet(10, 10), sheet(11, 11));
+  assert.match(sheet(11, 12), /Metodo 11 · Focus 12/);
+});
+
+test("identity, listening and voice do not write the character", () => {
+  assert.equal(shouldWriteCharacter({ section: "identita" }), false);
+  assert.equal(shouldWriteCharacter({ section: "ascolto" }), false);
+  assert.equal(shouldWriteCharacter({ section: "voce" }), false);
+  assert.equal(shouldWriteCharacter({ section: "" }), false);
+  assert.equal(shouldWriteCharacter({ section: "carattere" }), true);
+  assert.equal(shouldWriteCharacter({ isNew: true, section: "identita" }), true);
 });
 
 test("the store keeps a character through unrelated updates and can switch it off", () => {

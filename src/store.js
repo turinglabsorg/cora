@@ -85,7 +85,7 @@ const AGENT_DEFAULTS = {
   avatarSeed: "",
   color: "#e8a33d",
   personality: "",
-  // An optional character sheet: six traits and two style axes. Off or absent keeps the free text alone.
+  // An optional character sheet: six traits and two style axes. Off or absent keeps the free text alone. On, the sheet is the prompt and the free text stays stored.
   character: null,
   core: "",
   model: "",
