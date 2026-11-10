@@ -826,7 +826,7 @@ function banners() {
   if (info.state === "missing-token") out.push(h("a", { class: "banner err", href: "#/settings" }, icon("key"), h("span", {}, h("b", {}, info.kind === "telegram" ? "Telegram senza token. " : "Nessuno ascolta Discord. "), info.kind === "telegram" ? "Incolla il token del bot (da BotFather) nelle impostazioni." : "Attiva «Message Content Intent» nella pagina Bot dell'app Discord di almeno un agente: Cora ascolterà con quel bot.")));
   else if (info.state === "error") out.push(h("a", { class: "banner err", href: "#/settings" }, icon("alert"), h("span", {}, h("b", {}, `${info.label}: `), raw(info.error))));
   if (info.kind === "slack" && info.state !== "missing-token" && !S.data.settings.slackChannelIds.length) {
-    out.push(h("a", { class: "banner", href: "#/settings/slack" }, icon("info"), h("span", {}, h("b", {}, "Nessun canale Slack acceso. "), "Invita un'app in un canale: compare qui e lo accendi.")));
+    out.push(h("a", { class: "banner", href: "#/settings/slack" }, icon("info"), h("span", {}, h("b", {}, "Nessun canale Slack acceso. "), "Invita un'app in un canale: compare qui, già acceso.")));
   }
   if (info.kind === "telegram" && info.state !== "missing-token" && !S.data.settings.telegramChatIds.length) {
     out.push(h("a", { class: "banner", href: "#/settings" }, icon("info"), h("span", {}, h("b", {}, "Nessuna chat Telegram accesa. "), "Aggiungi il bot a un gruppo e accendi la chat nelle impostazioni.")));
@@ -7455,7 +7455,7 @@ function renderSettings() {
             slackTokenForm({ path: "/api/slack/token", ok: "App Slack collegata" })), { stack: true }))),
     panel({ icon: "radio", title: "Ascolto", hint: "I canali accesi, e chi può far usare il computer agli agenti.", actions: refreshChannels },
       setRows(
-        slackRow = setRow("Canali", slack.channels?.length ? "Le app sentono solo i canali accesi." : "Invita un'app in un canale: compare qui e lo accendi.",
+        slackRow = setRow("Canali", slack.channels?.length ? "Un canale in cui entra un'app parte acceso; resta spento solo quello che spegni." : "Invita un'app in un canale: compare qui, già acceso.",
           slack.channels?.length ? switchList(slack.channels.map((channel) => ({ id: channel.id, name: `#${channel.name}`, sub: tr(channel.private ? "canale privato" : "canale pubblico") })), settings.slackChannelIds, "slackChannelIds", () => slackRow) : null, { stack: true }),
         ownersRow("slackOwnerIds", "ID utente Slack. Se è vuoto diventa proprietario chi possiede il workspace, appena scrive."))),
     panel({ icon: "user", title: "Aspetto delle app", hint: "Nome, descrizione e immagine di ogni app seguono il pannello." }, slackAppsField()));

@@ -169,7 +169,18 @@ export class Channels {
       if (entry.client?.botToken) jobs.push(entry.client.listChannels().catch(() => []));
     }
     await Promise.all(jobs);
+    this.adoptSlackChannels();
     return this.slackCatalog();
+  }
+
+  /** A channel an app is in starts on; only a channel the owner switched off stays off. */
+  adoptSlackChannels() {
+    const settings = this.store.settings;
+    const on = new Set(settings.slackChannelIds);
+    const muted = new Set(settings.slackMutedChannelIds);
+    const fresh = this.slackCatalog().map((channel) => channel.id).filter((id) => !on.has(id) && !muted.has(id));
+    if (fresh.length) this.store.updateSettings({ slackChannelIds: [...settings.slackChannelIds, ...fresh] });
+    return fresh;
   }
 
   /** Channels of every platform switched on that the cora listens to. */

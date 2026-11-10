@@ -42,6 +42,7 @@ const DEFAULT_SETTINGS = {
   telegramChatIds: [],
   telegramOwnerIds: [],
   slackChannelIds: [],
+  slackMutedChannelIds: [],
   slackOwnerIds: [],
   slackTeamId: "",
   // The Ollama servers of this machine: one per card when there is more than one.
@@ -374,6 +375,7 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     telegramChatIds: cleanIds(merged.telegramChatIds, /^-?\d{1,20}$/),
     telegramOwnerIds: cleanIds(merged.telegramOwnerIds, /^\d{1,20}$/),
     slackChannelIds: cleanIds(merged.slackChannelIds, /^[A-Z0-9]{5,}$/),
+    slackMutedChannelIds: cleanIds(merged.slackMutedChannelIds, /^[A-Z0-9]{5,}$/),
     slackOwnerIds: cleanIds(merged.slackOwnerIds, /^[UW][A-Z0-9]{4,}$/),
     slackTeamId: cleanText(merged.slackTeamId, 24).trim(),
     ollamaHosts: (Array.isArray(merged.ollamaHosts) ? merged.ollamaHosts : []).slice(0, 8).map((host) => ({

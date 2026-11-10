@@ -237,6 +237,7 @@ export function startCora(overrides = {}) {
   slack.on("status", (status) => web.broadcast({ type: "slack", state: status.state, error: status.error }));
   const publishSlackChannels = () => {
     if (stopping) return;
+    channels.adoptSlackChannels();
     web.broadcast({ type: "slack-channels" });
   };
   slack.on("channels", publishSlackChannels);

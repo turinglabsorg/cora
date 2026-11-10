@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { asksToStop, claimsWork, cleanReply, deliveryNote } from "../src/brain.js";
+import { Channels } from "../src/channels.js";
 import { DIRECT_MESSAGE_INTENTS, Discord, LISTENING_INTENTS, splitMessage } from "../src/discord.js";
 import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
@@ -1028,6 +1029,21 @@ describe("slack channel switches", () => {
     list.dispatch("change");
     for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(puts, [{ slackChannelIds: ["C0ON"] }]);
+  });
+});
+
+describe("slack channels start on", () => {
+  test("a channel an app is in is switched on by itself, one the owner switched off stays off", () => {
+    const settings = { transport: "slack", transports: ["slack"], slackChannelIds: ["C0ON"], slackMutedChannelIds: ["C0OFF"], telegramChatIds: [], guildIds: [] };
+    const store = { get settings() { return settings; }, updateSettings(input) { Object.assign(settings, input); return settings; } };
+    const main = { botToken: "xoxb-main", status: () => ({ channels: [{ id: "C0ON", name: "on" }, { id: "C0OFF", name: "off" }] }) };
+    const agent = { botToken: "xoxb-agent", status: () => ({ channels: [{ id: "C0OFF", name: "off" }, { id: "C0NEW", name: "nuovo", private: true }, { id: "D0DM", name: "", direct: true }] }) };
+    const channels = new Channels({ store, discord: {}, telegram: {}, slack: main, skBots: { clients: new Map([["ag_1", { client: agent }]]) } });
+    assert.deepEqual(channels.slackCatalog().map((channel) => [channel.id, channel.private]), [["C0NEW", true], ["C0OFF", false], ["C0ON", false]], "the union of every app, direct messages aside");
+    assert.deepEqual(channels.adoptSlackChannels(), ["C0NEW"]);
+    assert.deepEqual(settings.slackChannelIds, ["C0ON", "C0NEW"]);
+    assert.deepEqual(settings.slackMutedChannelIds, ["C0OFF"]);
+    assert.deepEqual(channels.adoptSlackChannels(), [], "nothing new, nothing saved");
   });
 });
 

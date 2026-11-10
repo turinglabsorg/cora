@@ -1233,6 +1233,8 @@ export const EN = {
   "ID utente Telegram. Se è vuoto diventa proprietario chi ha creato il gruppo, o chi scrive al bot in privato.": "Telegram user IDs. If empty, the owner is whoever created the group, or whoever writes to the bot privately.",
   "I canali accesi, e chi può far usare il computer agli agenti.": "The channels turned on, and who may have the agents use their computers.",
   "Le app sentono solo i canali accesi.": "The apps only hear the channels turned on.",
+  "Un canale in cui entra un'app parte acceso; resta spento solo quello che spegni.": "A channel an app enters starts on; only the ones you switch off stay off.",
+  "Invita un'app in un canale: compare qui, già acceso.": "Invite an app to a channel: it shows up here, already on.",
   "ID utente Slack. Se è vuoto diventa proprietario chi possiede il workspace, appena scrive.": "Slack user IDs. If empty, the owner is whoever owns the workspace, as soon as they write.",
   "Nome, descrizione e immagine di ogni app seguono il pannello.": "Each app's name, description and picture follow the panel.",
   "Usa gli account del server": "Use the server's accounts",

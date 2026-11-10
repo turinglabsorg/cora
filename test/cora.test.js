@@ -5766,11 +5766,13 @@ describe("agents in Slack", () => {
     assert.equal(state.slack.user.username, "cora");
     assert.equal(state.slack.team.name, "Dopamina");
     assert.ok(state.slack.channels.some((channel) => channel.id === SLACK_CHANNEL && channel.name === "generale"));
-    assert.deepEqual(state.channels, [], "no Slack channel is switched on yet");
+    await waitFor(async () => ((await call("/api/state")).data.channels.some((channel) => channel.id === `sl:${SLACK_CHANNEL}`)), { what: "the channel the app is in, on by itself" });
+    assert.deepEqual(app.store.settings.slackChannelIds, [SLACK_CHANNEL]);
+    assert.deepEqual(app.store.settings.slackMutedChannelIds, []);
     assert.equal(app.store.settings.slackTeamId, "T0000000001");
   });
 
-  test("a channel is heard only once switched on, the workspace owner becomes the owner, and the agent answers with its own app", async () => {
+  test("a channel the apps are in is heard on its own, the workspace owner becomes the owner, and the agent answers with its own app", async () => {
     silvia = (await call("/api/agents", { method: "POST", body: { name: "Silvia", model: "ollama/test-model", chattiness: 0, tools: false } })).data;
     slack.addApp({ botToken: SILVIA_BOT, appToken: SILVIA_APP, id: "U0000000101", name: "silvia", channels: [SLACK_CHANNEL] });
     assert.match((await call(`/api/agents/${silvia.id}/slack-bot`, { method: "PUT", body: { botToken: MAIN_BOT, appToken: MAIN_APP } })).data.error, /app principale/);
@@ -5786,11 +5788,6 @@ describe("agents in Slack", () => {
       prompt = lastUserText(body);
       return { content: "Ci sono, dimmi pure." };
     });
-    slack.say({ text: "@Silvia, ci sei?" });
-    await sleep(1500);
-    assert.equal(slack.postsIn(SLACK_CHANNEL).length, 0, "a channel that is not switched on is ignored");
-
-    await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL] } });
     const channels = (await call("/api/state")).data.channels;
     assert.deepEqual(channels.map((channel) => [channel.id, channel.name, channel.kind]), [[`sl:${SLACK_CHANNEL}`, "generale", "slack"]]);
 
@@ -5808,28 +5805,24 @@ describe("agents in Slack", () => {
     await quiet();
   });
 
-  test("a private channel only an agent's app is in shows up on its own, is heard once switched on, and stays off once switched off", async () => {
+  test("a private channel only an agent's app is in shows up on its own and is heard, and stays off once switched off", async () => {
     const PRIVATE = "C0PRIVATE01";
     slack.state.channels.set(PRIVATE, { id: PRIVATE, name: "refracto-dev", is_private: true });
     slack.invite(SILVIA_BOT, PRIVATE);
     await waitFor(async () => {
       const state = (await call("/api/state")).data;
       return state.slack.channels.some((channel) => channel.id === PRIVATE && channel.private && channel.name === "refracto-dev")
-        && !state.channels.some((channel) => channel.id === `sl:${PRIVATE}`);
-    }, { what: "the private channel in the panel, still off" });
+        && state.channels.some((channel) => channel.id === `sl:${PRIVATE}`);
+    }, { what: "the private channel in the panel, on by itself" });
 
     replies.set("Silvia", () => ({ content: "Ci sono, nel canale privato." }));
-    slack.say({ text: "@Silvia, ci sei nel privato?", channel: PRIVATE });
-    await sleep(800);
-    assert.equal(slack.postsIn(PRIVATE).length, 0, "a channel that is not switched on is ignored");
-
-    await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL, PRIVATE] } });
     slack.say({ text: "@Silvia, ci sei nel privato?", channel: PRIVATE });
     const post = await waitFor(() => slack.postsIn(PRIVATE)[0], { what: "Silvia in the private channel" });
     assert.equal(post.app, "silvia");
     assert.equal(post.text, "Ci sono, nel canale privato.");
 
     await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL] } });
+    assert.deepEqual(app.store.settings.slackMutedChannelIds, [PRIVATE], "the channel switched off is remembered");
     slack.state.posts.length = 0;
     slack.say({ text: "@Silvia, ancora?", channel: PRIVATE });
     await sleep(800);
@@ -5838,18 +5831,31 @@ describe("agents in Slack", () => {
     const again = (await call("/api/state")).data;
     assert.deepEqual(listed.data.map((channel) => channel.id).sort(), again.slack.channels.map((channel) => channel.id).sort(), "refresh and the panel read the same list");
     assert.ok(listed.data.some((channel) => channel.id === PRIVATE && channel.private));
-    assert.ok(!again.channels.some((channel) => channel.id === `sl:${PRIVATE}`), "a switched-off channel is listed and not heard");
+    assert.ok(!again.channels.some((channel) => channel.id === `sl:${PRIVATE}`), "a refresh does not turn a switched-off channel back on");
 
     slack.join(SILVIA_BOT, SLACK_OTHER_CHANNEL);
     const refreshed = await call("/api/slack/channels");
     assert.ok(refreshed.data.some((channel) => channel.id === SLACK_OTHER_CHANNEL && channel.name === "clienti"), "refresh sees a channel whose join event was missed");
-    assert.deepEqual(refreshed.data.map((channel) => channel.id).sort(), ((await call("/api/state")).data.slack.channels.map((channel) => channel.id).sort()));
+    const found = (await call("/api/state")).data;
+    assert.deepEqual(refreshed.data.map((channel) => channel.id).sort(), found.slack.channels.map((channel) => channel.id).sort());
+    assert.ok(found.channels.some((channel) => channel.id === `sl:${SLACK_OTHER_CHANNEL}`), "a channel found by a refresh starts on");
 
     slack.state.apps.get(SILVIA_BOT).channels.delete(SLACK_OTHER_CHANNEL);
     slack.leave(SILVIA_BOT, PRIVATE);
     await waitFor(async () => !((await call("/api/state")).data.slack.channels.some((channel) => channel.id === PRIVATE)), { what: "leaving drops the channel without a manual refresh" });
     const afterLeave = await call("/api/slack/channels");
     assert.ok(!afterLeave.data.some((channel) => channel.id === PRIVATE || channel.id === SLACK_OTHER_CHANNEL), "refresh drops a channel whose leave event was missed");
+
+    slack.invite(SILVIA_BOT, PRIVATE);
+    await waitFor(async () => (await call("/api/state")).data.slack.channels.some((channel) => channel.id === PRIVATE), { what: "the channel back in the list" });
+    assert.ok(!(await call("/api/state")).data.channels.some((channel) => channel.id === `sl:${PRIVATE}`), "a channel switched off stays off when the app is back in it");
+    await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL, PRIVATE] } });
+    assert.deepEqual(app.store.settings.slackMutedChannelIds, [], "switching it on forgets the mute");
+    assert.ok((await call("/api/state")).data.channels.some((channel) => channel.id === `sl:${PRIVATE}`));
+    slack.leave(SILVIA_BOT, PRIVATE);
+    await waitFor(async () => !((await call("/api/state")).data.slack.channels.some((channel) => channel.id === PRIVATE)), { what: "the channel gone again" });
+    await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL] } });
+    assert.deepEqual([app.store.settings.slackChannelIds, app.store.settings.slackMutedChannelIds], [[SLACK_CHANNEL], []], "a channel no app is in drops off the list without being muted");
     await quiet();
   });
 

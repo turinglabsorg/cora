@@ -937,6 +937,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const keysBefore = store.settings.sshKeys.join("\n");
       // Permissions change only through /api/permissions, which only the owner may call.
       const { permissions: _ignored, ...changes } = await readJson(req);
+      // A Slack channel switched off is remembered, so it stays off when an app is in it again.
+      if (Array.isArray(changes.slackChannelIds)) {
+        const on = new Set(changes.slackChannelIds.map(String));
+        const known = new Set([...store.settings.slackMutedChannelIds, ...channels.slackCatalog().map((channel) => channel.id)]);
+        changes.slackMutedChannelIds = [...known].filter((id) => !on.has(id));
+      }
       const settings = store.updateSettings(changes);
       if (settings.useResidentSubscriptions && !residentsBefore) await subscriptions.discoverResidents();
       if (settings.sshKeys.join("\n") !== keysBefore) {
