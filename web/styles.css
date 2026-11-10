@@ -2040,6 +2040,11 @@ a.share-stats:hover { color: var(--amber); }
 .connector-detail .panel-body > p { margin: 0; }
 .connector-detail .muted { color: var(--muted); }
 .connector-detail [role="status"]:empty { display: none; }
+.connector-detail .segmented { align-self: flex-start; }
+.connector-feedback { margin: 0; }
+.connector-feedback:empty { display: none; }
+.connector-detail .steps a { color: var(--amber); }
+.connector-detail .steps { margin: 0; }
 @media (max-width: 600px) {
   .connector-toolbar { align-items: stretch; }
   .connector-search { min-width: 0; flex-basis: 100%; }

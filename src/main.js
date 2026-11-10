@@ -33,6 +33,7 @@ import { SubscriptionUsage } from "./subscription-usage.js";
 import { providerUsageData, providerUsageRecords } from "./provider-usage.js";
 import { Voice } from "./voice.js";
 import { GoogleConnector } from "./google-connector.js";
+import { KeyConnectors } from "./key-connectors.js";
 import { EmailChannel } from "./email-channel.js";
 import { MailDomains } from "./mail-domains.js";
 import { KnowledgeSources } from "./knowledge.js";
@@ -185,6 +186,8 @@ export function startCora(overrides = {}) {
   });
   vault.knowledge = knowledge;
   googleConnector.knowledge = knowledge;
+  // Connectors that take a key or an app: the value is checked with the service and kept in the vault.
+  const keyConnectors = new KeyConnectors({ store, vault, log: activity });
   brain.vault = vault;
   // Each agent's own GitHub App: made from the panel, its hour-long tokens written on the agent's desktop.
   const github = new GithubApps({
@@ -203,7 +206,7 @@ export function startCora(overrides = {}) {
   companyBrain.onNote = () => librarian.requestRun({ reason: "memoria" });
   // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
   const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, credentials, github, mailDomains, email, googleConnector, knowledge });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, credentials, github, mailDomains, email, googleConnector, keyConnectors, knowledge });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));
@@ -345,7 +348,7 @@ export function startCora(overrides = {}) {
     await companyBrain.close();
     store.close();
   };
-  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, github, mailDomains, email, googleConnector, knowledge, server: web.server };
+  return { ready, stop, store, subscriptions, discord, telegram, slack, channels, orchestrator, scheduler, brain, boxes, llm, bridge, bots, tgBots, skBots, traces, push, voice, companyBrain, librarian, artifacts, vault, github, mailDomains, email, googleConnector, keyConnectors, knowledge, server: web.server };
 }
 
 const isMain = (() => {

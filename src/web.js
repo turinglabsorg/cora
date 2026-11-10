@@ -181,7 +181,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, credentials = null, github = null, mailDomains = null, email = null, googleConnector = null, knowledge = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, credentials = null, github = null, mailDomains = null, email = null, googleConnector = null, keyConnectors = null, knowledge = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -500,7 +500,23 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { ok: true }, { "Set-Cookie": clearedCookies() });
     }
 
-    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(user), canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"), notice: store.value("googleConnectorNotice", "") });
+    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(user), keyConnectors: keyConnectors ? keyConnectors.view() : [], canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"), notice: store.value("googleConnectorNotice", "") });
+    const keyConnector = /^\/api\/connectors\/keys\/(linear|asana|canva)$/.exec(path);
+    if (keyConnector) {
+      if (!keyConnectors) throw new HttpError(404, "Connettore non disponibile.");
+      const canManage = Boolean(knowledge?.ownerMemory || user.role === "owner");
+      if (!canManage) throw new HttpError(403, "Solo il proprietario collega i connettori.");
+      if (method === "POST") {
+        const record = await keyConnectors.connect(keyConnector[1], await readJson(req, 20000), user);
+        return send(res, 200, { ...googleConnector.view(user), keyConnectors: keyConnectors.view(), canManage, record });
+      }
+      if (method === "PUT") {
+        const record = keyConnectors.updateAgents(keyConnector[1], (await readJson(req, 8000)).agents, user);
+        return send(res, 200, { ...googleConnector.view(user), keyConnectors: keyConnectors.view(), canManage, record });
+      }
+      if (method === "DELETE") { keyConnectors.disconnect(keyConnector[1], user); return send(res, 200, { ok: true }); }
+      throw new HttpError(405, "Metodo non supportato.");
+    }
     if (path === "/api/connectors/google" && method === "POST") {
       if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega account Google.");
       const started = googleConnector.begin(user);

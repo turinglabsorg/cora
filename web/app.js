@@ -3257,6 +3257,13 @@ function emailSettingsTabs(controls, agentsPanel, feedback) {
   return panel({ icon: "mail", title: "E-mail", hint: "Dall'arrivo della posta al resoconto nel canale scelto." }, h("div", { class: "stack" }, tabs, [...pages.values()], feedback));
 }
 
+const CONNECTOR_SERVICES = [
+  { id: "google", name: "Google", icon: "mail", description: "Invia email dal tuo account Gmail o Google Workspace con gli agenti che scegli.", meta: "Gmail · Google Workspace" },
+  { id: "linear", name: "Linear", icon: "list", description: "Gli agenti leggono e creano issue nel workspace che colleghi.", meta: "Linear · Issue e progetti" },
+  { id: "asana", name: "Asana", icon: "check", description: "Gli agenti lavorano sui progetti e sulle attività del tuo Asana.", meta: "Asana · Progetti e attività" },
+  { id: "canva", name: "Canva", icon: "layers", description: "Gli agenti preparano e aggiornano materiali di design.", meta: "Canva · Design" },
+];
+
 function connectorsPane() {
   const slot = h("div", { class: "stack connectors-pane" });
   const catalog = h("div", { class: "stack connector-catalog" });
@@ -3265,32 +3272,51 @@ function connectorsPane() {
   const search = h("input", { type: "search", "aria-label": "Cerca connettori", placeholder: "Cerca per nome, servizio o account", autocomplete: "off", maxlength: 200 });
   const filters = h("div", { class: "segmented", role: "group", "aria-label": "Filtra connettori" });
   const filterButtons = new Map();
-  let data = null, filter = "all", current = route()[2] === "google" ? "google" : "";
+  let data = null, filter = "all", current = CONNECTOR_SERVICES.some((service) => service.id === route()[2]) ? route()[2] : "", asanaMode = "", canvaOpen = false;
   const show = (id, update = true) => {
-    current = id === "google" ? id : "";
+    current = CONNECTOR_SERVICES.some((service) => service.id === id) ? id : "";
     catalog.hidden = Boolean(current); detail.hidden = !current;
     if (update) history.replaceState(null, "", current ? `#/settings/connettori/${current}` : "#/settings/connettori");
+  };
+  const keyRecord = (id) => (data?.keyConnectors || []).find((item) => item.service === id) || null;
+  const serviceState = (id) => {
+    if (id === "google") {
+      const count = data ? data.connections.length : 0;
+      return { connected: count > 0, status: !data ? "In preparazione" : count ? count === 1 ? "1 account collegato" : "{count} account collegati" : data.available ? "Da collegare" : "In preparazione", count };
+    }
+    const record = keyRecord(id);
+    if (!record || record.status === "new") return { connected: false, status: "Da collegare" };
+    if (record.status === "connected") return { connected: true, status: record.workspace || "Collegato" };
+    if (record.status === "app") return { connected: false, status: "App pronta" };
+    return { connected: false, status: "Non serve" };
   };
   const drawCatalog = () => {
     for (const [key, button] of filterButtons) { button.classList.toggle("on", key === filter); button.setAttribute("aria-pressed", String(key === filter)); }
     if (!data) { results.replaceChildren(h("p", { role: "status", class: "muted" }, "Carico i connettori…")); return; }
     const query = search.value.trim().toLocaleLowerCase();
-    const matches = `Google Gmail Workspace email posta ${data.connections.map(item => item.email).join(" ")}`.toLocaleLowerCase().includes(query);
-    if (!matches || (filter === "connected" && !data.connections.length)) {
+    const cards = CONNECTOR_SERVICES.filter((service) => {
+      const state = serviceState(service.id);
+      if (filter === "connected" && !state.connected) return false;
+      const accounts = service.id === "google" ? data.connections.map((item) => item.email).join(" ") : `${keyRecord(service.id)?.workspace || ""} ${keyRecord(service.id)?.account || ""}`;
+      return `${service.name} ${service.description} ${service.meta} ${service.id} ${accounts}`.toLocaleLowerCase().includes(query);
+    });
+    if (!cards.length) {
       results.replaceChildren(h("div", { class: "connector-empty" }, icon("search"),
         h("h3", {}, filter === "connected" && !query ? "Nessun connettore collegato" : "Nessun connettore trovato"),
         h("p", {}, filter === "connected" && !query ? "Apri un connettore dal catalogo per collegare il primo account." : "Prova un altro nome o azzera i filtri."),
         btn("Azzera filtri", { cls: "ghost", onclick: () => { search.value = ""; filter = "all"; drawCatalog(); search.focus(); } })));
       return;
     }
-    const connected = data.connections.length;
-    const status = connected ? connected === 1 ? tr("1 account collegato") : tr("{count} account collegati", { count: connected }) : tr(data.available ? "Da collegare" : "In preparazione");
-    results.replaceChildren(h("button", { type: "button", class: "connector-card", "aria-label": tr("Apri connettore Google"), onclick: () => { show("google"); detail.querySelector(".connector-back")?.focus(); } },
-      h("span", { class: "connector-card-head" }, h("span", { class: "connector-mark", "aria-hidden": "true" }, icon("mail")), tag(status, connected ? "ok" : "agent")),
-      h("span", { class: "connector-card-name" }, "Google"),
-      h("span", { class: "connector-card-description" }, "Invia email dal tuo account Gmail o Google Workspace con gli agenti che scegli."),
-      h("span", { class: "connector-card-meta" }, "Gmail · Google Workspace"),
-      h("span", { class: "connector-card-action" }, "Apri connettore", icon("next"))));
+    results.replaceChildren(...cards.map((service) => {
+      const state = serviceState(service.id);
+      const status = state.status.includes("{count}") ? tr(state.status, { count: state.count }) : tr(state.status);
+      return h("button", { type: "button", class: "connector-card", "aria-label": tr("Apri connettore {name}", { name: service.name }), onclick: () => { show(service.id); draw(); detail.querySelector(".connector-back")?.focus(); } },
+        h("span", { class: "connector-card-head" }, h("span", { class: "connector-mark", "aria-hidden": "true" }, icon(service.icon)), tag(status, state.connected ? "ok" : "agent")),
+        h("span", { class: "connector-card-name" }, service.name),
+        h("span", { class: "connector-card-description" }, tr(service.description)),
+        h("span", { class: "connector-card-meta" }, tr(service.meta)),
+        h("span", { class: "connector-card-action" }, tr("Apri connettore"), icon("next")));
+    }));
   };
   for (const [id, label] of [["all", "Tutti"], ["connected", "Collegati"]]) {
     const button = btn(label, { onclick: () => { filter = id; drawCatalog(); } });
@@ -3299,66 +3325,214 @@ function connectorsPane() {
   search.addEventListener("input", drawCatalog);
   catalog.append(panel({ icon: "link", title: "Connettori", hint: "Scegli un servizio, collega il tuo account e decidi quali agenti possono usarlo." },
     h("div", { class: "connector-toolbar" }, h("div", { class: "connector-search" }, icon("search"), search), filters), results));
-  slot.append(catalog, detail); drawCatalog(); show(current, false);
+
+  const back = () => btn("Catalogo connettori", { icon: "back", cls: "ghost connector-back", onclick: () => { show(""); drawCatalog(); results.querySelector(".connector-card")?.focus(); } });
+
+  const agentChoices = (record, service) => {
+    const feedback = h("p", { class: "muted", role: "status" });
+    const choices = (data.agents || []).map((agent) => {
+      const input = h("input", { type: "checkbox", checked: record.agents.includes(agent.id), disabled: !data.canManage, "aria-label": tr("Autorizza {name}", { name: agent.name }) });
+      input.addEventListener("change", async () => {
+        for (const other of choices) other.input.disabled = true;
+        try {
+          await api(`/api/connectors/keys/${service}`, { method: "PUT", body: { agents: choices.filter((other) => other.input.checked).map((other) => other.id) } });
+          feedback.textContent = tr("Agenti autorizzati aggiornati");
+          await load();
+        } catch (error) { input.checked = !input.checked; feedback.className = "err-text"; feedback.textContent = tr(error.message); for (const other of choices) other.input.disabled = !data.canManage; }
+      });
+      return { id: agent.id, input, node: h("label", { class: "email-folder" }, input, raw(agent.name)) };
+    });
+    return h("div", { class: "stack-sm" }, choices.length ? h("div", { class: "email-folders" }, choices.map((item) => item.node)) : h("p", { class: "muted" }, "Crea un agente per autorizzarlo."), feedback);
+  };
+
+  const connectedPanel = (service, record, intro) => {
+    const feedback = h("p", { class: "muted", role: "status" });
+    const disconnect = armedButton("Scollega", "Conferma scollegamento", { icon: "power", onconfirm: async () => {
+      disconnect.disabled = true;
+      try { await api(`/api/connectors/keys/${service.id}`, { method: "DELETE" }); await load(); toast("Connettore scollegato"); }
+      catch (error) { toast(error.message, true); disconnect.disabled = false; }
+    } });
+    const secret = service.id === "linear" ? "CORA_LINEAR_KEY" : "CORA_ASANA_TOKEN";
+    return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: tag(record.workspace || tr("Collegato"), "ok") },
+      h("p", {}, tr(intro)),
+      setRows(
+        setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, ` · ${record.account}`) : null), tag("Collegato", "ok")),
+        setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, secret), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
+        setRow("Agenti autorizzati", "Solo gli agenti spuntati possono usare questo connettore.", agentChoices(record, service.id), { stack: true }),
+        setRow("Scollega", "Toglie la chiave dalla cassaforte e l'accesso agli agenti.", disconnect)),
+      feedback);
+  };
+
+  const keyForm = (service, { mode = "", decision = "" } = {}) => {
+    const feedback = h("p", { class: "connector-feedback", role: "status" });
+    const submit = (label, run) => {
+      const button = btn(label, { icon: "check", cls: "primary", onclick: async () => {
+        button.disabled = true; feedback.textContent = ""; feedback.classList.remove("err-text");
+        try { await run(); await load(); } catch (error) { feedback.textContent = tr(error.message); feedback.classList.add("err-text"); button.disabled = false; }
+      } });
+      return button;
+    };
+    if (service.id === "linear") {
+      const workspace = h("input", { type: "text", placeholder: "turinglabs", autocomplete: "off", autocapitalize: "none", spellcheck: "false", "aria-label": "Workspace di Linear" });
+      const secret = h("input", { type: "password", autocomplete: "off", autocapitalize: "none", spellcheck: "false", "aria-label": "Chiave API di Linear" });
+      return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: tag("Da collegare", "agent") },
+        h("p", {}, "Gli agenti leggono e creano issue nel workspace che colleghi. La chiave resta nella cassaforte, mai nel pannello."),
+        h("p", { role: "status", class: "notice warn" }, "Servono due dati, che si trovano in Linear: il workspace e una chiave API personale."),
+        setRows(
+          setRow("1. Il workspace", "Il nome che compare in linear.app/<workspace>, per esempio turinglabs.", workspace, { stack: true }),
+          setRow("2. La chiave API", h("div", { class: "stack-sm" }, steps(
+            h("span", {}, "apri ", h("a", { href: "https://linear.app/settings/security", target: "_blank", rel: "noopener" }, "linear.app/settings/security"), " → Sicurezza → Chiavi API e crea una chiave personale;"),
+            "copia la chiave;",
+            h("span", {}, "incollala qui: Cora la verifica su Linear e la salva nella cassaforte come ", h("code", {}, "CORA_LINEAR_KEY"), ", senza mostrarla più.")),
+            h("div", { class: "input-row token" }, secret, submit("Verifica e collega", () => api("/api/connectors/keys/linear", { method: "POST", body: { workspace: workspace.value.trim(), token: secret.value.trim() } })))), { stack: true }),
+          setRow("3. Gli agenti", "Dopo il collegamento scegli quali agenti possono usare la chiave.", h("p", { class: "muted" }, "Il passo si sblocca appena il workspace è collegato."))),
+        feedback);
+    }
+    if (service.id === "asana") {
+      const chosen = asanaMode || mode || (keyRecord("asana")?.mode === "oauth" ? "oauth" : "pat");
+      const toggle = h("div", { class: "segmented", role: "group", "aria-label": "Come collegare Asana" },
+        btn("Token personale", { onclick: () => { asanaMode = "pat"; draw(); } }),
+        btn("App OAuth", { onclick: () => { asanaMode = "oauth"; draw(); } }));
+      [...toggle.children].forEach((button, index) => { const on = (index === 0) === (chosen === "pat"); button.classList.toggle("on", on); button.setAttribute("aria-pressed", String(on)); });
+      if (chosen === "oauth") {
+        const clientId = h("input", { type: "text", autocomplete: "off", spellcheck: "false", "aria-label": "Client ID dell'app Asana" });
+        const clientSecret = h("input", { type: "password", autocomplete: "off", spellcheck: "false", "aria-label": "Client secret dell'app Asana" });
+        const record = keyRecord("asana");
+        return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: record?.status === "app" ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
+          h("p", {}, "Con un'app OAuth l'accesso è dell'app che crei tu su Asana, non di una persona sola."),
+          toggle,
+          h("p", { role: "status", class: "notice warn" }, "Creare l'app Asana richiede due dati: client ID e client secret. L'autorizzazione OAuth si completa dopo, quando l'app esiste."),
+          setRows(setRow("L'app Asana", h("div", { class: "stack-sm" }, steps(
+            h("span", {}, "apri ", h("a", { href: "https://developers.asana.com/docs/authentication", target: "_blank", rel: "noopener" }, "developers.asana.com"), " → My apps → Create new app;"),
+            "copia client ID e client secret dell'app;",
+            h("span", {}, "incollali qui: finiscono nella cassaforte come ", h("code", {}, "CORA_ASANA_CLIENT_ID"), " e ", h("code", {}, "CORA_ASANA_CLIENT_SECRET"), ";"),
+            "l'autorizzazione OAuth è il passo successivo: appena l'app è pronta la completiamo da qui."),
+            h("div", { class: "stack-sm" }, field("Client ID", clientId), field("Client secret", clientSecret), h("div", { class: "row end" }, submit("Salva l'app", () => api("/api/connectors/keys/asana", { method: "POST", body: { mode: "oauth", clientId: clientId.value.trim(), clientSecret: clientSecret.value.trim() } }))))), { stack: true })),
+          feedback);
+      }
+      const token = h("input", { type: "password", autocomplete: "off", autocapitalize: "none", spellcheck: "false", "aria-label": "Token personale di Asana" });
+      return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: tag("Da collegare", "agent") },
+        h("p", {}, "Gli agenti lavorano sui progetti del tuo Asana. Il token resta nella cassaforte, mai nel pannello."),
+        toggle,
+        h("p", { role: "status", class: "notice warn" }, "Collegare Asana richiede un token personale: il workspace lo ricava Cora dal token."),
+        setRows(setRow("Il token personale", h("div", { class: "stack-sm" }, steps(
+          h("span", {}, "apri ", h("a", { href: "https://developers.asana.com/docs/personal-access-token", target: "_blank", rel: "noopener" }, "Asana → Impostazioni → App"), " e crea un token di accesso personale;"),
+          "copia il token;",
+          h("span", {}, "incollalo qui: Cora lo verifica su Asana e lo salva nella cassaforte come ", h("code", {}, "CORA_ASANA_TOKEN"), ", senza mostrarlo più.")),
+          h("div", { class: "input-row token" }, token, submit("Verifica e collega", () => api("/api/connectors/keys/asana", { method: "POST", body: { mode: "pat", token: token.value.trim() } })))), { stack: true })),
+        feedback);
+    }
+    // Canva: either the app credentials, or the decision that it is not needed for now.
+    const record = keyRecord("canva");
+    if (record?.status === "app" || canvaOpen || decision === "app") {
+      const clientId = h("input", { type: "text", autocomplete: "off", spellcheck: "false", "aria-label": "Client ID dell'app Canva" });
+      const clientSecret = h("input", { type: "password", autocomplete: "off", spellcheck: "false", "aria-label": "Client secret dell'app Canva" });
+      return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: record?.status === "app" ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
+        h("p", {}, "Canva non ha token personali: si collega solo con un'app Canva intestata a te."),
+        h("p", { role: "status", class: "notice warn" }, "Per attivare Canva servono i dati dell'app: client ID e client secret. L'autorizzazione OAuth è il passo successivo."),
+        setRows(setRow("L'app Canva", h("div", { class: "stack-sm" }, steps(
+          h("span", {}, "apri ", h("a", { href: "https://www.canva.com/developers/", target: "_blank", rel: "noopener" }, "canva.com/developers"), " → Your integrations → Create integration;"),
+          "copia client ID e client secret;",
+          h("span", {}, "incollali qui: finiscono nella cassaforte come ", h("code", {}, "CORA_CANVA_CLIENT_ID"), " e ", h("code", {}, "CORA_CANVA_CLIENT_SECRET"), ";"),
+          "l'autorizzazione OAuth si completa appena l'app esiste."),
+          h("div", { class: "stack-sm" }, field("Client ID", clientId), field("Client secret", clientSecret), h("div", { class: "row end" }, submit("Salva l'app", () => api("/api/connectors/keys/canva", { method: "POST", body: { clientId: clientId.value.trim(), clientSecret: clientSecret.value.trim() } }))))), { stack: true })),
+        feedback);
+    }
+    return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: record?.status === "later" ? tag("Non serve") : tag("Da collegare", "agent") },
+      h("p", {}, "Canva non ha token personali: si collega solo con un'app Canva intestata a te, con client ID, client secret e autorizzazione OAuth."),
+      h("p", { role: "status", class: "notice warn" }, "Decidi tu: collegare Canva adesso con un'app, oppure lasciarla spenta. Senza app nessun agente può usarla."),
+      record?.status === "later" ? h("p", { class: "muted" }, "Canva è esclusa: nessun agente la usa e nessuna chiave è salvata.") : null,
+      h("div", { class: "row wrap" }, btn(record?.status === "later" ? "Attiva Canva" : "Collega Canva con un'app", { icon: "plus", cls: "primary", onclick: () => { canvaOpen = true; draw(); } }),
+        btn("Per ora no", { cls: "ghost", onclick: async () => {
+          try { await api("/api/connectors/keys/canva", { method: "POST", body: { decision: "later" } }); canvaOpen = false; await load(); toast("Canva lasciata spenta"); }
+          catch (error) { toast(error.message, true); }
+        } })),
+      feedback);
+  };
+
+  const keyDetail = (id) => {
+    const service = CONNECTOR_SERVICES.find((item) => item.id === id);
+    const record = keyRecord(id);
+    const intro = id === "linear" ? "Gli agenti leggono e creano issue nel workspace che colleghi. La chiave resta nella cassaforte, mai nel pannello."
+      : id === "asana" ? "Gli agenti lavorano sui progetti del tuo Asana. Il token resta nella cassaforte, mai nel pannello."
+        : "Gli agenti preparano materiali di design. Canva richiede un'app Canva (OAuth) intestata a te.";
+    return [back(), record?.status === "connected" ? connectedPanel(service, record, intro) : keyForm(service, { decision: canvaOpen ? "app" : "" })];
+  };
+
+  const googleDetail = () => {
+    const connect = btn(data.connections.length ? "Collega un altro account Google" : "Collega account Google", { icon: "plus", cls: "primary", disabled: !data.canManage || !data.available, onclick: async (event) => {
+      const button = event.currentTarget; button.disabled = true;
+      try { const result = await api("/api/connectors/google", { method: "POST" }); window.location.assign(result.url); }
+      catch (error) { toast(error.message, true); button.disabled = !data.canManage || !data.available; }
+    } });
+    const accountNodes = data.connections.map((connection) => {
+      const choices = data.agents.map((agent) => {
+        const input = h("input", { type: "checkbox", checked: connection.agents.includes(agent.id), disabled: !data.canManage, "aria-label": tr("Autorizza {name}", { name: agent.name }) });
+        return { id: agent.id, input, node: h("label", { class: "email-folder" }, input, raw(agent.name)) };
+      });
+      const feedback = h("p", { role: "status", class: "muted" });
+      const senders = h("div", { class: "stack-sm connector-senders" });
+      const drawSenders = () => {
+        const selected = choices.filter((item) => item.input.checked);
+        senders.replaceChildren(h("p", { class: "label" }, "3. Scegli il mittente"),
+          h("p", { class: "muted" }, "Nella pagina Email dell'agente scegli questo account come mittente."),
+          selected.length ? h("div", { class: "row wrap" }, selected.map((item) => btn(raw(tr("Email di {name}", { name: data.agents.find((agent) => agent.id === item.id).name })), { icon: "mail", cls: "ghost sm", href: `#/agent/${item.id}/email/invio` }))) : h("p", { class: "muted" }, "Autorizza almeno un agente per scegliere il mittente."));
+      };
+      drawSenders();
+      for (const item of choices) item.input.addEventListener("change", async () => {
+        for (const other of choices) other.input.disabled = true;
+        try {
+          await api(`/api/connectors/${connection.id}`, { method: "PUT", body: { agents: choices.filter((other) => other.input.checked).map((other) => other.id) } });
+          connection.agents = choices.filter((other) => other.input.checked).map((other) => other.id);
+          feedback.className = "muted"; feedback.textContent = tr("Agenti autorizzati aggiornati"); drawSenders();
+        } catch (error) { item.input.checked = !item.input.checked; feedback.className = "err-text"; feedback.textContent = tr(error.message); }
+        finally { for (const other of choices) other.input.disabled = !data.canManage; }
+      });
+      let armed = false;
+      const disconnect = btn("Scollega", { icon: "power", cls: "ghost danger", disabled: !data.canManage, onclick: async () => {
+        if (!armed) { armed = true; disconnect.textContent = tr("Conferma scollegamento"); return; }
+        disconnect.disabled = true;
+        try { await api(`/api/connectors/${connection.id}`, { method: "DELETE" }); await load(); }
+        catch (error) { toast(error.message, true); disconnect.disabled = !data.canManage; }
+      } });
+      return panel({ icon: "mail", title: raw(connection.email), hint: "Account Google collegato", actions: disconnect },
+        h("p", { class: "label" }, "2. Autorizza gli agenti"),
+        choices.length ? h("div", { class: "email-folders" }, choices.map((item) => item.node)) : h("p", { class: "muted" }, "Crea un agente per assegnargli questo account."), feedback, senders);
+    });
+    return [back(),
+      panel({ icon: "mail", title: "Google", hint: "Gmail e Google Workspace", actions: tag(data.connections.length ? "Collegato" : "Da collegare", data.connections.length ? "ok" : "agent") },
+        h("p", {}, "Collega Gmail o Google Workspace con Fluxkit per inviare email dal tuo indirizzo."),
+        h("p", { class: "muted" }, "Scegli quali agenti possono usare ogni account. La posta in arrivo di Google resta nel tuo account."),
+        data.notice ? h("p", { role: "status" }, raw(tr(data.notice))) : null,
+        setRows(setRow("1. Collega il tuo account", "Accedi su Google e conferma il permesso di invio. Puoi collegare più account.", h("div", { class: "stack-sm" },
+          !data.available ? h("p", { role: "status", class: "notice warn" }, "Il collegamento di nuovi account Google non è disponibile in questo spazio. Puoi continuare a usare e gestire gli account già collegati.") : null,
+          !data.canManage ? h("p", { class: "muted" }, "Solo il proprietario cambia i connettori.") : null,
+          h("div", { class: "row" }, connect)), { stack: true }))),
+      ...accountNodes];
+  };
+
+  const draw = () => {
+    catalog.hidden = Boolean(current); detail.hidden = !current;
+    drawCatalog();
+    if (!current) return;
+    if (!data) { detail.replaceChildren(back(), h("p", { class: "muted", role: "status" }, "Carico i connettori…")); return; }
+    try { detail.replaceChildren(...(current === "google" ? googleDetail() : keyDetail(current))); }
+    catch (error) { detail.replaceChildren(back(), panel({ icon: "alert", title: "Connettore non disponibile" }, h("p", { role: "alert" }, raw(tr(error.message))))); }
+  };
+
+  slot.append(catalog, detail);
   async function load() {
     try {
       const response = await api("/api/connectors");
       if (!slot.isConnected) return;
       data = response;
-      const connect = btn(data.connections.length ? "Collega un altro account Google" : "Collega account Google", { icon: "plus", cls: "primary", disabled: !data.canManage || !data.available, onclick: async (event) => {
-        const button = event.currentTarget; button.disabled = true;
-        try { const result = await api("/api/connectors/google", { method: "POST" }); window.location.assign(result.url); }
-        catch (error) { toast(error.message, true); button.disabled = !data.canManage || !data.available; }
-      } });
-      const accountNodes = data.connections.map((connection) => {
-        const choices = data.agents.map((agent) => {
-          const input = h("input", { type: "checkbox", checked: connection.agents.includes(agent.id), disabled: !data.canManage, "aria-label": tr("Autorizza {name}", { name: agent.name }) });
-          return { id: agent.id, input, node: h("label", { class: "email-folder" }, input, raw(agent.name)) };
-        });
-        const feedback = h("p", { role: "status", class: "muted" });
-        const senders = h("div", { class: "stack-sm connector-senders" });
-        const drawSenders = () => {
-          const selected = choices.filter(item => item.input.checked);
-          senders.replaceChildren(h("p", { class: "label" }, "3. Scegli il mittente"),
-            h("p", { class: "muted" }, "Nella pagina Email dell'agente scegli questo account come mittente."),
-            selected.length ? h("div", { class: "row wrap" }, selected.map(item => btn(raw(tr("Email di {name}", { name: data.agents.find(agent => agent.id === item.id).name })), { icon: "mail", cls: "ghost sm", href: `#/agent/${item.id}/email/invio` }))) : h("p", { class: "muted" }, "Autorizza almeno un agente per scegliere il mittente."));
-        };
-        drawSenders();
-        for (const item of choices) item.input.addEventListener("change", async () => {
-          for (const other of choices) other.input.disabled = true;
-          try {
-            await api(`/api/connectors/${connection.id}`, { method: "PUT", body: { agents: choices.filter(other => other.input.checked).map(other => other.id) } });
-            connection.agents = choices.filter(other => other.input.checked).map(other => other.id);
-            feedback.className = "muted"; feedback.textContent = tr("Agenti autorizzati aggiornati"); drawSenders();
-          } catch (error) { item.input.checked = !item.input.checked; feedback.className = "err-text"; feedback.textContent = tr(error.message); }
-          finally { for (const other of choices) other.input.disabled = !data.canManage; }
-        });
-        let armed = false;
-        const disconnect = btn("Scollega", { icon: "unlink", cls: "ghost danger", disabled: !data.canManage, onclick: async () => {
-          if (!armed) { armed = true; disconnect.textContent = tr("Conferma scollegamento"); return; }
-          disconnect.disabled = true;
-          try { await api(`/api/connectors/${connection.id}`, { method: "DELETE" }); await load(); }
-          catch (error) { toast(error.message, true); disconnect.disabled = !data.canManage; }
-        } });
-        return panel({ icon: "mail", title: raw(connection.email), hint: "Account Google collegato", actions: disconnect },
-          h("p", { class: "label" }, "2. Autorizza gli agenti"),
-          choices.length ? h("div", { class: "email-folders" }, choices.map(item => item.node)) : h("p", { class: "muted" }, "Crea un agente per assegnargli questo account."), feedback, senders);
-      });
-      detail.replaceChildren(btn("Catalogo connettori", { icon: "back", cls: "ghost connector-back", onclick: () => { show(""); results.querySelector(".connector-card")?.focus(); } }),
-        panel({ icon: "mail", title: "Google", hint: "Gmail e Google Workspace", actions: tag(data.connections.length ? "Collegato" : "Da collegare", data.connections.length ? "ok" : "agent") },
-          h("p", {}, "Collega Gmail o Google Workspace con Fluxkit per inviare email dal tuo indirizzo."),
-          h("p", { class: "muted" }, "Scegli quali agenti possono usare ogni account. La posta in arrivo di Google resta nel tuo account."),
-          data.notice ? h("p", { role: "status" }, raw(tr(data.notice))) : null,
-          setRows(setRow("1. Collega il tuo account", "Accedi su Google e conferma il permesso di invio. Puoi collegare più account.", h("div", { class: "stack-sm" },
-            !data.available ? h("p", { role: "status", class: "notice warn" }, "Il collegamento di nuovi account Google non è disponibile in questo spazio. Puoi continuare a usare e gestire gli account già collegati.") : null,
-            !data.canManage ? h("p", { class: "muted" }, "Solo il proprietario cambia i connettori.") : null,
-            h("div", { class: "row" }, connect)), { stack: true }))),
-        ...accountNodes);
-      slot.replaceChildren(catalog, detail); drawCatalog(); show(current, false);
+      slot.replaceChildren(catalog, detail);
+      draw();
     } catch (error) { slot.replaceChildren(panel({ icon: "alert", title: "Connettori non disponibili" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
   }
-  slot.openCatalog = () => show("");
+  slot.openCatalog = () => { show(""); draw(); };
   slot.readyConnectors = Promise.resolve().then(load);
+  draw();
   return slot;
 }
 

@@ -7689,7 +7689,7 @@ describe("email channel", () => {
     node.querySelectorAll("button").find(button => button.textContent === "Connected").click();
     assert.match(node.querySelector(".connector-catalog").textContent, /No connected services/);
     node.querySelectorAll("button").find(button => button.textContent === "Reset filters").click();
-    assert.equal(node.querySelectorAll(".connector-card").length, 1);
+    assert.deepEqual(node.querySelectorAll(".connector-card").map(card => card.querySelector(".connector-card-name").textContent), ["Google", "Linear", "Asana", "Canva"]);
     assert.equal((await f.call("/api/connectors/google", { method: "POST", asMember: true })).status, 403);
   });
 
