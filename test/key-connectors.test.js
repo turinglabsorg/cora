@@ -178,7 +178,7 @@ test("the connectors page asks for the Asana choice and the Canva decision with 
   assert.ok(clientId && clientSecret);
   node.querySelectorAll("button").find((button) => button.textContent === "Catalogo connettori").click();
   node.querySelectorAll(".connector-card").find((card) => /Canva/.test(card.textContent)).click();
-  assert.match(node.querySelector(".connector-detail").textContent, /app Canva/);
+  assert.match(node.querySelector(".connector-detail").textContent, /Collega Canva con un.app/);
   assert.doesNotMatch(node.querySelector(".connector-detail").textContent, /\[object Object\]/);
   node.querySelectorAll("button").find((button) => /Per ora no/.test(button.textContent)).click();
   await waitFor(() => f.app.keyConnectors.record("canva")?.status === "later");
@@ -261,7 +261,7 @@ test("the panel draws the catalogue and the forms from src/connectors, so a new 
     return { ok: response.status < 400, status: response.status, json: async () => response.data };
   } });
   const served = (await f.call("/api/connectors")).data.catalog;
-  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tool]), [["google", "google", ""], ["linear", "key", "linear"], ["asana", "key", "asana"], ["canva", "key", ""]]);
+  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tool]), [["google", "google", "google_email"], ["linear", "key", "linear"], ["asana", "key", "asana"], ["canva", "key", "canva"]]);
   assert.equal(served.find((item) => item.id === "linear").secret, "CORA_LINEAR_KEY");
   const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
   await node.readyConnectors;
