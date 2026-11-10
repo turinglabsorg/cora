@@ -1389,10 +1389,10 @@ function hermesPlaceOf(id) {
 }
 
 const HERMES_PLACES = {
-  local: ["Su questa macchina", "I pesi stanno qui: niente esce, e la scheda decide la velocità."],
-  ollama: ["Ollama Cloud", "I modelli cloud di Ollama, con la tua chiave o quella dello space."],
-  deepseek: ["DeepSeek", "I modelli DeepSeek, con la tua chiave o quella dello space."],
-  orcarouter: ["OrcaRouter", "I modelli del router, con la chiave dello space."],
+  local: ["Su questa macchina", "I pesi stanno qui: niente esce, e la scheda decide la velocità.", "chip"],
+  ollama: ["Ollama Cloud", "I modelli cloud di Ollama, con la tua chiave o quella dello space.", "layers"],
+  deepseek: ["DeepSeek", "I modelli DeepSeek, con la tua chiave o quella dello space.", "spark"],
+  orcarouter: ["OrcaRouter", "I modelli del router, con la chiave dello space.", "swap"],
 };
 
 function brainPanel(agent) {
@@ -1647,20 +1647,21 @@ function brainPanel(agent) {
     const selected = resolveKey(backend);
     const chooseSpace = () => { keyChoice[backend] = ""; remoteStamp[backend] = ""; drawRight(); };
     const chooseOwn = (id) => { keyChoice[backend] = id; remoteStamp[backend] = ""; drawRight(); };
+    const spaceChosen = !selected && spaceOn;
     const spaceRow = h("button", {
-      type: "button", class: `row-link model-row hermes-key${selected ? "" : " on"}`,
+      type: "button", class: `row-link hermes-key${spaceChosen ? " on" : ""}`, role: "radio", "aria-checked": String(spaceChosen),
       disabled: !spaceOn, onclick: spaceOn ? chooseSpace : undefined,
-    }, h("div", { class: "row-text full" },
-      h("span", { class: "row-title" }, "Chiave dello space", !selected && spaceOn ? badge("scelto", "on", "check") : null),
-      h("span", { class: "row-meta" }, spaceOn ? "pronta in Impostazioni" : "non configurata")));
+    }, h("span", { class: "hermes-key-dot", "aria-hidden": "true" }), h("span", { class: "hermes-key-text" },
+      h("span", { class: "hermes-key-name" }, "Chiave dello space"),
+      h("span", { class: "hermes-key-meta" }, spaceOn ? "pronta in Impostazioni" : "non configurata")));
     const ownRows = mine.map((item) => {
       const on = selected === item.id;
       return h("button", {
-        type: "button", class: `row-link model-row hermes-key${on ? " on" : ""}`,
+        type: "button", class: `row-link hermes-key${on ? " on" : ""}`, role: "radio", "aria-checked": String(on),
         onclick: () => chooseOwn(item.id),
-      }, h("div", { class: "row-text full" },
-        h("span", { class: "row-title" }, raw(item.label || tr("La tua chiave")), on ? badge("scelto", "on", "check") : null),
-        h("span", { class: "row-meta" }, tr("La tua chiave"), " · ", raw(`···${item.last4 || ""}`))));
+      }, h("span", { class: "hermes-key-dot", "aria-hidden": "true" }), h("span", { class: "hermes-key-text" },
+        h("span", { class: "hermes-key-name" }, raw(item.label || tr("La tua chiave"))),
+        h("span", { class: "hermes-key-meta" }, tr("La tua chiave"), " · ", raw(`···${item.last4 || ""}`))));
     });
     const secret = h("input", {
       type: "password", autocomplete: "new-password", autocapitalize: "off", spellcheck: "false",
@@ -1693,11 +1694,12 @@ function brainPanel(agent) {
       remoteStamp[backend] = "";
       drawRight();
     } }) : null;
+    const form = h("div", { class: "stack-sm hermes-key-form" }, h("div", { class: "input-row hermes-key-add" }, secret, label), h("div", { class: "row" }, add));
+    const hasKey = spaceOn || mine.length > 0;
     return h("div", { class: "stack-sm hermes-keys" },
-      h("span", { class: "label" }, "Chiave"),
-      h("div", { class: "rows", role: "radiogroup", "aria-label": "Chiave" }, spaceRow, ...ownRows),
-      h("div", { class: "input-row hermes-key-add" }, secret, label),
-      h("div", { class: "row" }, add, remove));
+      h("div", { class: "hermes-keys-head" }, h("span", { class: "label" }, "Chiave"), remove),
+      h("div", { class: "hermes-key-list", role: "radiogroup", "aria-label": "Chiave" }, spaceRow, ...ownRows),
+      hasKey ? h("details", { class: "brain-custom", ...(draftSecret ? { open: "" } : {}) }, h("summary", {}, tr("Aggiungi la tua chiave")), form) : form);
   }
 
   function keyedSide(backend) {
@@ -1733,7 +1735,8 @@ function brainPanel(agent) {
       }
       pick(`hermes/${backend}/${name}`);
     };
-    out.push(h("div", { class: "input-row" }, typed, btn("Usa questo nome", { icon: "check", cls: "sm", onclick: useTyped })));
+    const typedRow = h("div", { class: "input-row hermes-typed" }, typed, btn("Usa questo nome", { icon: "check", cls: "sm", onclick: useTyped }));
+    out.push(rows.length ? h("details", { class: "brain-custom" }, h("summary", {}, tr("Un modello che non è in elenco")), h("div", { class: "stack-sm" }, typedRow)) : typedRow);
     return out;
   }
 
@@ -1761,12 +1764,12 @@ function brainPanel(agent) {
       const ends = ["local", "ollama", "deepseek"];
       if ((S.data.models || []).some((model) => String(model.id).startsWith("hermes/orcarouter/"))) ends.push("orcarouter");
       if (!ends.includes(place)) place = ends.includes(hermesPlaceOf(chosen || fallback)) ? hermesPlaceOf(chosen || fallback) : "local";
-      const switcher = h("div", { class: "segmented", role: "tablist", "aria-label": "Dove gira Hermes" });
+      const switcher = h("div", { class: `segmented hermes-places${ends.length > 3 ? " four" : ""}`, role: "tablist", "aria-label": "Dove gira Hermes" });
       for (const key of ends) {
         switcher.append(h("button", {
           type: "button", role: "tab", class: `hermes-end${place === key ? " on" : ""}`, "aria-selected": String(place === key),
           onclick: () => { place = key; problem = ""; drawRight(); },
-        }, tr(HERMES_PLACES[key][0])));
+        }, icon(HERMES_PLACES[key][2]), h("span", {}, tr(HERMES_PLACES[key][0]))));
       }
       out.push(h("div", { class: "field" }, h("span", { class: "label" }, "Dove gira"), switcher, h("small", {}, tr(HERMES_PLACES[place][1]))));
     } else {
@@ -1793,7 +1796,8 @@ function brainPanel(agent) {
     else if (harness === "hermes" && place === "deepseek") out.push(...keyedSide("deepseek"));
     else if (harness === "hermes" && place === "orcarouter") out.push(...routerSide());
     else out.push(...(place === "local" ? localSide() : cloudSide()));
-    out.push(h("details", { class: "brain-custom" }, h("summary", {}, tr("Scrivi tu l'id del modello")),
+    const keyedHermes = harness === "hermes" && (place === "ollama" || place === "deepseek");
+    if (!keyedHermes || custom.value.trim()) out.push(h("details", { class: "brain-custom" }, h("summary", {}, tr("Scrivi tu l'id del modello")),
       h("div", { class: "stack-sm" }, custom, h("small", { class: "muted" }, "Se lo scrivi, vince su quello scelto qui sopra."))));
     right.replaceChildren(...out.filter(Boolean));
   }

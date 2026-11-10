@@ -375,6 +375,35 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .brain-custom[open] > summary::before { content: "▾ "; }
 .brain-custom > summary:hover { color: var(--text); }
 .brain-custom > .stack-sm { margin-top: 10px; }
+.row-link.model-row { padding: 12px 12px 12px 14px; }
+.model-row.on { box-shadow: inset 3px 0 0 var(--amber); }
+.model-row .tag { height: auto; min-height: 20px; padding: 4px 6px; line-height: 1.35; white-space: normal; text-align: left; overflow-wrap: anywhere; }
+/* Where Hermes runs: three lit tiles, each with its mark, rather than a squeezed toggle. */
+.segmented.hermes-places { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+.segmented.hermes-places.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.segmented.hermes-places button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-height: 58px; padding: 8px 6px; line-height: 1.2; text-align: center; }
+.segmented.hermes-places button .ico { width: 18px; height: 18px; margin: 0; vertical-align: 0; }
+.segmented.hermes-places button:not(.on) .ico { color: var(--faint); }
+.hermes-keys-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }
+.hermes-key-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); overflow: hidden; }
+.hermes-key { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 10px 14px; border: 0; border-top: 1px solid var(--line); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.hermes-key:first-child { border-top: 0; }
+.hermes-key:hover:not(:disabled) { background: var(--panel-2); }
+.hermes-key:disabled { opacity: 0.45; cursor: not-allowed; }
+.hermes-key.on { background: var(--amber-wash); box-shadow: inset 3px 0 0 var(--amber); }
+.hermes-key-dot { flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--line-strong); display: grid; place-items: center; }
+.hermes-key.on .hermes-key-dot { border-color: var(--amber); }
+.hermes-key.on .hermes-key-dot::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 6px var(--amber-glow); }
+.hermes-key-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hermes-key-name { font: 600 15px/1.2 var(--display); letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.hermes-key-meta { color: var(--faint); font: 400 11px/1.4 var(--mono); }
+.hermes-key-form { margin-top: 10px; }
+@media (max-width: 600px) {
+  .segmented.hermes-places.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hermes-key-add, .hermes-typed { flex-direction: column; align-items: stretch; }
+  .hermes-key-add > input, .hermes-typed > input { flex: none; width: 100%; }
+  .hermes-key-form .row > .btn, .hermes-typed > .btn { width: 100%; justify-content: center; }
+}
 .notice { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); }
 .notice.warn { border-color: var(--amber-line); background: var(--amber-wash); color: var(--text); }
 .notice > svg { flex: none; margin-top: 3px; color: var(--amber); }

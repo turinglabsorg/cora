@@ -2347,6 +2347,7 @@ export const EN = {
   "I modelli compaiono appena la chiave risponde.": "The models show up once the key answers.",
   "Scrivi il nome del modello, oppure aspetta l'elenco della chiave.": "Type the model name, or wait for the key's list.",
   "Usa questo nome": "Use this name",
+  "Un modello che non è in elenco": "A model not in the list",
   "Nome del modello": "Model name",
   "Dove gira Hermes": "Where Hermes runs",
   "Nessun modello del router.": "No router models.",
