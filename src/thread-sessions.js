@@ -1,10 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { hostname } from "node:os";
+import { readFileSync } from "node:fs";
+import { hostname, uptime } from "node:os";
 
 /** The CLI child started by the turn running in this async context. */
 export const noteChildPid = new AsyncLocalStorage();
 
 const STALE_MS = 45000;
+
+/** This boot of the machine: a pid saved before a reboot names some other process now. */
+export function machineBoot() {
+  try { return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(); } catch {
+    return `up-${Math.round((Date.now() / 1000 - uptime()) / 60)}`;
+  }
+}
 
 /** A dead harness: the account spend limit, or a broken transport. A model's own quota reply is handled by the brain and must not start a second instance. A stop or an abort is not one of these. */
 export function sessionFailure(error) {
@@ -48,14 +56,23 @@ export class ThreadSessions {
     this.store = store;
     this.boot = `boot_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     this.host = hostname();
+    this.machine = machineBoot();
     this.beats = new Map();
+  }
+
+  /** The saved pid is still that CLI only on this machine, since its last boot. */
+  ownPid(session) {
+    if (!session?.pid) return false;
+    if (session.host && session.host !== this.host) return false;
+    if (session.machine && session.machine !== this.machine) return false;
+    return pidAlive(session.pid);
   }
 
   /** Previous process: if its CLI is still alive, kill it, then the row is no longer active. */
   reap() {
     for (const session of this.store.activeThreadSessions()) {
       if (session.boot === this.boot) continue;
-      if (pidAlive(session.pid)) killPid(session.pid);
+      if (this.ownPid(session)) killPid(session.pid);
       this.store.closeThreadSession(session.id, { status: "killed", error: "chiusa al riavvio: il processo precedente è stato fermato" });
     }
   }
@@ -67,7 +84,7 @@ export class ThreadSessions {
 
   alive(session) {
     if (!session || session.status !== "active") return false;
-    if (pidAlive(session.pid)) return true;
+    if (this.ownPid(session)) return true;
     return session.boot === this.boot && Date.now() - Date.parse(session.heartbeatAt) < STALE_MS;
   }
 
@@ -76,7 +93,7 @@ export class ThreadSessions {
       const current = this.store.activeThreadSession(agentId, channelId);
       if (current && this.alive(current)) return null;
       if (current) this.store.closeThreadSession(current.id, { status: "interrupted", error: "segnale di vita assente" });
-      return this.store.openThreadSession({ agentId, channelId, kind, boot: this.boot, host: this.host, replaces });
+      return this.store.openThreadSession({ agentId, channelId, kind, boot: this.boot, host: this.host, machine: this.machine, replaces });
     });
     if (!session) return null;
     const beat = setInterval(() => {
@@ -104,9 +121,9 @@ export class ThreadSessions {
   stop(agentId, channelId) {
     const session = this.store.activeThreadSession(agentId, channelId);
     if (!session) return null;
-    const pid = session.pid;
+    const own = this.ownPid(session);
     this.finish(session, { status: "stopped", error: "fermata dal pannello" });
-    if (pidAlive(pid)) killPid(pid);
+    if (own) killPid(session.pid);
     return session;
   }
 }

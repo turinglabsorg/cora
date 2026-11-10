@@ -3,9 +3,11 @@ import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { Orchestrator } from "../src/orchestrator.js";
 import { Store } from "../src/store.js";
-import { ThreadSessions, pidAlive, sessionFailure } from "../src/thread-sessions.js";
+import { hostname } from "node:os";
+import { ThreadSessions, machineBoot, pidAlive, sessionFailure } from "../src/thread-sessions.js";
 import { fakeDocker, fakeOllama, tempHome } from "./helpers.js";
 import { startCora } from "../src/main.js";
+import { knowledgeWorld } from "./knowledge-fixtures.js";
 
 function sessions() {
   const store = new Store(tempHome());
@@ -50,12 +52,35 @@ test("restart kills the previous process before a new session starts", async () 
   const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
   child.unref();
   try {
-    const stale = store.openThreadSession({ agentId: "ag_a", channelId: "ch", kind: "chat", boot: "previous", host: "old", pid: child.pid });
+    const stale = store.openThreadSession({ agentId: "ag_a", channelId: "ch", kind: "chat", boot: "previous", host: hostname(), machine: machineBoot(), pid: child.pid });
     const live = new ThreadSessions(store);
     live.reap();
     assert.equal(store.threadSession(stale.id).status, "killed");
     await new Promise((resolve) => setTimeout(resolve, 400));
     assert.equal(pidAlive(child.pid), false);
+  } finally {
+    try { process.kill(child.pid, "SIGKILL"); } catch { /* already stopped */ }
+    store.close();
+  }
+});
+
+test("a pid saved before a reboot or on another machine is never killed and never holds the thread", async () => {
+  const { store } = sessions();
+  const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  child.unref();
+  try {
+    const rebooted = store.openThreadSession({ agentId: "ag_a", channelId: "ch", kind: "chat", boot: "previous", host: hostname(), machine: "another-boot", pid: child.pid });
+    const elsewhere = store.openThreadSession({ agentId: "ag_b", channelId: "ch", kind: "chat", boot: "previous", host: "other-host", machine: machineBoot(), pid: child.pid });
+    const live = new ThreadSessions(store);
+    assert.equal(live.blocking("ag_a", "ch"), null);
+    live.reap();
+    assert.equal(store.threadSession(rebooted.id).status, "killed");
+    assert.equal(store.threadSession(elsewhere.id).status, "killed");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(pidAlive(child.pid), true);
+    const next = live.begin({ agentId: "ag_a", channelId: "ch", kind: "chat" });
+    assert.ok(next);
+    live.finish(next);
   } finally {
     try { process.kill(child.pid, "SIGKILL"); } catch { /* already stopped */ }
     store.close();
@@ -127,4 +152,100 @@ test("the thread board shows one flow per agent and stop ends only that flow", a
   assert.equal(flows.find((flow) => flow.agentId === vera.id).status, "active");
   const anon = await fetch(base + "/api/threads/close", { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ id: channelId }) });
   assert.equal(anon.status, 401);
+});
+
+test("the thread page keeps names, refuses channels, reopens closed threads and shows every turn", async (t) => {
+  const ollama = await fakeOllama(() => ({ content: "PASS" }));
+  const app = startCora({
+    home: tempHome(), host: "127.0.0.1", port: 0, adminPassword: "fixture-password", sessionKey: "fixture-session", insecureCookies: true,
+    useResidentSubscriptions: false, cloudUrl: "", cloudKey: "", cloudSpace: "", discordToken: "", telegramToken: "", botTokenFor: () => "",
+    ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
+    ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
+  });
+  t.after(async () => { await app.stop(); await ollama.close(); });
+  await app.ready;
+  const nico = app.store.createAgent({ name: "Nico" });
+  const vera = app.store.createAgent({ name: "Vera" });
+  const threadId = "155500000000000123";
+  const channelId = "155500000000000124";
+  const orch = app.orchestrator;
+  const listed = [
+    { id: channelId, name: "generale", kind: "discord", guildId: "g1", thread: false },
+    { id: threadId, name: "REF-62 pagine Admin", kind: "discord", guildId: "g1", thread: true, parentId: channelId },
+  ];
+  const realList = orch.channels.list.bind(orch.channels);
+  orch.channels.list = () => [...realList(), ...listed];
+  const first = orch.sessions.begin({ agentId: nico.id, channelId: threadId, kind: "chat" });
+  orch.sessions.finish(first);
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const login = await fetch(base + "/api/login", { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ password: "fixture-password" }) });
+  const cookie = login.headers.get("set-cookie").split(";")[0];
+  const call = async (path, body) => {
+    const response = await fetch(base + path, { method: body ? "POST" : "GET", headers: { "X-Cora": "1", "Content-Type": "application/json", Cookie: cookie }, body: body ? JSON.stringify(body) : undefined });
+    return { status: response.status, body: await response.json() };
+  };
+  const seen = (await call("/api/threads")).body.threads.find((thread) => thread.id === threadId);
+  assert.equal(seen.name, "REF-62 pagine Admin");
+  assert.equal(seen.parentName, "generale");
+
+  // Archived on Discord: the gateway no longer lists it, the remembered name stays.
+  listed.pop();
+  const archived = (await call("/api/threads")).body.threads.find((thread) => thread.id === threadId);
+  assert.equal(archived.name, "REF-62 pagine Admin");
+  assert.equal(archived.thread, true);
+  assert.equal(archived.link, `https://discord.com/channels/g1/${threadId}`);
+  assert.equal(archived.open, false);
+
+  // A whole channel is not renamed or closed from here.
+  orch.sessions.finish(orch.sessions.begin({ agentId: vera.id, channelId, kind: "chat" }));
+  const rename = await call("/api/threads/rename", { id: channelId, name: "nuovo" });
+  assert.equal(rename.status, 400);
+  const close = await call("/api/threads/close", { id: channelId });
+  assert.equal(close.status, 400);
+
+  // Closed, then someone writes again: the thread is open again.
+  app.store.setValue("closedThreads", [threadId]);
+  await orch.withSession(nico, threadId, "chat", async () => ({ text: "ok" }));
+  assert.equal(app.store.value("closedThreads", []).includes(threadId), false);
+
+  const trace = orch.brain.traces.start({ agentId: nico.id, kind: "chat", channelId: threadId, model: "ollama/fixture", prompt: "p", system: "s" });
+  trace.add({ type: "thinking", text: "Leggo la pagina Settori" });
+  const page = await call(`/api/threads/${threadId}`);
+  assert.equal(page.status, 200);
+  assert.equal(page.body.thread.name, "REF-62 pagine Admin");
+  const turn = page.body.traces.find((item) => item.id === trace.id);
+  assert.ok(turn);
+  assert.equal(turn.agentName, "Nico");
+  assert.equal(turn.prompt, undefined);
+  assert.equal(turn.system, undefined);
+  assert.equal(turn.steps[0].text, "Leggo la pagina Settori");
+  trace.finish({ status: "done", output: "Fatto" });
+  const stored = (await call(`/api/threads/${threadId}`)).body.traces.find((item) => item.id === trace.id);
+  assert.equal(stored.output, "Fatto");
+  assert.equal(stored.steps.length, 1);
+  assert.equal(stored.prompt, undefined);
+  assert.equal((await call("/api/threads/155500000000000999")).status, 404);
+});
+
+test("a co-owner stops only the sessions of agents they manage and sees only their turns", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const mine = f.app.store.createAgent({ name: "Clara", brainOwnerId: f.alice.user.id, tools: false });
+  const other = f.app.store.createAgent({ name: "Milo", brainOwnerId: f.bob.user.id, tools: false });
+  const channelId = "155500000000000321";
+  f.app.orchestrator.sessions.begin({ agentId: mine.id, channelId, kind: "chat" });
+  f.app.orchestrator.sessions.begin({ agentId: other.id, channelId, kind: "chat" });
+  const turnOf = (agent) => { const trace = f.app.orchestrator.brain.traces.start({ agentId: agent.id, kind: "chat", channelId }); trace.finish({ status: "done", output: agent.name }); return trace; };
+  turnOf(mine); turnOf(other);
+  const board = await f.request(f.alice, "/api/threads");
+  const row = board.data.threads.find((thread) => thread.id === channelId);
+  assert.deepEqual(row.flows.map((flow) => [flow.agentName, flow.canStop]), [["Clara", true]]);
+  const page = await f.request(f.alice, `/api/threads/${channelId}`);
+  assert.deepEqual(page.data.traces.map((trace) => trace.agentName), ["Clara"]);
+  assert.equal((await f.request(f.alice, "/api/threads/stop", { method: "POST", body: { id: channelId, agentId: other.id } })).status, 403);
+  assert.equal((await f.request(f.alice, "/api/threads/stop", { method: "POST", body: { id: channelId } })).status, 403);
+  assert.equal((await f.request(f.alice, "/api/threads/rename", { method: "POST", body: { id: channelId, name: "x" } })).status, 403);
+  const stopped = await f.request(f.alice, "/api/threads/stop", { method: "POST", body: { id: channelId, agentId: mine.id } });
+  assert.equal(stopped.status, 200);
+  assert.equal(stopped.data.stopped, 1);
+  assert.equal(f.app.store.activeThreadSession(other.id, channelId)?.status, "active");
 });

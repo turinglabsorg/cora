@@ -509,6 +509,7 @@ function threadSessionRow(row) {
     pid: row.pid || 0,
     boot: row.boot || "",
     host: row.host || "",
+    machine: row.machine || "",
     traceId: row.trace_id || "",
     startedAt: row.started_at,
     heartbeatAt: row.heartbeat_at,
@@ -585,7 +586,9 @@ export class Store {
   tokens_in INTEGER NOT NULL DEFAULT 0,
   tokens_out INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS thread_sessions_lookup ON thread_sessions(agent_id, channel_id, started_at);`);
+CREATE INDEX IF NOT EXISTS thread_sessions_lookup ON thread_sessions(agent_id, channel_id, started_at);
+CREATE INDEX IF NOT EXISTS traces_channel ON traces(channel_id, started_at);`);
+    try { this.db.exec("ALTER TABLE thread_sessions ADD COLUMN machine TEXT NOT NULL DEFAULT ''"); } catch {}
     try { this.db.exec("ALTER TABLE messages ADD COLUMN meta TEXT"); } catch {}
     // Older databases have no token counts: their traces simply read as zero.
     for (const column of ["tokens_in", "tokens_out"]) {
@@ -1538,12 +1541,12 @@ CREATE INDEX IF NOT EXISTS thread_sessions_lookup ON thread_sessions(agent_id, c
 
 
   /* ---------- thread sessions ---------- */
-  openThreadSession({ agentId, channelId, kind, boot, host, replaces = "", pid = 0 }) {
+  openThreadSession({ agentId, channelId, kind, boot, host, machine = "", replaces = "", pid = 0 }) {
     const id = newId("ts");
     const now = new Date().toISOString();
-    this.stmt(`INSERT INTO thread_sessions(id, agent_id, channel_id, kind, status, pid, boot, host, trace_id, started_at, heartbeat_at, ended_at, error, replaces, tokens_in, tokens_out)
-      VALUES (?, ?, ?, ?, 'active', ?, ?, ?, '', ?, ?, NULL, '', ?, 0, 0)`).run(
-      id, String(agentId), String(channelId), String(kind || "chat"), Number(pid) || 0, String(boot || ""), String(host || ""), now, now, String(replaces || ""),
+    this.stmt(`INSERT INTO thread_sessions(id, agent_id, channel_id, kind, status, pid, boot, host, machine, trace_id, started_at, heartbeat_at, ended_at, error, replaces, tokens_in, tokens_out)
+      VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, '', ?, ?, NULL, '', ?, 0, 0)`).run(
+      id, String(agentId), String(channelId), String(kind || "chat"), Number(pid) || 0, String(boot || ""), String(host || ""), String(machine || ""), now, now, String(replaces || ""),
     );
     return this.threadSession(id);
   }
@@ -1580,6 +1583,13 @@ CREATE INDEX IF NOT EXISTS thread_sessions_lookup ON thread_sessions(agent_id, c
     this.stmt("UPDATE thread_sessions SET status = ?, error = ?, ended_at = ? WHERE id = ? AND status = 'active'").run(
       String(status || "done"), String(error || "").slice(0, 500), new Date().toISOString(), String(id),
     );
+  }
+
+  /** The turns of every agent in one channel, newest first, with their steps but not the prompt. */
+  channelTraces(channelId, limit = 60) {
+    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal, meter, steps FROM traces WHERE channel_id = ? ORDER BY started_at DESC LIMIT ?")
+      .all(String(channelId), Math.max(1, Math.min(200, Number(limit) || 60)))
+      .map((row) => ({ ...traceRow(row, false), output: row.output || "", steps: JSON.parse(row.steps || "[]") }));
   }
 
   traceBrief(id) {

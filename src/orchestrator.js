@@ -1896,6 +1896,9 @@ export class Orchestrator {
   async withSession(agent, channelId, kind, fn) {
     const holder = { session: this.sessions.begin({ agentId: agent.id, channelId, kind }) };
     if (!holder.session) return { busy: true };
+    // A closed thread someone writes in again is open again.
+    const closed = this.store.value("closedThreads", []);
+    if (closed.includes(channelId)) this.store.setValue("closedThreads", closed.filter((id) => id !== channelId));
     let failed = null;
     const once = () => noteChildPid.run((pid) => this.sessions.notePid(holder.session.id, pid), fn);
     const remember = (value) => {
@@ -1946,25 +1949,66 @@ export class Orchestrator {
     return null;
   }
 
-  threadBoard() {
+  /**
+   * The names of the threads, remembered: Discord forgets an archived thread, and
+   * after a restart the gateway only lists the open ones, so a number would show.
+   */
+  threadNames(ids, known) {
+    const names = this.store.value("threadNames", {});
+    let changed = false;
+    for (const channel of known.values()) {
+      if (!(channel.thread || channel.parentId) || !channel.name) continue;
+      const saved = names[channel.id];
+      if (saved?.name === channel.name && saved?.parentId === (channel.parentId || "")) continue;
+      names[channel.id] = { name: channel.name, parentId: channel.parentId || "", guildId: channel.guildId || "", thread: true };
+      changed = true;
+    }
+    if (changed) this.store.setValue("threadNames", names);
+    this.nameMisses ||= new Map();
+    const missing = this.discord?.token ? ids.filter((id) => !known.has(id) && !names[id] && transportOf(id) === "discord" && /^\d{5,}$/.test(id)
+      && Date.now() - (this.nameMisses.get(id) || 0) > 10 * 60 * 1000).slice(0, 10) : [];
+    for (const id of missing) {
+      // Asked once in the background: the page shows the name at its next refresh.
+      this.nameMisses.set(id, Date.now());
+      this.discord.request("GET", `/channels/${id}`).then((channel) => {
+        if (!channel?.name) return;
+        const saved = this.store.value("threadNames", {});
+        saved[id] = { name: channel.name, parentId: channel.parent_id || "", guildId: channel.guild_id || "", thread: [10, 11, 12].includes(channel.type) };
+        this.store.setValue("threadNames", saved);
+        this.nameMisses.delete(id);
+      }).catch(() => {});
+    }
+    return names;
+  }
+
+  async threadBoard() {
     const labels = this.store.value("threadLabels", {});
     const closed = new Set(this.store.value("closedThreads", []));
     const known = new Map((this.channels?.list?.() || []).map((channel) => [channel.id, channel]));
+    const sessions = this.store.threadSessions(400);
+    const ids = [...new Set([...Object.keys(labels), ...sessions.map((session) => session.channelId)])];
+    const names = this.threadNames(ids, known);
     const groups = new Map();
     const ensure = (id) => {
       if (groups.has(id)) return groups.get(id);
       const channel = known.get(id);
+      const saved = names[id];
       const slack = slackIds(id);
-      const kind = channel?.kind || (slack ? "slack" : isWebRoom(id) ? "web" : "discord");
+      const kind = channel?.kind || (slack ? "slack" : isWebRoom(id) ? "web" : transportOf(id) === "telegram" ? "telegram" : "discord");
+      const info = !channel && !saved && (kind === "web" || kind === "telegram") ? this.channels?.info?.(id) : null;
+      const guildId = channel?.guildId || saved?.guildId || "";
+      const parentId = channel?.parentId || saved?.parentId || (slack?.threadTs ? slackChannel(slack.channelId) : "");
       const group = {
         id,
-        name: labels[id] || channel?.name || id,
+        name: labels[id] || channel?.name || saved?.name || info?.name || id,
         kind,
-        thread: Boolean(channel?.thread || channel?.parentId || slack?.threadTs),
-        parentId: channel?.parentId || (slack?.threadTs ? slackChannel(slack.channelId) : ""),
-        guildId: channel?.guildId || "",
-        link: kind === "discord" && channel?.guildId ? `https://discord.com/channels/${channel.guildId}/${id}` : "",
+        thread: Boolean(channel?.thread || channel?.parentId || saved?.thread || slack?.threadTs),
+        parentId,
+        parentName: parentId ? (known.get(parentId)?.name || "") : "",
+        guildId,
+        link: kind === "discord" && guildId ? `https://discord.com/channels/${guildId}/${id}` : "",
         closed: closed.has(id),
+        open: Boolean(channel) && !closed.has(id),
         flows: [],
       };
       groups.set(id, group);
@@ -1972,7 +2016,7 @@ export class Orchestrator {
     };
     for (const channel of known.values()) if (channel.thread || channel.parentId) ensure(channel.id);
     for (const id of Object.keys(labels)) ensure(id);
-    for (const session of this.store.threadSessions(400)) {
+    for (const session of sessions) {
       const group = ensure(session.channelId);
       const agent = this.store.agent(session.agentId);
       const live = session.status === "active" ? this.liveTrace(session.agentId, session.channelId) : null;
@@ -2001,6 +2045,22 @@ export class Orchestrator {
     return { threads: [...groups.values()], parents };
   }
 
+  /** One thread whole: its flows and every turn the agents took in it, with their steps. */
+  async threadDetail(id) {
+    const board = await this.threadBoard();
+    const thread = board.threads.find((item) => item.id === id);
+    if (!thread) return null;
+    const live = [...(this.brain?.traces?.live?.values?.() || [])].filter((trace) => trace.channelId === id).map((trace) => trace.full());
+    const stored = this.store.channelTraces(id, 60).filter((trace) => !live.some((item) => item.id === trace.id));
+    const traces = [...live.map(({ prompt, system, ...trace }) => trace), ...stored]
+      .sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
+      .map((trace) => {
+        const agent = this.store.agent(trace.agentId);
+        return { ...trace, agentName: agent?.name || trace.agentId, color: agent?.color || "#f2a93b" };
+      });
+    return { thread, traces };
+  }
+
   async createPlatformThread({ parentId, name }) {
     const clean = String(name || "").trim().slice(0, 100);
     if (!clean) throw Object.assign(new Error("manca il nome"), { status: 400 });
@@ -2027,9 +2087,18 @@ export class Orchestrator {
     throw Object.assign(new Error("un thread si crea su Discord o Slack"), { status: 400 });
   }
 
+  /** Only a thread is renamed or closed here: a whole Discord or Slack channel is not. */
+  async platformThread(id) {
+    const thread = (await this.threadBoard()).threads.find((item) => item.id === id);
+    if (!thread) throw Object.assign(new Error("thread non trovato"), { status: 404 });
+    if (!thread.thread) throw Object.assign(new Error("è un canale, non un thread"), { status: 400 });
+    return thread;
+  }
+
   async renamePlatformThread(id, name) {
     const clean = String(name || "").trim().slice(0, 100);
     if (!clean || !id) throw Object.assign(new Error("manca il nome"), { status: 400 });
+    await this.platformThread(id);
     if (transportOf(id) === "discord" && /^\d{5,}$/.test(id)) {
       await this.discord.request("PATCH", `/channels/${id}`, { body: { name: clean } });
     }
@@ -2051,6 +2120,7 @@ export class Orchestrator {
   }
 
   async closePlatformThread(id) {
+    await this.platformThread(id);
     this.stopThread(id);
     if (transportOf(id) === "discord" && /^\d{5,}$/.test(String(id))) {
       await this.discord.request("PATCH", `/channels/${id}`, { body: { archived: true } }).catch(() => {});

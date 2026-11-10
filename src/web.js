@@ -803,16 +803,37 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       throw new HttpError(404, "not found");
     }
+    const canStopFlow = (agentId) => user.role === "owner" || Boolean(knowledge?.canManage(store.agent(agentId), user));
     if (path === "/api/threads" && method === "GET") {
-      const board = orchestrator.threadBoard();
+      const board = await orchestrator.threadBoard();
       if (knowledge?.ownerMemory && user.role !== "owner") {
         const allowed = new Set(knowledge.agentsFor(user).map((agent) => agent.id));
         board.threads = board.threads.map((thread) => ({ ...thread, flows: thread.flows.filter((flow) => allowed.has(flow.agentId)) }));
         board.parents = [];
       }
+      board.threads = board.threads.map((thread) => ({ ...thread, flows: thread.flows.map((flow) => ({ ...flow, canStop: canStopFlow(flow.agentId) })) }));
       return send(res, 200, board);
     }
-    if (["/api/threads", "/api/threads/rename", "/api/threads/stop", "/api/threads/close"].includes(path) && method === "POST" && user.role !== "owner") {
+    const threadPage = /^\/api\/threads\/([\w:.%-]{3,160})$/.exec(path);
+    if (threadPage && !["rename", "stop", "close"].includes(threadPage[1]) && method === "GET") {
+      const detail = await orchestrator.threadDetail(decodeURIComponent(threadPage[1]));
+      if (!detail) throw new HttpError(404, "thread non trovato");
+      if (knowledge?.ownerMemory && user.role !== "owner") {
+        const allowed = new Set(knowledge.agentsFor(user).map((agent) => agent.id));
+        detail.thread.flows = detail.thread.flows.filter((flow) => allowed.has(flow.agentId));
+        detail.traces = detail.traces.filter((trace) => allowed.has(trace.agentId));
+      }
+      if (knowledge?.ownerMemory) detail.traces = detail.traces.filter((trace) => ownsEntry(trace, user));
+      detail.thread.flows = detail.thread.flows.map((flow) => ({ ...flow, canStop: canStopFlow(flow.agentId) }));
+      return send(res, 200, detail);
+    }
+    if (path === "/api/threads/stop" && method === "POST" && user.role !== "owner") {
+      // A co-owner stops the session of an agent they manage, nothing else.
+      const body = await readJson(req, 4000);
+      if (!body.agentId || !canStopFlow(String(body.agentId))) throw new HttpError(403, "Solo il proprietario");
+      return send(res, 200, orchestrator.stopThread(String(body.id || ""), String(body.agentId)));
+    }
+    if (["/api/threads", "/api/threads/rename", "/api/threads/close"].includes(path) && method === "POST" && user.role !== "owner") {
       throw new HttpError(403, "Solo il proprietario");
     }
     if (path === "/api/threads" && method === "POST") {
