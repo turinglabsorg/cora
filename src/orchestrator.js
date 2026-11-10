@@ -670,8 +670,8 @@ export class Orchestrator {
         for (const id of focus.ids) {
           const agent = this.agentsFor(channelId).find((candidate) => candidate.id === id);
           if (!agent) continue;
-          // A working agent is not idle: nobody asks it whether it still wants to listen.
-          if (this.agentWorking(agent.id)) continue;
+          // An agent at work in this conversation is not idle here; work elsewhere does not postpone the question.
+          if (this.states.get(channelId)?.working?.has(agent.id) || this.threadWork.has(channelId, agent.id)) continue;
           if (transportOf(channelId) === "discord" && !this.dmAgentId(channelId) && this.bots && !await this.bots.canRead(agent, channelId)) continue;
           if (this.engagements[channelId] !== focus) break;
           const text = this.store.settings.language === "en" ? "It has been 30 minutes since the last message. Should I keep listening to this conversation? I will stay connected until you explicitly ask me to leave." : "Sono passati 30 minuti dall'ultimo messaggio. Devo rimanere in ascolto di questa conversazione? Resto collegato finché non mi chiedi esplicitamente di uscire.";
@@ -992,12 +992,6 @@ export class Orchestrator {
   }
 
   /** True while the agent is on a task anywhere: its own work is not silence. */
-  agentWorking(agentId) {
-    for (const state of this.states.values()) if (state.working?.has(agentId)) return true;
-    for (const agents of this.threadWork.values()) if (agents.has(agentId)) return true;
-    return false;
-  }
-
   /** Any message in the conversation restarts the thirty minutes, the agent's own included. */
   restartInactivity(state, agentId, at) {
     const focus = state.focus;

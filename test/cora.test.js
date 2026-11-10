@@ -4277,6 +4277,30 @@ describe("talking with the agents", () => {
     assert.equal(reminders().length, 1);
   });
 
+  test("work in another conversation does not postpone the thirty-minute question", async () => {
+    const IDLE = "1599000000000000797";
+    const BUSY = "1599000000000000798";
+    discord.dispatch("THREAD_CREATE", { id: IDLE, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle elsewhere" });
+    discord.dispatch("THREAD_CREATE", { id: BUSY, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "busy elsewhere" });
+    await sleep(100);
+    const reminders = () => discord.state.webhookPosts.filter((item) => item.channelId === IDLE && /30 minuti/.test(item.content));
+    replies.set("Olga", () => ({ content: "Resto qui." }));
+    discord.say({ content: "@Olga, ascolta qui", channel: IDLE });
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === IDLE && item.content === "Resto qui."), { what: "Olga in the idle thread" });
+    await quiet();
+    const start = app.orchestrator.engagements[IDLE].at;
+    let release;
+    const working = new Promise((resolve) => { release = resolve; });
+    replies.set("Olga", async () => { await working; return { content: "Fatto altrove." }; });
+    discord.say({ content: "@Olga, lavora qui con calma", channel: BUSY });
+    await waitFor(() => app.orchestrator.state(BUSY).working?.has(olga.id), { what: "Olga at work elsewhere" });
+    await app.orchestrator.checkEngagements(start + 30 * 60000);
+    assert.equal(reminders().length, 1, "the idle conversation is asked on time even while she works in another one");
+    release();
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === BUSY && item.content === "Fatto altrove."), { what: "Olga's result elsewhere" });
+    await quiet();
+  });
+
   test("an agent at work shows it the way a person does, without a line in the channel", async () => {
     const before = discord.state.typing;
     let turn = 0;
