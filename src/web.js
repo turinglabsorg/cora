@@ -495,6 +495,10 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (path === "/api/connectors/google" && method === "POST") {
       if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega account Google.");
       const started = googleConnector.begin(user);
+      if (actingUser) {
+        googleConnector.pending.delete(started.nonce);
+        return send(res, 409, { error: "Google sign-in requires your browser session. Open the returned Cora page and connect the account there.", browserAction: { path: "/#/settings/connettori/google", identity: user.id } });
+      }
       const name = config.insecureCookies ? "cora_google" : "__Host-cora_google";
       return send(res, 200, { url: started.url }, { "Set-Cookie": `${name}=${started.nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=900${config.insecureCookies ? "" : "; Secure"}` });
     }

@@ -713,6 +713,27 @@ test("external configuration MCP validates its transport and cannot proxy extern
   assert.deepEqual(JSON.parse(guide.content[0].text).areas.map(area => area.id), ["email"]);
 });
 
+test("external configuration MCP returns a browser handoff for new Google connections without issuing browser cookies", async (t) => {
+  const f = await panelMcpWorld(t), access = await f.issue(f.alice), reader = await f.issue(f.alice, { readOnly: true });
+  const connector = f.app.googleConnector;
+  connector.enabled = false;
+  const gated = (await f.invoke(access, { method: "POST", path: "/api/connectors/google" })).data.result;
+  assert.equal(gated.structuredContent.status, 409); assert.equal(gated.structuredContent.data.browserAction, undefined);
+  connector.enabled = true; connector.broker = "https://fixture-broker.test"; connector.space = "fixture";
+  const reply = await f.invoke(access, { method: "POST", path: "/api/connectors/google" });
+  const result = reply.data.result;
+  assert.equal(result.isError, true); assert.equal(result.structuredContent.status, 409);
+  assert.deepEqual(result.structuredContent.data.browserAction, { path: "/#/settings/connettori/google", identity: f.alice.user.id, url: f.base + "/#/settings/connettori/google" });
+  assert.equal(reply.headers.get("set-cookie"), null);
+  assert.equal(connector.pending.size, 0, "MCP must not leave an unusable browser-bound nonce");
+  assert.equal((await f.invoke(reader, { method: "POST", path: "/api/connectors/google" })).data.result.structuredContent.status, 403);
+  assert.equal(connector.pending.size, 0);
+  const native = await fetch(f.base + "/api/connectors/google", { method: "POST", headers: { ...f.alice.headers, "X-Cora": "1" } });
+  assert.equal(native.status, 200); assert.ok(native.headers.get("set-cookie").includes("cora_google="));
+  assert.ok((await native.json()).url.startsWith("https://fixture-broker.test/"));
+  assert.equal(connector.pending.size, 1, "the browser route retains its own nonce protection");
+});
+
 test("external configuration MCP panel keeps personal drafts and one-time masked tokens until saved or revoked", async (t) => {
   const f = await panelMcpWorld(t);
   await f.issue(f.bob, { name: "Bob private client" });

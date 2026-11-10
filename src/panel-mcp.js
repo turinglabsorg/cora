@@ -13,7 +13,7 @@ const publicToken = ({ hash: _hash, userId: _userId, ...record }) => record;
 
 const AREAS = [
   { id: "agents", paths: ["/api/agents", "/api/agents/{id}", "/api/agents/{id}/owners", "/api/agents/{id}/permissions", "/api/agents/{id}/knowledge"], help: "Read an agent before updating its identity, personality, model, subscription, voice or listening fields. Owners and chat permissions use their dedicated routes and version checks." },
-  { id: "email", paths: ["/api/connectors", "/api/connectors/google", "/api/connectors/{id}", "/api/mail/channel", "/api/mail/domains", "/api/mail/accounts", "/api/agents/{id}/email", "/api/agents/{id}/mailbox"], help: "Manage Google assignments, receiving rules, report destinations, sender, signature, Resend accounts and domains. Account connections remain private to their connector; space settings require the space owner." },
+  { id: "email", paths: ["/api/connectors", "/api/connectors/google", "/api/connectors/{id}", "/api/mail/channel", "/api/mail/domains", "/api/mail/accounts", "/api/agents/{id}/email", "/api/agents/{id}/mailbox"], help: "Manage Google assignments, receiving rules, report destinations, sender, signature, Resend accounts and domains. A new Google connection returns browserAction: open its URL and connect while signed into Cora as this same person, then read the connections again. Account connections remain private to their connector; space settings require the space owner." },
   { id: "memory", paths: ["/api/brain", "/api/brain/pages", "/api/brain/pages/{slug}", "/api/brain/review", "/api/brain/sharing", "/api/agents/{id}/memories", "/api/agents/{id}/core"], help: "Brain requests can carry an ownerId query only for an authorized Brain scope. Read existing pages and memory before editing. Private and external Brain rules remain enforced." },
   { id: "routines", paths: ["/api/agents/{id}/routines", "/api/routines/{id}", "/api/routines/history", "/api/routines/archive", "/api/cron/preview"], help: "Create routines or one-time reminders with the saved agent id and an accessible destination. Read history and existing definitions before replacing schedules or prompts." },
   { id: "accounts", paths: ["/api/subscriptions", "/api/subscriptions/{id}", "/api/providers/{provider}/key", "/api/agents/{id}/github", "/api/agents/{id}/bot", "/api/agents/{id}/telegram-bot", "/api/agents/{id}/slack-bot"], help: "Subscription and connector credentials retain their original owner. Use the native login/check routes when needed; complete human sign-in using the returned link. Stored secrets are never read back." },
@@ -113,6 +113,7 @@ export class PanelMcp {
       }
       result = await this.request(user, record, params.name === "cora_state" ? { path: "/api/state" } : args);
     } catch (error) { if (error.code) throw error; result = { status: error.status || 500, data: { error: error.message } }; }
+    if (result.status === 409 && result.data?.browserAction?.path === "/#/settings/connettori/google") result.data.browserAction.url = new URL(result.data.browserAction.path, context.endpoint).href;
     return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: result.status >= 400 };
   }
   async handle(req, res, readJson) {
@@ -125,6 +126,7 @@ export class PanelMcp {
     }
     const context = this.authenticate(req);
     if (!context) return send(401, { error: "Accesso MCP non valido o scaduto." }, { "WWW-Authenticate": 'Bearer realm="Cora MCP"' });
+    context.endpoint = this.endpoint(req);
     const version = req.headers["mcp-protocol-version"];
     if (version && !VERSIONS.includes(version)) return send(400, { error: "Unsupported MCP protocol version." });
     if (req.method !== "POST") return send(405, { error: "Use POST for this stateless MCP endpoint." }, { Allow: "POST" });

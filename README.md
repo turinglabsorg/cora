@@ -231,6 +231,8 @@ The endpoint is `https://<instance>/mcp`. It accepts JSON-RPC POST requests, sup
 
 These are panel configuration tools, separate from the internal per-turn MCP server used by Cora's agents. Requests resolve the token creator's current identity and admission every time. Space administration remains owner-only, and private agents, Brains, accounts and files retain their existing ownership and sharing rules; an administrator's cookie cannot override the token identity. Read-only tokens reject every write. Expiry, admission removal and revocation take effect immediately. Authentication/bootstrap routes, event streams and MCP-token issuance are excluded from the tools. Browser requests must have the instance's own Origin when an Origin header is present.
 
+Connecting a new Google account requires the person's browser session. An MCP request returns HTTP status 409 and `browserAction` with the Cora Google settings URL and the required identity. Open that URL while signed into Cora as the same person, choose Connect Google and complete consent there, then read `/api/connectors` again through MCP before assigning agents or selecting a sender. The MCP response never transfers the browser's nonce cookie, and the verification gate still refuses new connections while unavailable.
+
 ### Reminders and history
 
 Open an agent’s **Routines and reminders** tab to create a recurring routine or a one-time reminder. A reminder uses an exact date/time rather than cron. It runs once when due; an independent, tool-free verification checks the actual tool results and delivered reply before Cora automatically archives it. This verification also works with Claude and Codex subscriptions and remains active when goal mode is off.
