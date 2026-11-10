@@ -270,6 +270,7 @@ class OwnerBrain {
   state(...args) { return this.own.state(...args); }
   stats() { return this.own.stats(); }
   reviewQueue() { return this.own.reviewQueue(); }
+  diary(span) { return this.own.diary(span); }
   review(input) { return this.own.review(input); }
   note(input) { return this.own.note(input); }
   archive(slug, input) { if (slug.startsWith("shared-")) throw new KnowledgeError("Solo il proprietario modifica questa pagina.", 403); return this.own.archive(slug, input); }

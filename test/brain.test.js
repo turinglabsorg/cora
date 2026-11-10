@@ -159,6 +159,22 @@ test("the librarian turns the chats into the company brain, the agents read it, 
   assert.match(edited.data.revisions[0].author, /^owner:/);
   assert.equal((await call("/api/brain")).data.stats.pending, 0);
 
+  // The diary: one day of the brain, page changes with their authors and the agents' notes.
+  const now = Date.now(), day = (from, to) => `/api/brain/diary?from=${new Date(from).toISOString()}&to=${new Date(to).toISOString()}`;
+  const today = await call(day(now - 86400000, now + 60000));
+  assert.equal(today.status, 200);
+  const seen = today.data.changes.map((change) => `${change.slug}:${change.action}`);
+  for (const step of ["acme:create", "acme:update", "giulia-ferri:create", "fatturazione:create"]) assert.ok(seen.includes(step), `${step} is in the diary`);
+  assert.ok(today.data.changes.some((change) => change.slug === "acme" && /^owner:/.test(change.author)), "who changed it");
+  assert.ok(today.data.changes.every((change) => !("body" in change)), "the diary lists changes, not whole pages");
+  assert.ok(today.data.notes.some((note) => /Giulia Ferri/.test(note.text)), "the agents' notes of the day are there");
+  assert.equal(today.data.before, null);
+  const tomorrow = await call(day(now + 60000, now + 86400000));
+  assert.deepEqual([tomorrow.data.changes.length, tomorrow.data.notes.length], [0, 0]);
+  assert.ok(tomorrow.data.before, "an empty day points back to the last one with something in it");
+  assert.equal((await call("/api/brain/diary?from=nope&to=nope")).status, 400);
+  assert.equal((await call(day(now - 5 * 86400000, now))).status, 400, "one day at a time");
+
   // The night's backups: Cora's database and the brain.
   await app.scheduler.backup("2026-11-03");
   assert.ok(existsSync(join(home, "backups", "cora-2026-11-03.db")));

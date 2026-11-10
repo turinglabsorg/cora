@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS brain_revisions (
 );
 CREATE INDEX IF NOT EXISTS brain_revisions_page ON brain_revisions (page_id, version);
 CREATE INDEX IF NOT EXISTS brain_revisions_review ON brain_revisions (review, created_at);
+CREATE INDEX IF NOT EXISTS brain_revisions_created ON brain_revisions (created_at);
 CREATE TABLE IF NOT EXISTS brain_notes (
   id text PRIMARY KEY,
   text text NOT NULL,
@@ -103,6 +104,7 @@ CREATE TABLE IF NOT EXISTS brain_notes (
   created_at timestamptz NOT NULL DEFAULT now(),
   used_at timestamptz
 );
+CREATE INDEX IF NOT EXISTS brain_notes_created ON brain_notes (created_at);
 CREATE TABLE IF NOT EXISTS brain_chunks (
   id text PRIMARY KEY,
   source text NOT NULL,
@@ -351,6 +353,26 @@ export class CompanyBrain {
       nodes: rows.map((row) => ({ slug: row.slug, kind: row.kind, title: row.title, summary: row.summary, pending: Number(row.pending || 0), updatedAt: iso(row.updated_at) })),
       edges: [...edges.values()],
     };
+  }
+
+  /**
+   * One day of the brain, between two instants the caller picks (its own midnight
+   * to midnight): every page change with who wrote it and where it came from, the
+   * notes the agents left, and the nearest earlier and later moments that hold any.
+   */
+  async diary({ from, to }) {
+    const start = new Date(from || ""), end = new Date(to || "");
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) throw new Error("Giorno non valido");
+    const span = [start.toISOString(), end.toISOString()];
+    const changes = (await this.q(`SELECT r.*, p.slug FROM brain_revisions r JOIN brain_pages p ON p.id = r.page_id
+      WHERE r.created_at >= $1 AND r.created_at < $2 ORDER BY r.created_at DESC LIMIT 300`, span)).map(revisionRow)
+      .map(({ body, ...change }) => ({ ...change, sources: change.sources.map(({ type, author, channel, at }) => ({ type, author, channel, at })) }));
+    const notes = (await this.q("SELECT * FROM brain_notes WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at DESC LIMIT 300", span))
+      .map((row) => ({ id: row.id, text: row.text, agentId: row.agent_id, author: row.author, createdAt: iso(row.created_at), usedAt: iso(row.used_at) }));
+    const [edge] = await this.q(`SELECT
+      GREATEST((SELECT max(created_at) FROM brain_revisions WHERE created_at < $1), (SELECT max(created_at) FROM brain_notes WHERE created_at < $1)) AS before,
+      LEAST((SELECT min(created_at) FROM brain_revisions WHERE created_at >= $2), (SELECT min(created_at) FROM brain_notes WHERE created_at >= $2)) AS after`, span);
+    return { from: span[0], to: span[1], changes, notes, before: iso(edge?.before), after: iso(edge?.after) };
   }
 
   async stats() {

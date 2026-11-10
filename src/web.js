@@ -676,6 +676,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         }
         if (method === "DELETE") return send(res, 200, await userBrain.archive(page.slug, { author, note: "archiviata dal proprietario", review: "approved" }));
       }
+      if (path === "/api/brain/diary" && method === "GET") {
+        const from = new Date(url.searchParams.get("from") || ""), to = new Date(url.searchParams.get("to") || "");
+        if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to <= from || to - from > 2 * 86400000) throw new HttpError(400, "Giorno non valido");
+        if (!userBrain.diary) throw new HttpError(404, "Questo Brain non ha un diario");
+        return send(res, 200, await userBrain.diary({ from, to }));
+      }
       if (path === "/api/brain/review" && method === "GET") return send(res, 200, { queue: await userBrain.reviewQueue() });
       if (path === "/api/brain/review" && method === "POST") {
         manage();

@@ -5332,19 +5332,117 @@ function brainMap(graph) {
   };
 }
 
+const BRAIN_TZ = () => S.data?.timezone || "Europe/Rome";
+/** The calendar day (YYYY-MM-DD) an instant falls on in the instance's time zone. */
+function brainDayOf(at) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: BRAIN_TZ(), year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(at));
+}
+function brainShiftDay(day, by) {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + by)).toISOString().slice(0, 10);
+}
+/** The instant a calendar day starts in the instance's time zone, daylight saving included. */
+function brainDayStart(day) {
+  const [y, m, d] = day.split("-").map(Number), wall = Date.UTC(y, m - 1, d);
+  const offset = (at) => {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: BRAIN_TZ(), hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" }).formatToParts(new Date(at)).map((part) => [part.type, part.value]));
+    return Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second) - at;
+  };
+  return new Date(wall - offset(wall - offset(wall)));
+}
+function brainDayLabel(day, short = false) {
+  const [y, m, d] = day.split("-").map(Number);
+  const text = new Intl.DateTimeFormat(LOCALE, { timeZone: "UTC", ...(short ? { weekday: "short", day: "numeric", month: "short" } : { weekday: "long", day: "numeric", month: "long", year: "numeric" }) }).format(new Date(Date.UTC(y, m - 1, d)));
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** Brain → Diario: one day of the brain, the page changes and the notes each agent left. */
+function brainDiary({ day: initial = "", onDay = () => {} } = {}) {
+  const element = h("div", { class: "brain-diary stack" });
+  let day = initial, who = "", data = null, ticket = 0;
+  const today = () => brainDayOf(Date.now());
+  function go(next) { day = next >= today() ? "" : next; who = ""; onDay(day); load(); }
+  function head(current) {
+    const now = today();
+    const picker = h("input", { type: "date", class: "brain-diary-pick", value: current, max: now, "aria-label": tr("Scegli il giorno"), onchange: (event) => { if (/^\d{4}-\d{2}-\d{2}$/.test(event.target.value)) go(event.target.value); } });
+    return h("div", { class: "brain-diary-head" },
+      btn("", { icon: "back", cls: "ghost", title: tr("Giorno prima"), "aria-label": tr("Giorno prima"), onclick: () => go(brainShiftDay(current, -1)) }),
+      h("div", { class: "grow brain-diary-day" }, h("b", {}, raw(brainDayLabel(current))), h("small", {}, current === now ? tr("Oggi") : current === brainShiftDay(now, -1) ? tr("Ieri") : "")),
+      picker,
+      btn("", { icon: "next", cls: "ghost", title: tr("Giorno dopo"), "aria-label": tr("Giorno dopo"), disabled: current >= now, onclick: () => go(brainShiftDay(current, 1)) }),
+      current < now ? btn("Oggi", { cls: "ghost", onclick: () => go(now) }) : null);
+  }
+  const whoOf = (change) => [...new Set([...(change.author && change.author !== "librarian" ? [change.author] : []), ...change.sources.map((source) => source.author).filter(Boolean)])];
+  function draw(current) {
+    const { changes, notes } = data;
+    const people = [...new Set([...notes.map((note) => note.author || tr("Senza nome")), ...changes.flatMap(whoOf)])].sort((a, b) => a.localeCompare(b));
+    const shownChanges = who ? changes.filter((change) => whoOf(change).includes(who)) : changes;
+    const shownNotes = who ? notes.filter((note) => (note.author || tr("Senza nome")) === who) : notes;
+    const count = (action) => changes.filter((change) => action.includes(change.action)).length;
+    const summary = [[count(["create", "restore"]), "{count} aggiunte"], [count(["update"]), "{count} modificate"], [count(["archive", "revert"]), "{count} tolte"], [notes.length, "{count} note"]]
+      .filter(([value]) => value).map(([value, text]) => tr(text, { count: value }));
+    const jump = (at, label, name) => at ? btn(tr(label, { day: brainDayLabel(brainDayOf(at), true) }), { icon: name, cls: "sm ghost", onclick: () => go(brainDayOf(at)) }) : null;
+    const jumps = h("div", { class: "row brain-diary-jumps" },
+      data.before && brainDayOf(data.before) !== brainShiftDay(current, -1) ? jump(data.before, "Attività precedente: {day}", "back") : null,
+      h("span", { class: "spacer" }),
+      data.after && brainDayOf(data.after) !== brainShiftDay(current, 1) ? jump(data.after, "Attività seguente: {day}", "next") : null);
+    if (!changes.length && !notes.length) {
+      element.replaceChildren(head(current), empty("book", tr("Niente di nuovo nel brain in questo giorno.")), jumps);
+      return;
+    }
+    const filter = people.length > 1 ? h("div", { class: "chips", role: "group", "aria-label": tr("Chi") },
+      [["", tr("Tutti")], ...people.map((name) => [name, raw(name)])].map(([key, label]) => h("button", { type: "button", class: `chip${who === key ? " on" : ""}`, "aria-pressed": String(who === key), onclick: () => { who = key; draw(current); } }, label))) : null;
+    const changeRow = (change) => h("a", { class: "brain-diary-row", href: brainHref(`#/brain/p/${change.slug}`) },
+      h("span", { class: "brain-diary-time mono" }, raw(fmtTime(change.createdAt))),
+      h("div", { class: "grow" }, h("b", {}, raw(change.title)), change.note ? h("small", {}, raw(change.note)) : null,
+        whoOf(change).length ? h("small", { class: "brain-diary-who" }, tr("da {who}", { who: whoOf(change).join(" · ") })) : null),
+      h("div", { class: "brain-row-meta" }, badge(BRAIN_ACTIONS[change.action] || raw(change.action), ["create", "restore"].includes(change.action) ? "on" : ["archive", "revert"].includes(change.action) ? "warn" : ""),
+        ["pending", "flagged"].includes(change.review) ? badge("Da rivedere", "warn") : null));
+    const groups = new Map();
+    for (const note of shownNotes) { const name = note.author || tr("Senza nome"); if (!groups.has(name)) groups.set(name, []); groups.get(name).push(note); }
+    element.replaceChildren(head(current),
+      h("p", { class: "brain-diary-sum mono" }, summary.join(" · ")),
+      ...(filter ? [filter] : []),
+      h("section", { class: "stack-sm" }, h("h3", { class: "label" }, tr("Pagine")),
+        shownChanges.length ? h("div", { class: "brain-list" }, shownChanges.map(changeRow)) : h("p", { class: "muted" }, tr("Nessuna pagina cambiata."))),
+      h("section", { class: "stack-sm" }, h("h3", { class: "label" }, tr("Note degli agenti")),
+        groups.size ? h("div", { class: "brain-diary-agents" }, [...groups].map(([name, items]) => h("div", { class: "brain-diary-agent" },
+          h("div", { class: "row" }, icon("user"), h("b", {}, raw(name)), h("span", { class: "spacer" }), h("small", { class: "faint mono" }, tr(items.length === 1 ? "1 nota" : "{count} note", { count: items.length }))),
+          items.map((note) => h("div", { class: "brain-diary-note" },
+            h("span", { class: "brain-diary-time mono" }, raw(fmtTime(note.createdAt))),
+            h("p", { class: "grow" }, raw(note.text)),
+            badge(note.usedAt ? "Nel brain" : "In attesa", note.usedAt ? "on" : "")))))) : h("p", { class: "muted" }, tr("Nessuna nota lasciata."))),
+      jumps);
+  }
+  async function load() {
+    const current = day || today(), mine = ++ticket;
+    element.replaceChildren(head(current), skeleton("rows", 3));
+    try {
+      const result = await api(`/api/brain/diary?${new URLSearchParams({ from: brainDayStart(current).toISOString(), to: brainDayStart(brainShiftDay(current, 1)).toISOString() })}`);
+      if (mine !== ticket) return;
+      data = result; draw(current);
+    } catch (error) { if (mine === ticket) element.replaceChildren(head(current), h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr(error.message))))); }
+  }
+  return { element, load, get loaded() { return Boolean(data); } };
+}
+
 function renderBrain() {
   const [, view, slug] = route();
   if (view === "nuova") return renderBrainCreate(slug);
   if (view === "p" && slug) return renderBrainPage(slug);
   if (view === "revisione") return renderBrainReview();
-  const mapView = view === "mappa";
   const body = h("div", { class: "stack" }, skeleton("rows", 4));
   let state = null;
   let kind = "";
-  let map = null;
+  let map = null, mapLoading = false, listLoaded = false;
   const mapBox = h("div", {}, skeleton("rows", 3));
-  const search = h("input", { type: "search", placeholder: tr("Cerca nel brain…"), "aria-label": tr("Cerca nel brain"), autocomplete: "off" });
+  const searchField = () => h("input", { type: "search", placeholder: tr("Cerca nel brain…"), "aria-label": tr("Cerca nel brain"), autocomplete: "off" });
+  const search = searchField(), mapSearch = searchField();
+  const listChips = h("div", { class: "chips", role: "group", "aria-label": tr("Tipo di pagina") });
+  const mapChips = h("div", { class: "chips", role: "group", "aria-label": tr("Tipo di pagina") });
   const list = h("div", { class: "brain-list" });
+  const diaryDay = view === "diario" && /^\d{4}-\d{2}-\d{2}$/.test(slug || "") ? slug : "";
+  const diary = brainDiary({ day: diaryDay, onDay: (day) => history.replaceState(null, "", brainHref(`#/brain/diario${day ? `/${day}` : ""}`)) });
   const reviewButton = btn("Rivedi", { icon: "check", cls: "primary", href: "#/brain/revisione" });
   const addButton = btn("Aggiungi pagina", { icon: "plus", cls: "primary", href: "#/brain/nuova" });
   addButton.hidden = true;
@@ -5353,19 +5451,22 @@ function renderBrain() {
     if (await guard(api("/api/brain/run", { method: "POST" }), "Il bibliotecario è al lavoro")) setTimeout(load, 4000);
     runButton.disabled = false;
   } });
+  async function drawMap() {
+    if (map) { map.filter({ kind, query: mapSearch.value.trim() }); return; }
+    if (mapLoading) return;
+    mapLoading = true;
+    try {
+      const graph = await api("/api/brain/graph");
+      if (!graph.nodes.length) { mapBox.replaceChildren(empty("bulb", "Ancora nessuna pagina. Aggiungine una o lascia una nota al bibliotecario.")); return; }
+      map = brainMap(graph);
+      mapBox.replaceChildren(map.element);
+      map.filter({ kind, query: mapSearch.value.trim() });
+    } catch (error) { mapBox.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr(error.message))))); }
+    finally { mapLoading = false; }
+  }
   async function pages() {
     const query = search.value.trim();
-    if (mapView) {
-      if (map) { map.filter({ kind, query }); return; }
-      try {
-        const graph = await api("/api/brain/graph");
-        if (!graph.nodes.length) { mapBox.replaceChildren(empty("bulb", "Ancora nessuna pagina. Aggiungine una o lascia una nota al bibliotecario.")); return; }
-        map = brainMap(graph);
-        mapBox.replaceChildren(map.element);
-        map.filter({ kind, query: search.value.trim() });
-      } catch (error) { mapBox.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr(error.message))))); }
-      return;
-    }
+    listLoaded = true;
     list.replaceChildren(skeleton("rows", 3));
     try {
       const data = await api(`/api/brain/pages?${new URLSearchParams(query ? { q: query } : { kind })}`);
@@ -5376,9 +5477,16 @@ function renderBrain() {
     } catch (error) { list.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr(error.message))))); }
   }
   let timer = null;
-  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(pages, mapView ? 120 : 300); });
-  const views = h("div", { class: "segmented", role: "tablist", "aria-label": tr("Come vedere il brain") },
-    [["", "Elenco", "list"], ["mappa", "Mappa", "graph"]].map(([key, label, name]) => h("button", { type: "button", role: "tab", class: (key === "mappa") === mapView ? "on" : "", "aria-selected": String((key === "mappa") === mapView), onclick: () => { location.hash = brainHref(key ? `#/brain/${key}` : "#/brain"); } }, icon(name), label)));
+  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(pages, 300); });
+  mapSearch.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(drawMap, 120); });
+  const drawChips = () => {
+    for (const box of [listChips, mapChips]) box.replaceChildren(...[["", "Tutte"], ...Object.entries(BRAIN_KINDS_PLURAL)].map(([key, label]) => h("button", { type: "button", class: `chip${kind === key ? " on" : ""}`, "aria-pressed": String(kind === key), onclick: () => {
+      kind = key; search.value = ""; drawChips();
+      addButton.href = brainHref(`#/brain/nuova${kind ? `/${kind}` : ""}`);
+      addButton.querySelector("span").textContent = tr(BRAIN_ADD_LABEL[kind] || "Aggiungi pagina");
+      pages(); if (map) drawMap();
+    } }, label)));
+  };
   // The librarian's settings, in the rows of Settings: each saved as it changes.
   const settingsPanel = () => {
     const settings = S.data.settings;
@@ -5459,26 +5567,38 @@ function renderBrain() {
     addButton.querySelector("span").textContent = tr(BRAIN_ADD_LABEL[kind] || "Aggiungi pagina");
     reviewButton.querySelector("span").textContent = stats.pending + stats.flagged ? tr("Rivedi ({count})", { count: stats.pending + stats.flagged }) : tr("Rivedi");
     reviewButton.className = `btn${stats.pending + stats.flagged ? " primary" : " ghost"}`;
-    const chips = h("div", { class: "chips", role: "group", "aria-label": tr("Tipo di pagina") },
-      [["", "Tutte"], ...Object.entries(BRAIN_KINDS_PLURAL)].map(([key, label]) => h("button", { type: "button", class: `chip${kind === key ? " on" : ""}`, "aria-pressed": String(kind === key), onclick: () => { kind = key; search.value = ""; draw(); pages(); } }, label)));
+    drawChips();
+    const failed = lastRun?.errors?.length ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("L'ultimo giro del bibliotecario non è riuscito: {error}", { error: lastRun.errors[0] })))) : null;
+    const configure = state.canConfigure ?? state.canManage;
+    const entries = [
+      ["elenco", "Elenco", "list", tr("{count} pagine", { count: stats.pages }), [h("div", { class: "brain-search" }, search, listChips), list]],
+      ["mappa", "Mappa", "graph", tr("Le pagine e i loro legami"), [h("div", { class: "brain-search" }, mapSearch, mapChips), mapBox]],
+      ["diario", "Diario", "clock", tr("Cosa è cambiato, giorno per giorno"), [diary.element]],
+      ...(configure ? [["bibliotecario", "Il bibliotecario", "sliders", failed ? tr("ultimo giro non riuscito") : lastRun ? tr("ultimo giro {when}", { when: fmtTime(lastRun.at, true) }) : tr("Modello, riserve e orari"), [...(failed ? [failed.cloneNode(true)] : []), settingsPanel()]]] : []),
+    ];
+    const current = ["elenco", "mappa", "diario", "bibliotecario"].includes(view) && entries.some(([id]) => id === view) ? view : "";
+    const workspace = sectionWorkspace({ title: "Brain", base: "#/brain", current, entries, onSelect: (id) => {
+      if (id === "mappa") drawMap();
+      else if (id === "diario") { if (!diary.loaded) diary.load(); if (diaryDay) history.replaceState(null, "", brainHref(`#/brain/diario/${diaryDay}`)); }
+      else if (id === "elenco" && !listLoaded) pages();
+    } });
     body.replaceChildren(
       ...(scopeSelect ? [field("Brain aperto", scopeSelect)] : []),
       h("div", { class: "stats" },
         statCard({ icon: "book", value: String(stats.pages), label: "pagine" }),
         statCard({ icon: "check", value: String(stats.pending + stats.flagged), label: "da rivedere", href: stats.pending + stats.flagged ? "#/brain/revisione" : null }),
         statCard({ icon: "search", value: String(stats.chunks), label: "messaggi cercabili" }),
-        statCard({ icon: "clock", value: lastRun ? raw(fmtTime(lastRun.at, true)) : "—", label: "ultimo giro",
+        statCard({ icon: "clock", value: lastRun ? raw(fmtTime(lastRun.at, true)) : "—", label: "ultimo giro", href: configure ? brainHref("#/brain/bibliotecario") : null,
           sub: lastRun ? raw(tr("{created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato" })),
-      ...(lastRun?.errors?.length ? [h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("L'ultimo giro del bibliotecario non è riuscito: {error}", { error: lastRun.errors[0] }))))] : []),
-      h("div", { class: "brain-search" }, search, h("div", { class: "brain-views" }, chips, views)),
-      ...(mapView ? [mapBox] : [list, ...(state.canConfigure ?? state.canManage ? [settingsPanel()] : [])]));
+      ...(failed ? [failed] : []),
+      workspace);
   }
   async function load() {
     try {
       state = await api("/api/brain");
       if (!body.isConnected) return;
+      listLoaded = false; map = null; mapBox.replaceChildren(skeleton("rows", 3));
       draw();
-      if (state.enabled) pages();
     } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr(error.message))))); }
   }
   shell([pageHead("Brain", "Quello che sa l'azienda: clienti, progetti, persone, decisioni e procedure, con le fonti.", [reviewButton, runButton, addButton]), body], { title: "Brain" });
