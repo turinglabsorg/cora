@@ -4,12 +4,13 @@ import { test } from "node:test";
 import { mailWorld } from "./mail-fixtures.js";
 import { panelHarness } from "./panel.js";
 import { waitFor } from "./helpers.js";
+import { executeTool, summarizeArgs } from "../src/tools.js";
 
 const LINEAR_KEY = "lin_api_fixture_turinglabs";
 const ASANA_TOKEN = "asana_fixture_pat";
 
 async function fakeServices(t) {
-  const linear = [];
+  const linear = [], asana = [];
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -20,12 +21,25 @@ async function fakeServices(t) {
       linear.push({ authorization: req.headers.authorization, body });
       const token = String(req.headers.authorization || "").replace(/^Bearer /, "");
       if (token !== LINEAR_KEY) return send(401, { errors: [{ message: "Authentication required" }] });
+      if (/issueCreate/.test(body.query)) return send(200, { data: { issueCreate: { success: true, issue: { identifier: "TL-7", title: body.variables?.input?.title } } } });
+      if (/broken/.test(body.query)) return send(400, { errors: [{ message: "Cannot query field broken" }] });
       return send(200, { data: { viewer: { name: "Sebastiano", email: "seb@example.test", organization: { name: "Turing Labs", urlKey: "turinglabs" } } } });
     }
     if (req.url === "/asana/users/me") {
       if (req.headers.authorization !== `Bearer ${ASANA_TOKEN}`) return send(401, {});
       return send(200, { data: { gid: "1", name: "Sebastiano" } });
     }
+    if (req.url.startsWith("/asana/projects?")) {
+      if (req.headers.authorization !== `Bearer ${ASANA_TOKEN}`) return send(401, {});
+      return send(200, { data: [{ gid: "31", name: "Dopamina", query: req.url.split("?")[1] }] });
+    }
+    if (req.url === "/asana/tasks" && req.method === "POST") {
+      asana.push({ method: req.method, body });
+      return send(201, { data: { gid: "77", ...body.data } });
+    }
+    if (req.url === "/asana/tasks/77" && req.method === "DELETE") return send(200, { data: {} });
+    if (req.url === "/asana/tasks/404") return send(404, { errors: [{ message: "task: Unknown object: 404" }] });
+    if (req.url === "/asana/echo") return send(200, { data: { header: req.headers.authorization } });
     if (req.url === "/asana/workspaces") {
       if (req.headers.authorization !== `Bearer ${ASANA_TOKEN}`) return send(401, {});
       return send(200, { data: [{ gid: "2", name: "Turing Labs" }] });
@@ -34,7 +48,7 @@ async function fakeServices(t) {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
-  return { base: `http://127.0.0.1:${server.address().port}`, linear };
+  return { base: `http://127.0.0.1:${server.address().port}`, linear, asana };
 }
 
 async function connectorWorld(t) {
@@ -168,4 +182,98 @@ test("the connectors page asks for the Asana choice and the Canva decision with 
   assert.doesNotMatch(node.querySelector(".connector-detail").textContent, /\[object Object\]/);
   node.querySelectorAll("button").find((button) => /Per ora no/.test(button.textContent)).click();
   await waitFor(() => f.app.keyConnectors.record("canva")?.status === "later");
+});
+
+test("authorised agents work on Linear and Asana through their Cora tools, and nobody else sees them", async (t) => {
+  const f = await connectorWorld(t);
+  const other = f.app.store.agent((await f.call("/api/agents", { method: "POST", body: { name: "Other agent", tools: false } })).data.id);
+  const connectors = f.app.keyConnectors;
+  assert.deepEqual(connectors.toolsFor(f.agent), [], "nothing is connected yet");
+
+  await f.call("/api/connectors/keys/linear", { method: "POST", body: { workspace: "turinglabs", token: LINEAR_KEY } });
+  await f.call("/api/connectors/keys/asana", { method: "POST", body: { mode: "pat", token: ASANA_TOKEN } });
+  assert.deepEqual(connectors.toolsFor(f.agent), [], "connected, but no agent is authorised");
+  assert.match((await connectors.runTool(f.agent, "linear", { query: "{ viewer { name } }" })).text, /^error: you are not authorised for Linear/);
+
+  await f.call("/api/connectors/keys/linear", { method: "PUT", body: { agents: [f.agent.id] } });
+  await f.call("/api/connectors/keys/asana", { method: "PUT", body: { agents: [f.agent.id] } });
+  const tools = connectors.toolsFor(f.agent);
+  assert.deepEqual(tools.map((tool) => tool.name), ["linear", "asana"]);
+  assert.match(tools[0].description, /workspace turinglabs, acting as Sebastiano/);
+  assert.match(tools[1].description, /Turing Labs \(gid 2\)/);
+  for (const tool of tools) assert.doesNotMatch(JSON.stringify(tool), new RegExp(`${LINEAR_KEY}|${ASANA_TOKEN}`));
+  assert.deepEqual(connectors.toolsFor(other), [], "an agent the owner did not pick gets no tool");
+  assert.match((await connectors.runTool(other, "asana", { path: "/workspaces" })).text, /^error: you are not authorised for Asana/);
+
+  const viewer = await connectors.runTool(f.agent, "linear", { query: "{ viewer { name } }" });
+  assert.equal(JSON.parse(viewer.text).viewer.name, "Sebastiano");
+  assert.equal(f.services.linear.at(-1).authorization, LINEAR_KEY, "a personal API key goes bare in the header");
+  const created = await connectors.runTool(f.agent, "linear", { query: "mutation($input:IssueCreateInput!){ issueCreate(input:$input){ success issue{ identifier title } } }", variables: { input: { teamId: "t1", title: "Prova" } } });
+  assert.deepEqual(JSON.parse(created.text).issueCreate, { success: true, issue: { identifier: "TL-7", title: "Prova" } });
+  assert.deepEqual(f.services.linear.at(-1).body.variables, { input: { teamId: "t1", title: "Prova" } });
+  assert.match((await connectors.runTool(f.agent, "linear", { query: "{ broken }" })).text, /^error: Linear: Cannot query field broken/);
+  assert.match((await connectors.runTool(f.agent, "linear", {})).text, /^error: write the GraphQL query/);
+
+  const projects = await connectors.runTool(f.agent, "asana", { path: "/projects", query: { workspace: "2", archived: false } });
+  assert.deepEqual(JSON.parse(projects.text).data[0], { gid: "31", name: "Dopamina", query: "workspace=2&archived=false" });
+  const task = await connectors.runTool(f.agent, "asana", { method: "POST", path: "/tasks", body: { name: "Prova", projects: ["31"] } });
+  assert.equal(JSON.parse(task.text).data.gid, "77");
+  assert.deepEqual(f.services.asana.at(-1).body, { data: { name: "Prova", projects: ["31"] } }, "Cora wraps the fields in data");
+  assert.equal((await connectors.runTool(f.agent, "asana", { method: "DELETE", path: "/tasks/77" })).text, '{"data":{}}');
+  assert.match((await connectors.runTool(f.agent, "asana", { path: "/tasks/404" })).text, /^error: Asana answered 404: task: Unknown object/);
+  for (const path of ["https://evil.test/x", "//evil.test", "/tasks/../../x", "tasks"]) assert.match((await connectors.runTool(f.agent, "asana", { path })).text, /^error: path is an Asana API path/);
+  assert.match((await connectors.runTool(f.agent, "asana", { method: "PATCH", path: "/tasks/1" })).text, /^error: method is/);
+  const echoed = await connectors.runTool(f.agent, "asana", { path: "/echo" });
+  assert.doesNotMatch(echoed.text, new RegExp(ASANA_TOKEN), "a key the service echoes never reaches the agent");
+  assert.match(echoed.text, /\[key\]/);
+
+  connectors.asanaApi = "http://127.0.0.1:9/asana";
+  assert.match((await connectors.runTool(f.agent, "asana", { path: "/workspaces" })).text, /^error: Asana does not answer/);
+
+  await f.call("/api/connectors/keys/linear", { method: "DELETE" });
+  assert.deepEqual(connectors.toolsFor(f.agent).map((tool) => tool.name), ["asana"], "a disconnected service takes its tool away");
+});
+
+test("a connector tool runs inside an agent turn only for an authorised request", async (t) => {
+  const f = await connectorWorld(t);
+  await f.call("/api/connectors/keys/linear", { method: "POST", body: { workspace: "turinglabs", token: LINEAR_KEY } });
+  await f.call("/api/connectors/keys/linear", { method: "PUT", body: { agents: [f.agent.id] } });
+  const ctx = { agent: f.agent, store: f.app.store, connectors: f.app.keyConnectors, vault: f.app.vault };
+  assert.match((await executeTool({ name: "linear", args: { query: "{ viewer { name } }" } }, ctx)).text, /^error: connectors work on the owner's accounts/);
+  const answer = await executeTool({ name: "linear", args: { query: "{ viewer { name } }" } }, { ...ctx, requester: { kind: "owner", id: "u1" } });
+  assert.equal(JSON.parse(answer.text).viewer.name, "Sebastiano");
+  assert.equal(summarizeArgs("linear", { query: "{\n viewer { name } }" }), "{ viewer { name } }");
+  assert.equal(summarizeArgs("asana", { method: "post", path: "/tasks" }), "POST /tasks");
+  assert.ok(f.app.brain.connectors === f.app.keyConnectors, "the brain hands the connectors to every turn");
+  const system = f.app.brain.systemPrompt(f.agent, { place: "", computer: true });
+  assert.match(system, /## Connettori\nIl proprietario ti ha autorizzato su linear/);
+});
+
+test("the panel draws the catalogue and the forms from src/connectors, so a new module needs no panel code", async (t) => {
+  const f = await connectorWorld(t);
+  const posted = [];
+  const acme = { id: "acme", name: "Acme", kind: "key", secret: "CORA_ACME_KEY", appSecrets: [], tool: "acme", icon: "link", description: "Acme di prova.", meta: "Acme · Prova", intro: "Gli agenti usano Acme.",
+    modes: [{ id: "key", notice: "Serve la chiave di Acme.", rows: [{ title: "La chiave", steps: [["apri ", { href: "https://acme.test/keys", text: "acme.test/keys" }, ";"], ["salvala come ", { code: "CORA_ACME_KEY" }]], field: { name: "token", type: "password", label: "Chiave di Acme" }, submit: "Verifica e collega" }] }] };
+  const panel = panelHarness({ hash: "#/settings/connettori", fetch: async (path, options = {}) => {
+    if (path === "/api/connectors/keys/acme") { posted.push(JSON.parse(options.body)); return { ok: false, status: 400, json: async () => ({ error: "Chiave di prova rifiutata." }) }; }
+    const response = await f.call(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+    if (path === "/api/connectors") response.data.catalog.push(acme);
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  const served = (await f.call("/api/connectors")).data.catalog;
+  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tool]), [["google", "google", ""], ["linear", "key", "linear"], ["asana", "key", "asana"], ["canva", "key", ""]]);
+  assert.equal(served.find((item) => item.id === "linear").secret, "CORA_LINEAR_KEY");
+  const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
+  await node.readyConnectors;
+  const cards = node.querySelectorAll(".connector-card");
+  assert.deepEqual(cards.map((card) => card.querySelector(".connector-card-name").textContent), ["Google", "Linear", "Asana", "Canva", "Acme"]);
+  cards.find((card) => /Acme/.test(card.textContent)).click();
+  const detail = node.querySelector(".connector-detail");
+  assert.match(detail.textContent, /Serve la chiave di Acme/);
+  assert.match(detail.textContent, /CORA_ACME_KEY/);
+  assert.ok(detail.querySelectorAll("a").some((link) => link.getAttribute("href") === "https://acme.test/keys"));
+  node.querySelectorAll("input").find((input) => input.getAttribute("type") === "password").value = "acme-key";
+  node.querySelectorAll("button").find((button) => /Verifica e collega/.test(button.textContent)).click();
+  await waitFor(() => /Chiave di prova rifiutata/.test(detail.textContent));
+  assert.deepEqual(posted, [{ token: "acme-key" }]);
 });

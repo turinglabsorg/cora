@@ -27,6 +27,7 @@ import { BRAIN_KINDS } from "./company-brain.js";
 import { VOICE_LANGUAGES } from "./voice.js";
 import { contextSources, writeContextFile } from "./context.js";
 import { brainsInUse, testRule } from "./rule-test.js";
+import { connectorCatalog } from "./connectors/index.js";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
 const COOKIE = "cora_session";
@@ -500,7 +501,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { ok: true }, { "Set-Cookie": clearedCookies() });
     }
 
-    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(user), keyConnectors: keyConnectors ? keyConnectors.view() : [], canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"), notice: store.value("googleConnectorNotice", "") });
+    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog(), keyConnectors: keyConnectors ? keyConnectors.view() : [], canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"), notice: store.value("googleConnectorNotice", "") });
     const keyConnector = /^\/api\/connectors\/keys\/(linear|asana|canva)$/.exec(path);
     if (keyConnector) {
       if (!keyConnectors) throw new HttpError(404, "Connettore non disponibile.");
@@ -508,11 +509,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!canManage) throw new HttpError(403, "Solo il proprietario collega i connettori.");
       if (method === "POST") {
         const record = await keyConnectors.connect(keyConnector[1], await readJson(req, 20000), user);
-        return send(res, 200, { ...googleConnector.view(user), keyConnectors: keyConnectors.view(), canManage, record });
+        return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog(), keyConnectors: keyConnectors.view(), canManage, record });
       }
       if (method === "PUT") {
         const record = keyConnectors.updateAgents(keyConnector[1], (await readJson(req, 8000)).agents, user);
-        return send(res, 200, { ...googleConnector.view(user), keyConnectors: keyConnectors.view(), canManage, record });
+        return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog(), keyConnectors: keyConnectors.view(), canManage, record });
       }
       if (method === "DELETE") { keyConnectors.disconnect(keyConnector[1], user); return send(res, 200, { ok: true }); }
       throw new HttpError(405, "Metodo non supportato.");

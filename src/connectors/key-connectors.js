@@ -1,4 +1,7 @@
 import { randomBytes } from "node:crypto";
+import { CONNECTORS, connectorForTool, KEY_SERVICES } from "./index.js";
+
+export { KEY_SERVICES };
 
 /**
  * Connectors that need nothing but a key or an app registered by the owner: a person
@@ -11,12 +14,6 @@ export class KeyConnectorError extends Error {
 }
 
 const clean = (value, max = 400) => String(value ?? "").trim().slice(0, max);
-
-export const KEY_SERVICES = {
-  linear: { name: "Linear", secret: "CORA_LINEAR_KEY", label: "workspace" },
-  asana: { name: "Asana", secret: "CORA_ASANA_TOKEN", appSecrets: ["CORA_ASANA_CLIENT_ID", "CORA_ASANA_CLIENT_SECRET"], label: "workspace" },
-  canva: { name: "Canva", appSecrets: ["CORA_CANVA_CLIENT_ID", "CORA_CANVA_CLIENT_SECRET"], label: "team" },
-};
 
 export class KeyConnectors {
   constructor({ store, vault = null, log = () => {}, linearApi = "https://api.linear.app/graphql", asanaApi = "https://app.asana.com/api/1.0", fetch: fetchImpl = fetch }) {
@@ -82,7 +79,7 @@ export class KeyConnectors {
     const workspaces = await this.request(`${this.asanaApi}/workspaces`, { headers: { Authorization: `Bearer ${token}` } });
     const workspace = Array.isArray(workspaces?.data) ? workspaces.data[0] : null;
     if (!me?.data?.name) throw new KeyConnectorError("Asana non ha riconosciuto il token: creane uno nuovo e incollalo di nuovo.");
-    return { workspace: clean(workspace?.name || "", 120), account: clean(me.data.name, 120) };
+    return { workspace: clean(workspace?.name || "", 120), workspaceId: clean(workspace?.gid || "", 40), account: clean(me.data.name, 120) };
   }
 
   appInput(input, service) {
@@ -159,5 +156,62 @@ export class KeyConnectors {
     const names = [KEY_SERVICES[service].secret, ...(KEY_SERVICES[service].appSecrets || [])].filter(Boolean);
     for (const name of names) { try { this.vault?.remove(name, user ? this.by(user) : null); } catch { /* the value is already gone */ } }
     this.log({ type: "connector", text: `connettore ${KEY_SERVICES[service].name}: scollegato` });
+  }
+
+  /** The connector tools this agent may use: only connected services whose key the owner gave it. */
+  toolsFor(agent) {
+    if (!agent || !this.vault?.enabled) return [];
+    return this.records().filter((record) => !record.disconnected && record.status === "connected").flatMap((record) => {
+      const connector = CONNECTORS.find((item) => item.id === record.service);
+      if (!connector?.definition || !this.allowed(record, connector, agent)) return [];
+      return [connector.definition(record)];
+    });
+  }
+
+  allowed(record, connector, agent) {
+    const secret = this.store.vaultSecret(connector.secret);
+    return Boolean(secret && (record.agents || []).includes(agent.id) && this.vault.canUse(secret, agent));
+  }
+
+  handles(name) { return Boolean(connectorForTool(name)); }
+
+  summarize(name, args) { return connectorForTool(name)?.summarize?.(args || {}) || ""; }
+
+  /** Answers the HTTP status and JSON of a call, without throwing on a refusal: the agent reads it. */
+  async call(url, { method = "GET", headers = {}, body } = {}) {
+    let response;
+    try {
+      response = await this.fetch(url, { method, headers: { Accept: "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000) });
+    } catch {
+      return { status: 0, data: null };
+    }
+    let data = null;
+    try { data = await response.json(); } catch { data = null; }
+    return { status: response.status, data };
+  }
+
+  /** Runs a connector tool for an agent: Cora takes the key from the vault, the agent gets only the service's answer. */
+  async runTool(agent, name, args = {}) {
+    const connector = connectorForTool(name);
+    const record = connector && this.record(connector.id);
+    if (!connector || !record || record.status !== "connected") return { text: `error: ${connector?.name || name} is not connected: the owner connects it in Connettori` };
+    if (!this.vault?.enabled || !this.allowed(record, connector, agent)) return { text: `error: you are not authorised for ${connector.name}: the owner picks the agents in its card in Connettori` };
+    const token = this.vault.value(this.store.vaultSecret(connector.secret)).toString("utf8");
+    let result;
+    try {
+      const request = async (url, options) => {
+        const answer = await this.call(url, options);
+        if (!answer.status) throw new Error(`${connector.name} does not answer: try again shortly`);
+        return answer;
+      };
+      result = await connector.run(args || {}, { token, request, api: { linear: this.linearApi, asana: this.asanaApi } });
+    } catch (error) {
+      result = { error: error.message };
+    }
+    const hide = (text) => token ? text.split(token).join("[key]") : text;
+    if (result.error !== undefined) return { text: hide(`error: ${result.error}`) };
+    const text = JSON.stringify(result.data);
+    const LIMIT = 40000;
+    return { text: hide(text.length > LIMIT ? `${text.slice(0, LIMIT)}\n[truncated at ${LIMIT} of ${text.length} characters: ask for fewer fields or fewer items]` : text) };
   }
 }

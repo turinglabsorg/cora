@@ -32,8 +32,8 @@ import { Subscriptions } from "./subscriptions.js";
 import { SubscriptionUsage } from "./subscription-usage.js";
 import { providerUsageData, providerUsageRecords } from "./provider-usage.js";
 import { Voice } from "./voice.js";
-import { GoogleConnector } from "./google-connector.js";
-import { KeyConnectors } from "./key-connectors.js";
+import { GoogleConnector } from "./connectors/google.js";
+import { KeyConnectors } from "./connectors/key-connectors.js";
 import { EmailChannel } from "./email-channel.js";
 import { MailDomains } from "./mail-domains.js";
 import { KnowledgeSources } from "./knowledge.js";
@@ -188,6 +188,7 @@ export function startCora(overrides = {}) {
   googleConnector.knowledge = knowledge;
   // Connectors that take a key or an app: the value is checked with the service and kept in the vault.
   const keyConnectors = new KeyConnectors({ store, vault, log: activity });
+  brain.connectors = keyConnectors;
   brain.vault = vault;
   // Each agent's own GitHub App: made from the panel, its hour-long tokens written on the agent's desktop.
   const github = new GithubApps({

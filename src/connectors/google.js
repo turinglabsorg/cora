@@ -1,5 +1,21 @@
 import { createHash, randomBytes } from "node:crypto";
 
+/**
+ * Google: an account connected through Cora's OAuth broker. It has no tool of its
+ * own: an agent authorised on the account sends from it with email_send and its
+ * sender_id. The broker asks Google for gmail.send only.
+ */
+export const google = {
+  id: "google",
+  name: "Google",
+  kind: "google",
+  card: {
+    icon: "mail",
+    description: "Invia email dal tuo account Gmail o Google Workspace con gli agenti che scegli.",
+    meta: "Gmail · Google Workspace",
+  },
+};
+
 const hash = (value) => createHash("sha256").update(value).digest("base64url");
 const SECRET = (id) => `CORA_GOOGLE_${id.toUpperCase()}`;
 export class ConnectorError extends Error {

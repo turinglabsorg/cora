@@ -3261,13 +3261,7 @@ function emailSettingsTabs(controls, agentsPanel, feedback) {
   return panel({ icon: "mail", title: "E-mail", hint: "Dall'arrivo della posta al resoconto nel canale scelto." }, h("div", { class: "stack" }, tabs, [...pages.values()], feedback));
 }
 
-const CONNECTOR_SERVICES = [
-  { id: "google", name: "Google", icon: "mail", description: "Invia email dal tuo account Gmail o Google Workspace con gli agenti che scegli.", meta: "Gmail · Google Workspace" },
-  { id: "linear", name: "Linear", icon: "list", description: "Gli agenti leggono e creano issue nel workspace che colleghi.", meta: "Linear · Issue e progetti" },
-  { id: "asana", name: "Asana", icon: "check", description: "Gli agenti lavorano sui progetti e sulle attività del tuo Asana.", meta: "Asana · Progetti e attività" },
-  { id: "canva", name: "Canva", icon: "layers", description: "Gli agenti preparano e aggiornano materiali di design.", meta: "Canva · Design" },
-];
-
+// The catalogue comes from the server (src/connectors): each module declares its card and its forms.
 function connectorsPane() {
   const slot = h("div", { class: "stack connectors-pane" });
   const catalog = h("div", { class: "stack connector-catalog" });
@@ -3276,15 +3270,18 @@ function connectorsPane() {
   const search = h("input", { type: "search", "aria-label": "Cerca connettori", placeholder: "Cerca per nome, servizio o account", autocomplete: "off", maxlength: 200 });
   const filters = h("div", { class: "segmented", role: "group", "aria-label": "Filtra connettori" });
   const filterButtons = new Map();
-  let data = null, filter = "all", current = CONNECTOR_SERVICES.some((service) => service.id === route()[2]) ? route()[2] : "", asanaMode = "", canvaOpen = false;
+  let data = null, filter = "all", current = route()[2] || "";
+  const modeChoice = new Map(), optionalOpen = new Set();
+  const services = () => data?.catalog || [];
+  const serviceOf = (id) => services().find((service) => service.id === id) || null;
   const show = (id, update = true) => {
-    current = CONNECTOR_SERVICES.some((service) => service.id === id) ? id : "";
+    current = !data || serviceOf(id) ? id || "" : "";
     catalog.hidden = Boolean(current); detail.hidden = !current;
     if (update) history.replaceState(null, "", current ? `#/settings/connettori/${current}` : "#/settings/connettori");
   };
   const keyRecord = (id) => (data?.keyConnectors || []).find((item) => item.service === id) || null;
   const serviceState = (id) => {
-    if (id === "google") {
+    if (serviceOf(id)?.kind === "google") {
       const count = data ? data.connections.length : 0;
       return { connected: count > 0, status: !data ? "In preparazione" : count ? count === 1 ? "1 account collegato" : "{count} account collegati" : data.available ? "Da collegare" : "In preparazione", count };
     }
@@ -3298,10 +3295,10 @@ function connectorsPane() {
     for (const [key, button] of filterButtons) { button.classList.toggle("on", key === filter); button.setAttribute("aria-pressed", String(key === filter)); }
     if (!data) { results.replaceChildren(h("p", { role: "status", class: "muted" }, "Carico i connettori…")); return; }
     const query = search.value.trim().toLocaleLowerCase();
-    const cards = CONNECTOR_SERVICES.filter((service) => {
+    const cards = services().filter((service) => {
       const state = serviceState(service.id);
       if (filter === "connected" && !state.connected) return false;
-      const accounts = service.id === "google" ? data.connections.map((item) => item.email).join(" ") : `${keyRecord(service.id)?.workspace || ""} ${keyRecord(service.id)?.account || ""}`;
+      const accounts = service.kind === "google" ? data.connections.map((item) => item.email).join(" ") : `${keyRecord(service.id)?.workspace || ""} ${keyRecord(service.id)?.account || ""}`;
       return `${service.name} ${service.description} ${service.meta} ${service.id} ${accounts}`.toLocaleLowerCase().includes(query);
     });
     if (!cards.length) {
@@ -3349,25 +3346,29 @@ function connectorsPane() {
     return h("div", { class: "stack-sm" }, choices.length ? h("div", { class: "email-folders" }, choices.map((item) => item.node)) : h("p", { class: "muted" }, "Crea un agente per autorizzarlo."), feedback);
   };
 
-  const connectedPanel = (service, record, intro) => {
+  const connectedPanel = (service, record) => {
     const feedback = h("p", { class: "muted", role: "status" });
     const disconnect = armedButton("Scollega", "Conferma scollegamento", { icon: "power", onconfirm: async () => {
       disconnect.disabled = true;
       try { await api(`/api/connectors/keys/${service.id}`, { method: "DELETE" }); await load(); toast("Connettore scollegato"); }
       catch (error) { toast(error.message, true); disconnect.disabled = false; }
     } });
-    const secret = service.id === "linear" ? "CORA_LINEAR_KEY" : "CORA_ASANA_TOKEN";
     return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: tag(record.workspace || tr("Collegato"), "ok") },
-      h("p", {}, tr(intro)),
+      h("p", {}, tr(service.intro)),
       setRows(
         setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, ` · ${record.account}`) : null), tag("Collegato", "ok")),
-        setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, secret), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
+        setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, service.secret), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
+        service.tool ? setRow("Strumento degli agenti", h("span", {}, "Gli agenti autorizzati lavorano con lo strumento ", h("code", {}, service.tool), " di Cora, che aggiunge la chiave a ogni chiamata.")) : null,
         setRow("Agenti autorizzati", "Solo gli agenti spuntati possono usare questo connettore.", agentChoices(record, service.id), { stack: true }),
         setRow("Scollega", "Toglie la chiave dalla cassaforte e l'accesso agli agenti.", disconnect)),
       feedback);
   };
 
-  const keyForm = (service, { mode = "", decision = "" } = {}) => {
+  const stepParts = (parts) => (Array.isArray(parts) ? parts : [parts]).map((part) => typeof part === "string" ? part
+    : part.href ? h("a", { href: part.href, target: "_blank", rel: "noopener" }, part.text) : h("code", {}, part.code));
+
+  // One form for every key connector, drawn from the modes its module declares.
+  const keyForm = (service) => {
     const feedback = h("p", { class: "connector-feedback", role: "status" });
     const submit = (label, run) => {
       const button = btn(label, { icon: "check", cls: "primary", onclick: async () => {
@@ -3376,91 +3377,56 @@ function connectorsPane() {
       } });
       return button;
     };
-    if (service.id === "linear") {
-      const workspace = h("input", { type: "text", placeholder: "turinglabs", autocomplete: "off", autocapitalize: "none", spellcheck: "false", "aria-label": "Workspace di Linear" });
-      const secret = h("input", { type: "password", autocomplete: "off", autocapitalize: "none", spellcheck: "false", "aria-label": "Chiave API di Linear" });
-      return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: tag("Da collegare", "agent") },
-        h("p", {}, "Gli agenti leggono e creano issue nel workspace che colleghi. La chiave resta nella cassaforte, mai nel pannello."),
-        h("p", { role: "status", class: "notice warn" }, "Servono due dati, che si trovano in Linear: il workspace e una chiave API personale."),
-        setRows(
-          setRow("1. Il workspace", "Il nome che compare in linear.app/<workspace>, per esempio turinglabs.", workspace, { stack: true }),
-          setRow("2. La chiave API", null, h("div", { class: "stack-sm" }, steps(
-            h("span", {}, "apri ", h("a", { href: "https://linear.app/settings/security", target: "_blank", rel: "noopener" }, "linear.app/settings/security"), " → Sicurezza → Chiavi API e crea una chiave personale;"),
-            "copia la chiave;",
-            h("span", {}, "incollala qui: Cora la verifica su Linear e la salva nella cassaforte come ", h("code", {}, "CORA_LINEAR_KEY"), ", senza mostrarla più.")),
-            h("div", { class: "input-row token" }, secret, submit("Verifica e collega", () => api("/api/connectors/keys/linear", { method: "POST", body: { workspace: workspace.value.trim(), token: secret.value.trim() } })))), { stack: true }),
-          setRow("3. Gli agenti", "Dopo il collegamento scegli quali agenti possono usare la chiave.", h("p", { class: "muted" }, "Il passo si sblocca appena il workspace è collegato."))),
+    const record = keyRecord(service.id);
+    const optional = service.optional;
+    if (optional && record?.status !== "app" && !optionalOpen.has(service.id)) {
+      return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: record?.status === "later" ? tag("Non serve") : tag("Da collegare", "agent") },
+        h("p", {}, optional.intro),
+        h("p", { role: "status", class: "notice warn" }, optional.notice),
+        record?.status === "later" ? h("p", { class: "muted" }, optional.off) : null,
+        h("div", { class: "row wrap" }, btn(record?.status === "later" ? optional.restart : optional.start, { icon: "plus", cls: "primary", onclick: () => { optionalOpen.add(service.id); draw(); } }),
+          btn(optional.later, { cls: "ghost", onclick: async () => {
+            try { await api(`/api/connectors/keys/${service.id}`, { method: "POST", body: { decision: "later" } }); optionalOpen.delete(service.id); await load(); toast(optional.done); }
+            catch (error) { toast(error.message, true); }
+          } })),
         feedback);
     }
-    if (service.id === "asana") {
-      const chosen = asanaMode || mode || (keyRecord("asana")?.mode === "oauth" ? "oauth" : "pat");
-      const toggle = h("div", { class: "segmented", role: "group", "aria-label": "Come collegare Asana" },
-        btn("Token personale", { onclick: () => { asanaMode = "pat"; draw(); } }),
-        btn("App OAuth", { onclick: () => { asanaMode = "oauth"; draw(); } }));
-      [...toggle.children].forEach((button, index) => { const on = (index === 0) === (chosen === "pat"); button.classList.toggle("on", on); button.setAttribute("aria-pressed", String(on)); });
-      if (chosen === "oauth") {
-        const clientId = h("input", { type: "text", autocomplete: "off", spellcheck: "false", "aria-label": "Client ID dell'app Asana" });
-        const clientSecret = h("input", { type: "password", autocomplete: "off", spellcheck: "false", "aria-label": "Client secret dell'app Asana" });
-        const record = keyRecord("asana");
-        return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: record?.status === "app" ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
-          h("p", {}, "Con un'app OAuth l'accesso è dell'app che crei tu su Asana, non di una persona sola."),
-          toggle,
-          h("p", { role: "status", class: "notice warn" }, "Creare l'app Asana richiede due dati: client ID e client secret. L'autorizzazione OAuth si completa dopo, quando l'app esiste."),
-          setRows(setRow("L'app Asana", null, h("div", { class: "stack-sm" }, steps(
-            h("span", {}, "apri ", h("a", { href: "https://developers.asana.com/docs/authentication", target: "_blank", rel: "noopener" }, "developers.asana.com"), " → My apps → Create new app;"),
-            "copia client ID e client secret dell'app;",
-            h("span", {}, "incollali qui: finiscono nella cassaforte come ", h("code", {}, "CORA_ASANA_CLIENT_ID"), " e ", h("code", {}, "CORA_ASANA_CLIENT_SECRET"), ";"),
-            "l'autorizzazione OAuth è il passo successivo: appena l'app è pronta la completiamo da qui."),
-            h("div", { class: "stack-sm" }, field("Client ID", clientId), field("Client secret", clientSecret), h("div", { class: "row end" }, submit("Salva l'app", () => api("/api/connectors/keys/asana", { method: "POST", body: { mode: "oauth", clientId: clientId.value.trim(), clientSecret: clientSecret.value.trim() } }))))), { stack: true })),
-          feedback);
-      }
-      const token = h("input", { type: "password", autocomplete: "off", autocapitalize: "none", spellcheck: "false", "aria-label": "Token personale di Asana" });
-      return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: tag("Da collegare", "agent") },
-        h("p", {}, "Gli agenti lavorano sui progetti del tuo Asana. Il token resta nella cassaforte, mai nel pannello."),
-        toggle,
-        h("p", { role: "status", class: "notice warn" }, "Collegare Asana richiede un token personale: il workspace lo ricava Cora dal token."),
-        setRows(setRow("Il token personale", null, h("div", { class: "stack-sm" }, steps(
-          h("span", {}, "apri ", h("a", { href: "https://developers.asana.com/docs/personal-access-token", target: "_blank", rel: "noopener" }, "Asana → Impostazioni → App"), " e crea un token di accesso personale;"),
-          "copia il token;",
-          h("span", {}, "incollalo qui: Cora lo verifica su Asana e lo salva nella cassaforte come ", h("code", {}, "CORA_ASANA_TOKEN"), ", senza mostrarlo più.")),
-          h("div", { class: "input-row token" }, token, submit("Verifica e collega", () => api("/api/connectors/keys/asana", { method: "POST", body: { mode: "pat", token: token.value.trim() } })))), { stack: true })),
-        feedback);
+    const modes = service.modes || [];
+    const mode = modes.find((item) => item.id === modeChoice.get(service.id)) || modes.find((item) => item.id === record?.mode) || modes[0];
+    const inputs = new Map();
+    const input = (spec) => {
+      const node = h("input", { type: spec.type || "text", placeholder: spec.placeholder, autocomplete: "off", autocapitalize: "none", spellcheck: "false", "aria-label": spec.label });
+      inputs.set(spec.name, node);
+      return node;
+    };
+    const send = () => api(`/api/connectors/keys/${service.id}`, { method: "POST", body: { ...(mode.body || {}), ...Object.fromEntries([...inputs].map(([name, node]) => [name, node.value.trim()])) } });
+    let toggle = null;
+    if (modes.length > 1) {
+      toggle = h("div", { class: "segmented", role: "group", "aria-label": tr("Come collegare {name}", { name: service.name }) },
+        modes.map((item) => btn(item.label, { onclick: () => { modeChoice.set(service.id, item.id); draw(); } })));
+      [...toggle.children].forEach((button, index) => { const on = modes[index] === mode; button.classList.toggle("on", on); button.setAttribute("aria-pressed", String(on)); });
     }
-    // Canva: either the app credentials, or the decision that it is not needed for now.
-    const record = keyRecord("canva");
-    if (record?.status === "app" || canvaOpen || decision === "app") {
-      const clientId = h("input", { type: "text", autocomplete: "off", spellcheck: "false", "aria-label": "Client ID dell'app Canva" });
-      const clientSecret = h("input", { type: "password", autocomplete: "off", spellcheck: "false", "aria-label": "Client secret dell'app Canva" });
-      return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: record?.status === "app" ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
-        h("p", {}, "Canva non ha token personali: si collega solo con un'app Canva intestata a te."),
-        h("p", { role: "status", class: "notice warn" }, "Per attivare Canva servono i dati dell'app: client ID e client secret. L'autorizzazione OAuth è il passo successivo."),
-        setRows(setRow("L'app Canva", null, h("div", { class: "stack-sm" }, steps(
-          h("span", {}, "apri ", h("a", { href: "https://www.canva.com/developers/", target: "_blank", rel: "noopener" }, "canva.com/developers"), " → Your integrations → Create integration;"),
-          "copia client ID e client secret;",
-          h("span", {}, "incollali qui: finiscono nella cassaforte come ", h("code", {}, "CORA_CANVA_CLIENT_ID"), " e ", h("code", {}, "CORA_CANVA_CLIENT_SECRET"), ";"),
-          "l'autorizzazione OAuth si completa appena l'app esiste."),
-          h("div", { class: "stack-sm" }, field("Client ID", clientId), field("Client secret", clientSecret), h("div", { class: "row end" }, submit("Salva l'app", () => api("/api/connectors/keys/canva", { method: "POST", body: { clientId: clientId.value.trim(), clientSecret: clientSecret.value.trim() } }))))), { stack: true })),
-        feedback);
-    }
-    return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: record?.status === "later" ? tag("Non serve") : tag("Da collegare", "agent") },
-      h("p", {}, "Canva non ha token personali: si collega solo con un'app Canva intestata a te, con client ID, client secret e autorizzazione OAuth."),
-      h("p", { role: "status", class: "notice warn" }, "Decidi tu: collegare Canva adesso con un'app, oppure lasciarla spenta. Senza app nessun agente può usarla."),
-      record?.status === "later" ? h("p", { class: "muted" }, "Canva è esclusa: nessun agente la usa e nessuna chiave è salvata.") : null,
-      h("div", { class: "row wrap" }, btn(record?.status === "later" ? "Attiva Canva" : "Collega Canva con un'app", { icon: "plus", cls: "primary", onclick: () => { canvaOpen = true; draw(); } }),
-        btn("Per ora no", { cls: "ghost", onclick: async () => {
-          try { await api("/api/connectors/keys/canva", { method: "POST", body: { decision: "later" } }); canvaOpen = false; await load(); toast("Canva lasciata spenta"); }
-          catch (error) { toast(error.message, true); }
-        } })),
+    const rows = (mode.rows || []).map((row) => {
+      const parts = [];
+      if (row.steps) parts.push(steps(...row.steps.map(stepParts)));
+      if (row.field) { const node = input(row.field); parts.push(row.submit ? h("div", { class: "input-row token" }, node, submit(row.submit, send)) : node); }
+      if (row.fields) parts.push(h("div", { class: "stack-sm" }, row.fields.map((spec) => field(spec.title, input(spec))), row.submit ? h("div", { class: "row end" }, submit(row.submit, send)) : null));
+      if (row.note) parts.push(h("p", { class: "muted" }, row.note));
+      const control = parts.length === 1 && !row.steps ? parts[0] : h("div", { class: "stack-sm" }, parts);
+      return setRow(row.title, row.hint || null, control, { stack: Boolean(row.steps || row.field || row.fields) });
+    });
+    return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: mode.ready && record?.status === mode.ready ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
+      h("p", {}, mode.intro || service.intro),
+      toggle,
+      mode.notice ? h("p", { role: "status", class: "notice warn" }, mode.notice) : null,
+      setRows(...rows),
       feedback);
   };
 
   const keyDetail = (id) => {
-    const service = CONNECTOR_SERVICES.find((item) => item.id === id);
+    const service = serviceOf(id);
     const record = keyRecord(id);
-    const intro = id === "linear" ? "Gli agenti leggono e creano issue nel workspace che colleghi. La chiave resta nella cassaforte, mai nel pannello."
-      : id === "asana" ? "Gli agenti lavorano sui progetti del tuo Asana. Il token resta nella cassaforte, mai nel pannello."
-        : "Gli agenti preparano materiali di design. Canva richiede un'app Canva (OAuth) intestata a te.";
-    return [back(), record?.status === "connected" ? connectedPanel(service, record, intro) : keyForm(service, { decision: canvaOpen ? "app" : "" })];
+    return [back(), record?.status === "connected" ? connectedPanel(service, record) : keyForm(service)];
   };
 
   const googleDetail = () => {
@@ -3520,7 +3486,7 @@ function connectorsPane() {
     drawCatalog();
     if (!current) return;
     if (!data) { detail.replaceChildren(back(), h("p", { class: "muted", role: "status" }, "Carico i connettori…")); return; }
-    try { detail.replaceChildren(...(current === "google" ? googleDetail() : keyDetail(current))); }
+    try { detail.replaceChildren(...(serviceOf(current)?.kind === "google" ? googleDetail() : keyDetail(current))); }
     catch (error) { detail.replaceChildren(back(), panel({ icon: "alert", title: "Connettore non disponibile" }, h("p", { role: "alert" }, raw(tr(error.message))))); }
   };
 
@@ -3530,6 +3496,7 @@ function connectorsPane() {
       const response = await api("/api/connectors");
       if (!slot.isConnected) return;
       data = response;
+      if (current && !serviceOf(current)) show("");
       slot.replaceChildren(catalog, detail);
       draw();
     } catch (error) { slot.replaceChildren(panel({ icon: "alert", title: "Connettori non disponibili" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
