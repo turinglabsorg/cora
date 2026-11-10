@@ -655,9 +655,11 @@ export class Orchestrator {
         for (const id of focus.ids) {
           const agent = this.agentsFor(channelId).find((candidate) => candidate.id === id);
           if (!agent) continue;
+          // A working agent is not idle: nobody asks it whether it still wants to listen.
+          if (this.agentWorking(agent.id)) continue;
           if (transportOf(channelId) === "discord" && !this.dmAgentId(channelId) && this.bots && !await this.bots.canRead(agent, channelId)) continue;
           if (this.engagements[channelId] !== focus) break;
-          const text = this.store.settings.language === "en" ? "It has been 30 minutes since your last message. Should I keep listening to this conversation? I will stay connected until you explicitly ask me to leave." : "Sono passati 30 minuti dal tuo ultimo messaggio. Devo rimanere in ascolto di questa conversazione? Resto collegato finché non mi chiedi esplicitamente di uscire.";
+          const text = this.store.settings.language === "en" ? "It has been 30 minutes since the last message. Should I keep listening to this conversation? I will stay connected until you explicitly ask me to leave." : "Sono passati 30 minuti dall'ultimo messaggio. Devo rimanere in ascolto di questa conversazione? Resto collegato finché non mi chiedi esplicitamente di uscire.";
           await this.postAs(agent, this.state(channelId), text, undefined, undefined, { passive: true });
           if (this.engagements[channelId] === focus) {
             focus.remindedAt = now;
@@ -972,6 +974,22 @@ export class Orchestrator {
   /** True when no channel has a round running or scheduled, and no agent is still working. */
   quiet() {
     return !this.threadWork.size && [...this.states.values()].every((state) => !state.running && !state.nextRoundAt && !state.pending && !state.working?.size);
+  }
+
+  /** True while the agent is on a task anywhere: its own work is not silence. */
+  agentWorking(agentId) {
+    for (const state of this.states.values()) if (state.working?.has(agentId)) return true;
+    for (const agents of this.threadWork.values()) if (agents.has(agentId)) return true;
+    return false;
+  }
+
+  /** Any message in the conversation restarts the thirty minutes, the agent's own included. */
+  restartInactivity(state, agentId, at) {
+    const focus = state.focus;
+    if (!focus?.ids?.includes(agentId)) return;
+    focus.at = at;
+    this.engagements[state.id] = focus;
+    this.store.setValue("conversationEngagements", this.engagements);
   }
 
   async runRound(state) {
@@ -1658,6 +1676,7 @@ export class Orchestrator {
       };
       this.push(state, item);
       this.store.appendArchive(state.id, item);
+      this.restartInactivity(state, agent.id, item.at);
       if (!passive && !continuation) {
         state.budget -= 1;
         this.queueColleagues(state, item, delegationAuthorized);
@@ -1757,6 +1776,7 @@ export class Orchestrator {
     };
     this.push(state, item);
     this.store.appendArchive(state.id, item);
+    this.restartInactivity(state, agent.id, item.at);
     if (text && !passive && !continuation) {
       state.budget -= 1;
       this.queueColleagues(state, item, delegationAuthorized);

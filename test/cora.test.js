@@ -4110,7 +4110,7 @@ describe("talking with the agents", () => {
     }
   });
 
-  test("after 30 minutes of human silence the reminder asks once, stays connected, survives restart and resets only on human input", async () => {
+  test("after 30 minutes without messages the reminder asks once, stays connected, survives restart and restarts when anyone writes", async () => {
     const THREAD = "1599000000000000792";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle reminder" });
     await sleep(100);
@@ -4134,11 +4134,40 @@ describe("talking with the agents", () => {
     await waitFor(() => posts("Olga").filter((text) => text === "Resto qui.").length === 2);
     await quiet();
     const renewed = app.orchestrator.engagements[THREAD];
+    const renewedAt = renewed.at;
     assert.equal(renewed.remindedAt, 0);
+    await sleep(20);
     await app.orchestrator.postAs(olga, app.orchestrator.state(THREAD), "Aggiornamento del bot.", undefined, undefined, { passive: true });
-    assert.equal(app.orchestrator.engagements[THREAD].at, renewed.at, "agent output does not reset human inactivity");
-    await app.orchestrator.checkEngagements(renewed.at + 30 * 60000);
+    const afterBot = app.orchestrator.engagements[THREAD].at;
+    assert.ok(afterBot > renewedAt, "the agent's own message restarts the thirty minutes");
+    await app.orchestrator.checkEngagements(renewedAt + 30 * 60000);
+    assert.equal(reminders().length, 1, "the count runs from the last message, whoever wrote it");
+    await app.orchestrator.checkEngagements(afterBot + 30 * 60000);
     assert.equal(reminders().length, 2);
+  });
+
+  test("an agent at work is never asked whether it still wants to listen, and its own answers restart the count", async () => {
+    const THREAD = "1599000000000000794";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle at work" });
+    await sleep(100);
+    const reminders = () => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && /30 minuti/.test(item.content));
+    let release;
+    const working = new Promise((resolve) => { release = resolve; });
+    replies.set("Olga", async () => { await working; return { content: "Fatto, ecco il risultato." }; });
+    discord.say({ content: "@Olga, guarda la cosa con calma", channel: THREAD });
+    await waitFor(() => app.orchestrator.state(THREAD).working?.has(olga.id), { what: "Olga at work" });
+    const start = app.orchestrator.engagements[THREAD].at;
+    await app.orchestrator.checkEngagements(start + 30 * 60000);
+    assert.equal(reminders().length, 0, "a working agent is not asked whether it still listens");
+    release();
+    await waitFor(() => posts("Olga").filter((text) => text === "Fatto, ecco il risultato.").length === 1, { what: "Olga's result" });
+    await quiet();
+    const after = app.orchestrator.engagements[THREAD].at;
+    assert.ok(after > start, "her own answer restarts the thirty minutes");
+    await app.orchestrator.checkEngagements(start + 30 * 60000);
+    assert.equal(reminders().length, 0);
+    await app.orchestrator.checkEngagements(after + 30 * 60000);
+    assert.equal(reminders().length, 1);
   });
 
   test("an agent at work shows it the way a person does, without a line in the channel", async () => {
