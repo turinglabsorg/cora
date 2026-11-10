@@ -22,7 +22,7 @@ import { telegramBotEnvName } from "./telegram-bots.js";
 import { isWebRoom, isSalotto, ownerRoom, roomAgentId } from "./rooms.js";
 import { nextRuns } from "./scheduler.js";
 import { SHARED } from "./store.js";
-import { hermesKeyBackend } from "./hermes-keys.js";
+import { modelKeyBackend } from "./hermes-keys.js";
 import { BRAIN_KINDS } from "./company-brain.js";
 import { VOICE_LANGUAGES } from "./voice.js";
 import { contextSources, writeContextFile } from "./context.js";
@@ -1160,7 +1160,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         const record = store.credential(credentialId);
         if (!record || record.connectedBy?.id !== user.id) throw new HttpError(403, "Chiave privata.");
       }
-      const backend = hermesKeyBackend(model);
+      const backend = modelKeyBackend(model);
       if (backend && !credentialId) {
         const ready = backend === "ollama" ? Boolean(llm.ollamaKey) : Boolean(llm.deepseek?.key);
         if (!ready) throw new HttpError(400, "scegli una tua chiave oppure configura quella dello space");

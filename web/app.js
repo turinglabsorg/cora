@@ -48,7 +48,7 @@ const HARNESSES = {
   muse: { label: "Muse Code", hint: "Muse guida sé stesso con l'account Meta scelto qui sotto.", providers: ["muse"] },
   gemini: { label: "Antigravity CLI", hint: "Gemini usa l'abbonamento Google AI dell'account scelto qui sotto.", providers: ["gemini"] },
   hermes: { label: "Hermes", hint: "Hermes guida sé stesso: su questa macchina, su Ollama Cloud o su DeepSeek.", providers: ["hermes"] },
-  deepseek: { label: "DeepSeek Harness", hint: "dsh, l'harness di DeepSeek, guida sé stesso con la chiave DeepSeek di questa Cora.", providers: ["deepseek"] },
+  deepseek: { label: "DeepSeek Harness", hint: "dsh, l'harness di DeepSeek, guida sé stesso con la tua chiave DeepSeek o quella dello space.", providers: ["deepseek"] },
 };
 const harnessOf = (model) => {
   const provider = String(model || "").split("/")[0];
@@ -83,7 +83,7 @@ const PROVIDER_HINTS = {
   ollamaCloud: "questa macchina non è collegata a Ollama Cloud, e manca CORA_OLLAMA_API_KEY in hush",
   orcarouter: "manca CORA_ORCAROUTER_API_KEY in hush",
   hermes: "Hermes non trovato su questa macchina",
-  deepseek: "serve dsh su questa macchina e la chiave DeepSeek",
+  deepseek: "serve dsh su questa macchina e una chiave DeepSeek, tua o dello space",
 };
 const PROVIDER_SHORT = { claude: "Claude", codex: "ChatGPT", grok: "Grok", muse: "Meta", gemini: "Gemini", ollama: "Ollama", orcarouter: "OrcaRouter", hermes: "Hermes", deepseek: "DeepSeek" };
 /** Each subscription's mark, so two accounts are told apart at a glance. */
@@ -1317,7 +1317,7 @@ const HARNESS_NEEDS = {
   muse: "Muse Code non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   gemini: "Antigravity CLI non è installato su questa macchina: installalo sul server con l'utente di Cora.",
   hermes: "Hermes non è installato su questa macchina: installalo sul server con l'utente di Cora.",
-  deepseek: "DeepSeek Harness ha bisogno di dsh sul server (npm i -g @deepseek-ai/dsh) e della chiave DeepSeek in Impostazioni → DeepSeek.",
+  deepseek: "DeepSeek Harness ha bisogno di dsh sul server (npm i -g @deepseek-ai/dsh) e di una chiave DeepSeek: la tua, oppure quella dello space in Impostazioni → DeepSeek.",
   ollama: "Nessun Ollama su questa macchina e nessuna chiave Ollama Cloud.",
   orcarouter: "Nessuna chiave OrcaRouter.",
 };
@@ -1371,6 +1371,13 @@ function hermesBackendOf(model) {
   return parts[1] === "ollama" || parts[1] === "deepseek" ? parts[1] : "";
 }
 
+/** The key a model id needs: a keyed Hermes end, or DeepSeek Harness itself. */
+function keyBackendOf(model) {
+  const parts = String(model || "").split("/");
+  if (parts[0] === "hermes") return hermesBackendOf(model);
+  return parts[0] === "deepseek" ? "deepseek" : "";
+}
+
 function hermesPlaceOf(id) {
   const backend = hermesBackendOf(id);
   if (backend) return backend;
@@ -1398,7 +1405,7 @@ function brainPanel(agent) {
   // "" is the space key. A key_* id is the person's own key for that endpoint.
   // null means the person has not chosen yet: their own key if they have one, otherwise the space key.
   const keyChoice = { ollama: null, deepseek: null };
-  const startedOn = hermesBackendOf(agent.model);
+  const startedOn = keyBackendOf(agent.model);
   if (startedOn) keyChoice[startedOn] = agent.credentialId || "";
   const remoteModels = { ollama: [], deepseek: [] };
   const remoteStamp = { ollama: "", deepseek: "" };
@@ -1459,7 +1466,7 @@ function brainPanel(agent) {
   function drawHarness() {
     harnessInput.replaceChildren(...Object.entries(HARNESSES).map(([key, item]) => {
       const ready = harnessReady(key);
-      const status = ready ? "" : tr(key === "deepseek" && S.data.providers?.deepseekInstalled ? "senza chiave" : "non installato");
+      const status = ready ? "" : tr("non installato");
       return h("option", { value: key, selected: key === harness }, raw(tr(item.label) + (status ? ` · ${status}` : "")));
     }));
     harnessInput.value = harness;
@@ -1598,12 +1605,12 @@ function brainPanel(agent) {
   }
 
   function credentialFor(modelId) {
-    const backend = hermesBackendOf(modelId);
+    const backend = keyBackendOf(modelId);
     return backend ? resolveKey(backend) : "";
   }
 
   function hermesKeyProblem(modelId) {
-    const backend = hermesBackendOf(modelId);
+    const backend = keyBackendOf(modelId);
     if (!backend) return "";
     const cred = resolveKey(backend);
     if (cred) {
@@ -1781,7 +1788,8 @@ function brainPanel(agent) {
     }
 
     if (problem) out.push(h("p", { class: "notice warn", role: "alert" }, icon("alert"), h("span", {}, problem)));
-    if (harness === "hermes" && place === "ollama") out.push(...keyedSide("ollama"));
+    if (harness === "deepseek") out.push(keyBox("deepseek"), ...cloudSide());
+    else if (harness === "hermes" && place === "ollama") out.push(...keyedSide("ollama"));
     else if (harness === "hermes" && place === "deepseek") out.push(...keyedSide("deepseek"));
     else if (harness === "hermes" && place === "orcarouter") out.push(...routerSide());
     else out.push(...(place === "local" ? localSide() : cloudSide()));

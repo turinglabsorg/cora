@@ -2046,6 +2046,87 @@ describe("per-agent subscription authentication", () => {
     assert.equal(changed.data.subscriptionId, claude.id);
   });
 
+  test("an account signed in twice is one account, shared by every agent that uses it", async (t) => {
+    const fixture = await subscriptionApp(t);
+    fixture.identity.set({ email: "shared@example.test" });
+    const first = await connectIdentity(fixture, "claude", "First");
+    const agent = fixture.app.store.createAgent({ name: "Shared account agent", model: "claude/claude-sonnet-5-5", subscriptionId: first.id, tools: false });
+    const second = await connectIdentity(fixture, "claude", "Second");
+    await waitFor(() => fixture.app.store.subscriptions().length === 1, { what: "one Claude account" });
+    const [account] = fixture.app.store.subscriptions();
+    assert.equal(account.id, second.id, "the sign-in that just happened stays");
+    assert.equal(account.email, "shared@example.test");
+    assert.equal(fixture.app.store.agent(agent.id).subscriptionId, second.id, "its agents move onto the one account");
+    assert.equal(fixture.app.store.subscription(first.id), null);
+    assert.equal(existsSync(join(fixture.home, "subscriptions", first.id)), false, "the duplicate profile is gone");
+    assert.equal((await fixture.request("/api/subscriptions")).data.length, 1);
+  });
+
+  test("different addresses stay different accounts", async (t) => {
+    const fixture = await subscriptionApp(t);
+    fixture.identity.set({ email: "one@example.test" });
+    const first = await connectIdentity(fixture, "claude", "One");
+    fixture.identity.set({ email: "two@example.test" });
+    const second = await connectIdentity(fixture, "claude", "Two");
+    await fixture.app.subscriptions.consolidate();
+    assert.deepEqual(fixture.app.store.subscriptions().map((record) => record.email).sort(), ["one@example.test", "two@example.test"]);
+    assert.ok(fixture.app.store.subscription(first.id) && fixture.app.store.subscription(second.id));
+  });
+
+  test("Antigravity says which Google account a profile is, so two profiles of one account are one", async (t) => {
+    const fixture = await subscriptionApp(t);
+    fixture.identity.set({ geminiUsage: { status: "SUCCESS", command: { data: { groups: [] } } } });
+    const first = fixture.app.store.createSubscription({ provider: "gemini", label: "Gemini" });
+    const second = fixture.app.store.createSubscription({ provider: "gemini", label: "Gemini" });
+    for (const record of [first, second]) {
+      const directory = fixture.app.subscriptions.directory(record);
+      writeFileSync(join(directory, "fixture-account.json"), JSON.stringify({ type: "chatgpt", email: "fixture@example.test", planType: "pro" }));
+      const logs = join(directory, ".gemini", "antigravity-cli", "log");
+      mkdirSync(logs, { recursive: true });
+      writeFileSync(join(logs, "cli-20261109_170134.log"), "I1109 17:01:48.114098 347 server_oauth.go:226] OAuth: authenticated successfully as sebastiano@example.test\n");
+    }
+    await fixture.app.subscriptions.check(first.id);
+    assert.equal(fixture.app.store.subscription(first.id).email, "sebastiano@example.test");
+    // The other profile already says the same address, so one check is enough to know both.
+    await waitFor(() => fixture.app.store.subscriptions().length === 1, { what: "one Gemini account" });
+    const [account] = fixture.app.store.subscriptions();
+    assert.equal(account.id, first.id, "the profile that was just checked stays");
+    assert.equal(account.email, "sebastiano@example.test");
+    assert.equal(fixture.app.store.subscription(second.id), null);
+    assert.equal(existsSync(join(fixture.home, "subscriptions", second.id)), false, "the other profile is gone");
+    const agent = fixture.app.store.createAgent({ name: "Vera profile", model: "gemini/gemini-3.8-flash-high", subscriptionId: account.id, tools: false });
+    assert.equal(fixture.app.store.agent(agent.id).subscriptionId, account.id);
+  });
+
+  test("two Gemini profiles already on disk are one account before anyone checks them", async (t) => {
+    const fixture = await subscriptionApp(t);
+    const first = fixture.app.store.createSubscription({ provider: "gemini", label: "Vera profile" });
+    fixture.app.store.updateSubscription(first.id, { status: "ready" });
+    fixture.app.store.createAgent({ name: "First Gemini agent", model: "gemini/gemini-3.8-flash-high", subscriptionId: first.id, tools: false });
+    const second = fixture.app.store.createSubscription({ provider: "gemini", label: "Second profile" });
+    for (const record of [first, second]) {
+      const logs = join(fixture.app.subscriptions.directory(record), ".gemini", "antigravity-cli", "log");
+      mkdirSync(logs, { recursive: true });
+      writeFileSync(join(logs, "cli-20261109_170134.log"), "I1109 17:01:48.114098 347 server_oauth.go:221] applyAuthResult: email=sebastiano@example.test, authMethod=consume\n");
+    }
+    await fixture.app.subscriptions.consolidate();
+    await waitFor(() => fixture.app.store.subscriptions().length === 1, { what: "one Gemini account" });
+    const [account] = fixture.app.store.subscriptions();
+    assert.equal(account.email, "sebastiano@example.test", "the address from the profile is the identity");
+    assert.equal(fixture.app.store.agents().filter((agent) => agent.subscriptionId === account.id).length, 1, "the agent follows the account it used");
+  });
+
+  test("per-owner memory keeps two people's identical address apart", async (t) => {
+    const fixture = await subscriptionApp(t);
+    fixture.app.subscriptions.ownerScoped = true;
+    const alice = fixture.app.store.createSubscription({ provider: "claude", label: "Alice", connectedBy: { id: "ac_alice" } });
+    const bob = fixture.app.store.createSubscription({ provider: "claude", label: "Bob", connectedBy: { id: "ac_bob" } });
+    for (const record of [alice, bob]) fixture.app.store.updateSubscription(record.id, { status: "ready", email: "team@example.test" });
+    await fixture.app.subscriptions.consolidate();
+    assert.equal(fixture.app.store.subscriptions().length, 2);
+    assert.ok(fixture.app.store.subscription(alice.id) && fixture.app.store.subscription(bob.id));
+  });
+
   test("the Brain routes different agents to different local accounts without host credential overrides", async (t) => {
     const fixture = await subscriptionApp(t);
     const first = await connectIdentity(fixture, "codex", "First account");
@@ -2791,7 +2872,7 @@ describe("agents in Discord", () => {
     assert.ok(state.data.models.some((model) => model.id === "claude/claude-opus-5-5"));
     assert.ok(state.data.models.some((model) => model.id === "codex/gpt-6-sol"));
     assert.ok(!state.data.models.some((model) => model.id === "codex/hidden"));
-    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, gemini: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true, deepseek: false, deepseekInstalled: true }, "dsh is here, its key is not");
+    assert.deepEqual(state.data.providers, { claude: true, codex: true, grok: true, muse: true, gemini: true, ollama: true, ollamaLocal: true, ollamaCloud: true, orcarouter: true, hermes: true, deepseek: true, deepseekInstalled: true }, "dsh is here; its key is chosen agent by agent");
   });
 
   test("creates two agents through the API", async () => {
@@ -5190,7 +5271,7 @@ describe("what runs the models", () => {
     await panel.navigate(`#/agent/${agent.id}/cervello`);
     await waitFor(() => panel.app.querySelector(".brain-harness"));
     assert.deepEqual(panel.app.querySelector(".brain-harness").querySelectorAll("option").map((node) => node.textContent),
-      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Antigravity CLI", "Hermes", "DeepSeek Harness · no key"]);
+      ["Cora's harness", "Claude Code", "Codex", "Grok Build", "Muse Code", "Antigravity CLI", "Hermes", "DeepSeek Harness"]);
     const sections = panel.app.querySelector(".email-workspace-nav").querySelectorAll("button");
     assert.deepEqual(sections.map((node) => node.querySelector("b").textContent), ["Model and account", "Reasoning", "Computer"]);
     // It opens on the side the agent is already on: the cloud.

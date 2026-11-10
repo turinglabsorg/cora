@@ -297,3 +297,46 @@ test("the panel offers the three Hermes ends and both keys, and the API keeps ea
   panel.app.querySelectorAll(".model-row").find((button) => button.textContent.includes("qwen3:14b") && !button.textContent.includes("Predefinito")).click();
   assert.equal(panel.run("window.__brain.credentialId()"), "", "a local model does not keep a cloud key");
 });
+
+test("the panel gives DeepSeek Harness the same key choice: the person's or the space one", async () => {
+  const panel = panelHarness({ fetch: async (path) => {
+    if (path === "/api/hardware") return { ok: true, status: 200, json: async () => ({ hosts: [], gpus: [] }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  const state = (spaceKey) => `S.data = {
+    settings: { defaultModel: "deepseek/deepseek-flash" },
+    currentUser: { id: "local-owner", name: "Owner", role: "owner" },
+    providers: { deepseek: true, deepseekInstalled: true, ollama: true, hermes: true },
+    keys: { ollama: false, deepseek: ${spaceKey} },
+    credentials: [{ id: "key_aaaaaaaaaaaa", provider: "deepseek", label: "Mia DeepSeek", last4: "MINE", connectedBy: { id: "local-owner", name: "Owner" } }],
+    models: [
+      { id: "deepseek/deepseek-flash", provider: "deepseek", label: "DeepSeek V4.1 Flash", tools: true },
+      { id: "deepseek/deepseek-v4-pro", provider: "deepseek", label: "DeepSeek V4 Pro", tools: true },
+    ],
+    ollamaCloud: { signedIn: false },
+    agents: [],
+    subscriptions: [],
+  }`;
+  panel.run(state("true"));
+  panel.run(`window.__brain = brainPanel({ id: "ag_1", name: "Nico", model: "deepseek/deepseek-flash", credentialId: "", subscriptionId: "", tools: true })`);
+  panel.run(`document.getElementById("app").append(window.__brain.node)`);
+  const keys = () => panel.app.querySelectorAll(".hermes-key").map((button) => button.textContent);
+  assert.ok(keys().some((text) => text.includes("Chiave dello space") && text.includes("pronta")), "the space key is offered for this harness too");
+  assert.ok(keys().some((text) => text.includes("Mia DeepSeek") && text.includes("MINE")), "a personal DeepSeek key is offered beside it");
+  assert.ok(panel.app.querySelectorAll(".model-row").some((row) => row.textContent.includes("DeepSeek V4.1 Flash")));
+  assert.equal(panel.run("window.__brain.credentialId()"), "", "with no key chosen the agent uses the space key");
+  assert.equal(panel.run("window.__brain.validate()"), true);
+  panel.app.querySelectorAll(".hermes-key").find((button) => button.textContent.includes("MINE")).click();
+  assert.equal(panel.run("window.__brain.credentialId()"), "key_aaaaaaaaaaaa", "the person's own key is what the agent saves");
+  panel.app.querySelectorAll(".hermes-key").find((button) => button.textContent.includes("Chiave dello space")).click();
+  assert.equal(panel.run("window.__brain.credentialId()"), "", "the space key stays available beside the personal one");
+
+  const empty = panelHarness({ fetch: async (path) => {
+    if (path === "/api/hardware") return { ok: true, status: 200, json: async () => ({ hosts: [], gpus: [] }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  } });
+  empty.run(state("false").replace(/credentials: \[[^\]]*\],/, "credentials: [],"));
+  empty.run(`window.__brain = brainPanel({ id: "ag_2", name: "Nico", model: "deepseek/deepseek-flash", credentialId: "", subscriptionId: "", tools: true })`);
+  empty.run(`document.getElementById("app").append(window.__brain.node)`);
+  assert.equal(empty.run("window.__brain.validate()"), false, "no space key and no personal key: the harness cannot be saved");
+});

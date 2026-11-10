@@ -7,7 +7,7 @@ import { sanitizeCharacter } from "./character.js";
 import { plainKeys } from "./box.js";
 import { cleanGithubOrg } from "./github-apps.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS, isSubscriptionProvider } from "./harnesses.js";
-import { hermesKeyBackend } from "./hermes-keys.js";
+import { modelKeyBackend } from "./hermes-keys.js";
 import { VOICE_LANGUAGES } from "./voice.js";
 import { aggregateMeters } from "./usage.js";
 
@@ -341,8 +341,8 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     createdAt: previous.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
-  // A local model does not keep a cloud key hanging off it.
-  if (!hermesKeyBackend(agent.model)) agent.credentialId = "";
+  // A model with no key of its own does not keep one hanging off it.
+  if (!modelKeyBackend(agent.model)) agent.credentialId = "";
   return { ...agent, ...avatarFields(agent, avatarBase) };
 }
 
@@ -865,9 +865,9 @@ export class Store {
     return this.stmt("DELETE FROM credentials WHERE id = ?").run(id).changes > 0;
   }
 
-  /** A keyed Hermes model may name one of that provider's keys, or none: none means the space key. */
+  /** A keyed model (Hermes on an end, or DeepSeek Harness) may name one of that provider's keys, or none: none means the space key. */
   checkAgentCredential(agent) {
-    const backend = hermesKeyBackend(agent.model);
+    const backend = modelKeyBackend(agent.model);
     if (!backend || !agent.credentialId) return;
     const record = this.credential(agent.credentialId);
     if (!record || record.provider !== backend) throw new ValidationError("chiave incompatibile con il modello");
