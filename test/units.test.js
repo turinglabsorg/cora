@@ -472,19 +472,26 @@ test("the panel renders markdown as DOM: blocks, inline marks, only web and mail
   assert.equal(render("**grassetto *e corsivo***").querySelector("strong").querySelector("em").textContent, "e corsivo");
 });
 
-test("Artefatti: the count of reviews waits beside its entry, proposals come first, folders sit in their groups", async () => {
+test("Artefatti: the count of reviews waits beside its entry, proposals come first, levels open like directories", async () => {
   const folder = (id, path, extra = {}) => ({ id, path, title: path.split("/").at(-1), description: "", kind: "files", policy: "review", head: "", pending: 0, conflicts: 0, shares: 0, files: 0, bytes: 0, lastActivity: Date.parse("2026-11-05T09:00:00Z"), ...extra });
   const listing = {
     folders: [folder("af_000000000001", "clienti/acme/sito", { kind: "site", head: "ac_000000000009", files: 3, bytes: 2048, pending: 1 }), folder("af_000000000002", "clienti/acme/report", { conflicts: 1 }), folder("af_000000000003", "comunicati", { head: "ac_000000000008", files: 1, bytes: 10 })],
     reviews: [{ id: "ac_000000000010", folderId: "af_000000000001", message: "Numeri del Q3", author: { kind: "agent", id: "ag_x", name: "Nico" }, status: "proposed", createdAt: Date.parse("2026-11-05T09:00:00Z"), changes: { added: 1, modified: 1, deleted: 0 } }],
-    quota: { used: 4096, limit: 20 * 1024 ** 3 }, people: [], canManage: true,
+    quota: { used: 4096, limit: 20 * 1024 ** 3 }, people: [], canManage: true, levelShares: { clienti: 2 },
   };
-  const panel = panelHarness({ fetch: async (path) => ({ ok: true, status: 200, json: async () => (path === "/api/artifacts" ? listing : {}) }) });
+  const level = (path) => ({ path, folders: listing.folders.filter((item) => item.path.startsWith(`${path}/`)).map((item) => ({ ...item, served: true })), canShare: true, people: [], shareHosting: true, shareSuffix: "--acme.usecora.space", shares: [], activity: {} });
+  const asked = [];
+  const panel = panelHarness({ fetch: async (path) => {
+    asked.push(path);
+    const levelPath = path.startsWith("/api/artifacts/level?") ? new URLSearchParams(path.split("?")[1]).get("path") : "";
+    return { ok: true, status: 200, json: async () => (path === "/api/artifacts" ? listing : levelPath ? level(levelPath) : {}) };
+  } });
+  const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   panel.run(`transportInfo = () => ({ icon: "radio", label: "Discord", where: "test", state: "ready" })`);
   panel.run(`S.data = { agents: [], artifacts: { reviews: 3 }, currentUser: { id: "u1", name: "Ada", email: "", role: "owner", avatar: "" } }`);
   panel.run(`location.hash = "#/artefatti"`);
   panel.run("renderArtifacts()");
-  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  await settle();
   const nav = panel.app.querySelector(".side-nav").querySelectorAll("a").find((link) => link.attributes.href === "#/artefatti");
   assert.equal(nav.className, "active");
   assert.equal(nav.querySelector(".nav-count").textContent, "1", "the count follows what the server says waits for this viewer");
@@ -492,16 +499,31 @@ test("Artefatti: the count of reviews waits beside its entry, proposals come fir
   assert.equal(reviews.length, 1);
   assert.equal(reviews[0].attributes.href, "#/artefatti/af_000000000001/c/ac_000000000010");
   assert.match(reviews[0].textContent, /Nico.*Numeri del Q3.*clienti\/acme\/sito.*\+1~1/);
-  const groups = panel.app.querySelectorAll(".art-group");
-  assert.deepEqual(groups.map((group) => group.querySelector("h3").textContent), ["clienti2", "Senza gruppo1"]);
-  const rows = panel.app.querySelectorAll(".art-row");
-  assert.deepEqual(rows.map((row) => row.attributes.href), ["#/artefatti/af_000000000001", "#/artefatti/af_000000000002", "#/artefatti/af_000000000003"]);
-  assert.match(rows[0].textContent, /1 da rivedere.*3 file · 2 KB/);
-  assert.match(rows[1].textContent, /Conflitto.*niente in onda/);
-  assert.match(rows[2].textContent, /1 file · 10 B/);
-  assert.equal(rows[0].querySelector(".led").className, "led busy");
-  assert.equal(rows[1].querySelector(".led").className, "led err");
-  assert.equal(rows[2].querySelector(".led").className, "led on");
+  let rows = panel.app.querySelectorAll(".art-row");
+  assert.deepEqual(rows.map((row) => row.attributes.href), ["#/artefatti/in/clienti", "#/artefatti/af_000000000003"], "the root shows only what sits at the root: a level, then a folder");
+  assert.match(rows[0].textContent, /clienti.*2 cartelle · acme.*1 da rivedere/);
+  assert.equal(rows[0].querySelector(".led").className, "led err", "a level lights up with the worst of its folders");
+  assert.match(rows[1].textContent, /1 file · 10 B/);
+  assert.equal(rows[1].querySelector(".led").className, "led on");
+
+  panel.run(`location.hash = "#/artefatti/in/clienti"`);
+  panel.run("renderArtifacts()");
+  await settle();
+  assert.match(panel.app.querySelector(".art-crumbs").textContent, /Artefatti\/clienti/);
+  rows = panel.app.querySelectorAll(".art-row");
+  assert.deepEqual(rows.map((row) => row.attributes.href), ["#/artefatti/in/clienti/acme"]);
+
+  panel.run(`location.hash = "#/artefatti/in/clienti/acme"`);
+  panel.run("renderArtifacts()");
+  await settle();
+  assert.ok(asked.includes("/api/artifacts/level?path=clienti%2Facme"), "a level asks for its links");
+  rows = panel.app.querySelectorAll(".art-row");
+  assert.deepEqual(rows.map((row) => row.attributes.href), ["#/artefatti/af_000000000002", "#/artefatti/af_000000000001"]);
+  assert.match(rows[0].textContent, /report.*Conflitto.*niente in onda/);
+  assert.match(rows[1].textContent, /sito.*1 da rivedere.*3 file · 2 KB/);
+  assert.equal(rows[0].querySelector(".led").className, "led err");
+  assert.equal(rows[1].querySelector(".led").className, "led busy");
+  assert.match(panel.app.querySelector(".art-level-shares").textContent, /Ancora nessun link per questo livello|^$/);
 });
 
 test("Segreti: names and who may use them, never a value; what agents asked to send waits for the owner on top", async () => {

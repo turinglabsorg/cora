@@ -1661,6 +1661,13 @@ details.raw summary .ico { width: 15px; height: 15px; }
 .art-row-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; flex: none; max-width: 46%; }
 .art-row-meta small { color: var(--faint); font: 400 11px/1.4 var(--mono); }
 .art-row .chev { width: 16px; height: 16px; color: var(--faint); }
+.art-level-ico { color: var(--amber); }
+.art-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -4px 0 -6px; font: 500 12px/1.4 var(--mono); color: var(--muted); }
+.art-crumbs a { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); text-decoration: none; border-radius: 6px; padding: 2px 4px; }
+.art-crumbs a:hover { color: var(--amber); background: var(--amber-wash); }
+.art-crumbs .ico { width: 14px; height: 14px; }
+.art-crumbs b { color: var(--text); font-weight: 600; padding: 2px 4px; }
+.art-crumb-sep { color: var(--faint); }
 
 .art-reviews > .label { display: flex; align-items: center; gap: 8px; padding: 2px 4px 4px; color: var(--amber); }
 .art-reviews > .label .count { font-style: normal; padding: 1px 7px; border-radius: 999px; background: var(--amber); color: var(--ink); }

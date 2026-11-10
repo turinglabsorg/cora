@@ -1614,6 +1614,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         quota: artifacts.space(),
         people: store.sharingPeople(user),
         canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"),
+        levelShares: store.artifactShares().filter((share) => share.prefix && share.status === "active").reduce((out, share) => ({ ...out, [share.prefix]: (out[share.prefix] || 0) + 1 }), {}),
       });
     }
     if (path === "/api/artifacts/folders" && method === "POST") {
@@ -1732,12 +1733,42 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       throw new HttpError(405, "method not allowed");
     }
+    // A level of the paths (clienti, clienti/acme): what is inside it, and links that serve all of it.
+    match = /^\/api\/artifacts\/level(?:\/(shares|events))?$/.exec(path);
+    if (match) {
+      const level = String(url.searchParams.get("path") || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
+      if (!level || store.artifactFolderByPath(level)) throw new HttpError(404, "livello non trovato");
+      const inside = artifacts.groupFolders(level).filter((folder) => artifacts.canReadMember(folder, user));
+      if (!inside.length) throw new HttpError(404, "livello non trovato");
+      const canShare = artifacts.canShareGroup(level, user);
+      const id = `ag:${level}`;
+      if (match[1] === "shares" && method === "POST") {
+        if (!canShare) throw new HttpError(403, "condivide un livello solo chi rivede almeno una delle sue cartelle");
+        const body = await readJson(req, 32768);
+        return send(res, 201, artifacts.createShare(id, { label: body.label, view: body.view, access: body.access, commit: body.commit, expiresAt: body.expiresAt, root: body.root, createdBy: by }));
+      }
+      if (match[1] === "events" && method === "GET") {
+        if (!canShare) throw new HttpError(403, "il registro lo vede chi rivede le cartelle di questo livello");
+        return send(res, 200, { events: store.artifactEvents(id, { shareId: url.searchParams.get("share") || "", before: Number(url.searchParams.get("before")) || 0, limit: 200 }) });
+      }
+      if (match[1] || method !== "GET") throw new HttpError(405, "method not allowed");
+      return send(res, 200, {
+        path: level,
+        folders: inside.map((folder) => ({ ...artifacts.folderView(folder), served: canShare && artifacts.canReview(folder, user) })),
+        canShare,
+        people: canShare ? store.sharingPeople(user) : [],
+        shareHosting: Boolean(artifacts.shareSuffix),
+        shareSuffix: artifacts.shareSuffix,
+        shares: store.artifactShares(id).map((share) => artifacts.shareView(share)),
+        activity: canShare ? store.artifactEventCounts(id) : {},
+      });
+    }
     match = /^\/api\/artifacts\/shares\/(as_[a-f0-9]{12})$/.exec(path);
     if (match) {
       const share = store.artifactShare(match[1]);
-      const folder = share ? store.artifactFolder(share.folderId) : null;
+      const folder = share ? artifacts.shareFolder(share.folderId) : null;
       if (!share || !folder) throw new HttpError(404, "link non trovato");
-      if (!artifacts.canReview(folder, user)) throw new HttpError(403, "cambiano un link solo il proprietario e i revisori della cartella");
+      if (folder.group ? !artifacts.canShareGroup(folder.path, user) : !artifacts.canReview(folder, user)) throw new HttpError(403, "cambiano un link solo il proprietario e i revisori della cartella");
       if (method === "PUT") return send(res, 200, artifacts.updateShare(share.id, await readJson(req, 32768), user));
       if (method === "DELETE") {
         store.deleteArtifactShare(share.id);

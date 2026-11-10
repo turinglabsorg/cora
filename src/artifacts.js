@@ -1070,9 +1070,76 @@ export class Artifacts {
   }
 
   shareView(share) {
-    const folder = this.store.artifactFolder(share.folderId);
+    const folder = this.shareFolder(share.folderId);
     const { password, ...access } = share.access || {};
-    return { ...share, access: { mode: "people", ...access }, url: this.shareUrl(share.label), folderPath: folder?.path || "", expired: Boolean(share.expiresAt && share.expiresAt < Date.now()) };
+    return { ...share, access: { mode: "people", ...access }, url: this.shareUrl(share.label), folderPath: folder?.path || share.prefix || "", group: Boolean(share.prefix), expired: Boolean(share.expiresAt && share.expiresAt < Date.now()) };
+  }
+
+  /* ---------- levels: a path that holds folders, browsed and shared like a directory ---------- */
+
+  /** A level of the folder paths, "clienti" or "clienti/acme": one that holds folders and is not a folder itself. */
+  cleanGroup(value) {
+    const path = String(value || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
+    if (!FOLDER_PATH.test(path)) throw new ArtifactError("percorso non valido");
+    if (this.store.artifactFolderByPath(path)) throw new ArtifactError(`${path} è una cartella, non un livello`);
+    if (!this.groupFolders(path).length) throw new ArtifactError(`nessuna cartella dentro ${path}`, 404);
+    return path;
+  }
+
+  /** The folders under a level, at any depth. */
+  groupFolders(path) {
+    const prefix = `${path}/`;
+    return this.store.artifactFolders().filter((folder) => folder.path.startsWith(prefix));
+  }
+
+  /** A level stands in for a folder where links are kept: its id is ag:<path>. */
+  groupFolder(path) {
+    return { id: `ag:${path}`, path, title: path.split("/").at(-1), kind: "files", group: true };
+  }
+
+  shareFolder(folderId) {
+    const id = String(folderId || "");
+    return id.startsWith("ag:") ? this.groupFolder(id.slice(3)) : this.store.artifactFolder(id);
+  }
+
+  /** Whether a panel user may share a level: they review at least one folder in it, and the link serves only those. */
+  canShareGroup(path, user) {
+    return this.groupFolders(path).some((folder) => this.canReview(folder, user));
+  }
+
+  /**
+   * Which folders a level's link serves, decided each time it is opened: those its creator
+   * or approver may still share (the folders a person reviews, the folders an agent may push
+   * to). A folder added later under the level shows up there, as in a directory.
+   */
+  groupGrants(share, folder) {
+    return [share.createdBy, share.approvedBy].filter(Boolean).some((by) => {
+      if (by.kind === "agent") {
+        const agent = this.store.agent(by.id);
+        return Boolean(agent && this.canWrite(folder, agent));
+      }
+      const user = this.store.panelUser(by.id);
+      return Boolean(user && this.canReview(folder, user));
+    });
+  }
+
+  /** What a level's link serves: the version on air of each folder it grants, under its path inside the level. */
+  groupTree(share) {
+    const prefix = `${share.prefix}/`;
+    const tree = new Map();
+    const ids = [];
+    let latest = 0;
+    for (const folder of this.groupFolders(share.prefix).sort((a, b) => a.path.localeCompare(b.path))) {
+      if (!folder.head || !this.groupGrants(share, folder)) continue;
+      const commit = this.store.artifactCommit(folder.head);
+      if (!commit) continue;
+      const base = folder.path.slice(prefix.length);
+      for (const [path, file] of this.readTree(commit.tree)) tree.set(`${base}/${path}`, file);
+      latest = Math.max(latest, commit.publishedAt || commit.createdAt || 0);
+      ids.push(commit.id);
+    }
+    const id = `ac_${createHash("sha256").update(ids.join(",")).digest("hex").slice(0, 12)}`;
+    return { tree, commit: ids.length ? { id, tree: "", status: "published", publishedAt: latest, createdAt: latest } : null };
   }
 
   /** A link that opens a folder on an address of its own: public, behind a password, or for the people it names. */
@@ -1084,8 +1151,10 @@ export class Artifacts {
 
   createShare(folderId, { label, view, access, commit = "", expiresAt = 0, status = "active", createdBy, requestedBy = null, reason = "", root = "" }) {
     if (!this.shareSuffix) throw new ArtifactError("i link di condivisione esistono solo per gli spazi su usecora.space", 409);
-    const folder = this.store.artifactFolder(folderId);
+    const group = String(folderId || "").startsWith("ag:") ? this.cleanGroup(String(folderId).slice(3)) : "";
+    const folder = group ? this.groupFolder(group) : this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
+    if (group && commit) throw new ArtifactError("il link di un livello segue sempre le versioni in onda delle sue cartelle");
     const clean = this.validLabel(label);
     if (this.store.artifactShareByLabel(clean)) throw new ArtifactError(`il link ${clean} esiste già`, 409);
     if (commit) {
@@ -1094,7 +1163,7 @@ export class Artifacts {
     }
     const now = Date.now();
     const share = {
-      id: `as_${randomBytes(6).toString("hex")}`, label: clean, folderId, view: view === "files" ? "files" : view === "site" ? "site" : folder.kind,
+      id: `as_${randomBytes(6).toString("hex")}`, label: clean, folderId: folder.id, ...(group ? { prefix: group } : {}), view: view === "files" ? "files" : view === "site" ? "site" : folder.kind,
       access: this.cleanAccess(access), commit: commit || "", expiresAt: Number(expiresAt) || 0, status, revision: 1, root: this.cleanShareRoot(root),
       createdBy: createdBy || null, approvedBy: status === "active" ? createdBy || null : null, requestedBy, reason: String(reason || "").slice(0, 500), createdAt: now, updatedAt: now,
     };
@@ -1153,6 +1222,10 @@ export class Artifacts {
     }
     const share = this.store.artifactShareByLabel(String(label || ""));
     if (!share || share.status !== "active" || (share.expiresAt && share.expiresAt < Date.now())) return null;
+    if (share.prefix) {
+      const { tree, commit } = this.groupTree(share);
+      return { kind: "share", share, folder: this.groupFolder(share.prefix), commit, tree, scope: share.id, revision: share.revision, view: share.view, root: share.root || "" };
+    }
     const folder = this.store.artifactFolder(share.folderId);
     const commit = folder ? this.store.artifactCommit(share.commit || folder.head) : null;
     if (!folder) return null;
@@ -1249,7 +1322,9 @@ export class Artifacts {
     const what = share.root ? `${folder.path}/${share.root}` : folder.path;
     const active = share.status === "active";
     const access = share.access.mode === "public" ? "pubblico" : share.access.mode === "password" ? "con password" : "per le persone indicate";
-    this.webPush?.notify({ userId: this.knowledge?.ownerMemory ? this.folderOwner(folder) || "unavailable" : "", title: `Artefatti · ${what}`, body: active ? `${agent.name} ha aperto un link ${access}: ${share.label}` : `${agent.name} chiede un link: ${share.label}`, url: `/#/artefatti/${folder.id}/condivisione`, tag: `share-${share.id}` }).catch?.(() => {});
+    const owner = folder.group ? this.groupFolders(folder.path).map((item) => this.folderOwner(item)).find(Boolean) : this.folderOwner(folder);
+    const url = folder.group ? `/#/artefatti/in/${folder.path.split("/").map(encodeURIComponent).join("/")}` : `/#/artefatti/${folder.id}/condivisione`;
+    this.webPush?.notify({ userId: this.knowledge?.ownerMemory ? owner || "unavailable" : "", title: `Artefatti · ${what}`, body: active ? `${agent.name} ha aperto un link ${access}: ${share.label}` : `${agent.name} chiede un link: ${share.label}`, url, tag: `share-${share.id}` }).catch?.(() => {});
     const text = active ? `🔗 ${agent.name} ha aperto un link ${access} per **${what}**: ${share.url}`
       : `🔗 Richiesta di un link per **${what}** (${share.label}) da ${agent.name}: si apre quando il proprietario lo attiva.`;
     if (channelId && this.notice) Promise.resolve(this.notice(channelId, text)).catch(() => {});

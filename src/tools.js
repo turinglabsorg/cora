@@ -319,11 +319,11 @@ export const TOOL_DEFS = [
   },
   {
     name: "artifact_share",
-    description: "Make a link that opens an artifact folder, or one subfolder of it, on an address of its own, when a person asks you to share it. Access: \"people\" (only the emails or company domains you list, after signing in), \"password\" (anyone with the password; one is made up for you unless the person chose it), or \"public\" (anyone with the link: only when the person asked for that). It works at once when the person asking is talking to you now; otherwise it waits for the owner to turn it on. Give the person the link the tool returns, and the password only to them.",
+    description: "Make a link that opens an artifact folder, one subfolder of it, or a whole level of folders (e.g. clienti, or clienti/acme with every folder under it), on an address of its own, when a person asks you to share it. Access: \"people\" (only the emails or company domains you list, after signing in), \"password\" (anyone with the password; one is made up for you unless the person chose it), or \"public\" (anyone with the link: only when the person asked for that). It works at once when the person asking is talking to you now; otherwise it waits for the owner to turn it on. Give the person the link the tool returns, and the password only to them.",
     parameters: {
       type: "object",
       properties: {
-        folder: { type: "string", description: "the folder's path or id" },
+        folder: { type: "string", description: "the folder's path or id, or a level holding folders, e.g. clienti/acme" },
         subfolder: { type: "string", description: "optional: a subfolder inside it to share instead of all of it, e.g. landing" },
         label: { type: "string", description: "the link's name: lowercase letters, digits and dashes, e.g. report-acme" },
         access: { type: "string", enum: ["people", "password", "public"] },
@@ -425,6 +425,36 @@ export function summarizeArgs(name, args) {
   if (name === "delete_routine") return String(args.id || "");
   if (name === "ask_owner") return String(args.question || "").slice(0, 200);
   return "";
+}
+
+/**
+ * A link for a level of folders (clienti/acme): it serves, each time it opens, the folders
+ * under it that this agent may push to and, for a person in the panel, that they review.
+ */
+async function shareLevel(ctx, level, args) {
+  const { agent, store, channelId } = ctx;
+  const artifacts = ctx.artifacts;
+  const userId = ctx.artifactUserId || (store?.panelUser?.(ctx.requester?.id) ? ctx.requester.id : "");
+  const mine = artifacts.groupFolders(level).filter((folder) => artifacts.canWrite(folder, agent)
+    && (!ctx.knowledge?.ownerMemory || artifacts.canReadMember(folder, store.panelUser(ctx.knowledge.ownerId(agent))))
+    && (!userId || artifacts.canReview(folder, store.panelUser(userId))));
+  if (!mine.length) return `error: you may not share ${level}: none of its folders is one you may push to`;
+  const root = artifacts.cleanShareRoot(args.subfolder);
+  const view = args.view === "site" ? "site" : "files";
+  const mode = ["people", "password", "public"].includes(args.access) ? args.access : "people";
+  const password = mode === "password" ? String(args.password || "") || randomBytes(9).toString("base64url") : "";
+  const direct = Boolean(ctx.requester);
+  const share = artifacts.createShare(`ag:${level}`, {
+    label: args.label, root, view, access: { mode, emails: args.emails || [], domains: args.domains || [], password },
+    expiresAt: Number(args.days) > 0 ? Date.now() + Math.min(Number(args.days), 365) * 86400000 : 0, status: direct ? "active" : "proposed",
+    createdBy: { kind: "agent", id: agent.id, name: agent.name }, requestedBy: ctx.requester || null, reason: args.reason,
+  });
+  artifacts.announceShare?.(artifacts.groupFolder(level), share, { agent, channelId });
+  const what = root ? `${level}/${root}` : level;
+  const inside = `${mine.length} folder${mine.length === 1 ? "" : "s"} (${mine.slice(0, 8).map((folder) => folder.path.slice(level.length + 1)).join(", ")}${mine.length > 8 ? ", …" : ""})`;
+  if (!direct) return `REQUESTED, NOT ACTIVE: the link ${share.url || share.label} for ${what} opens only after the owner turns it on in the panel. Say so; do not send the link as if it worked.`;
+  const who = mode === "public" ? "anyone with the link" : mode === "password" ? `anyone with the password ${password} (give it only to ${ctx.requester.name || "the person who asked"})` : `only ${[...share.access.emails, ...share.access.domains.map((domain) => `anyone at ${domain}`)].join(", ")}, after signing in`;
+  return `ACTIVE: ${share.url} opens the level ${what}, ${inside}, as a page of files to ${who}${share.expiresAt ? `, until ${new Date(share.expiresAt).toISOString().slice(0, 10)}` : ""}. The owner sees it in the panel and can change or close it.`;
 }
 
 /** Execute one tool call for an agent. Returns {text, image?}. Errors come back as text for the model. */
@@ -757,6 +787,8 @@ export async function executeTool(call, ctx) {
       case "artifact_share": {
         if (!ctx.artifacts) return { text: "error: artifacts are not available here" };
         const folder = ctx.artifacts.findFolder(args.folder);
+        const level = folder ? "" : String(args.folder || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
+        if (!folder && level && ctx.artifacts.groupFolders(level).length) return { text: await shareLevel(ctx, level, args) };
         if (!folder) return { text: "error: no such folder: list them with artifact_folders (a subfolder goes in subfolder, not in folder)" };
         if (!ctx.artifacts.canWrite(folder, agent)) return { text: `error: you may not share ${folder.path}: only the agents that may push to it can share it` };
         const root = ctx.artifacts.cleanShareRoot(args.subfolder);

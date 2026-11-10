@@ -793,3 +793,72 @@ test("a space on its own address has shares too: the cloud calls it by that addr
   assert.equal(framed.status, 200);
   assert.equal(framed.headers["content-security-policy"], `frame-ancestors https://${OWN}`);
 });
+
+test("a level of folders is shared like a directory: one link serves every folder under it, as it is on air", async (t) => {
+  const { app, port, call, agent, put, owner } = await fixture(t);
+  const make = async (dir, folder, files, kind = "files") => {
+    for (const [name, content] of Object.entries(files)) put(`${dir}/${name}`, content);
+    const pushed = await app.artifacts.push({ agent, folder, path: `/home/agent/work/${dir}`, message: dir, requester: { kind: "owner", id: "1", name: "Owner" }, create: { title: dir, description: dir, kind } });
+    await app.artifacts.review(pushed.commit.id, { decision: "approve", user: owner });
+    return pushed.folder;
+  };
+  await make("feedback", "clienti/comune-giarratana/feedback-virginia", { "giro-1.md": "# giro 1" });
+  await make("grafica", "clienti/comune-giarratana/grafica", { "logo.svg": "<svg/>", "foto/piazza.jpg": "jpg" });
+  await make("sito", "clienti/comune-giarratana/sito", { "index.html": "<h1>Visit</h1>" }, "site");
+  await make("docs", "clienti/nobrainer/docs", { "guide.pdf": "%PDF" });
+  await make("altro", "progetti/altro", { "x.md": "x" });
+
+  const top = await call(`/api/artifacts/level?${new URLSearchParams({ path: "clienti" })}`);
+  assert.equal(top.status, 200);
+  assert.equal(top.data.canShare, true);
+  assert.deepEqual(top.data.folders.map((folder) => folder.path).sort(), ["clienti/comune-giarratana/feedback-virginia", "clienti/comune-giarratana/grafica", "clienti/comune-giarratana/sito", "clienti/nobrainer/docs"]);
+  assert.equal((await call(`/api/artifacts/level?${new URLSearchParams({ path: "clienti/comune-giarratana/grafica" })}`)).status, 404, "a folder is not a level");
+  assert.equal((await call(`/api/artifacts/level?${new URLSearchParams({ path: "nessuno" })}`)).status, 404);
+
+  const level = await call(`/api/artifacts/level/shares?${new URLSearchParams({ path: "clienti/comune-giarratana" })}`, { method: "POST", body: { label: "giarratana", view: "files", access: { mode: "public" } } });
+  assert.equal(level.status, 201, JSON.stringify(level.data));
+  assert.equal(level.data.prefix, "clienti/comune-giarratana");
+  assert.equal(level.data.folderPath, "clienti/comune-giarratana");
+  assert.equal(level.data.group, true);
+  const host = "giarratana--acme.usecora.test";
+  const files = JSON.parse((await hit(port, host, "/_cora/files.json")).body);
+  assert.equal(files.folder, "clienti/comune-giarratana");
+  assert.deepEqual(files.files.map((file) => file.path).sort(), ["feedback-virginia/giro-1.md", "grafica/foto/piazza.jpg", "grafica/logo.svg", "sito/index.html"]);
+  const listing = await hit(port, host, "/");
+  assert.equal(listing.status, 200);
+  for (const name of ["feedback-virginia", "grafica", "sito"]) assert.match(listing.body, new RegExp(name));
+  assert.doesNotMatch(listing.body, /nobrainer/);
+  assert.equal((await hit(port, host, "/grafica/logo.svg?download=1")).body, "<svg/>");
+
+  const whole = await call(`/api/artifacts/level/shares?${new URLSearchParams({ path: "clienti" })}`, { method: "POST", body: { label: "tutti-i-clienti", view: "files", access: { mode: "public" } } });
+  assert.equal(whole.status, 201);
+  const all = JSON.parse((await hit(port, "tutti-i-clienti--acme.usecora.test", "/_cora/files.json")).body);
+  assert.deepEqual(all.files.map((file) => file.path).sort(), ["comune-giarratana/feedback-virginia/giro-1.md", "comune-giarratana/grafica/foto/piazza.jpg", "comune-giarratana/grafica/logo.svg", "comune-giarratana/sito/index.html", "nobrainer/docs/guide.pdf"]);
+  assert.equal((await hit(port, "tutti-i-clienti--acme.usecora.test", "/nobrainer/docs/guide.pdf?download=1")).body, "%PDF");
+
+  await make("nuovo", "clienti/nuovo/report", { "q4.md": "# q4" });
+  const later = JSON.parse((await hit(port, "tutti-i-clienti--acme.usecora.test", "/_cora/files.json")).body);
+  assert.ok(later.files.some((file) => file.path === "nuovo/report/q4.md"), "a folder created later under the level shows up, as in a directory");
+
+  const sub = await call(`/api/artifacts/level/shares?${new URLSearchParams({ path: "clienti" })}`, { method: "POST", body: { label: "solo-grafica", view: "files", root: "comune-giarratana/grafica", access: { mode: "public" } } });
+  assert.equal(sub.status, 201);
+  assert.deepEqual(JSON.parse((await hit(port, "solo-grafica--acme.usecora.test", "/_cora/files.json")).body).files.map((file) => file.path).sort(), ["foto/piazza.jpg", "logo.svg"]);
+
+  assert.equal((await call(`/api/artifacts/level/shares?${new URLSearchParams({ path: "clienti" })}`, { method: "POST", body: { label: "pin", commit: "ac_000000000000", access: { mode: "public" } } })).status, 400, "a level always follows what is on air");
+  const listed = await call(`/api/artifacts/level?${new URLSearchParams({ path: "clienti/comune-giarratana" })}`);
+  assert.deepEqual(listed.data.shares.map((share) => share.label), ["giarratana"]);
+  assert.equal((await call(`/api/artifacts/shares/${level.data.id}`, { method: "PUT", body: { status: "revoked" } })).status, 200);
+  assert.equal((await hit(port, host, "/")).status, 404, "a revoked level link is gone");
+  assert.equal((await call(`/api/artifacts/shares/${level.data.id}`, { method: "DELETE" })).status, 200);
+
+  const ctx = { agent, store: app.store, artifacts: app.artifacts, channelId: "chan-1", requester: { kind: "authorized", id: "42", name: "Seb" } };
+  const made = await executeTool({ name: "artifact_share", args: { folder: "clienti/comune-giarratana", label: "giarratana-agente", access: "public", reason: "Seb vuole tutta Giarratana" } }, ctx);
+  assert.match(made.text, /^ACTIVE: https:\/\/giarratana-agente--acme\.usecora\.test\/ opens the level clienti\/comune-giarratana, 3 folders \(feedback-virginia, grafica, sito\)/);
+  assert.equal((await hit(port, "giarratana-agente--acme.usecora.test", "/feedback-virginia/giro-1.md?download=1")).body, "# giro 1");
+  const stranger = app.store.createAgent({ name: "Ugo", model: "ollama/test-model", tools: true });
+  for (const folder of app.artifacts.groupFolders("clienti/comune-giarratana")) app.artifacts.updateFolder(folder.id, { writers: [agent.id] }, owner);
+  assert.match((await executeTool({ name: "artifact_share", args: { folder: "clienti/comune-giarratana", label: "di-ugo", access: "public", reason: "x" } }, { ...ctx, agent: stranger })).text, /^error: you may not share clienti\/comune-giarratana/);
+  const routine = await executeTool({ name: "artifact_share", args: { folder: "clienti", label: "da-routine", access: "public", reason: "x" } }, { ...ctx, requester: null });
+  assert.match(routine.text, /^REQUESTED, NOT ACTIVE/);
+  assert.equal((await hit(port, "da-routine--acme.usecora.test", "/")).status, 404);
+});

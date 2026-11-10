@@ -416,7 +416,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
     if (mode === "people" && !viewer(req, target)) return redirect(res, `${cloud.url}/share?${new URLSearchParams({ to: host, next: safeNext(url.pathname + url.search) })}`);
     if (!target.commit) return page(req, res, 404, words(req, "empty"));
     // A link for a subfolder serves only what is under it, as if it were the whole folder.
-    const tree = artifacts.subtree(artifacts.readTree(target.commit.tree), target.root || "");
+    const tree = artifacts.subtree(target.tree || artifacts.readTree(target.commit.tree), target.root || "");
     const title = target.root ? `${target.folder.title} · ${target.root.split("/").at(-1)}` : target.folder.title;
     if (url.pathname === "/_cora/files.json") {
       res.writeHead(200, headers({ "Content-Type": "application/json; charset=utf-8" }));
