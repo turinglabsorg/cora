@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { runClaude, runCodex, runDeepSeek, runGemini, runGrok, runHermes, runMuse } from "./cli.js";
 import { isSubscriptionProvider } from "./harnesses.js";
+import { DEEPSEEK_CATALOG, HERMES_ENDS, hermesKeyBackend, hermesRemoteModel } from "./hermes-keys.js";
 import { imageMime } from "./images.js";
 import { routerUsage } from "./usage.js";
 
@@ -125,11 +126,8 @@ const CLOUD_NAME = /(^|[:-])cloud$/i;
 /** Model families that take images, for routers whose model list does not say. */
 const VISION = /(gpt-4o|gpt-4\.1|gpt-5|o3|o4|claude|gemini|grok-4|pixtral|vision|-vl|llava|qwen.*vl)/i;
 
-// The models dsh's own catalog ships for DeepSeek's API.
-const DEEPSEEK_MODELS = [
-  { name: "deepseek-flash", label: "DeepSeek V4.1 Flash" },
-  { name: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
-];
+// The models DeepSeek's API and dsh both answer as.
+const DEEPSEEK_MODELS = DEEPSEEK_CATALOG;
 
 const CLAUDE_MODELS = [
   { name: "claude-opus-5-5", label: "Opus 5.5" },
@@ -173,8 +171,20 @@ export function onPath(bin) {
 }
 
 export class LLM {
-  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", grokBin = "grok", museBin = "muse", geminiBin = "agy", grokHome = "", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", deepseekBin = "dsh", deepseekKey = "", deepseekHome = "", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
+  constructor({ ollamaUrl, ollamaKey, orcaUrl = "https://api.orcarouter.ai/v1", orcaKey = "", claudeBin = "claude", codexBin = "codex", grokBin = "grok", museBin = "muse", geminiBin = "agy", grokHome = "", hermesBin = "hermes", hermesHome = "", hermesBaseUrl = "http://127.0.0.1:11434/v1", hermesEnds = null, deepseekBin = "dsh", deepseekKey = "", deepseekHome = "", cliWorkDir, bridge, codexModelsFile, subscriptions }) {
     this.hermes = { bin: hermesBin, home: hermesHome || join(homedir(), ".cora", "hermes-home"), baseUrl: String(hermesBaseUrl).replace(/\/$/, "") };
+    const ollamaEnd = { ...HERMES_ENDS.ollama, ...(hermesEnds?.ollama || {}) };
+    // A test (or a private endpoint) that only moves the catalog must check the key there too.
+    // /api/tags stays public on ollama.com, so the check cannot be that request.
+    if (hermesEnds?.ollama?.modelsUrl && !hermesEnds?.ollama?.authUrl) {
+      ollamaEnd.authUrl = String(hermesEnds.ollama.modelsUrl).replace(/\/api\/tags(?=$|\?)/, "/api/me");
+    }
+    this.hermesEnds = {
+      ollama: ollamaEnd,
+      deepseek: { ...HERMES_ENDS.deepseek, ...(hermesEnds?.deepseek || {}) },
+    };
+    // A person's own keys, sealed. Empty until the process that owns them attaches them.
+    this.credentials = null;
     // DeepSeek Harness runs on the instance's own DeepSeek key, in a DSH_HOME of Cora's.
     this.deepseek = { bin: deepseekBin, key: deepseekKey, home: deepseekHome || join(homedir(), ".cora", "dsh-home") };
     this.ollamaUrl = ollamaUrl;
@@ -410,6 +420,69 @@ export class LLM {
   }
 
   /**
+   * Models a person's key, or the space key, can actually run on Ollama Cloud or DeepSeek.
+   * A refused key throws; the value itself never comes back.
+   */
+  async listHermesKeyModels(backend, apiKey) {
+    const end = this.hermesEnds[backend];
+    if (!end || !apiKey) throw Object.assign(new Error("chiave API mancante"), { status: 400 });
+    if (backend === "ollama" && end.authUrl) {
+      let auth;
+      try {
+        auth = await fetch(end.authUrl, { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(15000) });
+      } catch {
+        throw Object.assign(new Error("Ollama non risponde: riprova tra poco"), { status: 502 });
+      }
+      if (!auth.ok) {
+        await auth.body?.cancel().catch(() => {});
+        throw Object.assign(new Error("Ollama non accetta questa chiave"), { status: 400 });
+      }
+      await auth.body?.cancel().catch(() => {});
+    }
+    let response;
+    try {
+      response = await fetch(end.modelsUrl, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(15000) });
+    } catch {
+      throw Object.assign(new Error(backend === "ollama" ? "Ollama non risponde: riprova tra poco" : "DeepSeek non risponde: riprova tra poco"), { status: 502 });
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw Object.assign(new Error(backend === "ollama" ? "Ollama non accetta questa chiave" : "DeepSeek non accetta questa chiave"), { status: 400 });
+    }
+    const data = await response.json().catch(() => ({}));
+    if (backend === "deepseek") {
+      const ids = (data.data || []).map((model) => model.id).filter(Boolean);
+      const names = ids.length ? ids : DEEPSEEK_MODELS.map((model) => model.name);
+      return names.map((name) => ({ name, label: DEEPSEEK_MODELS.find((model) => model.name === name)?.label || name }));
+    }
+    return (data.models || [])
+      .filter((model) => model.name && !/^argo-/i.test(model.name))
+      .map((model) => ({ name: model.name, label: model.name }));
+  }
+
+  /**
+   * Where one Hermes turn actually talks. A keyed id (`ollama/` or `deepseek/`)
+   * uses that endpoint and either the person's key or the space key.
+   * Anything else is unchanged: a router with the space key, or this machine's Ollama.
+   */
+  hermesRunTarget(name, host = "", credentialId = "") {
+    const backend = hermesKeyBackend(`hermes/${name}`);
+    if (!backend) return this.hermesEndpoint(name, host);
+    const apiKey = credentialId
+      ? (this.credentials?.secret(credentialId) || "")
+      : (backend === "ollama" ? this.ollamaKey : this.deepseek.key);
+    if (!apiKey) {
+      throw new Error(credentialId ? "chiave API non trovata" : `manca la chiave ${backend === "ollama" ? "Ollama" : "DeepSeek"} dello space`);
+    }
+    return {
+      baseUrl: this.hermesEnds[backend].baseUrl,
+      key: apiKey,
+      model: hermesRemoteModel(`hermes/${name}`),
+      home: `${this.hermes.home}-${backend}`,
+    };
+  }
+
+  /**
    * The endpoint behind a Hermes model. `<router>/<model>` runs on that router with its
    * key; anything else runs on Hermes' own endpoint, which is this machine's Ollama.
    */
@@ -513,10 +586,24 @@ export class LLM {
       // Only what is really in the cloud: a model installed here has no cloud twin to invent.
       for (const model of models.filter((item) => item.provider === "ollama" && !item.local)) {
         const name = splitModel(model.id).name;
+        if (/^argo-/i.test(name)) continue;
         const cloud = CLOUD_NAME.test(name) ? name : name.includes(":") ? `${name}-cloud` : `${name}:cloud`;
-        if (/^argo-/i.test(name) || seen.has(`hermes/${cloud}`)) continue;
-        seen.add(`hermes/${cloud}`);
-        models.push({ id: `hermes/${cloud}`, provider: "hermes", label: cloud, via: PROVIDERS.ollama, local: false, tools: model.tools, vision: false, thinking: false });
+        if (!seen.has(`hermes/${cloud}`)) {
+          seen.add(`hermes/${cloud}`);
+          models.push({ id: `hermes/${cloud}`, provider: "hermes", label: cloud, via: PROVIDERS.ollama, local: false, tools: model.tools, vision: false, thinking: false });
+        }
+        // The same cloud model, addressed with a key: the person's or the space's, not the local proxy.
+        const keyed = `hermes/ollama/${name}`;
+        if (!seen.has(keyed)) {
+          seen.add(keyed);
+          models.push({ id: keyed, provider: "hermes", label: name, via: PROVIDERS.ollama, backend: "ollama", local: false, tools: model.tools, vision: false, thinking: false });
+        }
+      }
+      for (const model of DEEPSEEK_MODELS) {
+        const id = `hermes/deepseek/${model.name}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        models.push({ id, provider: "hermes", label: model.label, via: "DeepSeek", backend: "deepseek", local: false, tools: true, vision: model.name === "deepseek-flash", thinking: true });
       }
       for (const model of models.filter((item) => ROUTERS[item.provider])) {
         const id = `hermes/${model.provider}/${splitModel(model.id).name}`;
@@ -563,7 +650,7 @@ export class LLM {
    * A full agent turn on a subscription CLI. `tools` are cora's tool definitions,
    * `execute(name, args)` runs one of them; both reach the CLI through MCP.
    */
-  async runAgent({ model, subscriptionId, system, prompt, tools, execute, timeoutMs, onStep, onUsage, effort = "", goal = "", signal, host = "" }) {
+  async runAgent({ model, subscriptionId, credentialId = "", system, prompt, tools, execute, timeoutMs, onStep, onUsage, effort = "", goal = "", signal, host = "" }) {
     const { provider, name } = splitModel(model);
     subscriptionId ||= this.subscriptions?.defaultId(provider);
     if (isSubscriptionProvider(provider) && (!this.subscriptions || !subscriptionId)) throw new Error("subscription da collegare");
@@ -594,7 +681,7 @@ export class LLM {
           return await this.subscriptions.run(subscriptionId, provider, runSignal, invoke);
         }
         if (provider === "hermes") {
-          const endpoint = this.hermesEndpoint(name, host);
+          const endpoint = this.hermesRunTarget(name, host, credentialId);
           if (!endpoint.key) {
             const window = await this.contextLength(`ollama/${endpoint.model}`, endpoint.baseUrl.replace(/\/v1$/, ""));
             if (window && window < HERMES_MIN_CONTEXT) throw new Error(`hermes/${endpoint.model}: ${HERMES_TOO_SHORT} (ne ha ${Math.round(window / 1024)}K)`);

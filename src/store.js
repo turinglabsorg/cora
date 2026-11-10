@@ -7,6 +7,7 @@ import { sanitizeCharacter } from "./character.js";
 import { plainKeys } from "./box.js";
 import { cleanGithubOrg } from "./github-apps.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS, isSubscriptionProvider } from "./harnesses.js";
+import { hermesKeyBackend } from "./hermes-keys.js";
 import { VOICE_LANGUAGES } from "./voice.js";
 import { aggregateMeters } from "./usage.js";
 
@@ -91,6 +92,8 @@ const AGENT_DEFAULTS = {
   core: "",
   model: "",
   subscriptionId: "",
+  // A person's own API key for Hermes on Ollama Cloud or DeepSeek. Empty means the space key.
+  credentialId: "",
   ollamaHost: "",
   chattiness: 0.5,
   channelIds: [],
@@ -113,6 +116,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS avatars (agent_id TEXT PRIMARY KEY, data BLOB NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY, provider TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, provider TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS context_documents (
   id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, content TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -313,6 +317,7 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     core: cleanText(merged.core, 4000),
     model: checkModel(merged.model),
     subscriptionId: cleanText(merged.subscriptionId, 80).trim(),
+    credentialId: /^key_[a-f0-9]{12}$/.test(String(merged.credentialId || "")) ? String(merged.credentialId) : "",
     ownerId: owners[0] || "",
     ownerIds: owners,
     coOwnerIds: [...new Set((Array.isArray(merged.coOwnerIds) ? merged.coOwnerIds : []).map(id => cleanText(id, 160).trim()).filter(id => id && id !== merged.brainOwnerId))].slice(0, 20),
@@ -336,6 +341,8 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     createdAt: previous.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  // A local model does not keep a cloud key hanging off it.
+  if (!hermesKeyBackend(agent.model)) agent.credentialId = "";
   return { ...agent, ...avatarFields(agent, avatarBase) };
 }
 
@@ -523,9 +530,10 @@ export class Store {
         this.stmt("UPDATE subscriptions SET data = ? WHERE id = ?").run(JSON.stringify(record), record.id);
       }
       for (const agent of this.cachedAgents) {
-        if (Object.hasOwn(agent, "subscriptionId")) continue;
-        agent.subscriptionId = "";
-        this.writeAgent(agent);
+        let changed = false;
+        if (!Object.hasOwn(agent, "subscriptionId")) { agent.subscriptionId = ""; changed = true; }
+        if (!Object.hasOwn(agent, "credentialId")) { agent.credentialId = ""; changed = true; }
+        if (changed) this.writeAgent(agent);
       }
     });
     if (Object.hasOwn(savedSettings, "sharedMemory")) this.moveSharedMemory(savedSettings.sharedMemory);
@@ -838,6 +846,33 @@ export class Store {
     return this.stmt("DELETE FROM subscriptions WHERE id = ?").run(id).changes > 0;
   }
 
+  /* ---------- a person's own API keys; the value stays sealed ---------- */
+  credentials() {
+    return this.stmt("SELECT data FROM credentials ORDER BY rowid").all().map((row) => JSON.parse(row.data));
+  }
+
+  credential(id) {
+    const row = this.stmt("SELECT data FROM credentials WHERE id = ?").get(id);
+    return row ? JSON.parse(row.data) : null;
+  }
+
+  saveCredential(record) {
+    this.stmt("INSERT INTO credentials(id, provider, data) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, data = excluded.data")
+      .run(record.id, record.provider, JSON.stringify(record));
+  }
+
+  deleteCredential(id) {
+    return this.stmt("DELETE FROM credentials WHERE id = ?").run(id).changes > 0;
+  }
+
+  /** A keyed Hermes model may name one of that provider's keys, or none: none means the space key. */
+  checkAgentCredential(agent) {
+    const backend = hermesKeyBackend(agent.model);
+    if (!backend || !agent.credentialId) return;
+    const record = this.credential(agent.credentialId);
+    if (!record || record.provider !== backend) throw new ValidationError("chiave incompatibile con il modello");
+  }
+
   checkAgentSubscription(agent, { unchanged = false } = {}) {
     const provider = (agent.model || this.settings.defaultModel).split("/")[0];
     const needsSubscription = isSubscriptionProvider(provider);
@@ -908,6 +943,7 @@ export class Store {
   createAgent(input) {
     const agent = sanitizeAgent(input, {}, { avatarBase: this.avatarBase });
     this.checkAgentSubscription(agent);
+    this.checkAgentCredential(agent);
     if (this.cachedAgents.some((other) => other.name.toLowerCase() === agent.name.toLowerCase())) {
       throw new ValidationError("an agent with this name already exists");
     }
@@ -922,6 +958,7 @@ export class Store {
     const agent = sanitizeAgent(input, this.cachedAgents[index], { avatarBase: this.avatarBase });
     const previous = this.cachedAgents[index];
     this.checkAgentSubscription(agent, { unchanged: (agent.subscriptionId || "") === (previous.subscriptionId || "") && (agent.model || this.settings.defaultModel).split("/")[0] === (previous.model || this.settings.defaultModel).split("/")[0] });
+    this.checkAgentCredential(agent);
     if (this.cachedAgents.some((other) => other.id !== id && other.name.toLowerCase() === agent.name.toLowerCase())) {
       throw new ValidationError("an agent with this name already exists");
     }

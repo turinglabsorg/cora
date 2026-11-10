@@ -22,6 +22,7 @@ import { telegramBotEnvName } from "./telegram-bots.js";
 import { isWebRoom, isSalotto, ownerRoom, roomAgentId } from "./rooms.js";
 import { nextRuns } from "./scheduler.js";
 import { SHARED } from "./store.js";
+import { hermesKeyBackend } from "./hermes-keys.js";
 import { BRAIN_KINDS } from "./company-brain.js";
 import { VOICE_LANGUAGES } from "./voice.js";
 import { contextSources, writeContextFile } from "./context.js";
@@ -180,7 +181,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, github = null, mailDomains = null, email = null, googleConnector = null, knowledge = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, credentials = null, github = null, mailDomains = null, email = null, googleConnector = null, knowledge = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const sessionKey = config.sessionKey || config.adminPassword;
@@ -381,6 +382,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   const pulls = new Set();
   const publicAgent = async (agent) => ({
     ...agent,
+    // Which personal key it runs with, never the value. Null means the space key, when the model needs one.
+    credential: credentials && agent.credentialId ? credentials.view(store.credential(agent.credentialId)) : null,
     ...(knowledge?.ownerMemory || agent.brainSource === "external" ? { core: "" } : {}),
     // Who it answers to: a real person in the chats; null means the owner of the space.
     owner: store.agentOwner(agent),
@@ -783,6 +786,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key), soniox: Boolean(voice?.enabled), deepseek: Boolean(llm.deepseek?.key) },
         doc: { installed: Boolean(brain.doc?.installed), ...(brain.doc?.installed ? brain.doc.activity() : {}) },
         subscriptions: subscriptions.list().filter((entry) => !knowledge?.ownerMemory || entry.connectedBy?.id === user.id),
+        credentials: credentials ? credentials.list(user) : [],
         quotaAccounts: quotaAccountsFor(user),
         providerUsage: providerQuotasFor(user),
         boxImage: { name: config.boxImage, ready: imageReady },
@@ -858,6 +862,43 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       llm.cache = { at: 0, models: [] };
       return send(res, 200, { provider, configured: true });
     }
+    if (path === "/api/credentials" && method === "GET") return send(res, 200, credentials ? credentials.list(user) : []);
+    if (path === "/api/credentials" && method === "POST") {
+      if (!credentials) throw new HttpError(409, "impossibile conservare la chiave");
+      const body = await readJson(req, 8192);
+      const provider = body.provider === "deepseek" ? "deepseek" : body.provider === "ollama" ? "ollama" : "";
+      if (!provider) throw new HttpError(400, "provider non valido");
+      const secret = String(body.secret || "");
+      let models;
+      try { models = await llm.listHermesKeyModels(provider, secret); }
+      catch (error) { throw new HttpError(error.status || 400, error.message); }
+      const record = credentials.create({ provider, secret, label: body.label, connectedBy: { id: user.id, name: user.name || user.email } });
+      return send(res, 201, { ...record, models });
+    }
+    const credentialMatch = /^\/api\/credentials\/(key_[a-f0-9]{12})(?:\/models)?$/.exec(path);
+    if (credentialMatch && credentials) {
+      const record = store.credential(credentialMatch[1]);
+      if (!record || record.connectedBy?.id !== user.id) throw new HttpError(404, "chiave non trovata");
+      if (path.endsWith("/models") && method === "GET") {
+        try { return send(res, 200, { models: await llm.listHermesKeyModels(record.provider, credentials.secret(record.id)) }); }
+        catch (error) { throw new HttpError(error.status || 400, error.message); }
+      }
+      if (method === "DELETE") {
+        credentials.remove(record.id, user);
+        return send(res, 200, { ok: true });
+      }
+      throw new HttpError(404, "not found");
+    }
+    const hermesModelsMatch = /^\/api\/hermes\/models$/.exec(path);
+    if (hermesModelsMatch && method === "GET") {
+      const backend = url.searchParams.get("backend") === "deepseek" ? "deepseek" : url.searchParams.get("backend") === "ollama" ? "ollama" : "";
+      if (!backend) throw new HttpError(400, "provider non valido");
+      const apiKey = backend === "ollama" ? llm.ollamaKey : llm.deepseek?.key;
+      if (!apiKey) throw new HttpError(409, "manca la chiave dello space");
+      try { return send(res, 200, { models: await llm.listHermesKeyModels(backend, apiKey) }); }
+      catch (error) { throw new HttpError(error.status || 400, error.message); }
+    }
+
     // The voices agents can speak with, and a sample of one, for the agent's Voice panel.
     if (path === "/api/voices" && method === "GET") {
       if (!voice?.enabled) return send(res, 200, { configured: false, languages: VOICE_LANGUAGES, voices: [] });
@@ -1111,6 +1152,20 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { agents: accounts });
     }
 
+
+    const checkCredentialChoice = (previous, body) => {
+      const model = body.model !== undefined ? body.model : previous?.model || "";
+      const credentialId = body.credentialId !== undefined ? String(body.credentialId || "") : previous?.credentialId || "";
+      if (credentialId && credentialId !== (previous?.credentialId || "")) {
+        const record = store.credential(credentialId);
+        if (!record || record.connectedBy?.id !== user.id) throw new HttpError(403, "Chiave privata.");
+      }
+      const backend = hermesKeyBackend(model);
+      if (backend && !credentialId) {
+        const ready = backend === "ollama" ? Boolean(llm.ollamaKey) : Boolean(llm.deepseek?.key);
+        if (!ready) throw new HttpError(400, "scegli una tua chiave oppure configura quella dello space");
+      }
+    };
     if (path === "/api/agents" && method === "POST") {
       const body = await readJson(req);
       // Whom an agent answers to is the owner of the space's choice.
@@ -1119,6 +1174,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       delete body.coOwnerIds; delete body.ownerIds;
       body.brainOwnerId = user.id;
       if (knowledge?.ownerMemory && body.subscriptionId && store.subscription(body.subscriptionId)?.connectedBy?.id !== user.id) throw new HttpError(403, "Subscription privata.");
+      checkCredentialChoice(null, body);
       const agent = store.createAgent(body);
       bots?.sync();
       tgBots?.sync();
@@ -1141,6 +1197,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         delete body.coOwnerIds; delete body.ownerIds;
         if (body.core !== undefined) checkAgentMemory(agent.id, user);
         if (knowledge?.ownerMemory && body.subscriptionId && body.subscriptionId !== agent.subscriptionId && store.subscription(body.subscriptionId)?.connectedBy?.id !== user.id) throw new HttpError(403, "Subscription privata.");
+        checkCredentialChoice(agent, body);
         if (agent.brainSource === "external") delete body.core;
         const updated = store.updateAgent(agent.id, body);
         bots?.envName(agent);

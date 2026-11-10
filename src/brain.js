@@ -574,7 +574,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
         ],
         signal,
       };
-      const out = strict && this.llm.isAgentic(model) ? await this.llm.runAgent({ model, subscriptionId: agent.subscriptionId,
+      const out = strict && this.llm.isAgentic(model) ? await this.llm.runAgent({ model, subscriptionId: agent.subscriptionId, credentialId: agent.credentialId || "",
         system: options.messages[0].content, prompt: options.messages[1].content, tools: [], execute: async () => { throw new Error("verification has no tools"); }, timeoutMs: 120000, effort: "low", signal, host: agent.ollamaHost || "" }) : await this.llm.chat(options);
       const data = parseJsonObject(String(out.text || ""));
       if (!data || typeof data.met !== "boolean") return { met: !strict, blocked: strict, reason: strict ? "La verifica non ha restituito un esito valido." : "", usage: out.usage };
@@ -1061,7 +1061,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       controller.signal.throwIfAborted();
       if (this.llm.isAgentic(model)) {
         const run = (input) => this.llm.runAgent({
-          model, subscriptionId: agent.subscriptionId, system, prompt: input, tools, execute: runTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
+          model, subscriptionId: agent.subscriptionId, credentialId: agent.credentialId || "", system, prompt: input, tools, execute: runTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
           signal: controller.signal, host: agent.ollamaHost || "", onUsage: (usage) => trace.spent(usage),
         });
         let result = await run(currentPrompt());
@@ -1205,7 +1205,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       let summary;
       try {
         const result = this.llm.isAgentic(model)
-          ? await this.llm.runAgent({ model, subscriptionId: agent.subscriptionId, system, prompt, tools: [], execute: null, timeoutMs: 5 * 60 * 1000, onStep: (step) => trace.add(step), effort: effortOf(agent), host: agent.ollamaHost || "" })
+          ? await this.llm.runAgent({ model, subscriptionId: agent.subscriptionId, credentialId: agent.credentialId || "", system, prompt, tools: [], execute: null, timeoutMs: 5 * 60 * 1000, onStep: (step) => trace.add(step), effort: effortOf(agent), host: agent.ollamaHost || "" })
           : await this.llm.chat({ model, messages: [{ role: "system", content: system }, { role: "user", content: prompt }], tools: [], effort: effortOf(agent) });
         if (result.thinking) trace.add({ type: "thinking", text: result.thinking });
         summary = this.applySleep(agent, parseJsonObject(result.text));

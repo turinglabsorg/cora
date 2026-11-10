@@ -23,10 +23,10 @@ export function brainsInUse(agents, defaultModel = "") {
     if (agent.enabled === false) continue;
     const model = agent.model || defaultModel;
     if (!model) continue;
-    const key = `${model}\u0000${agent.subscriptionId || ""}\u0000${agent.ollamaHost || ""}`;
+    const key = `${model}\u0000${agent.subscriptionId || ""}\u0000${agent.credentialId || ""}\u0000${agent.ollamaHost || ""}`;
     if (!brains.has(key)) {
       const [harness, ...rest] = model.split("/");
-      brains.set(key, { model, subscriptionId: agent.subscriptionId || "", host: agent.ollamaHost || "", label: `${HARNESS_NAMES[harness] || harness} · ${rest.join("/") || model}`, agents: [] });
+      brains.set(key, { model, subscriptionId: agent.subscriptionId || "", credentialId: agent.credentialId || "", host: agent.ollamaHost || "", label: `${HARNESS_NAMES[harness] || harness} · ${rest.join("/") || model}`, agents: [] });
     }
     brains.get(key).agents.push(agent.name);
   }
@@ -40,7 +40,7 @@ function clean(text) {
 async function write(llm, brain, prompt, signal) {
   const options = { model: brain.model, effort: "low", signal: AbortSignal.any([signal, AbortSignal.timeout(CALL_MS)]), host: brain.host };
   const out = llm.isAgentic(brain.model)
-    ? await llm.runAgent({ ...options, subscriptionId: brain.subscriptionId, system: SYSTEM, prompt, tools: [], execute: async () => { throw new Error("no tools here"); }, timeoutMs: CALL_MS })
+    ? await llm.runAgent({ ...options, subscriptionId: brain.subscriptionId, credentialId: brain.credentialId || "", system: SYSTEM, prompt, tools: [], execute: async () => { throw new Error("no tools here"); }, timeoutMs: CALL_MS })
     : await llm.chat({ ...options, tools: [], messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }] });
   return clean(out.text);
 }

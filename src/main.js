@@ -20,6 +20,7 @@ import { Boxes, plainKeys } from "./box.js";
 import { config, resolveDiscordToken } from "./config.js";
 import { Discord } from "./discord.js";
 import { LLM } from "./llm.js";
+import { Credentials } from "./credentials.js";
 import { CompanyBrain } from "./company-brain.js";
 import { Doc, findDoc } from "./doc.js";
 import { Librarian } from "./librarian.js";
@@ -65,6 +66,7 @@ export function startCora(overrides = {}) {
     hermesBin: cfg.hermesBin,
     hermesHome: cfg.hermesHome,
     hermesBaseUrl: cfg.hermesBaseUrl,
+    hermesEnds: cfg.hermesEnds,
     deepseekBin: cfg.deepseekBin,
     deepseekKey: cfg.deepseekKey,
     deepseekHome: cfg.deepseekHome || join(cfg.home, "dsh-home"),
@@ -79,6 +81,8 @@ export function startCora(overrides = {}) {
     bridge,
     subscriptions,
   });
+  const credentials = new Credentials({ store, key: cfg.vaultKey || cfg.sessionKey || cfg.adminPassword });
+  llm.credentials = credentials;
   subscriptions.usage = new SubscriptionUsage({ store, subscriptions, providerRecords: () => providerUsageRecords(llm),
     read: overrides.subscriptionUsageReader || ((record, signal) => record.server ? providerUsageData(record, { llm, config: cfg }, signal) : subscriptions.usageData(record.id, signal)),
     emit: () => web?.broadcast({ type: "subscription-usage" }) });
@@ -199,7 +203,7 @@ export function startCora(overrides = {}) {
   companyBrain.onNote = () => librarian.requestRun({ reason: "memoria" });
   // Cora's own app on Slack keeps its name and wears Cora's mark, served by this instance.
   const syncMainSlackApp = (options) => slackApps.sync({ key: "main", botToken: slack.botToken, name: "Cora", iconUrl: instanceUrl ? `${instanceUrl}/assets/icon-512.png` : "" }, options);
-  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, github, mailDomains, email, googleConnector, knowledge });
+  web = createWeb({ config: { ...cfg, filesDir }, store, subscriptions, discord, telegram, slack, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots, activity, storeSecret, traces, push, voice, companyBrain, librarian, slackApps, syncMainSlackApp, artifacts, vault, credentials, github, mailDomains, email, googleConnector, knowledge });
 
   discord.on("message", (message) => {
     orchestrator.onMessage(message).catch((error) => activity({ type: "error", channelId: message.channel_id, text: error.message }));

@@ -266,7 +266,7 @@ test("an account says whose it is, and a member's new agent starts on the accoun
     })()`);
   })();
   assert.deepEqual(connections.groups, ["Context", "Channels", "Connectors", "Subscriptions", "API keys", "Agents", "People", "General"], "the agents' context opens Settings");
-  assert.deepEqual(connections.ids.slice(0, 9), ["contesto", "discord", "telegram", "slack", "email", "connettori", "server", "claude", "codex"]);
+  assert.deepEqual(connections.ids.slice(0, 10), ["contesto", "discord", "telegram", "slack", "email", "connettori", "mcp", "server", "claude", "codex"]);
   const firstKey = connections.ids.indexOf("ollama");
   assert.deepEqual(connections.ids.slice(firstKey, firstKey + 5), ["ollama", "orcarouter", "deepseek", "typesafe", "soniox"]);
   assert.deepEqual(connections.ids.slice(firstKey + 5), ["regia", "modelli", "github", "domini", "accesso", "ssh", "spazio", "controlli", "preferenze"], "agent permissions live inside each agent; GitHub and Domains stay with the agents, Spazio with general settings");

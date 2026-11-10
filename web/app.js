@@ -47,7 +47,7 @@ const HARNESSES = {
   grok: { label: "Grok Build", hint: "Grok guida sé stesso con l'account scelto qui sotto.", providers: ["grok"] },
   muse: { label: "Muse Code", hint: "Muse guida sé stesso con l'account Meta scelto qui sotto.", providers: ["muse"] },
   gemini: { label: "Antigravity CLI", hint: "Gemini usa l'abbonamento Google AI dell'account scelto qui sotto.", providers: ["gemini"] },
-  hermes: { label: "Hermes", hint: "Hermes guida sé stesso sui modelli del suo endpoint, di solito quelli di questa macchina.", providers: ["hermes"] },
+  hermes: { label: "Hermes", hint: "Hermes guida sé stesso: su questa macchina, su Ollama Cloud o su DeepSeek.", providers: ["hermes"] },
   deepseek: { label: "DeepSeek Harness", hint: "dsh, l'harness di DeepSeek, guida sé stesso con la chiave DeepSeek di questa Cora.", providers: ["deepseek"] },
 };
 const harnessOf = (model) => {
@@ -1363,6 +1363,31 @@ const usableModel = (id) => {
  * A harness this machine cannot run says what it needs; it never falls back to a
  * default that belongs to a different one, and it cannot be saved half-chosen.
  */
+
+/** Hermes on a keyed endpoint: `hermes/ollama/<model>` or `hermes/deepseek/<model>`. */
+function hermesBackendOf(model) {
+  const parts = String(model || "").split("/");
+  if (parts[0] !== "hermes" || parts.length < 3) return "";
+  return parts[1] === "ollama" || parts[1] === "deepseek" ? parts[1] : "";
+}
+
+function hermesPlaceOf(id) {
+  const backend = hermesBackendOf(id);
+  if (backend) return backend;
+  const rest = String(id || "").split("/").slice(1).join("/");
+  if (rest.startsWith("orcarouter/")) return "orcarouter";
+  const known = (S.data.models || []).find((item) => item.id === id);
+  if (known?.provider === "hermes" && known.local === false) return "ollama";
+  return "local";
+}
+
+const HERMES_PLACES = {
+  local: ["Su questa macchina", "I pesi stanno qui: niente esce, e la scheda decide la velocità."],
+  ollama: ["Ollama Cloud", "I modelli cloud di Ollama, con la tua chiave o quella dello space."],
+  deepseek: ["DeepSeek", "I modelli DeepSeek, con la tua chiave o quella dello space."],
+  orcarouter: ["OrcaRouter", "I modelli del router, con la chiave dello space."],
+};
+
 function brainPanel(agent) {
   const fallback = S.data.settings.defaultModel || "";
   let harness = harnessOf(agent.model || fallback);
@@ -1370,6 +1395,16 @@ function brainPanel(agent) {
   let chosen = agent.model || "";
   let hardware = null;
   let problem = "";
+  // "" is the space key. A key_* id is the person's own key for that endpoint.
+  // null means the person has not chosen yet: their own key if they have one, otherwise the space key.
+  const keyChoice = { ollama: null, deepseek: null };
+  const startedOn = hermesBackendOf(agent.model);
+  if (startedOn) keyChoice[startedOn] = agent.credentialId || "";
+  const remoteModels = { ollama: [], deepseek: [] };
+  const remoteStamp = { ollama: "", deepseek: "" };
+  let remoteNote = "";
+  let draftSecret = "";
+  let draftLabel = "";
   const modelInput = h("input", { type: "hidden", name: "model", value: chosen });
   const hostInput = h("input", { type: "hidden", name: "ollamaHost", value: agent.ollamaHost || "" });
   const custom = h("input", {
@@ -1555,6 +1590,154 @@ function brainPanel(agent) {
     return out;
   }
 
+
+  function resolveKey(backend) {
+    if (keyChoice[backend] !== null && keyChoice[backend] !== undefined) return keyChoice[backend];
+    const mine = (S.data.credentials || []).filter((item) => item.provider === backend);
+    return mine.length ? mine[0].id : "";
+  }
+
+  function credentialFor(modelId) {
+    const backend = hermesBackendOf(modelId);
+    return backend ? resolveKey(backend) : "";
+  }
+
+  function hermesKeyProblem(modelId) {
+    const backend = hermesBackendOf(modelId);
+    if (!backend) return "";
+    const cred = resolveKey(backend);
+    if (cred) {
+      const own = (S.data.credentials || []).find((item) => item.id === cred && item.provider === backend);
+      return own ? "" : tr("Questa chiave non è tua, o non va con questo provider.");
+    }
+    return S.data.keys?.[backend] ? "" : tr("Aggiungi la tua chiave, oppure configura quella dello space.");
+  }
+
+  function ensureRemote(backend) {
+    const cred = resolveKey(backend);
+    const stamp = `${backend}:${cred}`;
+    if (remoteStamp[backend] === stamp) return;
+    remoteStamp[backend] = stamp;
+    // No key at all: the rows already say so, there is nothing to ask the endpoint.
+    if (!cred && !S.data.keys?.[backend]) { remoteModels[backend] = []; remoteNote = ""; return; }
+    const path = cred ? `/api/credentials/${cred}/models` : `/api/hermes/models?backend=${backend}`;
+    api(path).then((data) => {
+      if (remoteStamp[backend] !== stamp) return;
+      remoteModels[backend] = data.models || [];
+      remoteNote = "";
+      if (place === backend) drawRight();
+    }).catch((error) => {
+      if (remoteStamp[backend] !== stamp) return;
+      remoteModels[backend] = [];
+      remoteNote = error.message || "";
+      if (place === backend && document.activeElement?.tagName !== "INPUT") drawRight();
+    });
+  }
+
+  function keyBox(backend) {
+    const spaceOn = Boolean(S.data.keys?.[backend]);
+    const mine = (S.data.credentials || []).filter((item) => item.provider === backend);
+    const selected = resolveKey(backend);
+    const chooseSpace = () => { keyChoice[backend] = ""; remoteStamp[backend] = ""; drawRight(); };
+    const chooseOwn = (id) => { keyChoice[backend] = id; remoteStamp[backend] = ""; drawRight(); };
+    const spaceRow = h("button", {
+      type: "button", class: `row-link model-row hermes-key${selected ? "" : " on"}`,
+      disabled: !spaceOn, onclick: spaceOn ? chooseSpace : undefined,
+    }, h("div", { class: "row-text full" },
+      h("span", { class: "row-title" }, "Chiave dello space", !selected && spaceOn ? badge("scelto", "on", "check") : null),
+      h("span", { class: "row-meta" }, spaceOn ? "pronta in Impostazioni" : "non configurata")));
+    const ownRows = mine.map((item) => {
+      const on = selected === item.id;
+      return h("button", {
+        type: "button", class: `row-link model-row hermes-key${on ? " on" : ""}`,
+        onclick: () => chooseOwn(item.id),
+      }, h("div", { class: "row-text full" },
+        h("span", { class: "row-title" }, raw(item.label || tr("La tua chiave")), on ? badge("scelto", "on", "check") : null),
+        h("span", { class: "row-meta" }, tr("La tua chiave"), " · ", raw(`···${item.last4 || ""}`))));
+    });
+    const secret = h("input", {
+      type: "password", autocomplete: "new-password", autocapitalize: "off", spellcheck: "false",
+      placeholder: "Incolla la chiave API", value: draftSecret, "aria-label": "La tua chiave API",
+    });
+    secret.addEventListener("input", () => { draftSecret = secret.value; });
+    const label = h("input", {
+      type: "text", autocomplete: "off", placeholder: "Nome, se ti serve", value: draftLabel, "aria-label": "Nome della chiave",
+    });
+    label.addEventListener("input", () => { draftLabel = label.value; });
+    const add = btn("Aggiungi la tua chiave", { icon: "plus", cls: "sm", onclick: async () => {
+      const value = draftSecret.trim();
+      if (!value) return;
+      const record = await guard(api("/api/credentials", { method: "POST", body: { provider: backend, secret: value, label: draftLabel.trim() } }));
+      if (!record) return;
+      draftSecret = "";
+      draftLabel = "";
+      const { models, ...saved } = record;
+      S.data.credentials = [...(S.data.credentials || []).filter((item) => item.id !== saved.id), saved];
+      keyChoice[backend] = saved.id;
+      remoteModels[backend] = models || [];
+      remoteStamp[backend] = `${backend}:${saved.id}`;
+      remoteNote = "";
+      drawRight();
+    } });
+    const remove = selected ? btn("Rimuovi", { icon: "trash", cls: "ghost sm", onclick: async () => {
+      if (!await guard(api(`/api/credentials/${selected}`, { method: "DELETE" }), "Chiave rimossa")) return;
+      S.data.credentials = (S.data.credentials || []).filter((item) => item.id !== selected);
+      keyChoice[backend] = "";
+      remoteStamp[backend] = "";
+      drawRight();
+    } }) : null;
+    return h("div", { class: "stack-sm hermes-keys" },
+      h("span", { class: "label" }, "Chiave"),
+      h("div", { class: "rows", role: "radiogroup", "aria-label": "Chiave" }, spaceRow, ...ownRows),
+      h("div", { class: "input-row hermes-key-add" }, secret, label),
+      h("div", { class: "row" }, add, remove));
+  }
+
+  function keyedSide(backend) {
+    ensureRemote(backend);
+    const known = (S.data.models || []).filter((model) => model.provider === "hermes" && (model.id.startsWith(`hermes/${backend}/`) || model.backend === backend));
+    const extra = (remoteModels[backend] || []).flatMap((model) => {
+      const id = `hermes/${backend}/${model.name}`;
+      if (!model.name || known.some((item) => item.id === id)) return [];
+      return [{ id, label: model.label || model.name, tools: true, via: backend === "deepseek" ? "DeepSeek" : "Ollama Cloud" }];
+    });
+    const rows = [...known, ...extra];
+    if (chosen && hermesPlaceOf(chosen) === backend && !rows.some((model) => model.id === chosen)) {
+      rows.unshift({ id: chosen, label: chosen.split("/").slice(2).join("/") || chosen, tools: true });
+    }
+    const out = [keyBox(backend)];
+    if (remoteNote) out.push(h("p", { class: "notice warn", role: "status" }, icon("alert"), h("span", {}, tr(remoteNote))));
+    out.push(rows.length
+      ? h("div", { class: "rows", role: "radiogroup", "aria-label": "Modello" }, ...rows.map((model) => modelRow(model, {
+        subtitle: tr(model.via || (backend === "deepseek" ? "DeepSeek" : "Ollama Cloud")),
+        selected: model.id === chosen,
+      })))
+      : h("small", { class: "muted" }, backend === "deepseek" ? "I modelli compaiono appena la chiave risponde." : "Scrivi il nome del modello, oppure aspetta l'elenco della chiave."));
+    const typed = h("input", {
+      type: "text", class: "hermes-model-name", autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+      placeholder: backend === "deepseek" ? "deepseek-flash" : "qwen3-coder:480b", "aria-label": "Nome del modello",
+    });
+    const useTyped = () => {
+      const name = typed.value.trim();
+      if (!name || /[\s/]/.test(name)) {
+        problem = tr("Il nome del modello non ha spazi né barre.");
+        drawRight();
+        return;
+      }
+      pick(`hermes/${backend}/${name}`);
+    };
+    out.push(h("div", { class: "input-row" }, typed, btn("Usa questo nome", { icon: "check", cls: "sm", onclick: useTyped })));
+    return out;
+  }
+
+  function routerSide() {
+    const models = (S.data.models || []).filter((model) => String(model.id).startsWith("hermes/orcarouter/"));
+    if (!models.length) return [h("small", { class: "muted" }, "Nessun modello del router.")];
+    return [h("div", { class: "rows", role: "radiogroup", "aria-label": "Modello" }, ...models.map((model) => modelRow(model, {
+      subtitle: tr(model.via || "OrcaRouter"), selected: model.id === chosen,
+    })))];
+  }
+
   function drawRight() {
     const out = [];
     if (!harnessReady(harness)) {
@@ -1567,25 +1750,41 @@ function brainPanel(agent) {
       right.replaceChildren(...out);
       return;
     }
-    const places = placesOf(harness);
-    if (!place || !places.includes(place)) place = places.includes(placeOfModel(chosen || fallback)) ? placeOfModel(chosen || fallback) : places[0] || "cloud";
-
-    if (SUBSCRIPTION_HARNESSES.includes(harness)) out.push(subscription.node);
-    if (places.length > 1) {
-      const switcher = h("div", { class: "segmented", role: "tablist", "aria-label": "Dove gira il modello" });
-      for (const key of places) {
+    if (harness === "hermes") {
+      const ends = ["local", "ollama", "deepseek"];
+      if ((S.data.models || []).some((model) => String(model.id).startsWith("hermes/orcarouter/"))) ends.push("orcarouter");
+      if (!ends.includes(place)) place = ends.includes(hermesPlaceOf(chosen || fallback)) ? hermesPlaceOf(chosen || fallback) : "local";
+      const switcher = h("div", { class: "segmented", role: "tablist", "aria-label": "Dove gira Hermes" });
+      for (const key of ends) {
         switcher.append(h("button", {
-          type: "button", role: "tab", class: place === key ? "on" : "", "aria-selected": String(place === key),
-          onclick: () => { place = key; drawRight(); },
-        }, tr(PLACES[key][0])));
+          type: "button", role: "tab", class: `hermes-end${place === key ? " on" : ""}`, "aria-selected": String(place === key),
+          onclick: () => { place = key; problem = ""; drawRight(); },
+        }, tr(HERMES_PLACES[key][0])));
       }
-      out.push(h("div", { class: "field" }, h("span", { class: "label" }, "Dove gira"), switcher, h("small", {}, tr(PLACES[place][1]))));
-    } else if (places.length === 1 && !SUBSCRIPTION_HARNESSES.includes(harness)) {
-      out.push(h("small", { class: "muted" }, tr(PLACES[places[0]][1])));
+      out.push(h("div", { class: "field" }, h("span", { class: "label" }, "Dove gira"), switcher, h("small", {}, tr(HERMES_PLACES[place][1]))));
+    } else {
+      const places = placesOf(harness);
+      if (!place || !places.includes(place)) place = places.includes(placeOfModel(chosen || fallback)) ? placeOfModel(chosen || fallback) : places[0] || "cloud";
+      if (SUBSCRIPTION_HARNESSES.includes(harness)) out.push(subscription.node);
+      if (places.length > 1) {
+        const switcher = h("div", { class: "segmented", role: "tablist", "aria-label": "Dove gira il modello" });
+        for (const key of places) {
+          switcher.append(h("button", {
+            type: "button", role: "tab", class: place === key ? "on" : "", "aria-selected": String(place === key),
+            onclick: () => { place = key; problem = ""; drawRight(); },
+          }, tr(PLACES[key][0])));
+        }
+        out.push(h("div", { class: "field" }, h("span", { class: "label" }, "Dove gira"), switcher, h("small", {}, tr(PLACES[place][1]))));
+      } else if (places.length === 1 && !SUBSCRIPTION_HARNESSES.includes(harness)) {
+        out.push(h("small", { class: "muted" }, tr(PLACES[places[0]][1])));
+      }
     }
 
     if (problem) out.push(h("p", { class: "notice warn", role: "alert" }, icon("alert"), h("span", {}, problem)));
-    out.push(...(place === "local" ? localSide() : cloudSide()));
+    if (harness === "hermes" && place === "ollama") out.push(...keyedSide("ollama"));
+    else if (harness === "hermes" && place === "deepseek") out.push(...keyedSide("deepseek"));
+    else if (harness === "hermes" && place === "orcarouter") out.push(...routerSide());
+    else out.push(...(place === "local" ? localSide() : cloudSide()));
     out.push(h("details", { class: "brain-custom" }, h("summary", {}, tr("Scrivi tu l'id del modello")),
       h("div", { class: "stack-sm" }, custom, h("small", { class: "muted" }, "Se lo scrivi, vince su quello scelto qui sopra."))));
     right.replaceChildren(...out.filter(Boolean));
@@ -1600,7 +1799,7 @@ function brainPanel(agent) {
     else if (typed) problem = harnessOf(typed) === harness ? "" : tr("L'id scritto appartiene a un altro harness.");
     else if (!chosen && !(fallback && harnessOf(fallback) === harness && usableModel(fallback))) problem = tr("Scegli un modello: quello predefinito dell'istanza non gira con questo harness.");
     else if (chosen && !usableModel(chosen) && !chosen.startsWith("ollama/") && !chosen.startsWith("hermes/")) problem = tr("Questo modello non è disponibile su questa macchina.");
-    else problem = "";
+    else problem = hermesKeyProblem(typed || chosen);
     if (problem) { drawRight(); toast(problem, true); right.scrollIntoView({ block: "center", behavior: "smooth" }); return false; }
     return subscription.validate();
   };
@@ -1624,6 +1823,7 @@ function brainPanel(agent) {
     node,
     validate,
     subscriptionId: () => subscription.value(),
+    credentialId: () => credentialFor(custom.value.trim() || chosen),
   };
 }
 
@@ -1660,6 +1860,7 @@ function brainTab(agent) {
       model: pickedModel(data, "model"),
       ollamaHost: data.get("ollamaHost") || "",
       subscriptionId: brain.subscriptionId(),
+      credentialId: brain.credentialId(),
       tools: form.elements.tools.checked,
       effort: data.get("effort"),
       think: false,
