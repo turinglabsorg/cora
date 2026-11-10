@@ -37,6 +37,8 @@ export function cleanDomain(value) {
 const hashPassword = (password, salt = randomBytes(16).toString("hex")) => ({ salt, hash: scryptSync(String(password), salt, 32).toString("hex") });
 const DOMAIN = /^([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
 
+const ACCESS_RANK = { none: 0, read: 1, write: 2 };
+
 export class ArtifactError extends Error {
   constructor(message, status = 400) {
     super(message);
@@ -309,8 +311,49 @@ export class Artifacts {
   memberPermission(folder, user) {
     if (!folder || !user || user.blocked || this.store.panelUser(user.id)?.blocked) return "none";
     if (this.canReview(folder, user)) return "write";
-    if (this.knowledge?.ownerMemory && !folder.ownerId && !Object.hasOwn(folder.memberAccess?.users || {}, user.id)) return "none";
-    return folder.memberAccess?.users && Object.hasOwn(folder.memberAccess.users, user.id) ? folder.memberAccess.users[user.id] : folder.memberAccess?.default ?? (this.knowledge?.ownerMemory ? "none" : "write");
+    const own = this.knowledge?.ownerMemory && !folder.ownerId && !Object.hasOwn(folder.memberAccess?.users || {}, user.id) ? "none" : folder.memberAccess?.users && Object.hasOwn(folder.memberAccess.users, user.id) ? folder.memberAccess.users[user.id] : folder.memberAccess?.default ?? (this.knowledge?.ownerMemory ? "none" : "write");
+    if (own === "write") return own;
+    const inherited = this.levelGrant(folder, user.id).permission;
+    return ACCESS_RANK[inherited] > ACCESS_RANK[own] ? inherited : own;
+  }
+
+  /** Team access given on the levels above a folder: it reaches every folder under them, present and future, of whoever gave it. */
+  levelGrant(folder, userId) {
+    let best = { permission: "none", level: "" };
+    const all = this.store.value("artifactLevelAccess", {}) || {};
+    const parts = String(folder?.path || "").split("/");
+    for (let depth = parts.length - 1; depth >= 1; depth -= 1) {
+      const level = parts.slice(0, depth).join("/");
+      for (const [ownerId, access] of Object.entries(all[level] || {})) {
+        if (ownerId === userId || !this.canManage(folder, this.store.panelUser(ownerId))) continue;
+        const permission = Object.hasOwn(access.users || {}, userId) ? access.users[userId] : access.default || "none";
+        if (ACCESS_RANK[permission] > ACCESS_RANK[best.permission]) best = { permission, level };
+      }
+    }
+    return best;
+  }
+
+  /** Whether a panel user may give the team access to a level: they own at least one folder in it, and it reaches only theirs. */
+  canManageGroup(path, user) {
+    return this.groupFolders(path).some((folder) => this.canManage(folder, user));
+  }
+
+  levelAccess(path, user) {
+    const all = this.store.value("artifactLevelAccess", {}) || {};
+    return all[path]?.[user.id] || { default: "none", users: {} };
+  }
+
+  updateLevelAccess(path, changes, user) {
+    const level = this.cleanGroup(path);
+    if (!this.canManageGroup(level, user)) throw new ArtifactError("dà accesso a un livello solo chi possiede almeno una delle sue cartelle", 403);
+    const clean = this.cleanMemberAccess(changes);
+    const all = { ...(this.store.value("artifactLevelAccess", {}) || {}) };
+    const users = Object.fromEntries(Object.entries(clean.users).filter(([id]) => id !== user.id));
+    all[level] = { ...(all[level] || {}), [user.id]: { default: clean.default, users, updatedAt: Date.now() } };
+    if (clean.default === "none" && !Object.values(users).some((value) => value !== "none")) delete all[level][user.id];
+    if (!Object.keys(all[level]).length) delete all[level];
+    this.store.setValue("artifactLevelAccess", all);
+    return this.levelAccess(level, user);
   }
 
   canReadMember(folder, user) {

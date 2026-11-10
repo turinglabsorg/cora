@@ -5815,7 +5815,7 @@ function renderArtifacts() {
 
   function draw() {
     if (level) {
-      body.replaceChildren(...[creating ? newFolderForm() : null, data.folders.length > 6 ? h("div", { class: "art-search" }, search) : null, list, levelShares].filter(Boolean));
+      body.replaceChildren(...[creating ? newFolderForm() : null, data.folders.length > 6 ? h("div", { class: "art-search" }, search) : null, list, levelAccess, levelShares].filter(Boolean));
       drawList();
       return;
     }
@@ -5850,6 +5850,9 @@ function renderArtifacts() {
   async function loadLevelShares() {
     let info;
     try { info = await api(`/api/artifacts/level?${new URLSearchParams({ path: level })}`); } catch (error) { levelShares.replaceChildren(); return; }
+    accessButton.style.display = info.canManage ? "" : "none";
+    levelAccess.replaceChildren(...(info.canManage && granting ? [artifactLevelAccess(info, level)] : []));
+    if (!info.shareHosting) { shareButton.style.display = "none"; levelShares.replaceChildren(); return; }
     const prefix = `${level}/`;
     const shareData = {
       folder: { id: `ag:${level}`, path: level, title: level.split("/").at(-1), kind: "files", group: true },
@@ -5865,6 +5868,10 @@ function renderArtifacts() {
     });
     levelShares.replaceChildren(...[sharing ? form : null, info.shares.length || sharing ? links : null].filter(Boolean));
   }
+  const levelAccess = h("div", { class: "stack art-level-access" });
+  let granting = false;
+  const accessButton = btn("Permessi", { icon: "shield", onclick: () => { granting = !granting; loadLevelShares(); } });
+  accessButton.style.display = "none";
   let sharing = false;
   const shareButton = btn("Condividi", { icon: "link", onclick: () => { sharing = !sharing; loadLevelShares().then(() => { if (sharing) levelShares.querySelector(".share-new input")?.focus(); }); } });
   shareButton.style.display = "none";
@@ -5884,7 +5891,7 @@ function renderArtifacts() {
       index === parts.length - 1 ? h("b", { "aria-current": "page" }, raw(part)) : h("a", { href: artifactLevelHref(parts.slice(0, index + 1).join("/")) }, raw(part))]).flat()) : null;
   shell(level
     ? [btn(raw(parts.length > 1 ? parts.at(-2) : "Artefatti"), { icon: "back", href: artifactLevelHref(parts.slice(0, -1).join("/")), cls: "ghost sm back-link art-back" }), crumbs,
-      pageHead(raw(parts.at(-1)), tr("Le cartelle e i livelli dentro {path}. Puoi condividerlo tutto con un solo link.", { path: `${level}/` }), [shareButton, newButton]), body]
+      pageHead(raw(parts.at(-1)), tr("Le cartelle e i livelli dentro {path}. Puoi condividerlo tutto con un solo link.", { path: `${level}/` }), [accessButton, shareButton, newButton]), body]
     : [pageHead("Artefatti", "Quello che gli agenti fanno sui loro computer, con tutte le versioni. Ogni caricamento è un commit e va in onda solo quando lo approvi.", [newButton]), body],
   { title: level ? parts.at(-1) : "Artefatti", back: level ? artifactLevelHref(parts.slice(0, -1).join("/")) : "", mode: level ? "artifacts" : "" });
   load();
@@ -6776,6 +6783,47 @@ function artifactShares(data, dir = "", opts = {}) {
   ];
 }
 
+/** Team access to a whole level: it reaches every folder of yours under it, the ones there now and the ones to come. */
+function artifactLevelAccess(info, level) {
+  let access = info.access || { default: "none", users: {} };
+  const levels = [["none", "Nessun accesso in più"], ["read", "Lettura"], ["write", "Caricamento e modifica"]];
+  const save = async (changes, row) => {
+    for (const control of node.querySelectorAll("select")) control.disabled = true;
+    try {
+      access = await api(`/api/artifacts/level/access?${new URLSearchParams({ path: level })}`, { method: "PUT", body: changes });
+    } catch (error) { toast(error.message, true); }
+    for (const control of node.querySelectorAll("select")) control.disabled = false;
+    draw();
+    const mark = node.querySelector(`[data-row="${row}"] .set-saved`);
+    if (mark) { mark.textContent = tr("salvato"); mark.classList.add("on"); setTimeout(() => { mark.classList.remove("on"); mark.textContent = ""; }, 1800); }
+  };
+  const node = h("div", {});
+  const people = (info.people || []).filter((person) => person.id !== S.data.currentUser?.id);
+  function draw() {
+    const defaultAccess = h("select", { "aria-label": tr("Accesso del team a tutto il livello") }, levels.map(([value, label]) => h("option", { value, selected: value === access.default }, label)));
+    defaultAccess.addEventListener("change", () => save({ ...access, default: defaultAccess.value }, "default"));
+    const defaultRow = setRow("Tutto il team", "Vale anche per chi entrerà nello spazio più avanti.", defaultAccess, { cls: "artifact-default-row" });
+    defaultRow.dataset.row = "default";
+    const list = people.length ? h("div", { class: "artifact-team-list" }, people.map((person) => {
+      const selected = Object.hasOwn(access.users || {}, person.id) ? access.users[person.id] : "inherit";
+      const control = h("select", { "aria-label": tr("Accesso di {name}", { name: person.name }) },
+        h("option", { value: "inherit", selected: selected === "inherit" }, "Come tutto il team"),
+        levels.map(([value, label]) => h("option", { value, selected: value === selected }, label)));
+      control.addEventListener("change", () => {
+        const users = { ...(access.users || {}) };
+        if (control.value === "inherit") delete users[person.id]; else users[person.id] = control.value;
+        save({ ...access, users }, "people");
+      });
+      return h("div", { class: "artifact-team-person" }, userMark(person), h("div", { class: "artifact-team-identity" }, h("b", {}, raw(person.name)), h("small", { class: "muted" }, raw(person.email || ""))), control);
+    })) : h("p", { class: "muted small" }, "Nessun altro membro del team è ancora entrato.");
+    const peopleRow = setRow("Membri del team", "Chi può vedere, scaricare o modificare i file di questo livello. Si somma all'accesso che ognuno ha già nelle singole cartelle.", list, { stack: true });
+    peopleRow.dataset.row = "people";
+    node.replaceChildren(panel({ icon: "shield", title: "Permessi del livello", hint: tr(info.managed === info.folders.length ? "Valgono per tutte le {count} cartelle sotto {path}/ e per quelle che ci metterai dopo." : "Valgono per le {count} cartelle tue sotto {path}/ e per quelle che ci metterai dopo.", { count: info.managed, path: level }) }, setRows(defaultRow, peopleRow)));
+  }
+  draw();
+  return node;
+}
+
 /** Who pushes, who reviews, whether it waits: rows that save as they change. */
 function artifactPermissions(data, { settings = false } = {}) {
   const { folder } = data;
@@ -6836,7 +6884,8 @@ function artifactPermissions(data, { settings = false } = {}) {
           if (control.value === "inherit") delete users[person.id]; else users[person.id] = control.value;
           choose({ ...policy, users });
         });
-        return h("div", { class: "artifact-team-person" }, userMark(person), h("div", { class: "artifact-team-identity" }, h("b", {}, raw(person.name)), h("small", { class: "muted" }, raw(person.email || "")), reviewer ? h("small", { class: "artifact-team-reviewer" }, "Revisore: può anche approvare i commit.") : null), control);
+        return h("div", { class: "artifact-team-person" }, userMark(person), h("div", { class: "artifact-team-identity" }, h("b", {}, raw(person.name)), h("small", { class: "muted" }, raw(person.email || "")), reviewer ? h("small", { class: "artifact-team-reviewer" }, "Revisore: può anche approvare i commit.") : null,
+          data.inherited?.[person.id] && !reviewer ? h("small", { class: "artifact-team-inherited" }, tr("Dal livello {level}: {access}", { level: `${data.inherited[person.id].level}/`, access: tr(data.inherited[person.id].permission === "write" ? "caricamento e modifica" : "lettura") })) : null), control);
       })) : h("p", { class: "muted small" }, "Nessun altro membro del team è ancora entrato."));
   };
   const memberAccessRow = data.canManage && folder.memberAccess ? setRow("Membri del team", "Scegli chi può vedere, scaricare o modificare i file. Tu e i revisori avete sempre accesso completo.", memberAccess, { stack: true }) : null;

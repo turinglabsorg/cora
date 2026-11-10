@@ -1670,6 +1670,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           canUpload: artifacts.canUpload(folder, user),
           canManage: artifacts.canManage(folder, user),
           people: artifacts.canManage(folder, user) ? store.sharingPeople(user) : [],
+          inherited: artifacts.canManage(folder, user) ? Object.fromEntries(store.sharingPeople(user).map((person) => [person.id, artifacts.levelGrant(folder, person.id)]).filter(([, grant]) => grant.permission !== "none")) : {},
           shareHosting: Boolean(artifacts.shareSuffix),
           shareSuffix: artifacts.shareSuffix,
           shares: store.artifactShares(folder.id).map((share) => artifacts.shareView(share)),
@@ -1734,7 +1735,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       throw new HttpError(405, "method not allowed");
     }
     // A level of the paths (clienti, clienti/acme): what is inside it, and links that serve all of it.
-    match = /^\/api\/artifacts\/level(?:\/(shares|events))?$/.exec(path);
+    match = /^\/api\/artifacts\/level(?:\/(shares|events|access))?$/.exec(path);
     if (match) {
       const level = String(url.searchParams.get("path") || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
       if (!level || store.artifactFolderByPath(level)) throw new HttpError(404, "livello non trovato");
@@ -1747,6 +1748,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         const body = await readJson(req, 32768);
         return send(res, 201, artifacts.createShare(id, { label: body.label, view: body.view, access: body.access, commit: body.commit, expiresAt: body.expiresAt, root: body.root, createdBy: by }));
       }
+      if (match[1] === "access" && method === "PUT") {
+        const access = artifacts.updateLevelAccess(level, await readJson(req, 65536), user);
+        activity({ type: "artifact", text: `${by.name} ha cambiato l'accesso del team al livello ${level}` });
+        return send(res, 200, access);
+      }
       if (match[1] === "events" && method === "GET") {
         if (!canShare) throw new HttpError(403, "il registro lo vede chi rivede le cartelle di questo livello");
         return send(res, 200, { events: store.artifactEvents(id, { shareId: url.searchParams.get("share") || "", before: Number(url.searchParams.get("before")) || 0, limit: 200 }) });
@@ -1756,7 +1762,10 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         path: level,
         folders: inside.map((folder) => ({ ...artifacts.folderView(folder), served: canShare && artifacts.canReview(folder, user) })),
         canShare,
-        people: canShare ? store.sharingPeople(user) : [],
+        canManage: artifacts.canManageGroup(level, user),
+        access: artifacts.canManageGroup(level, user) ? artifacts.levelAccess(level, user) : null,
+        managed: inside.filter((folder) => artifacts.canManage(folder, user)).length,
+        people: canShare || artifacts.canManageGroup(level, user) ? store.sharingPeople(user) : [],
         shareHosting: Boolean(artifacts.shareSuffix),
         shareSuffix: artifacts.shareSuffix,
         shares: store.artifactShares(id).map((share) => artifacts.shareView(share)),
