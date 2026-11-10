@@ -127,6 +127,8 @@ test("the connectors page shows Linear, Asana and Canva with their instructions 
   assert.match(node.querySelector(".connector-detail").textContent, /workspace/);
   assert.match(node.querySelector(".connector-detail").textContent, /CORA_LINEAR_KEY/);
   assert.match(node.querySelector(".connector-detail").textContent, /linear\.app\/settings/);
+  assert.doesNotMatch(node.querySelector(".connector-detail").textContent, /\[object Object\]/);
+  assert.ok(node.querySelector(".connector-detail").querySelectorAll(".set-control").some((control) => control.querySelectorAll("input").some((input) => input.getAttribute("type") === "password")), "the secret field sits in the row control");
   const workspace = node.querySelectorAll("input").find((input) => input.getAttribute("type") === "text");
   const key = node.querySelectorAll("input").find((input) => input.getAttribute("type") === "password");
   workspace.value = "turinglabs"; key.value = LINEAR_KEY;
@@ -151,14 +153,19 @@ test("the connectors page asks for the Asana choice and the Canva decision with 
   await node.readyConnectors;
   assert.match(node.querySelector(".connector-detail").textContent, /Token personale/);
   assert.match(node.querySelector(".connector-detail").textContent, /App OAuth/);
+  assert.doesNotMatch(node.querySelector(".connector-detail").textContent, /\[object Object\]/);
+  assert.ok(node.querySelector(".connector-detail").querySelectorAll(".set-control").some((control) => control.querySelectorAll("input").some((input) => input.getAttribute("type") === "password")), "the secret field sits in the row control");
   node.querySelectorAll("button").find((button) => button.textContent === "App OAuth").click();
   assert.match(node.querySelector(".connector-detail").textContent, /client ID/);
+  assert.doesNotMatch(node.querySelector(".connector-detail").textContent, /\[object Object\]/);
+  assert.ok(node.querySelector(".connector-detail").querySelectorAll(".set-control").some((control) => control.querySelectorAll("input").some((input) => input.getAttribute("type") === "password")), "the secret field sits in the row control");
   const clientId = node.querySelectorAll("input").find((input) => /Client ID/.test(input.getAttribute("aria-label") || ""));
   const clientSecret = node.querySelectorAll("input").find((input) => /Client secret/.test(input.getAttribute("aria-label") || ""));
   assert.ok(clientId && clientSecret);
   node.querySelectorAll("button").find((button) => button.textContent === "Catalogo connettori").click();
   node.querySelectorAll(".connector-card").find((card) => /Canva/.test(card.textContent)).click();
   assert.match(node.querySelector(".connector-detail").textContent, /app Canva/);
+  assert.doesNotMatch(node.querySelector(".connector-detail").textContent, /\[object Object\]/);
   node.querySelectorAll("button").find((button) => /Per ora no/.test(button.textContent)).click();
   await waitFor(() => f.app.keyConnectors.record("canva")?.status === "later");
 });

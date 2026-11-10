@@ -3380,7 +3380,7 @@ function connectorsPane() {
         h("p", { role: "status", class: "notice warn" }, "Servono due dati, che si trovano in Linear: il workspace e una chiave API personale."),
         setRows(
           setRow("1. Il workspace", "Il nome che compare in linear.app/<workspace>, per esempio turinglabs.", workspace, { stack: true }),
-          setRow("2. La chiave API", h("div", { class: "stack-sm" }, steps(
+          setRow("2. La chiave API", null, h("div", { class: "stack-sm" }, steps(
             h("span", {}, "apri ", h("a", { href: "https://linear.app/settings/security", target: "_blank", rel: "noopener" }, "linear.app/settings/security"), " → Sicurezza → Chiavi API e crea una chiave personale;"),
             "copia la chiave;",
             h("span", {}, "incollala qui: Cora la verifica su Linear e la salva nella cassaforte come ", h("code", {}, "CORA_LINEAR_KEY"), ", senza mostrarla più.")),
@@ -3402,7 +3402,7 @@ function connectorsPane() {
           h("p", {}, "Con un'app OAuth l'accesso è dell'app che crei tu su Asana, non di una persona sola."),
           toggle,
           h("p", { role: "status", class: "notice warn" }, "Creare l'app Asana richiede due dati: client ID e client secret. L'autorizzazione OAuth si completa dopo, quando l'app esiste."),
-          setRows(setRow("L'app Asana", h("div", { class: "stack-sm" }, steps(
+          setRows(setRow("L'app Asana", null, h("div", { class: "stack-sm" }, steps(
             h("span", {}, "apri ", h("a", { href: "https://developers.asana.com/docs/authentication", target: "_blank", rel: "noopener" }, "developers.asana.com"), " → My apps → Create new app;"),
             "copia client ID e client secret dell'app;",
             h("span", {}, "incollali qui: finiscono nella cassaforte come ", h("code", {}, "CORA_ASANA_CLIENT_ID"), " e ", h("code", {}, "CORA_ASANA_CLIENT_SECRET"), ";"),
@@ -3415,7 +3415,7 @@ function connectorsPane() {
         h("p", {}, "Gli agenti lavorano sui progetti del tuo Asana. Il token resta nella cassaforte, mai nel pannello."),
         toggle,
         h("p", { role: "status", class: "notice warn" }, "Collegare Asana richiede un token personale: il workspace lo ricava Cora dal token."),
-        setRows(setRow("Il token personale", h("div", { class: "stack-sm" }, steps(
+        setRows(setRow("Il token personale", null, h("div", { class: "stack-sm" }, steps(
           h("span", {}, "apri ", h("a", { href: "https://developers.asana.com/docs/personal-access-token", target: "_blank", rel: "noopener" }, "Asana → Impostazioni → App"), " e crea un token di accesso personale;"),
           "copia il token;",
           h("span", {}, "incollalo qui: Cora lo verifica su Asana e lo salva nella cassaforte come ", h("code", {}, "CORA_ASANA_TOKEN"), ", senza mostrarlo più.")),
@@ -3430,7 +3430,7 @@ function connectorsPane() {
       return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: record?.status === "app" ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
         h("p", {}, "Canva non ha token personali: si collega solo con un'app Canva intestata a te."),
         h("p", { role: "status", class: "notice warn" }, "Per attivare Canva servono i dati dell'app: client ID e client secret. L'autorizzazione OAuth è il passo successivo."),
-        setRows(setRow("L'app Canva", h("div", { class: "stack-sm" }, steps(
+        setRows(setRow("L'app Canva", null, h("div", { class: "stack-sm" }, steps(
           h("span", {}, "apri ", h("a", { href: "https://www.canva.com/developers/", target: "_blank", rel: "noopener" }, "canva.com/developers"), " → Your integrations → Create integration;"),
           "copia client ID e client secret;",
           h("span", {}, "incollali qui: finiscono nella cassaforte come ", h("code", {}, "CORA_CANVA_CLIENT_ID"), " e ", h("code", {}, "CORA_CANVA_CLIENT_SECRET"), ";"),
