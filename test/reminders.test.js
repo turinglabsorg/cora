@@ -94,7 +94,7 @@ test("a missing verifier, invalid verdict or owner dependency never becomes a su
 test("busy threads defer reminders without consuming them, then overdue reminders execute exactly once", async (t) => {
   const f = await fixture(t);
   const reminder = await f.create({ runAt: "2020-01-01T09:00:00Z" });
-  f.app.orchestrator.threadWork.set(reminder.channelId, "other-agent");
+  f.app.orchestrator.threadWork.set(reminder.channelId, f.agent.id);
   f.app.scheduler.tick(new Date("2050-01-01T12:01:00Z"));
   assert.equal(f.app.store.routine(reminder.id).lastStatus, "skipped");
   assert.equal(f.app.store.routineHistory().items[0].status, "skipped");

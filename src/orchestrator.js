@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ThreadState } from "./thread-state.js";
+import { ThreadSessions, killPid, noteChildPid, sessionFailure } from "./thread-sessions.js";
 import { TRANSPORT_LABELS, isSlackChannel, isTelegramChannel, slackChannel, slackIds, telegramBotAgent, telegramChannel, telegramChatId, transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, isSalotto, ownerRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { MEMORY_TOOLS } from "./tools.js";
@@ -206,6 +207,8 @@ export class Orchestrator {
     this.routineRuns = new Set();
     // One worker per agent and conversation; colleagues keep independent tasks.
     this.threadWork = new ThreadState();
+    this.sessions = new ThreadSessions(this.store);
+    this.sessions.reap();
     this.engagements = this.store.value("conversationEngagements", {});
     this.reminding = new Set();
     // The names people go by, by server (or "slack"): who wrote or was tagged since the start, on top of the archive.
@@ -1092,6 +1095,7 @@ export class Orchestrator {
       // Someone the owner authorized gets the computer the owner would: no "can I?" in between.
       const authorized = this.authorized(queued, agent, state);
       const mayUseComputer = queued ? queued.kind === "owner" || authorized || queued.delegated : state.ownerOrigin;
+      if (this.threadWork.has(state.id, agent.id) || this.sessions.blocking(agent.id, state.id)) return;
       const computer = Boolean(agent.tools && mayUseComputer && !this.threadWork.has(state.id, agent.id));
       this.acknowledge(state, agent.id, [...state.humanQueue.values()].filter((item) => item.id === queued?.id || snapshot.includes(item)).map((item) => item.id));
       const delegationAuthorized = queued ? queued.kind === "owner" || Boolean(queued.delegated) : state.ownerOrigin;
@@ -1105,7 +1109,7 @@ export class Orchestrator {
       const working = this.showWorking(state, agent, last);
       let result;
       try {
-        result = await this.brain.chatTurn({
+        const occupied = await this.withSession(agent, state.id, "chat", () => this.brain.chatTurn({
           agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, requestAuthorized: Boolean(mayUseComputer), belongsTo: this.ownsAgent(queued, agent, state),
           computerDenied: Boolean(agent.tools && !mayUseComputer),
           replyTo: queued,
@@ -1114,7 +1118,9 @@ export class Orchestrator {
           // Everything already in the channel when the turn starts is old news, not just what the prompt shows.
           inbox: this.inbox(state, state.history.slice()),
           onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
-        });
+        }));
+        if (occupied.busy) return;
+        result = occupied.value;
       } catch (error) {
         this.log({ type: "error", agentId: agent.id, channelId: state.id, text: error.message });
         if (isForced) result = { text: error.userMessage || `(non riesco a rispondere: ${error.message.slice(0, 180)})` };
@@ -1332,7 +1338,7 @@ export class Orchestrator {
       return;
     }
     // Each interrupted thread picks up on its own: an agent working in three threads resumes all three.
-    if (this.threadWork.has(trace.channelId, agent.id)) return;
+    if (this.threadWork.has(trace.channelId, agent.id) || this.sessions.blocking(agent.id, trace.channelId)) return;
     this.threadWork.set(trace.channelId, agent.id);
     const state = this.state(trace.channelId);
     state.working ??= new Set();
@@ -1345,13 +1351,15 @@ export class Orchestrator {
         || state.history.findLast((item) => ["human", "owner"].includes(item.kind) && item.at <= Date.parse(trace.startedAt));
       const english = this.store.settings.language === "en";
       await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.", undefined, undefined, this.replyDelivery(replyTo));
-      const result = await this.brain.resumeTurn({
+      const occupied = await this.withSession(agent, state.id, trace.kind || "chat", () => this.brain.resumeTurn({
         agent, trace, channel: this.turnChannel(state.id), replyTo,
         postFile: (file, caption, options = {}) => this.postAs(agent, state, caption, file, options.traceId, this.replyDelivery(options.replyTo || replyTo)),
         say: (text, target = state.id, options = {}) => this.postDirect(agent, state, target, text, { ...options, ...(target === state.id ? this.replyDelivery(options.replyTo || replyTo) : {}) }),
         inbox: this.inbox(state, state.history), routine,
         onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
-      });
+      }));
+      if (occupied.busy) return;
+      const result = occupied.value;
       if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId, this.replyDelivery(result.replyTo || replyTo));
       this.acknowledge(state, agent.id, result.handledMessageIds || []);
     } catch (error) {
@@ -1879,19 +1887,200 @@ export class Orchestrator {
     return item;
   }
 
+
+  /**
+   * Hold the one session of this agent in this thread. A second call is busy:
+   * the message stays in the history and reaches the live turn as a steer.
+   * Credits or a system error close this instance and open one other, then stop.
+   */
+  async withSession(agent, channelId, kind, fn) {
+    const holder = { session: this.sessions.begin({ agentId: agent.id, channelId, kind }) };
+    if (!holder.session) return { busy: true };
+    let failed = null;
+    const once = () => noteChildPid.run((pid) => this.sessions.notePid(holder.session.id, pid), fn);
+    const remember = (value) => {
+      if (!value?.traceId) return;
+      const brief = this.store.traceBrief(value.traceId);
+      this.store.noteThreadSessionTrace(holder.session.id, value.traceId, brief?.tokensIn || 0, brief?.tokensOut || 0);
+    };
+    try {
+      try {
+        const value = await once();
+        remember(value);
+        return { busy: false, value };
+      } catch (error) {
+        const row = this.store.threadSession(holder.session.id);
+        if (row?.status === "stopped" || !sessionFailure(error)) {
+          failed = error;
+          throw error;
+        }
+        const pid = row?.pid;
+        this.sessions.finish(holder.session, { status: "error", error: String(error.message || error).slice(0, 500) });
+        if (pid) killPid(pid);
+        this.log({ type: "warning", agentId: agent.id, channelId, text: "istanza in errore, ne apro un'altra" });
+        holder.session = this.sessions.begin({ agentId: agent.id, channelId, kind, replaces: row?.id || "" });
+        if (!holder.session) {
+          failed = error;
+          throw error;
+        }
+        try {
+          const value = await once();
+          remember(value);
+          return { busy: false, value };
+        } catch (again) {
+          failed = again;
+          throw again;
+        }
+      }
+    } finally {
+      this.sessions.finish(holder.session, failed ? { status: "error", error: String(failed.message || failed).slice(0, 500) } : {});
+    }
+  }
+
+  liveTrace(agentId, channelId) {
+    const live = this.brain?.traces?.live;
+    if (!live) return null;
+    for (const trace of live.values()) {
+      if (trace.agentId === agentId && trace.channelId === channelId && trace.status === "running") return trace;
+    }
+    return null;
+  }
+
+  threadBoard() {
+    const labels = this.store.value("threadLabels", {});
+    const closed = new Set(this.store.value("closedThreads", []));
+    const known = new Map((this.channels?.list?.() || []).map((channel) => [channel.id, channel]));
+    const groups = new Map();
+    const ensure = (id) => {
+      if (groups.has(id)) return groups.get(id);
+      const channel = known.get(id);
+      const slack = slackIds(id);
+      const kind = channel?.kind || (slack ? "slack" : isWebRoom(id) ? "web" : "discord");
+      const group = {
+        id,
+        name: labels[id] || channel?.name || id,
+        kind,
+        thread: Boolean(channel?.thread || channel?.parentId || slack?.threadTs),
+        parentId: channel?.parentId || (slack?.threadTs ? slackChannel(slack.channelId) : ""),
+        guildId: channel?.guildId || "",
+        link: kind === "discord" && channel?.guildId ? `https://discord.com/channels/${channel.guildId}/${id}` : "",
+        closed: closed.has(id),
+        flows: [],
+      };
+      groups.set(id, group);
+      return group;
+    };
+    for (const channel of known.values()) if (channel.thread || channel.parentId) ensure(channel.id);
+    for (const id of Object.keys(labels)) ensure(id);
+    for (const session of this.store.threadSessions(400)) {
+      const group = ensure(session.channelId);
+      const agent = this.store.agent(session.agentId);
+      const live = session.status === "active" ? this.liveTrace(session.agentId, session.channelId) : null;
+      const liveFull = live?.full?.() || null;
+      const brief = !liveFull && session.traceId ? this.store.traceBrief(session.traceId) : null;
+      const step = liveFull ? [...(liveFull.steps || [])].reverse().find((item) => ["thinking", "text", "tool", "note"].includes(item.type)) : null;
+      group.flows.push({
+        id: session.id,
+        agentId: session.agentId,
+        agentName: agent?.name || session.agentId,
+        color: agent?.color || "#f2a93b",
+        status: session.status,
+        kind: session.kind,
+        startedAt: session.startedAt,
+        heartbeatAt: session.heartbeatAt,
+        endedAt: session.endedAt,
+        error: session.error || brief?.error || "",
+        traceId: liveFull?.id || session.traceId || "",
+        tokensIn: liveFull?.tokensIn || brief?.tokensIn || session.tokensIn || 0,
+        tokensOut: liveFull?.tokensOut || brief?.tokensOut || session.tokensOut || 0,
+        reasoning: step ? (step.type === "tool" ? step.name : String(step.text || "").slice(0, 280)) : String(liveFull?.output || brief?.output || "").slice(0, 280),
+      });
+    }
+    const parents = [...known.values()].filter((channel) => !channel.thread && !channel.parentId && (channel.kind === "discord" || channel.kind === "slack"))
+      .map((channel) => ({ id: channel.id, name: channel.name, kind: channel.kind }));
+    return { threads: [...groups.values()], parents };
+  }
+
+  async createPlatformThread({ parentId, name }) {
+    const clean = String(name || "").trim().slice(0, 100);
+    if (!clean) throw Object.assign(new Error("manca il nome"), { status: 400 });
+    const parent = (this.channels?.list?.() || []).find((channel) => channel.id === parentId && !channel.thread && !channel.parentId);
+    if (!parent) throw Object.assign(new Error("canale non trovato"), { status: 404 });
+    if (parent.kind === "discord") {
+      const thread = await this.discord.request("POST", `/channels/${parentId}/threads`, { body: { name: clean, type: 11, auto_archive_duration: 10080 } });
+      const guild = this.discord.guilds?.get(parent.guildId);
+      guild?.threads?.set(thread.id, { ...thread, guild_id: parent.guildId, parent_id: parentId, type: thread.type || 11 });
+      return { id: thread.id, name: thread.name || clean, kind: "discord", thread: true, parentId };
+    }
+    if (parent.kind === "slack") {
+      const ids = slackIds(parent.id);
+      if (!this.slack || !ids) throw Object.assign(new Error("Slack non è collegato"), { status: 409 });
+      const sent = await this.slack.say(ids.channelId, { content: clean, name: "Cora" });
+      const ts = sent?.[0]?.ts;
+      if (!ts) throw Object.assign(new Error("Slack non ha aperto il thread"), { status: 502 });
+      const id = slackChannel(ids.channelId, ts);
+      const labels = this.store.value("threadLabels", {});
+      labels[id] = clean;
+      this.store.setValue("threadLabels", labels);
+      return { id, name: clean, kind: "slack", thread: true, parentId: parent.id };
+    }
+    throw Object.assign(new Error("un thread si crea su Discord o Slack"), { status: 400 });
+  }
+
+  async renamePlatformThread(id, name) {
+    const clean = String(name || "").trim().slice(0, 100);
+    if (!clean || !id) throw Object.assign(new Error("manca il nome"), { status: 400 });
+    if (transportOf(id) === "discord" && /^\d{5,}$/.test(id)) {
+      await this.discord.request("PATCH", `/channels/${id}`, { body: { name: clean } });
+    }
+    const labels = this.store.value("threadLabels", {});
+    labels[id] = clean;
+    this.store.setValue("threadLabels", labels);
+    return { id, name: clean };
+  }
+
+  stopThread(id, agentId = "") {
+    const sessions = this.store.activeThreadSessions().filter((session) => session.channelId === id && (!agentId || session.agentId === agentId));
+    for (const session of sessions) {
+      this.sessions.stop(session.agentId, session.channelId);
+      this.brain?.activeTurns?.get(session.channelId, session.agentId)?.stop?.();
+      this.threadWork.delete(session.channelId, session.agentId);
+      this.states.get(session.channelId)?.working?.delete(session.agentId);
+    }
+    return { stopped: sessions.length };
+  }
+
+  async closePlatformThread(id) {
+    this.stopThread(id);
+    if (transportOf(id) === "discord" && /^\d{5,}$/.test(String(id))) {
+      await this.discord.request("PATCH", `/channels/${id}`, { body: { archived: true } }).catch(() => {});
+    }
+    const closed = new Set(this.store.value("closedThreads", []));
+    closed.add(id);
+    this.store.setValue("closedThreads", [...closed]);
+    if (this.engagements?.[id]) {
+      delete this.engagements[id];
+      this.store.setValue("conversationEngagements", this.engagements);
+    }
+    return { id, closed: true };
+  }
+
+
   async runEmail(agent, email, channel) {
-    if (this.threadWork.has(channel.id)) return "busy";
+    if (this.threadWork.has(channel.id, agent.id) || this.sessions.blocking(agent.id, channel.id)) return "busy";
     this.threadWork.set(channel.id, agent.id);
     const state = this.state(channel.id);
     state.working ??= new Set();
     state.working.add(agent.id);
     this.email.status(agent, email, "working", channel.id);
     try {
-      const result = await this.brain.emailTurn({ agent, email, channel,
+      const occupied = await this.withSession(agent, channel.id, "email", () => this.brain.emailTurn({ agent, email, channel,
         say: (text, target = channel.id, options = {}) => this.postDirect(agent, state, target, text, { ...options, passive: true }),
         inbox: this.inbox(state, state.history),
         onMessageHandled: (ids) => this.acknowledge(state, agent.id, ids),
-      });
+      }));
+      if (occupied.busy) return "busy";
+      const result = occupied.value;
       if (result.text && result.text !== "PASS") await this.postAs(agent, state, result.text, undefined, result.traceId, { passive: true });
       this.email.status(agent, email, result.stopped ? "stopped" : "processed", channel.id);
       return "processed";
@@ -1943,9 +2132,8 @@ export class Orchestrator {
       return { status: "blocked" };
     }
     if (this.store.routine(routine.id)?.updatedAt !== routine.updatedAt) return { status: "stopped" };
-    // One task per thread: a routine that lands on a thread already at work waits for its next
-    // turn instead of opening a second session on the same work. Other threads do not matter.
-    const busyWith = this.threadWork.has(routine.channelId) ? "un compito già attivo in questo thread" : null;
+    // One session per agent in this thread. A colleague keeps a separate one; another thread does not matter.
+    const busyWith = (this.threadWork.has(routine.channelId, agent.id) || this.sessions.blocking(agent.id, routine.channelId)) ? "un compito già attivo in questo thread" : null;
     if (busyWith) {
       this.store.recordRoutineRun(routine.id, "skipped", `saltata: stava già lavorando a ${busyWith}`);
       this.log({ type: "routine-skip", agentId: agent.id, channelId: routine.channelId, text: `${routine.name}: stava già lavorando` });
@@ -1964,7 +2152,7 @@ export class Orchestrator {
     const typing = setInterval(() => this.typing(routine.channelId, [agent]), 8000);
     try {
       await this.ensureHistory(state);
-      const result = await this.brain[resumeTrace ? "resumeTurn" : "routineTurn"]({
+      const occupied = await this.withSession(agent, routine.channelId, snapshot.kind === "reminder" ? "reminder" : "routine", () => this.brain[resumeTrace ? "resumeTurn" : "routineTurn"]({
         agent, routine: snapshot, history: state.history, channel, trace: resumeTrace,
         replyTo: resumeTrace?.steps?.findLast((step) => step.replyTo)?.replyTo,
         postFile: (file, caption, { replyTo, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { passive: true, ...this.replyDelivery(replyTo) }),
@@ -1972,7 +2160,12 @@ export class Orchestrator {
         inbox: this.inbox(state, state.history),
         onTrace: (traceId) => this.store.attachRoutineTrace(run.id, traceId),
         onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
-      });
+      }));
+      if (occupied.busy) {
+        this.store.recordRoutineRun(routine.id, "skipped", "saltata: sessione già attiva", { runId: run.id, snapshot });
+        return { status: "busy" };
+      }
+      const result = occupied.value;
       if (result.text) {
         await this.postAs(agent, state, result.text, undefined, result.traceId, { passive: true, ...this.replyDelivery(result.replyTo) });
       }

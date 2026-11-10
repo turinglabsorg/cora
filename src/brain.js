@@ -1128,6 +1128,11 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     };
 
     control.settle = settleNews;
+    control.stop = () => {
+      halted = true;
+      stoppedByOwner = true;
+      if (!controller.signal.aborted) controller.abort();
+    };
     if (task) this.activeTurns.set(channel.id, agent.id, control);
     const controlTimer = setInterval(collectNews, 100);
     try {

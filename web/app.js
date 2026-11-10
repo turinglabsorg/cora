@@ -516,6 +516,7 @@ function connectEvents() {
         const [page, id] = route();
         if (page === "agent" && !S.data.agents.some(agent => agent.id === id)) { location.hash = "#/agenti"; renderAgents(); }
         else if (page === "brain") renderBrain();
+        else if (page === "thread") renderThreads();
         else if (page === "agenti") renderAgents();
         else document.querySelector(".agent-owner-panel")?.refreshOwners();
       });
@@ -618,6 +619,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
     // The salotto opens from the Banco: it is one of the desk's rooms, not a section of its own.
     ["banco", "Banco", "grid", section === "banco" || section === "salotto"],
     ["brain", "Brain", "bulb", section === "brain"],
+    ["thread", "Thread", "hash", section === "thread"],
     ["artefatti", "Artefatti", "archive", section === "artefatti", S.data?.artifacts?.reviews || 0],
     // Contesto opens from Impostazioni: what the agents read is a setting of the space, not a place of its own.
     ["settings", "Impostazioni", "sliders", section === "settings" || section === "contesto" || section === "domini"],
@@ -8599,6 +8601,111 @@ function renderLogin() {
 }
 
 /* ---------- boot ---------- */
+
+const THREAD_STATUS = {
+  active: "In corso",
+  done: "Conclusa",
+  error: "Errore",
+  stopped: "Fermata",
+  killed: "Chiusa al riavvio",
+  interrupted: "Interrotta",
+};
+
+function threadWhen(iso) {
+  if (!iso) return "";
+  return fmtTime(iso, true);
+}
+
+function threadFlow(flow) {
+  const live = flow.status === "active";
+  const reasoning = flow.reasoning || "";
+  return h("article", { class: "thread-flow" },
+    avatar({ id: flow.agentId, name: flow.agentName, color: flow.color }, "xs"),
+    h("div", { class: "thread-flow-body" },
+      h("div", { class: "thread-flow-line" },
+        h("b", {}, raw(flow.agentName)),
+        h("i", { class: `led${live ? " on" : flow.status === "error" ? " warn" : ""}`, title: tr(THREAD_STATUS[flow.status] || flow.status) }),
+        h("span", { class: "thread-meta" }, tr(THREAD_STATUS[flow.status] || flow.status)),
+        (Number(flow.tokensIn || 0) || Number(flow.tokensOut || 0)) ? h("span", { class: "thread-meta" }, raw(`${Number(flow.tokensIn || 0).toLocaleString(LOCALE)} → ${Number(flow.tokensOut || 0).toLocaleString(LOCALE)}`)) : null),
+      reasoning ? h("p", { class: "thread-reason" }, raw(reasoning)) : null,
+      flow.error && flow.status === "error" ? h("p", { class: "thread-error" }, raw(flow.error)) : null,
+      h("p", { class: "thread-meta" }, raw([threadWhen(flow.startedAt), flow.endedAt ? threadWhen(flow.endedAt) : ""].filter(Boolean).join(" · ")))),
+    h("div", { class: "thread-flow-actions" },
+      flow.traceId ? btn("", { icon: "bulb", cls: "sm", title: "Ragionamento", href: `#/agent/${flow.agentId}/ragionamento/${flow.traceId}` }) : null,
+      live && (S.data?.currentUser?.role === "owner" || S.data?.access?.canManage) ? btn("Ferma", { icon: "stop", cls: "sm danger", onclick: () => guard(api("/api/threads/stop", { method: "POST", body: { id: flow.channelId, agentId: flow.agentId } }), "Sessione fermata").then(() => renderThreads()) }) : null));
+}
+
+function threadCard(thread, { history = false } = {}) {
+  const flows = history ? thread.flows.filter((flow) => flow.status !== "active") : thread.flows.filter((flow) => flow.status === "active");
+  if (!flows.length && history) return null;
+  if (!flows.length && !history && !thread.thread) return null;
+  const manage = S.data?.currentUser?.role === "owner" || S.data?.access?.canManage;
+  const name = h("input", { type: "text", class: `thread-name${/^\d{8,}$/.test(thread.name) ? " mono" : ""}`, value: thread.name, "aria-label": tr("Nome del thread"), disabled: !manage });
+  return h("article", { class: `thread-card${thread.closed ? " closed" : ""}` },
+    h("header", {},
+      h("span", { class: "panel-ico" }, icon(thread.kind === "slack" ? "slack" : "hash")),
+      h("div", { class: "grow" },
+        h("b", { class: /^\d{8,}$/.test(thread.name) ? "thread-id" : "" }, raw(thread.name)),
+        h("p", { class: "thread-meta" },
+          raw(`${thread.kind === "slack" ? "Slack" : thread.kind === "web" ? "Pannello" : "Discord"}${thread.thread ? "" : " · canale"}`),
+          thread.link ? h("a", { href: thread.link, target: "_blank", rel: "noopener" }, tr("Apri")) : null))),
+    flows.length
+      ? h("div", { class: "thread-flows" }, flows.map((flow) => threadFlow({ ...flow, channelId: thread.id })))
+      : h("p", { class: "thread-meta" }, tr("Nessuna sessione attiva")),
+    manage ? h("div", { class: "thread-manage" },
+      name,
+      btn("Rinomina", { cls: "sm", onclick: () => guard(api("/api/threads/rename", { method: "POST", body: { id: thread.id, name: name.value } }), "Nome aggiornato").then(() => renderThreads()) }),
+      !history && thread.thread ? btn("Chiudi", { icon: "stop", cls: "sm", onclick: () => guard(api("/api/threads/close", { method: "POST", body: { id: thread.id } }), "Thread chiuso").then(() => renderThreads()) }) : null) : null);
+}
+
+
+async function renderThreads() {
+  const view = route()[1] || "";
+  const section = view === "storico" || view === "attivi" ? view : "";
+  let board = { threads: [], parents: [] };
+  let failed = "";
+  try { board = await api("/api/threads"); }
+  catch (error) { failed = error.message; }
+  const manage = S.data?.currentUser?.role === "owner" || S.data?.access?.canManage;
+  const parents = board.parents || [];
+  const parentSelect = h("select", { "aria-label": tr("Canale") }, parents.map((parent) => h("option", { value: parent.id }, raw(`${parent.kind === "slack" ? "Slack" : "Discord"} · ${parent.name}`))));
+  const nameInput = h("input", { type: "text", placeholder: tr("Nome del thread"), "aria-label": tr("Nome del thread"), maxlength: "100" });
+  const liveCards = (board.threads || []).map((thread) => threadCard(thread, { history: false })).filter(Boolean);
+  const pastCards = (board.threads || []).map((thread) => threadCard(thread, { history: true })).filter(Boolean);
+  const create = manage ? panel({ icon: "plus", title: "Nuovo thread", hint: "Si apre sul canale e resta abbinato 1:1." },
+    parents.length ? h("form", { class: "thread-create", onsubmit: (event) => {
+      event.preventDefault();
+      const parentId = parentSelect.value;
+      const name = nameInput.value.trim();
+      if (!parentId || !name) return;
+      guard(api("/api/threads", { method: "POST", body: { parentId, name } }), "Thread aperto").then(() => renderThreads());
+    } },
+    field("Canale", parentSelect),
+    field("Nome", nameInput),
+    btn("Crea", { icon: "plus", cls: "primary", type: "submit" })) : h("p", { class: "thread-meta" }, "Nessun canale Discord o Slack acceso.")) : null;
+  const entries = [
+    ["attivi", "Attivi", "hash", "Chi sta lavorando adesso", [
+      create,
+      liveCards.length ? h("div", { class: "thread-list" }, liveCards) : empty("hash", "Nessun thread attivo."),
+    ].filter(Boolean)],
+    ["storico", "Storico", "clock", "Sessioni già chiuse", [
+      pastCards.length ? h("div", { class: "thread-list" }, pastCards) : empty("clock", "Nessuna sessione passata."),
+    ]],
+  ];
+  const workspace = sectionWorkspace({ title: "Thread", base: "#/thread", current: section, entries });
+  shell([
+    pageHead("Thread", "Una sessione per agente, legata al thread Discord o Slack."),
+    failed ? h("p", { class: "banner err" }, raw(failed)) : null,
+    workspace,
+  ].filter(Boolean), { title: "Thread" });
+  const timer = setInterval(() => {
+    if (route()[0] !== "thread") return;
+    if (document.activeElement?.matches("input, textarea, select")) return;
+    renderThreads();
+  }, 4000);
+  S.timers.push(timer);
+}
+
 async function render() {
   closeAccountMenu();
   if (!S.data) return;
@@ -8615,6 +8722,7 @@ async function render() {
   else if (page === "archivio") renderRoutineArchive();
   else if (page === "contesto") renderContext();
   else if (page === "brain") renderBrain();
+  else if (page === "thread") await renderThreads();
   else if (page === "artefatti") renderArtifacts();
   else if (page === "settings") renderSettings();
   else if (page === "salotto") renderSalotto();
@@ -8625,7 +8733,7 @@ document.documentElement.lang = LANG;
 document.title = "Cora · Computer-Operating Resident Agents";
 
 /** While the state loads, the page being opened in outline: its own name, not always the agents page. */
-const BOOT_TITLES = { agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", domini: "Impostazioni", settings: "Impostazioni", archivio: "Archivio" };
+const BOOT_TITLES = { thread: "Thread", agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", domini: "Impostazioni", settings: "Impostazioni", archivio: "Archivio" };
 
 function bootSkeleton() {
   const [section] = route();

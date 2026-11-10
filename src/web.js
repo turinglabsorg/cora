@@ -803,6 +803,37 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       throw new HttpError(404, "not found");
     }
+    if (path === "/api/threads" && method === "GET") {
+      const board = orchestrator.threadBoard();
+      if (knowledge?.ownerMemory && user.role !== "owner") {
+        const allowed = new Set(knowledge.agentsFor(user).map((agent) => agent.id));
+        board.threads = board.threads.map((thread) => ({ ...thread, flows: thread.flows.filter((flow) => allowed.has(flow.agentId)) }));
+        board.parents = [];
+      }
+      return send(res, 200, board);
+    }
+    if (["/api/threads", "/api/threads/rename", "/api/threads/stop", "/api/threads/close"].includes(path) && method === "POST" && user.role !== "owner") {
+      throw new HttpError(403, "Solo il proprietario");
+    }
+    if (path === "/api/threads" && method === "POST") {
+      const body = await readJson(req, 4000);
+      try { return send(res, 201, await orchestrator.createPlatformThread(body)); }
+      catch (error) { throw new HttpError(error.status || 400, error.message); }
+    }
+    if (path === "/api/threads/rename" && method === "POST") {
+      const body = await readJson(req, 4000);
+      try { return send(res, 200, await orchestrator.renamePlatformThread(body.id, body.name)); }
+      catch (error) { throw new HttpError(error.status || 400, error.message); }
+    }
+    if (path === "/api/threads/stop" && method === "POST") {
+      const body = await readJson(req, 4000);
+      return send(res, 200, orchestrator.stopThread(String(body.id || ""), String(body.agentId || "")));
+    }
+    if (path === "/api/threads/close" && method === "POST") {
+      const body = await readJson(req, 4000);
+      try { return send(res, 200, await orchestrator.closePlatformThread(String(body.id || ""))); }
+      catch (error) { throw new HttpError(error.status || 400, error.message); }
+    }
     if (path === "/api/state" && method === "GET") {
       const [agents, models, imageReady] = await Promise.all([
         Promise.all((knowledge?.agentsFor(user) || store.agents()).map(publicAgent)),

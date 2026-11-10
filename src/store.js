@@ -497,6 +497,29 @@ function memoryRow(row) {
   };
 }
 
+
+function threadSessionRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    channelId: row.channel_id,
+    kind: row.kind,
+    status: row.status,
+    pid: row.pid || 0,
+    boot: row.boot || "",
+    host: row.host || "",
+    traceId: row.trace_id || "",
+    startedAt: row.started_at,
+    heartbeatAt: row.heartbeat_at,
+    endedAt: row.ended_at,
+    error: row.error || "",
+    replaces: row.replaces || "",
+    tokensIn: row.tokens_in || 0,
+    tokensOut: row.tokens_out || 0,
+  };
+}
+
 function messageRow(row) {
   return {
     id: row.id,
@@ -544,6 +567,25 @@ export class Store {
     this.db = new DatabaseSync(this.path);
     try { chmodSync(this.path, 0o600); } catch {}
     this.db.exec(SCHEMA);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS thread_sessions (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  pid INTEGER NOT NULL DEFAULT 0,
+  boot TEXT NOT NULL DEFAULT '',
+  host TEXT NOT NULL DEFAULT '',
+  trace_id TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL,
+  ended_at TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  replaces TEXT NOT NULL DEFAULT '',
+  tokens_in INTEGER NOT NULL DEFAULT 0,
+  tokens_out INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS thread_sessions_lookup ON thread_sessions(agent_id, channel_id, started_at);`);
     try { this.db.exec("ALTER TABLE messages ADD COLUMN meta TEXT"); } catch {}
     // Older databases have no token counts: their traces simply read as zero.
     for (const column of ["tokens_in", "tokens_out"]) {
@@ -1493,6 +1535,59 @@ export class Store {
     const row = this.stmt("SELECT t.*, s.text AS system FROM traces t LEFT JOIN trace_systems s ON s.hash = t.system_hash WHERE t.id = ?").get(String(id));
     return row ? traceRow(row, true) : null;
   }
+
+
+  /* ---------- thread sessions ---------- */
+  openThreadSession({ agentId, channelId, kind, boot, host, replaces = "", pid = 0 }) {
+    const id = newId("ts");
+    const now = new Date().toISOString();
+    this.stmt(`INSERT INTO thread_sessions(id, agent_id, channel_id, kind, status, pid, boot, host, trace_id, started_at, heartbeat_at, ended_at, error, replaces, tokens_in, tokens_out)
+      VALUES (?, ?, ?, ?, 'active', ?, ?, ?, '', ?, ?, NULL, '', ?, 0, 0)`).run(
+      id, String(agentId), String(channelId), String(kind || "chat"), Number(pid) || 0, String(boot || ""), String(host || ""), now, now, String(replaces || ""),
+    );
+    return this.threadSession(id);
+  }
+
+  threadSession(id) {
+    return threadSessionRow(this.stmt("SELECT * FROM thread_sessions WHERE id = ?").get(String(id || "")));
+  }
+
+  activeThreadSession(agentId, channelId) {
+    return threadSessionRow(this.stmt("SELECT * FROM thread_sessions WHERE agent_id = ? AND channel_id = ? AND status = 'active' ORDER BY started_at DESC LIMIT 1").get(String(agentId), String(channelId)));
+  }
+
+  activeThreadSessions() {
+    return this.stmt("SELECT * FROM thread_sessions WHERE status = 'active' ORDER BY started_at DESC").all().map(threadSessionRow);
+  }
+
+  threadSessions(limit = 400) {
+    return this.stmt("SELECT * FROM thread_sessions ORDER BY started_at DESC LIMIT ?").all(Math.max(1, Math.min(1000, Number(limit) || 400))).map(threadSessionRow);
+  }
+
+  touchThreadSession(id) {
+    this.stmt("UPDATE thread_sessions SET heartbeat_at = ? WHERE id = ? AND status = 'active'").run(new Date().toISOString(), String(id));
+  }
+
+  noteThreadSessionPid(id, pid) {
+    this.stmt("UPDATE thread_sessions SET pid = ?, heartbeat_at = ? WHERE id = ? AND status = 'active'").run(Number(pid) || 0, new Date().toISOString(), String(id));
+  }
+
+  noteThreadSessionTrace(id, traceId, tokensIn = 0, tokensOut = 0) {
+    this.stmt("UPDATE thread_sessions SET trace_id = ?, tokens_in = ?, tokens_out = ? WHERE id = ?").run(String(traceId || ""), Number(tokensIn) || 0, Number(tokensOut) || 0, String(id));
+  }
+
+  closeThreadSession(id, { status = "done", error = "" } = {}) {
+    this.stmt("UPDATE thread_sessions SET status = ?, error = ?, ended_at = ? WHERE id = ? AND status = 'active'").run(
+      String(status || "done"), String(error || "").slice(0, 500), new Date().toISOString(), String(id),
+    );
+  }
+
+  traceBrief(id) {
+    const row = this.stmt("SELECT id, output, error, tokens_in, tokens_out, status FROM traces WHERE id = ?").get(String(id || ""));
+    if (!row) return null;
+    return { id: row.id, output: row.output || "", error: row.error || "", tokensIn: row.tokens_in || 0, tokensOut: row.tokens_out || 0, status: row.status };
+  }
+
 
   /* ---------- push notifications ---------- */
   addPushSubscription({ endpoint, keys }, device = "", userId = "") {

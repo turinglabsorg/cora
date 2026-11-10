@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { noteChildPid } from "./thread-sessions.js";
 import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -30,7 +31,9 @@ export function childEnv() {
 function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, signal }) {
   signal?.throwIfAborted();
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, env: { ...(authEnv || childEnv()), ...env }, stdio: ["pipe", "pipe", "pipe"] });
+    const tracked = Boolean(noteChildPid.getStore());
+    const child = spawn(bin, args, { cwd, env: { ...(authEnv || childEnv()), ...env }, stdio: ["pipe", "pipe", "pipe"], detached: tracked });
+    if (tracked) noteChildPid.getStore()(child.pid);
     const stdout = [];
     const stderr = [];
     let partial = "";
@@ -47,8 +50,14 @@ function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, sign
     let timedOut = false;
     let killTimer;
     const terminate = () => {
-      child.kill("SIGTERM");
-      killTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+      if (tracked) {
+        try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+      } else child.kill("SIGTERM");
+      killTimer = setTimeout(() => {
+        if (tracked) {
+          try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+        } else child.kill("SIGKILL");
+      }, 5000);
       killTimer.unref();
     };
     signal?.addEventListener("abort", terminate, { once: true });

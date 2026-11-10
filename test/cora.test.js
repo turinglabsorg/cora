@@ -6415,28 +6415,35 @@ describe("thread goal lifecycle", () => {
     } finally { app.boxes.shell = shell; app.brain.progressEvery = every; }
   });
 
-  test("one thread admits one goal even when different agents have routines due together", async () => {
+  test("one agent keeps a single session in a thread and a colleague keeps another", async () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
-    let entered = false;
+    let irisEntered = false;
+    let ivoEntered = false;
     goals = () => "il controllo corrente è completo";
-    replies.set("Iris", async () => { entered = true; await gate; return { content: "PASS" }; });
+    replies.set("Iris", async () => { irisEntered = true; await gate; return { content: "PASS" }; });
+    replies.set("Ivo", async () => {
+      ivoEntered = true;
+      assert.equal(app.orchestrator.threadWork.has(CHANNEL, iris.id), true);
+      assert.equal(app.orchestrator.threadWork.has(CHANNEL, ivo.id), true);
+      return { content: "PASS" };
+    });
     const first = routine(iris, "Primo controllo");
-    const second = routine(ivo, "Secondo controllo");
+    const second = routine(iris, "Secondo controllo");
+    const colleague = routine(ivo, "Controllo del collega");
     const pending = app.orchestrator.runRoutine(first);
-    const overlapping = app.orchestrator.runRoutine(second);
     try {
-      await waitFor(() => entered);
-      const overlap = await overlapping;
+      await waitFor(() => irisEntered);
+      const overlap = await app.orchestrator.runRoutine(second);
       assert.equal(overlap.status, "busy");
       assert.equal(app.store.routine(second.id).lastStatus, "skipped");
-      assert.equal(app.orchestrator.threadWork.size, 1);
-      assert.equal(app.brain.channelGoals.size, 1);
-    } finally { release(); await Promise.all([pending, overlapping]); }
+      const other = app.orchestrator.runRoutine(colleague);
+      await waitFor(() => ivoEntered);
+      assert.equal(app.orchestrator.threadWork.has(CHANNEL, iris.id), true);
+      release();
+      await Promise.all([pending, other]);
+    } finally { release(); await pending; }
     assert.equal(app.orchestrator.threadWork.size, 0);
-    assert.equal(app.brain.channelGoals.size, 0);
-    replies.set("Ivo", () => ({ content: "PASS" }));
-    assert.equal((await app.orchestrator.runRoutine(app.store.routine(second.id))).status, "nothing");
   });
 
   test("different threads can each hold their own goal", async () => {
@@ -8002,8 +8009,7 @@ describe("agent character sheet", () => {
     assert.match(panel.app.querySelector(".character-legacy")?.textContent || "", /kept and does not enter the prompt/);
     const clear = panel.app.querySelectorAll("button").find((node) => /Remove the story/.test(node.textContent));
     clear.click();
-    await waitFor(() => app.store.agent(agent.id).personality === "", { what: "the old story cleared" });
-    assert.equal(panel.app.querySelector(".character-legacy"), null);
+    await waitFor(() => app.store.agent(agent.id).personality === "" && panel.app.querySelector(".character-legacy") == null, { what: "the old story cleared" });
   });
 
   test("saving identity does not turn the character on", async () => {
