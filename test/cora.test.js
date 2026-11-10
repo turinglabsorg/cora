@@ -4091,6 +4091,53 @@ describe("talking with the agents", () => {
     assert.deepEqual(posts("Pino"), []);
   });
 
+  test("a thread named after an issue keeps its topic: another thread's work is stopped and sent there, a question about it passes", async () => {
+    const HANDOVER = "1599000000000000731";
+    const PAGES = "1599000000000000732";
+    discord.dispatch("THREAD_CREATE", { id: HANDOVER, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "REF-23 handover" });
+    discord.dispatch("THREAD_CREATE", { id: PAGES, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "REF-62 — razionalizzazione pagine Admin" });
+    await sleep(150);
+    const inThread = (thread) => discord.state.webhookPosts.filter((item) => item.username === "Olga" && item.channelId === thread).map((item) => item.content);
+
+    replies.set("Olga", () => ({ content: "REF-62: Dashboard fatta, prossima Briefings." }));
+    discord.say({ content: "@Olga, lavora su REF-62", channel: PAGES });
+    await waitFor(() => inThread(PAGES).length === 1, { what: "Olga in the REF-62 thread" });
+    await quiet();
+
+    // The incident of 10/11: "procedi" in the handover thread, and the agent carries on REF-62 there.
+    const prompts = [];
+    let refusals = [];
+    replies.set("Olga", (body) => {
+      prompts.push(lastUserText(body));
+      const last = body.messages.at(-1);
+      if (last.role === "tool") refusals.push(String(last.content));
+      if (prompts.length === 1) return { tool_calls: [{ function: { name: "say", arguments: { text: "Passo a Source Health di REF-62." } } }] };
+      return { content: "Briefings chiusa su REF-62, ora Source Health." };
+    });
+    discord.say({ content: "@Olga, ok, procedi allora qui", channel: HANDOVER });
+    await waitFor(() => inThread(HANDOVER).length === 1, { what: "Olga's answer in the handover thread" });
+    await quiet();
+    assert.match(prompts[0], /Tema di questo thread: REF-23\. Qui lavori solo su questo\./);
+    assert.match(prompts[0], new RegExp(`REF-62 → «REF-62 — razionalizzazione pagine Admin» https://discord.com/channels/${GUILD}/${PAGES}`));
+    assert.match(prompts[0], /<altrove dove="[^"]*" tema="REF-62">altro thread, altro tema \(REF-62\)/);
+    assert.doesNotMatch(prompts[0], /Dashboard fatta/, "the other thread's work is a pointer, not a transcript to continue");
+    assert.match(refusals[0], /^error: not sent\. Questo thread è dedicato a REF-23; REF-62 ha il suo thread/);
+    assert.deepEqual(inThread(HANDOVER), [`Questo riguarda REF-62: ne parlo nel suo thread, https://discord.com/channels/${GUILD}/${PAGES}`], "after two rewrites a pointer goes out, never the work");
+    assert.ok(!discord.state.webhookPosts.some((item) => item.channelId === HANDOVER && /Source Health/.test(item.content)));
+
+    // Sent to its own thread, the same work goes through.
+    replies.set("Olga", (body) => body.messages.at(-1).role === "tool" ? { content: "PASS" } : { tool_calls: [{ function: { name: "say", arguments: { text: "Passo a Source Health di REF-62.", channel_id: PAGES } } }] });
+    discord.say({ content: "@Olga, scrivilo nel thread giusto", channel: HANDOVER });
+    await waitFor(() => inThread(PAGES).includes("Passo a Source Health di REF-62."), { what: "the work in its own thread" });
+    await quiet();
+
+    // The owner asks here about the other issue: answering is allowed.
+    replies.set("Olga", () => ({ content: "REF-62 è In Progress, mancano Sources e Cycles." }));
+    discord.say({ content: "@Olga, a che punto è REF-62?", channel: HANDOVER });
+    await waitFor(() => inThread(HANDOVER).includes("REF-62 è In Progress, mancano Sources e Cycles."), { what: "an answer to a question" });
+    await quiet();
+  });
+
   test("only the agent you name answers, a follow-up without names goes to it again, and a mention of someone else keeps them quiet", async () => {
     replies.set("Olga", () => ({ content: "Sono Olga, dimmi." }));
     replies.set("Pino", () => ({ content: "Anche io!" }));

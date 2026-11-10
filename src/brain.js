@@ -11,6 +11,7 @@ import { nextRuns } from "./scheduler.js";
 import { writtenReplyEvidence } from "./voice.js";
 import { attachmentImage } from "./images.js";
 import { agentPersona, agentTagline } from "./character.js";
+import { issueKeys, leakMessage, leakPointer, threadLeak, threadLink, threadTopics } from "./thread-topics.js";
 
 /** A conversation without the computer is short; a task runs until it is done, within these bounds. */
 const CHAT_STEPS = 14;
@@ -367,7 +368,8 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       "- La tua risposta finale viene pubblicata in questa conversazione: per rispondere qui scrivila e basta, senza say. Se con say hai già detto tutto, rispondi solo PASS, senza note come «messaggio inviato».",
       "- Mentre lavori, i nuovi messaggi della chat ti arrivano insieme ai risultati degli strumenti: leggili e, se cambiano la richiesta, cambia piano.",
       "- Non ripetere quello che ha già detto qualcun altro.",
-      "- Il proprietario ti parla da più posti (le chat, il pannello): per te è un'unica conversazione. Ricordi quello che vi siete detti altrove e rispondi dove ti scrive.",
+      "- Il proprietario ti parla da più posti (le chat, il pannello, Telegram): per te è un'unica conversazione. Ricordi quello che vi siete detti altrove e rispondi dove ti scrive.",
+      "- Ogni thread ha però il suo tema: il lavoro di un thread resta in quel thread. Un «procedi» o un «continua» vale solo per il tema del thread in cui è scritto, mai per un lavoro iniziato in un altro thread.",
       "- I messaggi con ★ vengono dal tuo proprietario: è lui che comanda, anche su dove vive il cora.",
     ].join("\n"));
     return sections.join("\n\n");
@@ -390,29 +392,62 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     }
   }
 
-  memoryContext(agent, query) {
+  memoryContext(agent, query, topics = null) {
     this.knowledge?.assertCurrent(agent);
     if (agent.brainSource === "external") return "";
     const facts = this.memory.relevant(agent.id, query);
     const diary = this.store.diary(agent.id).slice(-2);
     const parts = [];
-    parts.push(`Ti torna in mente:\n${facts.length ? facts.map((fact) => `- [${fact.id}] ${fact.text}${fact.scope === "shared" ? " (condiviso)" : ""}${fact.pinned ? " (fissato)" : ""}`).join("\n") : "- (niente di specifico)"}`);
+    const elsewhereNote = (text) => {
+      if (!topics?.topic?.length) return "";
+      const keys = issueKeys(text);
+      const foreign = keys.filter((key) => topics.others.has(key));
+      return foreign.length && !keys.some((key) => topics.topic.includes(key)) ? ` (riguarda ${foreign.join(", ")}, che ha il suo thread: contesto, non lavoro di questo thread)` : "";
+    };
+    parts.push(`Ti torna in mente:\n${facts.length ? facts.map((fact) => `- [${fact.id}] ${fact.text}${fact.scope === "shared" ? " (condiviso)" : ""}${fact.pinned ? " (fissato)" : ""}${elsewhereNote(fact.text)}`).join("\n") : "- (niente di specifico)"}`);
     if (diary.length) parts.push(`Dal tuo diario:\n${diary.map((entry) => `- ${formatWhen(Date.parse(entry.createdAt), this.timezone)}: ${entry.text}`).join("\n")}`);
     return parts.join("\n\n");
   }
 
-  /** The agent's latest exchanges in its other places (Discord, Telegram, the panel): one conversation, many surfaces. */
-  elsewhere(agent, channelId) {
+  /** The issue a thread is about and the threads of the same server that own the others (src/thread-topics.js). */
+  threadMap(agent, channelId) {
+    if (!this.channels?.info) return { topic: [], others: new Map() };
+    let here = null;
+    try { here = this.channels.info(channelId); } catch { return { topic: [], others: new Map() }; }
+    const known = [...(this.channels.list?.() || []), ...(this.channels.listFor?.(agent) || [])];
+    return threadTopics(known, here);
+  }
+
+  /**
+   * The agent's latest exchanges in its other places (Discord, Telegram, the panel): one conversation, many surfaces.
+   * Another thread with its own issue is another topic: from a thread with its own topic it shows as a pointer only.
+   */
+  elsewhere(agent, channelId, topics = null) {
     this.knowledge?.assertCurrent(agent);
     if (agent.brainSource === "external") return "";
     const ids = this.channelIdsFor(agent).filter((id) => id !== channelId);
     const places = this.store.recentElsewhere(agent.id, ids, Date.now() - ELSEWHERE_MS, { channels: 2, perChannel: 8 }).map((place) => this.knowledge?.ownerMemory ? { ...place, messages: place.messages.filter((message) => this.knowledge.messageOwner(message) === this.knowledge.ownerId(agent)) } : place).filter((place) => place.messages.length);
     if (!places.length) return "";
+    const here = topics?.topic || [];
     const blocks = places.map(({ channelId: id, messages }) => {
+      let info = null;
+      try { info = this.channels?.info?.(id); } catch {}
+      const theirs = info?.parentId ? issueKeys(info.name) : [];
+      const otherTopic = theirs.length && !theirs.some((key) => here.includes(key));
+      const label = `dove="${this.channelLabel(id)}"${theirs.length ? ` tema="${theirs.join(", ")}"` : ""}`;
+      if (otherTopic && here.length) {
+        return `<altrove ${label}>altro thread, altro tema (${theirs.join(", ")}): l'ultimo messaggio è delle ${formatWhen(messages.at(-1).at, this.timezone)}. Il suo lavoro si fa là (${threadLink({ ...info, id })}), non qui.</altrove>`;
+      }
       const short = messages.map((item) => ({ ...item, content: item.content.length > 600 ? `${item.content.slice(0, 600)}…` : item.content }));
-      return `<altrove dove="${this.channelLabel(id)}">\n${formatTranscript(short, agent, this.timezone)}\n</altrove>`;
+      return `<altrove ${label}>\n${formatTranscript(short, agent, this.timezone)}\n</altrove>`;
     });
-    return `Le tue ultime conversazioni in altri posti. È la stessa conversazione con le stesse persone, solo su un'altra superficie: quello che vi siete detti lì vale anche qui.\n${blocks.join("\n")}`;
+    return `Le tue ultime conversazioni in altri posti. Tra superfici diverse (Discord, Telegram, il pannello) è la stessa conversazione con le stesse persone. Ogni thread e canale ha però il suo tema: quello che leggi qui sotto è contesto, non lavoro da continuare qui, e un «procedi» detto in questa conversazione non riprende il lavoro di un altro thread.\n${blocks.join("\n")}`;
+  }
+
+  topicNote({ topic, others }) {
+    if (!topic.length) return "";
+    const elsewhere = [...others].slice(0, 12).map(([key, threads]) => `${key} → ${threads.map((thread) => `«${thread.name}» ${threadLink(thread)}`).join(" o ")}`);
+    return `Tema di questo thread: ${topic.join(", ")}. Qui lavori solo su questo.${elsewhere.length ? ` Le altre issue hanno il loro thread: ${elsewhere.join("; ")}. Il lavoro su quelle si scrive nel loro thread con say({text, channel_id}); Cora non pubblica qui i messaggi che portano il lavoro di un altro thread.` : ""}`;
   }
 
   async chatTurn({ agent, history, channel, forced, computer, authorized = false, requestAuthorized = false, belongsTo = false, computerDenied = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
@@ -420,13 +455,15 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const transcript = formatTranscript(history, agent, this.timezone);
     const last = replyTo || history[history.length - 1];
     const query = history.slice(-6).map((item) => item.content).join(" ");
+    const topics = { ...this.threadMap(agent, channel.id), asked: issueKeys([replyTo?.content, ...history.filter((item) => item.kind === "owner" || item.kind === "human").map((item) => item.content)].filter(Boolean).join("\n")) };
     const instruction = forced
       ? `${last?.authorName || "Qualcuno"} si è rivolto a te: rispondi (non PASS). Se ti serve lavorare, la prima cosa che fai è say con due parole (es. «Ricevuto, ci guardo»), poi lo tieni aggiornato con say a ogni passo importante, e alla fine scrivi il risultato.`
       : "Decidi se intervenire. Se non hai niente da aggiungere rispondi solo PASS.";
     const user = [
-      this.memoryContext(agent, query),
+      this.memoryContext(agent, query, topics),
       await this.brainContext(query, agent),
-      this.elsewhere(agent, channel.id),
+      this.elsewhere(agent, channel.id, topics),
+      this.topicNote(topics),
       `Ultimi messaggi ${channel.where || `in #${channel.name}`}${channel.note ? ` (${channel.note})` : ""}:\n<chat>\n${transcript}\n</chat>`,
       instruction,
       replyTo ? `Messaggio umano a cui rispondere adesso: ${replyTo.authorName}: ${replyTo.content}\nGli eventuali risultati di routine successivi sono solo contesto, non una nuova richiesta di eseguirle.` : "",
@@ -441,7 +478,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const requester = (computer || requestAuthorized) && request && (request.kind === "owner" || request.kind === "human")
       ? { kind: request.kind === "owner" ? "owner" : "authorized", id: String(request.authorId || ""), name: String(request.authorName || "") } : null;
     const turn = (prompt) => this.loop({
-      agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled, requester, replyTo, requestAuthorized,
+      agent, mode: "chat", channel, user: prompt, computer, postFile, say, inbox, onMessageHandled, requester, replyTo, requestAuthorized, topics,
       maxSteps: computer ? TASK_STEPS : CHAT_STEPS, deadline: Date.now() + (computer ? TASK_DEADLINE_MS : CHAT_DEADLINE_MS),
       imageMessages: [...history.filter((item) => ["owner", "human"].includes(item.kind) && (!item.addressed?.length || item.addressed.includes(agent.id))).slice(-12), ...(last && !history.includes(last) ? [last] : [])], task: Boolean(computer),
       goalRequest: request?.content || "", goalContext,
@@ -469,10 +506,12 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
   async routineTurn({ agent, routine, history, channel, postFile, say, inbox, onTrace, onMessageHandled }) {
     if (this.knowledge?.resetAt) history = history.filter((message) => this.knowledge.afterReset(message));
     const transcript = formatTranscript(history.slice(-12), agent, this.timezone);
+    const topics = { ...this.threadMap(agent, channel.id), asked: issueKeys(`${routine.name} ${routine.prompt}`) };
     const user = [
-      this.memoryContext(agent, `${routine.name} ${routine.prompt}`),
+      this.memoryContext(agent, `${routine.name} ${routine.prompt}`, topics),
       await this.brainContext(`${routine.name} ${routine.prompt}`, agent),
-      this.elsewhere(agent, channel.id),
+      this.elsewhere(agent, channel.id, topics),
+      this.topicNote(topics),
       routine.kind === "reminder" ? `È il momento del tuo reminder "${routine.name}" (una volta: ${routine.runAt}).` : `È il momento della tua routine "${routine.name}" (pianificazione: ${routine.schedule}).`,
       `[Attività programmata: ${routine.id}]`,
       `Compito:\n${routine.prompt}`,
@@ -483,7 +522,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     return this.loop({
       agent, mode: routine.kind === "reminder" ? "reminder" : "routine", channel, user, computer: agent.tools, postFile, say, inbox, onTrace, onMessageHandled,
       maxSteps: ROUTINE_STEPS, deadline: Date.now() + ROUTINE_DEADLINE_MS, images: [], task: Boolean(agent.tools),
-      goalRequest: this.routineGoal(routine), routine,
+      goalRequest: this.routineGoal(routine), routine, topics,
     });
   }
 
@@ -635,7 +674,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     }
   }
 
-  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, imageMessages = [], task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null, requester = null, replyTo = null, requestAuthorized = false }) {
+  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, imageMessages = [], task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null, requester = null, replyTo = null, requestAuthorized = false, topics = null }) {
     const selectedBrain = this.knowledge ? this.knowledge.forAgent(agent) : agent.brainSource === "external" ? null : this.companyBrain;
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
@@ -785,6 +824,21 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
      * per turn, so the rewrite goes out; a borderline comment goes through when the
      * agent runs the very same command again.
      */
+    // A thread's topic is enforced on every message the agent sends, wherever it sends it.
+    const topicsAt = new Map(topics ? [[channel.id, topics]] : []);
+    const topicsFor = (target) => {
+      if (!topicsAt.has(target)) topicsAt.set(target, { ...this.threadMap(agent, target), asked: [] });
+      return topicsAt.get(target);
+    };
+    const threadRefusal = (name, args) => {
+      if (name !== "say" && name !== "ask_owner") return "";
+      const target = String((name === "say" && args?.channel_id) || channel.id);
+      const here = topicsFor(target);
+      const leak = threadLeak(name === "say" ? args?.text : args?.question, here);
+      if (!leak) return "";
+      trace.add({ type: "note", text: `thread: messaggio su ${leak.key} fermato in un thread di ${here.topic.join(", ")}` });
+      return `error: not sent. ${leakMessage(leak, here.topic)}`;
+    };
     let docTalkBlocked = false;
     const docAsked = new Set();
     const docRefusal = async (name, args) => {
@@ -819,7 +873,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       if (allowed && LOOKUP_TOOLS.has(name)) looked.add(name);
       else if (allowed && !TALK_TOOLS.has(name)) changed += 1;
       const waitingForOwner = blockedWork && !OWN_TOOLS.has(name) && !["say", "ask_owner", "notify", "list_channels"].includes(name);
-      const refusal = allowed && !repeated && !halted && !waitingForOwner ? await docRefusal(name, args) : "";
+      const refusal = allowed && !repeated && !halted && !waitingForOwner ? threadRefusal(name, args) || await docRefusal(name, args) : "";
       let output = waitingForOwner ? { text: `error: the progress review found a real dependency: ${blockedWork}. Do not repeat searches or writes. Report completed results and ask the owner for the precise missing decision with ask_owner.` } : halted ? { text: "error: the owner asked you to stop. Do not run anything else: say where you had got to, in one line." }
         : !allowed ? { text: `error: the tool ${name} is not available now` }
         : repeated ? { text: "error: you have already done exactly this several times with the same result. Stop repeating it: write what you have so far and what is blocking you." }
@@ -948,7 +1002,12 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const done = (raw, steps) => {
       closed = true;
       const reply = cleanReply(raw, agent);
-      const text = !control.handoff && reply && !spokenMessages.includes(reply.trim()) && !(saidHere && deliveryNote(reply)) ? reply : null;
+      let text = !control.handoff && reply && !spokenMessages.includes(reply.trim()) && !(saidHere && deliveryNote(reply)) ? reply : null;
+      const leak = text && threadLeak(text, topicsFor(channel.id));
+      if (leak) {
+        trace.add({ type: "note", text: `thread: risposta su ${leak.key} sostituita da un rimando al suo thread` });
+        text = leakPointer(leak);
+      }
       trace.finish({ status: halted ? "stopped" : text ? "done" : "pass", output: raw });
       return { text, steps, traceId: trace.id, asked, stopped: halted, spoken: spokenMessages.length > 0, replyTo, handledMessageIds: [...new Set([...answeredMessageIds, ...(text || asked ? deliveredMessageIds : [])])] };
     };
@@ -1035,6 +1094,18 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
         : "in questo turno non hai usato nessuno strumento: quindi non sono successe";
       return { kind: "claim", text, prompt: `[Cora] Nella risposta dici di aver fatto delle cose, ma ${done}. Falle adesso con gli strumenti. Se parli di qualcosa fatto in un turno precedente, controllalo adesso con gli strumenti prima di confermarlo. Se non puoi farlo, scrivi chiaramente che non l'hai fatto.` };
     };
+    /** A final reply carrying another thread's work is written again, twice at most; after that done() posts a pointer instead. */
+    let threadChecks = 0;
+    const threadVerdict = (raw) => {
+      if (threadChecks >= 2 || halted) return null;
+      const text = cleanReply(raw, agent) || "";
+      const here = topicsFor(channel.id);
+      const leak = text && !spokenMessages.includes(text.trim()) ? threadLeak(text, here) : null;
+      if (!leak) return null;
+      threadChecks += 1;
+      trace.add({ type: "note", text: `thread: risposta su ${leak.key} fermata in un thread di ${here.topic.join(", ")}` });
+      return { kind: "thread", text, prompt: `[Cora] Risposta non pubblicata. ${leakMessage(leak, here.topic)} Scrivi di nuovo la risposta finale per questo thread, senza rifare il lavoro: quello che riguarda ${leak.key} mandalo nel suo thread con say, qui rispondi su ${here.topic.join(", ")} oppure PASS.` };
+    };
     /** doc reads the final reply once: one it stops is written again, and the rewrite goes out. */
     let docChecked = false;
     const docVerdict = async (raw) => {
@@ -1047,12 +1118,12 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       trace.add({ type: "note", text: `doc: risposta fermata — ${reason}` });
       return { kind: "doc", text, prompt: `[Cora] ${reason} Scrivi di nuovo la risposta finale, senza rifare il lavoro.` };
     };
-    const HARNESS_NOTES = { confirm: "chiedo conferma che sia finito", claim: "dice di aver fatto cose che nessuno strumento ha fatto: lo rimando a farle", doc: "doc ha fermato la risposta: la faccio riscrivere" };
+    const HARNESS_NOTES = { confirm: "chiedo conferma che sia finito", claim: "dice di aver fatto cose che nessuno strumento ha fatto: lo rimando a farle", doc: "doc ha fermato la risposta: la faccio riscrivere", thread: "risposta sul lavoro di un altro thread: la rimando nel suo thread" };
     /** With a goal it is the goal that decides; without one, the harness' own reading of the answer. */
     const nextStep = async (raw) => {
       await settleNews();
       if (halted) return null;
-      return (await docVerdict(raw)) || claimVerdict(raw) || (goal ? goalVerdict(raw) : verdict(raw));
+      return threadVerdict(raw) || (await docVerdict(raw)) || claimVerdict(raw) || (goal ? goalVerdict(raw) : verdict(raw));
     };
 
     control.settle = settleNews;
