@@ -12,6 +12,18 @@ export const asana = {
   appSecrets: ["CORA_ASANA_CLIENT_ID", "CORA_ASANA_CLIENT_SECRET"],
   label: "workspace",
   tool: "asana",
+  oauth: {
+    authorize: "https://app.asana.com/-/oauth_authorize",
+    token: "https://app.asana.com/-/oauth_token",
+    scopes: [],
+    clientAuth: "body",
+    async identify({ access, request, api }) {
+      const headers = { Authorization: `Bearer ${access}` };
+      const me = await request(`${api.asana}/users/me`, { headers });
+      const workspace = Array.isArray(me.data?.data?.workspaces) ? me.data.data.workspaces[0] : null;
+      return { workspace: String(workspace?.name || "").slice(0, 120), workspaceId: String(workspace?.gid || "").slice(0, 40), account: String(me.data?.data?.email || me.data?.data?.name || "").slice(0, 120) };
+    },
+  },
   card: {
     icon: "check",
     description: "Gli agenti lavorano sui progetti e sulle attività del tuo Asana.",
@@ -34,14 +46,15 @@ export const asana = {
       label: "App OAuth",
       ready: "app",
       intro: "Con un'app OAuth l'accesso è dell'app che crei tu su Asana, non di una persona sola.",
-      notice: "Creare l'app Asana richiede due dati: client ID e client secret. L'autorizzazione OAuth si completa dopo, quando l'app esiste.",
+      notice: "Servono client ID e client secret dell'app Asana; poi autorizzi Asana da qui e Cora salva i token nella cassaforte.",
       body: { mode: "oauth" },
       rows: [
         { title: "L'app Asana", steps: [
           ["apri ", { href: "https://developers.asana.com/docs/authentication", text: "developers.asana.com" }, " → My apps → Create new app;"],
           "copia client ID e client secret dell'app;",
           ["incollali qui: finiscono nella cassaforte come ", { code: "CORA_ASANA_CLIENT_ID" }, " e ", { code: "CORA_ASANA_CLIENT_SECRET" }, ";"],
-          "l'autorizzazione OAuth è il passo successivo: appena l'app è pronta la completiamo da qui.",
+          ["in OAuth aggiungi come redirect URL l'indirizzo di ritorno di Cora mostrato qui sotto, ", { code: "…/connectors/oauth/asana/callback" }, ";"],
+          "poi premi «Autorizza Asana» e accetta con il tuo account.",
         ], fields: [
           { name: "clientId", type: "text", title: "Client ID", label: "Client ID dell'app Asana" },
           { name: "clientSecret", type: "password", title: "Client secret", label: "Client secret dell'app Asana" },

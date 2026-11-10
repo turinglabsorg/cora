@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { CONNECTORS, connectorForTool, KEY_SERVICES } from "./index.js";
 
 export { KEY_SERVICES };
@@ -16,8 +16,20 @@ export class KeyConnectorError extends Error {
 const clean = (value, max = 400) => String(value ?? "").trim().slice(0, max);
 
 export class KeyConnectors {
-  constructor({ store, vault = null, log = () => {}, linearApi = "https://api.linear.app/graphql", asanaApi = "https://app.asana.com/api/1.0", fetch: fetchImpl = fetch }) {
-    Object.assign(this, { store, vault, log, linearApi, asanaApi, fetch: fetchImpl });
+  constructor({ store, vault = null, google = null, log = () => {}, linearApi = "https://api.linear.app/graphql", asanaApi = "https://app.asana.com/api/1.0", canvaApi = "https://api.canva.com/rest/v1", oauthUrls = {}, fetch: fetchImpl = fetch }) {
+    Object.assign(this, { store, vault, google, log, linearApi, asanaApi, canvaApi, oauthUrls, fetch: fetchImpl });
+    // OAuth authorisations under way: nonce → who started it, the PKCE verifier and where Google-style callbacks return.
+    this.pending = new Map();
+    // Access tokens renewed from a stored refresh token, until they expire.
+    this.access = new Map();
+  }
+
+  api() { return { linear: this.linearApi, asana: this.asanaApi, canva: this.canvaApi }; }
+
+  /** A module's OAuth endpoints, which a test may point elsewhere. */
+  oauthOf(service) {
+    const connector = CONNECTORS.find((item) => item.id === service);
+    return connector?.oauth ? { ...connector.oauth, ...(this.oauthUrls[service] || {}) } : null;
   }
 
   records() { return this.store.value("keyConnectors", []); }
@@ -137,6 +149,102 @@ export class KeyConnectors {
     return next;
   }
 
+  appCredentials(service) {
+    const [idName, secretName] = KEY_SERVICES[service].appSecrets || [];
+    const id = idName && this.store.vaultSecret(idName), secret = secretName && this.store.vaultSecret(secretName);
+    if (!id || !secret) throw new KeyConnectorError(`Salva prima client ID e client secret dell'app ${KEY_SERVICES[service].name}.`, 409);
+    return { clientId: this.vault.value(id).toString("utf8"), clientSecret: this.vault.value(secret).toString("utf8") };
+  }
+
+  /** Starts the owner's OAuth authorisation of a registered app: answers the service's page to open. */
+  beginOAuth(service, user, redirectUri) {
+    const oauth = this.oauthOf(service);
+    const record = this.record(service);
+    if (!oauth) throw new KeyConnectorError("Questo connettore non ha un'autorizzazione OAuth.", 404);
+    if (!record || !["app", "connected"].includes(record.status) || (record.status === "connected" && record.mode !== "oauth")) throw new KeyConnectorError(`Salva prima l'app ${KEY_SERVICES[service].name}.`, 409);
+    if (!redirectUri) throw new KeyConnectorError("Cora non conosce il suo indirizzo pubblico: l'autorizzazione OAuth non può tornare qui.", 409);
+    this.vaultReady();
+    const { clientId } = this.appCredentials(service);
+    for (const [key, value] of this.pending) if (value.expires < Date.now()) this.pending.delete(key);
+    const nonce = randomBytes(24).toString("base64url"), verifier = randomBytes(48).toString("base64url");
+    this.pending.set(nonce, { service, userId: user.id, verifier, redirectUri, expires: Date.now() + 900000 });
+    const url = new URL(oauth.authorize);
+    url.search = new URLSearchParams({
+      response_type: "code", client_id: clientId, redirect_uri: redirectUri, state: nonce,
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
+      ...(oauth.scopes?.length ? { scope: oauth.scopes.join(" ") } : {}),
+    });
+    return { url: url.href, nonce };
+  }
+
+  /** Calls a token endpoint with a form body, the way OAuth wants it. */
+  async tokenCall(service, params) {
+    const oauth = this.oauthOf(service);
+    const { clientId, clientSecret } = this.appCredentials(service);
+    const headers = { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" };
+    const form = new URLSearchParams(params);
+    if (oauth.clientAuth === "basic") headers.Authorization = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
+    else { form.set("client_id", clientId); form.set("client_secret", clientSecret); }
+    let response;
+    try { response = await this.fetch(oauth.token, { method: "POST", headers, body: form.toString(), signal: AbortSignal.timeout(20000) }); }
+    catch { throw new KeyConnectorError(`${KEY_SERVICES[service].name} non risponde. Riprova tra poco.`, 502); }
+    let data = null;
+    try { data = await response.json(); } catch { data = null; }
+    if (!response.ok || !data?.access_token) throw new KeyConnectorError(`${KEY_SERVICES[service].name} non ha concesso l'autorizzazione: riprova da Connettori.`, response.status === 400 || response.status === 401 ? 400 : 502);
+    return data;
+  }
+
+  bundle(previous, data) {
+    return {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token || previous?.refresh_token || "",
+      expires_at: Date.now() + Math.max(60, Number(data.expires_in) || 3600) * 1000,
+    };
+  }
+
+  /** The service sent the owner back with a code: Cora trades it for tokens and stores them in the vault. */
+  async finishOAuth(service, { state, code, error }, nonce) {
+    const pending = this.pending.get(String(state || ""));
+    if (!pending || pending.service !== service || pending.expires < Date.now() || state !== nonce) throw new KeyConnectorError("Autorizzazione scaduta. Riprova da Connettori.");
+    this.pending.delete(state);
+    const user = this.store.panelUser(pending.userId);
+    if (!user || user.blocked) throw new KeyConnectorError("Accesso non autorizzato.", 403);
+    if (error || !code) throw new KeyConnectorError("Autorizzazione annullata.");
+    this.vaultReady();
+    const data = await this.tokenCall(service, { grant_type: "authorization_code", code: String(code), redirect_uri: pending.redirectUri, code_verifier: pending.verifier });
+    const bundle = this.bundle(null, data);
+    const request = async (url, options) => {
+      const answer = await this.call(url, options);
+      if (answer.status < 200 || answer.status >= 300) throw new KeyConnectorError(`${KEY_SERVICES[service].name} non ha confermato l'account.`, 502);
+      return answer;
+    };
+    const checked = await this.oauthOf(service).identify({ access: bundle.access_token, request, api: this.api() });
+    const previous = this.record(service);
+    const agents = previous?.agents || [];
+    const meta = KEY_SERVICES[service];
+    await this.vault.put({ name: meta.secret, value: JSON.stringify(bundle), description: `Connettore ${meta.name} · token OAuth${checked.account ? ` di ${checked.account}` : ""}`, agents, by: this.by(user) });
+    this.access.set(service, bundle);
+    const next = { ...(previous || {}), service, agents, ...checked, status: "connected", mode: "oauth", connectedBy: user.id, connectedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), id: previous?.id || `kc_${randomBytes(6).toString("hex")}` };
+    this.save([...this.records().filter((item) => item.service !== service), next]);
+    this.log({ type: "connector", text: `connettore ${meta.name}: autorizzato con OAuth (${user.name})` });
+    return next;
+  }
+
+  /** The access token of an OAuth connector, renewed with its refresh token when it is about to expire. */
+  async oauthAccess(connector, record) {
+    const stored = this.access.get(connector.id) || JSON.parse(this.vault.value(this.store.vaultSecret(connector.secret)).toString("utf8"));
+    if (stored.expires_at > Date.now() + 60000) { this.access.set(connector.id, stored); return stored; }
+    if (!stored.refresh_token) throw new Error(`${connector.name} needs a new authorisation: the owner authorises it again in Connettori`);
+    let data;
+    try { data = await this.tokenCall(connector.id, { grant_type: "refresh_token", refresh_token: stored.refresh_token }); }
+    catch { throw new Error(`${connector.name} did not renew the authorisation: the owner authorises it again in Connettori`); }
+    const bundle = this.bundle(stored, data);
+    // Some services (Canva) hand out a new refresh token each time: the old one stops working, so the new one is stored at once.
+    await this.vault.put({ name: connector.secret, value: JSON.stringify(bundle), agents: record.agents || [], by: this.store.vaultSecret(connector.secret)?.createdBy || null, source: "connector" });
+    this.access.set(connector.id, bundle);
+    return bundle;
+  }
+
   updateAgents(service, agents, user) {
     const records = this.records();
     const record = records.find((item) => item.service === service && !item.disconnected);
@@ -153,6 +261,7 @@ export class KeyConnectors {
     const record = this.record(service);
     if (!record) throw new KeyConnectorError("Connettore non collegato.", 404);
     this.save(this.records().filter((item) => item.service !== service));
+    this.access.delete(service);
     const names = [KEY_SERVICES[service].secret, ...(KEY_SERVICES[service].appSecrets || [])].filter(Boolean);
     for (const name of names) { try { this.vault?.remove(name, user ? this.by(user) : null); } catch { /* the value is already gone */ } }
     this.log({ type: "connector", text: `connettore ${KEY_SERVICES[service].name}: scollegato` });
@@ -160,12 +269,13 @@ export class KeyConnectors {
 
   /** The connector tools this agent may use: only connected services whose key the owner gave it. */
   toolsFor(agent) {
-    if (!agent || !this.vault?.enabled) return [];
-    return this.records().filter((record) => !record.disconnected && record.status === "connected").flatMap((record) => {
+    const google = this.google?.toolsFor(agent) || [];
+    if (!agent || !this.vault?.enabled) return google;
+    return google.concat(this.records().filter((record) => !record.disconnected && record.status === "connected").flatMap((record) => {
       const connector = CONNECTORS.find((item) => item.id === record.service);
       if (!connector?.definition || !this.allowed(record, connector, agent)) return [];
       return [connector.definition(record)];
-    });
+    }));
   }
 
   allowed(record, connector, agent) {
@@ -193,22 +303,27 @@ export class KeyConnectors {
   /** Runs a connector tool for an agent: Cora takes the key from the vault, the agent gets only the service's answer. */
   async runTool(agent, name, args = {}) {
     const connector = connectorForTool(name);
+    if (connector?.kind === "google") return this.google ? this.google.runTool(agent, args || {}) : { text: "error: Google is not available on this Cora" };
     const record = connector && this.record(connector.id);
     if (!connector || !record || record.status !== "connected") return { text: `error: ${connector?.name || name} is not connected: the owner connects it in Connettori` };
     if (!this.vault?.enabled || !this.allowed(record, connector, agent)) return { text: `error: you are not authorised for ${connector.name}: the owner picks the agents in its card in Connettori` };
-    const token = this.vault.value(this.store.vaultSecret(connector.secret)).toString("utf8");
+    let token = "", hidden = [];
     let result;
     try {
+      if (record.mode === "oauth") {
+        const bundle = await this.oauthAccess(connector, record);
+        token = bundle.access_token; hidden = [bundle.refresh_token];
+      } else token = this.vault.value(this.store.vaultSecret(connector.secret)).toString("utf8");
       const request = async (url, options) => {
         const answer = await this.call(url, options);
         if (!answer.status) throw new Error(`${connector.name} does not answer: try again shortly`);
         return answer;
       };
-      result = await connector.run(args || {}, { token, request, api: { linear: this.linearApi, asana: this.asanaApi } });
+      result = await connector.run(args || {}, { token, request, api: this.api() });
     } catch (error) {
       result = { error: error.message };
     }
-    const hide = (text) => token ? text.split(token).join("[key]") : text;
+    const hide = (text) => [token, ...hidden].filter((value) => value && value.length > 7).reduce((out, value) => out.split(value).join("[key]"), text);
     if (result.error !== undefined) return { text: hide(`error: ${result.error}`) };
     const text = JSON.stringify(result.data);
     const LIMIT = 40000;

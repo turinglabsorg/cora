@@ -187,7 +187,7 @@ export function startCora(overrides = {}) {
   vault.knowledge = knowledge;
   googleConnector.knowledge = knowledge;
   // Connectors that take a key or an app: the value is checked with the service and kept in the vault.
-  const keyConnectors = new KeyConnectors({ store, vault, log: activity });
+  const keyConnectors = new KeyConnectors({ store, vault, google: googleConnector, log: activity });
   brain.connectors = keyConnectors;
   brain.vault = vault;
   // Each agent's own GitHub App: made from the panel, its hour-long tokens written on the agent's desktop.

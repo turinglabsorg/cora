@@ -3357,12 +3357,23 @@ function connectorsPane() {
       h("p", {}, tr(service.intro)),
       setRows(
         setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, ` · ${record.account}`) : null), tag("Collegato", "ok")),
-        setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, service.secret), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
+        record.mode === "oauth"
+          ? setRow("Autorizzazione", h("span", {}, "Token OAuth nella cassaforte come ", h("code", {}, service.secret), ". Cora lo rinnova da solo quando scade."), authorizeButton(service, "Autorizza di nuovo"))
+          : setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, service.secret), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
         service.tool ? setRow("Strumento degli agenti", h("span", {}, "Gli agenti autorizzati lavorano con lo strumento ", h("code", {}, service.tool), " di Cora, che aggiunge la chiave a ogni chiamata.")) : null,
         setRow("Agenti autorizzati", "Solo gli agenti spuntati possono usare questo connettore.", agentChoices(record, service.id), { stack: true }),
         setRow("Scollega", "Toglie la chiave dalla cassaforte e l'accesso agli agenti.", disconnect)),
       feedback);
   };
+
+  // A registered app is authorised with the owner's account on the service, which then sends them back to Cora.
+  const authorizeButton = (service, label) => btn(label, { icon: "link", cls: "primary", disabled: !data.canManage, onclick: async (event) => {
+    const button = event.currentTarget; button.disabled = true;
+    try { const result = await api(`/api/connectors/keys/${service.id}/authorize`, { method: "POST" }); window.location.assign(result.url); }
+    catch (error) { toast(error.message, true); button.disabled = !data.canManage; }
+  } });
+  const redirectRow = (service) => setRow("Indirizzo di ritorno", "Aggiungilo tra gli indirizzi di ritorno (redirect URL) dell'app sul servizio.",
+    service.redirect ? h("code", { class: "connector-redirect" }, raw(service.redirect)) : h("span", { class: "muted" }, "Cora non ha ancora un indirizzo pubblico."));
 
   const stepParts = (parts) => (Array.isArray(parts) ? parts : [parts]).map((part) => typeof part === "string" ? part
     : part.href ? h("a", { href: part.href, target: "_blank", rel: "noopener" }, part.text) : h("code", {}, part.code));
@@ -3415,7 +3426,12 @@ function connectorsPane() {
       const control = parts.length === 1 && !row.steps ? parts[0] : h("div", { class: "stack-sm" }, parts);
       return setRow(row.title, row.hint || null, control, { stack: Boolean(row.steps || row.field || row.fields) });
     });
-    return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: mode.ready && record?.status === mode.ready ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
+    const appReady = Boolean(mode.ready && record?.status === mode.ready);
+    if (service.oauth && mode.ready) {
+      rows.push(redirectRow(service));
+      if (appReady) rows.push(setRow("Autorizzazione", tr("App salvata: autorizzala con il tuo account {name}. Cora salva i token nella cassaforte come {secret}.", { name: service.name, secret: service.secret }), authorizeButton(service, tr("Autorizza {name}", { name: service.name }))));
+    }
+    return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: appReady ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
       h("p", {}, mode.intro || service.intro),
       toggle,
       mode.notice ? h("p", { role: "status", class: "notice warn" }, mode.notice) : null,

@@ -1,20 +1,47 @@
 import { createHash, randomBytes } from "node:crypto";
 
 /**
- * Google: an account connected through Cora's OAuth broker. It has no tool of its
- * own: an agent authorised on the account sends from it with email_send and its
- * sender_id. The broker asks Google for gmail.send only.
+ * Google: an account connected through Cora's OAuth broker, which asks Google for
+ * gmail.send only. An agent authorised on an account gets the google_email tool:
+ * it lists the accounts it may send from and sends from one of them. Cora takes
+ * the refresh token from the vault and renews the access token; the agent never
+ * holds either.
  */
 export const google = {
   id: "google",
   name: "Google",
   kind: "google",
+  tool: "google_email",
   card: {
     icon: "mail",
     description: "Invia email dal tuo account Gmail o Google Workspace con gli agenti che scegli.",
     meta: "Gmail · Google Workspace",
   },
+  definition(connections) {
+    return {
+      name: "google_email",
+      description: `Google email: send from a Gmail or Google Workspace account the owner connected in Connettori and authorised you on (${connections.map((item) => item.email).join(", ")}). action "accounts" lists them; action "send" sends one message from one of them, with from (its address), to, subject and body_html and/or body_text. The account only allows sending: it cannot read the mailbox. Send only what the person asked for, to the recipients they named; a send is final, so never retry one whose result is uncertain: check with the person first.`,
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["accounts", "send"], description: "default accounts" },
+          from: { type: "string", description: "send: the connected address to send from (or its id); optional when you have one account" },
+          to: { type: "array", items: { type: "string" }, description: "send: recipient addresses" },
+          subject: { type: "string" },
+          body_html: { type: "string" },
+          body_text: { type: "string" },
+          in_reply_to: { type: "string", description: "optional Message-ID this answers" },
+        },
+      },
+    };
+  },
+  summarize(args) {
+    const action = String(args.action || "accounts");
+    return action === "send" ? `send ${String(args.from || "")} → ${(Array.isArray(args.to) ? args.to : [args.to]).filter(Boolean).join(", ")}`.slice(0, 200) : action;
+  },
 };
+
+const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[a-z]{2,}$/i;
 
 const hash = (value) => createHash("sha256").update(value).digest("base64url");
 const SECRET = (id) => `CORA_GOOGLE_${id.toUpperCase()}`;
@@ -96,6 +123,35 @@ export class GoogleConnector {
     this.access.set(connection.id, { token: result.access_token, until: Date.now() + Math.min(3600, Number(result.expires_in) || 300) * 1000 });
     return result.access_token;
   }
+  /** The google_email tool, for an agent authorised on at least one account. */
+  toolsFor(agent) {
+    const connections = agent && this.enabled ? this.forAgent(agent) : [];
+    return connections.length ? [google.definition(connections)] : [];
+  }
+
+  async runTool(agent, args = {}) {
+    const connections = this.forAgent(agent);
+    if (!connections.length) return { text: "error: you are not authorised on a Google account: the owner picks the agents in the Google card in Connettori" };
+    const action = String(args.action || "accounts");
+    if (action === "accounts") return { text: JSON.stringify(connections.map(({ id, email, scope }) => ({ id, email, can: String(scope || "").includes("gmail.send") ? ["send"] : [] }))) };
+    if (action !== "send") return { text: "error: action is accounts or send" };
+    const from = String(args.from || "").trim().toLowerCase();
+    const connection = from ? connections.find((item) => item.id === from || item.email.toLowerCase() === from) : connections.length === 1 ? connections[0] : null;
+    if (!connection) return { text: `error: from is one of ${connections.map((item) => item.email).join(", ")}` };
+    const to = (Array.isArray(args.to) ? args.to : [args.to]).map((item) => String(item || "").trim()).filter(Boolean);
+    if (!to.length || to.length > 50 || to.some((item) => !EMAIL.test(item))) return { text: "error: to is a list of 1 to 50 email addresses" };
+    const subject = String(args.subject || "").replace(/[\r\n]+/g, " ").trim().slice(0, 500);
+    if (!subject) return { text: "error: subject is required" };
+    const bodyHtml = String(args.body_html || ""), bodyText = String(args.body_text || "");
+    if (!bodyHtml && !bodyText) return { text: "error: write body_html or body_text" };
+    try {
+      const sent = await this.send(agent, connection.id, { to, subject, body_html: bodyHtml || bodyText.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]).replace(/\n/g, "<br>"), body_text: bodyText || bodyHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), in_reply_to: args.in_reply_to ? String(args.in_reply_to) : "" });
+      return { text: JSON.stringify({ sent: true, from: sent.email, to, message_id: sent.message_id }) };
+    } catch (error) {
+      return { text: `error: ${error.message}` };
+    }
+  }
+
   async send(agent, senderId, message) {
     const connection = this.identity(agent, senderId), boundary = `cora_${randomBytes(16).toString("hex")}`;
     const encode = (text) => Buffer.from(text).toString("base64").match(/.{1,76}/g)?.join("\r\n") || "";

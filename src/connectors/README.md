@@ -1,11 +1,13 @@
 # Connectors
 
-A connector lets Cora's agents work on an outside service (Linear, Asana, …) with a
-key or an app that a person connects once, in the panel under **Connettori**.
+A connector lets Cora's agents work on an outside service (Linear, Asana, Canva, Google
+email, …) with a key, an OAuth app or an account that a person connects once, in the
+panel under **Connettori**.
 
 The person pastes what the service gives them. Cora checks it against the service,
 seals it in the vault and lets the owner choose which agents may use it. Those agents
-then get **one Cora tool per connector** (`linear`, `asana`, …) on the Cora MCP server.
+then get **one Cora tool per connector** (`linear`, `asana`, `canva`, `google_email`) on
+the Cora MCP server.
 Cora adds the key to every call itself. The agent never sees the key, does not need
 `curl` or `secret_import`, and does not have to work out the API on its own. An agent
 that is not authorised for a connector does not even see its tool.
@@ -17,14 +19,14 @@ that is not authorised for a connector does not even see its tool.
 | `index.js` | The registry: the list of connectors, in the order the panel shows them, and the catalogue the panel reads. |
 | `key-connectors.js` | `KeyConnectors`: connect, verify, authorise agents, disconnect, and run the agents' tools. |
 | `linear.js` | Linear: a personal API key; tool `linear` sends one GraphQL query or mutation. |
-| `asana.js` | Asana: a personal access token; tool `asana` makes one REST call (method + path + body). |
-| `canva.js` | Canva: an app's client ID and secret only. It has no tool yet (see below). |
-| `google.js` | Google: accounts connected through Cora's OAuth broker (`GoogleConnector`). |
+| `asana.js` | Asana: a personal access token or an OAuth app; tool `asana` makes one REST call (method + path + body). |
+| `canva.js` | Canva: an OAuth integration authorised by the owner; tool `canva` makes one Connect API call. |
+| `google.js` | Google: accounts connected through Cora's OAuth broker (`GoogleConnector`); tool `google_email` lists the accounts and sends from one. |
 
-Google has no tool of its own. An agent authorised on a Google account sends from it with
-the `email_*` tools, passing the account's `sender_id` to `email_send`. The broker grants
-`gmail.send` only, so agents cannot read that inbox. Its card has its own flow in the panel
-(`kind: "google"`).
+Google is `kind: "google"`: its card has its own flow in the panel (one card, several
+accounts, agents chosen per account), and `GoogleConnector` serves its tool, which
+`KeyConnectors` hands over to it. The broker grants `gmail.send` only, so `google_email`
+sends but cannot read an inbox.
 
 ## The panel reads the catalogue from here
 
@@ -46,6 +48,7 @@ the UI, so add the English for each new text there.
      appSecrets: [],           // optional: vault names for an app's client ID and secret
      label: "workspace",       // what the account is called in the card
      tool: "acme",             // optional: the agent tool's name; leave it out for no tool
+     oauth: { /* optional: authorise an app with the owner's account, see below */ },
      card: { /* the catalogue card and the forms, see below */ },
      definition(record) { /* the tool: { name, description, parameters } */ },
      summarize(args) { /* one line for the activity log: never the key, never a body */ },
@@ -54,7 +57,7 @@ the UI, so add the English for each new text there.
    ```
 
 2. **List it in `index.js`** in `CONNECTORS`.
-3. **Teach `KeyConnectors.connect`** to check the credential with the service before it
+3. **Teach `KeyConnectors.connect`** (keys and app credentials) to check the credential with the service before it
    is stored (see `checkLinear` and `checkAsana`): a wrong key is refused at once, with a
    message the person understands, and nothing reaches the vault.
 4. **Add the English** for the card's texts in `web/i18n.js`.
@@ -106,10 +109,36 @@ card: {
 - Agents act **as the account that made the key**. Say so in the description, so an agent
   knows whose name its comments and tasks will carry.
 
-## Canva
+## OAuth apps
 
-The Canva Connect API has no personal tokens: every call needs a user's OAuth token. The
-card stores the app's client ID and secret, but the OAuth step that turns them into a user
-token (authorisation URL, callback, refresh) is not built yet, so Canva has no agent tool.
-Add that step to `KeyConnectors`, store the refresh token under a `secret`, and add a
-`tool` the same way as Linear and Asana.
+When a service has no personal keys (Canva) or the owner prefers an app (Asana), the module
+declares `oauth` and `KeyConnectors` runs the whole authorisation; the module writes no
+OAuth code:
+
+```js
+oauth: {
+  authorize: "https://acme.example/oauth/authorize",  // the page the owner accepts on
+  token: "https://api.acme.example/oauth/token",      // code → tokens, refresh → tokens
+  scopes: ["read", "write"],                          // joined with spaces; [] for none
+  clientAuth: "basic",                                // "basic" header or "body" fields
+  async identify({ access, request, api }) {          // who authorised: shown in the card
+    return { workspace: "…", account: "…" };
+  },
+},
+```
+
+1. The card's form saves the app's client ID and secret under `appSecrets` (the record's
+   status becomes `app`, the mode's `ready`).
+2. The panel shows Cora's redirect URL (`<origin>/connectors/oauth/<id>/callback`, from the
+   catalogue) to add to the app, and an «Autorizza» button:
+   `POST /api/connectors/keys/<id>/authorize` answers the service's page, with PKCE (S256)
+   and a nonce in a cookie.
+3. The service sends the owner back to the callback; Cora trades the code for tokens,
+   calls `identify`, and seals `{ access_token, refresh_token, expires_at }` under the
+   module's `secret`. The record becomes `connected` with mode `oauth`.
+4. On every tool call Cora renews the access token when it is about to expire and stores a
+   rotated refresh token at once (Canva hands out a new one each time). `run` receives the
+   access token as `token`, exactly as with a key.
+
+Tests point `authorize` and `token` at a fake service with
+`keyConnectors.oauthUrls[<id>] = { token: "http://127.0.0.1:…/token" }`.

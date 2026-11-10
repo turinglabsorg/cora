@@ -27,7 +27,8 @@ import { BRAIN_KINDS } from "./company-brain.js";
 import { VOICE_LANGUAGES } from "./voice.js";
 import { contextSources, writeContextFile } from "./context.js";
 import { brainsInUse, testRule } from "./rule-test.js";
-import { connectorCatalog } from "./connectors/index.js";
+import { connectorCatalog, KEY_SERVICES } from "./connectors/index.js";
+import { KeyConnectorError } from "./connectors/key-connectors.js";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
 const COOKIE = "cora_session";
@@ -446,6 +447,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   // The space owner can connect either one for anybody. Private brains stay with their proprietors.
   const ownerTransport = (person, pathname) => person?.role === "owner" && /^\/api\/agents\/[\w-]+\/(?:slack-bot|telegram-bot|slack-app)$/.test(pathname);
 
+  // Where a service sends the owner back after an OAuth authorisation: the public address, else the one the panel was opened on.
+  const connectorOrigin = (req) => config.publicHost ? `https://${config.publicHost}` : cloud ? `https://${cloud.audience}` : `${config.insecureCookies ? "http" : "https"}://${String(req.headers.host || "127.0.0.1").replace(/[^\w.:\-\[\]]/g, "")}`;
+
   const panelMcp = new PanelMcp({
     store, dispatch: (req, res, url, user) => api(req, res, url, user),
     publicOrigin: config.publicHost ? `https://${config.publicHost}` : cloud ? `https://${cloud.audience}` : "",
@@ -501,19 +505,28 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, { ok: true }, { "Set-Cookie": clearedCookies() });
     }
 
-    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog(), keyConnectors: keyConnectors ? keyConnectors.view() : [], canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"), notice: store.value("googleConnectorNotice", "") });
-    const keyConnector = /^\/api\/connectors\/keys\/(linear|asana|canva)$/.exec(path);
+    if (path === "/api/connectors" && method === "GET") return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog({ origin: connectorOrigin(req) }), keyConnectors: keyConnectors ? keyConnectors.view() : [], canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"), notice: store.value("googleConnectorNotice", "") });
+    const oauthStart = /^\/api\/connectors\/keys\/([a-z][a-z0-9-]{1,40})\/authorize$/.exec(path);
+    if (oauthStart && method === "POST") {
+      if (!keyConnectors || !KEY_SERVICES[oauthStart[1]]) throw new HttpError(404, "Connettore non disponibile.");
+      if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega i connettori.");
+      if (actingUser) return send(res, 409, { error: "OAuth sign-in requires your browser session. Open the returned Cora page and authorise the app there.", browserAction: { path: `/#/settings/connettori/${oauthStart[1]}`, identity: user.id } });
+      const started = keyConnectors.beginOAuth(oauthStart[1], user, `${connectorOrigin(req)}/connectors/oauth/${oauthStart[1]}/callback`);
+      const name = config.insecureCookies ? "cora_oauth" : "__Host-cora_oauth";
+      return send(res, 200, { url: started.url }, { "Set-Cookie": `${name}=${started.nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=900${config.insecureCookies ? "" : "; Secure"}` });
+    }
+    const keyConnector = /^\/api\/connectors\/keys\/([a-z][a-z0-9-]{1,40})$/.exec(path);
     if (keyConnector) {
-      if (!keyConnectors) throw new HttpError(404, "Connettore non disponibile.");
+      if (!keyConnectors || !KEY_SERVICES[keyConnector[1]]) throw new HttpError(404, "Connettore non disponibile.");
       const canManage = Boolean(knowledge?.ownerMemory || user.role === "owner");
       if (!canManage) throw new HttpError(403, "Solo il proprietario collega i connettori.");
       if (method === "POST") {
         const record = await keyConnectors.connect(keyConnector[1], await readJson(req, 20000), user);
-        return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog(), keyConnectors: keyConnectors.view(), canManage, record });
+        return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog({ origin: connectorOrigin(req) }), keyConnectors: keyConnectors.view(), canManage, record });
       }
       if (method === "PUT") {
         const record = keyConnectors.updateAgents(keyConnector[1], (await readJson(req, 8000)).agents, user);
-        return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog(), keyConnectors: keyConnectors.view(), canManage, record });
+        return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog({ origin: connectorOrigin(req) }), keyConnectors: keyConnectors.view(), canManage, record });
       }
       if (method === "DELETE") { keyConnectors.disconnect(keyConnector[1], user); return send(res, 200, { ok: true }); }
       throw new HttpError(405, "Metodo non supportato.");
@@ -2071,6 +2084,18 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           store.setValue("googleConnectorNotice", message);
         } catch { status = 400; message = "Collegamento Google non riuscito o scaduto. Riprova da Connettori."; store.setValue("googleConnectorNotice", message); }
         const body = `<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${status === 200 ? '<meta http-equiv="refresh" content="1;url=/#/settings/connettori/google">' : ""}<title>Google · Cora</title><style>${SEND_STYLE}</style></head><body><main>${SEND_MARK}<h1>Google</h1><p>${message}</p><a class="button" href="/#/settings/connettori/google">Torna a Connettori</a></main></body></html>`;
+        return send(res, status, body, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'", "Set-Cookie": `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${config.insecureCookies ? "" : "; Secure"}` });
+      }
+      const oauthBack = /^\/connectors\/oauth\/([a-z][a-z0-9-]{1,40})\/callback$/.exec(url.pathname);
+      if (oauthBack && keyConnectors && KEY_SERVICES[oauthBack[1]] && req.method === "GET") {
+        const service = oauthBack[1], title = KEY_SERVICES[service].name;
+        const name = config.insecureCookies ? "cora_oauth" : "__Host-cora_oauth";
+        let status = 200, message = `${title} autorizzato. Scegli gli agenti che possono usarlo.`;
+        try { await keyConnectors.finishOAuth(service, Object.fromEntries(url.searchParams), parseCookies(req.headers.cookie)[name] || ""); }
+        catch (error) { status = 400; message = error instanceof KeyConnectorError ? error.message : `Autorizzazione ${title} non riuscita. Riprova da Connettori.`; }
+        const escape = (text) => String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+        const back = `/#/settings/connettori/${service}`;
+        const body = `<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${status === 200 ? `<meta http-equiv="refresh" content="1;url=${back}">` : ""}<title>${escape(title)} · Cora</title><style>${SEND_STYLE}</style></head><body><main>${SEND_MARK}<h1>${escape(title)}</h1><p>${escape(message)}</p><a class="button" href="${back}">Torna a Connettori</a></main></body></html>`;
         return send(res, status, body, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'", "Set-Cookie": `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${config.insecureCookies ? "" : "; Secure"}` });
       }
       if (url.pathname.startsWith("/github/") && github && (req.method === "GET" || req.method === "HEAD")) return await githubReturn(res, url);

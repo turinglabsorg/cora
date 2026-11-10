@@ -19,6 +19,9 @@ const BY_TOOL = new Map(CONNECTORS.filter((connector) => connector.tool).map((co
 export function connectorForTool(name) { return BY_TOOL.get(name) || null; }
 
 /** What the panel needs to draw the catalogue: names, cards and forms, never a value. */
-export function connectorCatalog() {
-  return CONNECTORS.map(({ id, name, kind = "key", secret = "", appSecrets = [], tool = "", card }) => ({ id, name, kind, secret, appSecrets, tool, ...card }));
+export function connectorCatalog({ origin = "" } = {}) {
+  return CONNECTORS.map(({ id, name, kind = "key", secret = "", appSecrets = [], tool = "", oauth = null, card }) => ({
+    id, name, kind, secret, appSecrets, tool, ...card,
+    ...(oauth ? { oauth: true, redirect: origin ? `${origin}/connectors/oauth/${id}/callback` : "" } : {}),
+  }));
 }
