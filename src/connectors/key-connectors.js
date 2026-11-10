@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { CONNECTORS, connectorForTool, KEY_SERVICES } from "./index.js";
+import { CONNECTORS, connectorForTool, KEY_SERVICES, summarizeTool, toolDefinition, toolFor } from "./index.js";
 
 export { KEY_SERVICES };
 
@@ -273,8 +273,8 @@ export class KeyConnectors {
     if (!agent || !this.vault?.enabled) return google;
     return google.concat(this.records().filter((record) => !record.disconnected && record.status === "connected").flatMap((record) => {
       const connector = CONNECTORS.find((item) => item.id === record.service);
-      if (!connector?.definition || !this.allowed(record, connector, agent)) return [];
-      return [connector.definition(record)];
+      if (!connector?.tools?.length || !this.allowed(record, connector, agent)) return [];
+      return connector.tools.map((tool) => toolDefinition(tool, record));
     }));
   }
 
@@ -285,13 +285,13 @@ export class KeyConnectors {
 
   handles(name) { return Boolean(connectorForTool(name)); }
 
-  summarize(name, args) { return connectorForTool(name)?.summarize?.(args || {}) || ""; }
+  summarize(name, args) { return summarizeTool(name, args || {}); }
 
   /** Answers the HTTP status and JSON of a call, without throwing on a refusal: the agent reads it. */
-  async call(url, { method = "GET", headers = {}, body } = {}) {
+  async call(url, { method = "GET", headers = {}, body, raw, timeout = 30000 } = {}) {
     let response;
     try {
-      response = await this.fetch(url, { method, headers: { Accept: "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000) });
+      response = await this.fetch(url, { method, headers: { Accept: "application/json", ...headers }, body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeout) });
     } catch {
       return { status: 0, data: null };
     }
@@ -301,9 +301,9 @@ export class KeyConnectors {
   }
 
   /** Runs a connector tool for an agent: Cora takes the key from the vault, the agent gets only the service's answer. */
-  async runTool(agent, name, args = {}) {
-    const connector = connectorForTool(name);
-    if (connector?.kind === "google") return this.google ? this.google.runTool(agent, args || {}) : { text: "error: Google is not available on this Cora" };
+  async runTool(agent, name, args = {}, { readFile = null } = {}) {
+    const connector = connectorForTool(name), tool = toolFor(name);
+    if (connector?.kind === "google") return this.google ? this.google.runTool(agent, name, args || {}, { readFile }) : { text: "error: Google is not available on this Cora" };
     const record = connector && this.record(connector.id);
     if (!connector || !record || record.status !== "connected") return { text: `error: ${connector?.name || name} is not connected: the owner connects it in Connettori` };
     if (!this.vault?.enabled || !this.allowed(record, connector, agent)) return { text: `error: you are not authorised for ${connector.name}: the owner picks the agents in its card in Connettori` };
@@ -319,13 +319,14 @@ export class KeyConnectors {
         if (!answer.status) throw new Error(`${connector.name} does not answer: try again shortly`);
         return answer;
       };
-      result = await connector.run(args || {}, { token, request, api: this.api() });
+      const base = { token, request, api: this.api(), record, readFile };
+      result = { data: await tool.run(args || {}, connector.context ? connector.context(base) : base) };
     } catch (error) {
       result = { error: error.message };
     }
     const hide = (text) => [token, ...hidden].filter((value) => value && value.length > 7).reduce((out, value) => out.split(value).join("[key]"), text);
     if (result.error !== undefined) return { text: hide(`error: ${result.error}`) };
-    const text = JSON.stringify(result.data);
+    const text = JSON.stringify(result.data ?? null);
     const LIMIT = 40000;
     return { text: hide(text.length > LIMIT ? `${text.slice(0, LIMIT)}\n[truncated at ${LIMIT} of ${text.length} characters: ask for fewer fields or fewer items]` : text) };
   }

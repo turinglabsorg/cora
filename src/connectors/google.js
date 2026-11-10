@@ -11,7 +11,7 @@ export const google = {
   id: "google",
   name: "Google",
   kind: "google",
-  tool: "google_email",
+  tools: [{ name: "google_email", summarize: (args) => google.summarize(args) }],
   card: {
     icon: "mail",
     description: "Invia email dal tuo account Gmail o Google Workspace con gli agenti che scegli.",
@@ -129,7 +129,7 @@ export class GoogleConnector {
     return connections.length ? [google.definition(connections)] : [];
   }
 
-  async runTool(agent, args = {}) {
+  async runTool(agent, name, args = {}) {
     const connections = this.forAgent(agent);
     if (!connections.length) return { text: "error: you are not authorised on a Google account: the owner picks the agents in the Google card in Connettori" };
     const action = String(args.action || "accounts");

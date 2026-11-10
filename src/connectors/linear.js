@@ -8,7 +8,6 @@ export const linear = {
   name: "Linear",
   secret: "CORA_LINEAR_KEY",
   label: "workspace",
-  tool: "linear",
   card: {
     icon: "list",
     description: "Gli agenti leggono e creano issue nel workspace che colleghi.",
@@ -30,7 +29,7 @@ export const linear = {
   },
   definition(record) {
     return {
-      name: "linear",
+      name: "linear_graphql",
       description: `Linear, workspace ${record.workspace || "connected in Connettori"}${record.account ? `, acting as ${record.account}` : ""}: send one GraphQL query or mutation to the Linear API and get its JSON back. Cora adds the key: you never see it, and you need no curl or secret_import. Ask only for the fields you need. Examples: { teams { nodes { id key name states { nodes { id name type } } } } } · query($id:String!){ issue(id:$id){ id identifier title description url state{name} assignee{name} comments{nodes{body user{name}}} } } with variables {"id":"REF-62"} · { issues(first:20, filter:{team:{key:{eq:"REF"}}, state:{type:{nin:["completed","canceled"]}}}){ nodes{ identifier title state{name} } } } · mutation($input:IssueCreateInput!){ issueCreate(input:$input){ success issue{ identifier url } } } with {"input":{"teamId":"…","title":"…","description":"…"}} · mutation{ commentCreate(input:{issueId:"…", body:"…"}){ success } } · mutation{ issueUpdate(id:"REF-62", input:{stateId:"…"}){ success } }.`,
       parameters: {
         type: "object",
@@ -54,5 +53,19 @@ export const linear = {
     if (data?.errors?.length && !data?.data) return { error: `Linear: ${data.errors.map((item) => item.message).join("; ").slice(0, 1500)}` };
     if (status >= 400) return { error: `Linear answered ${status}${data?.errors?.length ? `: ${data.errors.map((item) => item.message).join("; ").slice(0, 1500)}` : ""}` };
     return { data: data?.errors?.length ? { data: data.data, errors: data.errors.map((item) => item.message) } : data?.data ?? null };
+  },
+  get tools() {
+    const self = this;
+    return [{
+      name: "linear_graphql",
+      description: (record) => self.definition(record).description,
+      get parameters() { return self.definition({}).parameters; },
+      summarize: (args) => self.summarize(args),
+      async run(args, ctx) {
+        const result = await self.run(args, ctx);
+        if (result.error !== undefined) throw new Error(result.error);
+        return result.data;
+      },
+    }];
   },
 };

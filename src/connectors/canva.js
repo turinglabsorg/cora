@@ -22,7 +22,6 @@ export const canva = {
   secret: "CORA_CANVA_TOKEN",
   appSecrets: ["CORA_CANVA_CLIENT_ID", "CORA_CANVA_CLIENT_SECRET"],
   label: "team",
-  tool: "canva",
   oauth: {
     authorize: "https://www.canva.com/api/oauth/authorize",
     token: "https://api.canva.com/rest/v1/oauth/token",
@@ -73,7 +72,7 @@ export const canva = {
   },
   definition(record) {
     return {
-      name: "canva",
+      name: "canva_api",
       description: `Canva${record.account ? `, account ${record.account}` : ""}: one call to the Canva Connect API (https://api.canva.com/rest/v1) and its JSON back. Cora adds and renews the token: you never see it, and you need no curl or secret_import. Give method, path and, for writes, body (sent as JSON as it is). Examples: GET /users/me/profile · GET /designs?query=…&limit=20 · GET /designs/<id> · POST /designs {"design_type":{"type":"preset","name":"presentation"},"title":"…"} · GET /folders/root/items · POST /folders {"name":"…","parent_folder_id":"root"} · GET /brand-templates · POST /autofills {"brand_template_id":"…","data":{…}} then GET /autofills/<job id> · POST /exports {"design_id":"…","format":{"type":"pdf"}} then GET /exports/<job id> (the urls to download) · POST /url-asset-uploads {"name":"…","url":"https://…"} then GET /url-asset-uploads/<job id> · GET /designs/<id>/comments … Jobs are asynchronous: poll the GET until status is success or failed.`,
       parameters: {
         type: "object",
@@ -101,5 +100,19 @@ export const canva = {
     if (status === 403) return { error: `Canva answered 403${data?.message ? `: ${String(data.message).slice(0, 500)}` : ""}: the integration may lack the scope for this call` };
     if (status >= 400) return { error: `Canva answered ${status}${data?.message ? `: ${String(data.message).slice(0, 1500)}` : data?.code ? `: ${data.code}` : ""}` };
     return { data: data ?? {} };
+  },
+  get tools() {
+    const self = this;
+    return [{
+      name: "canva_api",
+      description: (record) => self.definition(record).description,
+      get parameters() { return self.definition({}).parameters; },
+      summarize: (args) => self.summarize(args),
+      async run(args, ctx) {
+        const result = await self.run(args, ctx);
+        if (result.error !== undefined) throw new Error(result.error);
+        return result.data;
+      },
+    }];
   },
 };
