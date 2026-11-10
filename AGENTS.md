@@ -240,6 +240,16 @@ The discovered Gemini and Claude families advertise vision; GPT-OSS does not. Vi
 - Every behaviour change needs an integration test in `test/cora.test.js` (stand-in Discord, Ollama and docker in `test/helpers.js`).
 - UI copy is written in Italian and translated through `web/i18n.js` (English); content written by people or agents is wrapped in `raw()` and never translated. Code, comments and docs are English.
 
+## Testing before a merge or deploy
+
+The full suite (`npm test`) takes about twenty minutes, almost all of it in `test/cora.test.js`, whose groups run one after another. Do not run it for every change.
+
+- **Default:** `npm run test:affected` (`scripts/test-affected.mjs`). It reads the files changed against `origin/main` (committed, staged, unstaged and untracked; `--base <ref>` for another base), runs the test files of each touched area plus `test/units.test.js`, and only the matching top-level groups of `test/cora.test.js` through `--test-name-pattern`. `--dry-run` prints what it would run.
+- **Full suite is mandatory** when the change touches the shared core (`package.json`, `package-lock.json`, `src/main.js`, `store.js`, `orchestrator.js`, `brain.js`, `tools.js`, `mcp-server.js`, `bridge.js`, `cli.js`, `llm.js`, `config.js`, `thread-state.js`, `rooms.js`, `channels.js`, `harnesses.js`, `test/helpers.js`, `test/panel.js`), or a file the script cannot map: the script then runs everything by itself. Also run it with `--full` before a deploy that bundles several unrelated changes since the last full run.
+- **A new source or test file** must be added to the `AREAS` table in `scripts/test-affected.mjs` in the same change, with its test files and the `cora.test.js` group names that cover it. A new top-level group in `cora.test.js` is added to the areas it covers.
+- Docs, `deploy/`, Markdown and static images run only `test/units.test.js`.
+- A changed test file always runs whole.
+
 ## Deployment
 
 usecora.space runs on the host behind the grog relay (`~/.grog/sites.json`: the apex and each space name point at the cloud's port 4380) with `cloud/bin/start.sh`; each space's Cora gets `CORA_CLOUD_URL=https://usecora.space`, `CORA_CLOUD_KEY` and `CORA_CLOUD_SPACE`.

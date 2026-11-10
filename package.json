@@ -12,7 +12,8 @@
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/main.js",
-    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "test:affected": "node scripts/test-affected.mjs"
   },
   "repository": {
     "type": "git",
