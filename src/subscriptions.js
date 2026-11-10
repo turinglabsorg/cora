@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { resolve as resolvePath, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ValidationError } from "./store.js";
@@ -129,8 +129,9 @@ class CodexAccount {
 
 /** The database selects an identity; the official CLI owns its protected credentials. */
 export class Subscriptions {
-  constructor({ store, claudeBin, codexBin, grokBin = "grok", museBin = "muse", geminiBin = "agy", timezone = "UTC", residentDirectories = {}, emit = () => {} }) {
+  constructor({ store, claudeBin, codexBin, grokBin = "grok", museBin = "muse", geminiBin = "agy", timezone = "UTC", residentDirectories = {}, ownerScoped = false, emit = () => {} }) {
     this.store = store;
+    this.ownerScoped = Boolean(ownerScoped);
     this.timezone = timezone;
     this.residentOverrides = residentDirectories;
     this.residentDirectories = Object.fromEntries(SUBSCRIPTION_PROVIDERS.map((provider) => [provider, residentDirectories[provider] || HARNESSES[provider].resident()]));
@@ -162,6 +163,7 @@ export class Subscriptions {
       const id = this.store.residentSubscription(provider).id;
       return this.busy.has(id) || this.running.has(id) ? this.view(id) : this.check(id);
     }));
+    await this.consolidate();
   }
 
   directory(record) {
@@ -206,6 +208,98 @@ export class Subscriptions {
 
   list() { return this.store.subscriptions().map((record) => this.view(record.id)); }
 
+  /**
+   * One real account, whichever agent connected it and however often: the provider and the
+   * address it signs in with decide. With per-owner memory an account is still one per owner,
+   * so a shared instance never joins two people's private logins.
+   */
+  accountKey(record) {
+    const email = this.accountEmail(record);
+    if (!email || record.resident) return "";
+    return [record.provider, email, this.ownerScoped ? record.connectedBy?.id || "" : ""].join("\u0000");
+  }
+
+  /**
+   * The stored address, or the one a profile already on disk signed in with. Antigravity keeps
+   * its sign-in in the profile's own log, so two Gemini profiles can be compared before either
+   * one is checked again.
+   */
+  accountEmail(record) {
+    const stored = String(record.email || "").trim().toLowerCase();
+    if (stored) return stored;
+    return record.provider === "gemini" ? String(this.geminiLogEmail(record) || "").trim().toLowerCase() : "";
+  }
+
+  accountWeight(record) {
+    const agents = this.store.agents().filter((agent) => agent.subscriptionId === record.id).length;
+    return (record.status === "ready" ? 100 : 0) + agents;
+  }
+
+  /**
+   * Merges the records that are the same account. The record that was just signed in stays
+   * and keeps the panel's selection; the other copies hand their agents over and go away,
+   * profile included. A copy a turn is using right now waits for that turn to end.
+   */
+  async consolidate(preferred = "") {
+    if (this.closed) return new Map();
+    const groups = new Map();
+    for (const record of this.store.subscriptions()) {
+      const key = this.accountKey(record);
+      if (!key) continue;
+      const group = groups.get(key) || [];
+      group.push(record);
+      groups.set(key, group);
+    }
+    const merged = new Map();
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      for (const record of group) {
+        if (record.email) continue;
+        const email = this.accountEmail(record);
+        if (!email) continue;
+        try { this.store.updateSubscription(record.id, { email }); } catch {}
+      }
+      const keep = group.find((record) => record.id === preferred)
+        || [...group].sort((a, b) => this.accountWeight(b) - this.accountWeight(a)
+          || String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.id.localeCompare(b.id))[0];
+      for (const duplicate of group) {
+        if (duplicate.id === keep.id) continue;
+        if (this.running.has(duplicate.id) || this.logins.has(duplicate.id) || this.stopping.has(duplicate.id)) continue;
+        let moved = true;
+        for (const agent of this.store.agents()) {
+          if (agent.subscriptionId !== duplicate.id) continue;
+          try { this.store.updateAgent(agent.id, { subscriptionId: keep.id }); } catch { moved = false; break; }
+        }
+        if (!moved || !this.store.deleteSubscription(duplicate.id)) continue;
+        this.usage?.invalidate(duplicate.id, { remove: true });
+        try { rmSync(join(this.store.home, "subscriptions", duplicate.id), { recursive: true, force: true }); } catch {}
+        merged.set(duplicate.id, keep.id);
+      }
+    }
+    if (merged.size) this.emit({ type: "subscriptions" });
+    return merged;
+  }
+
+  /**
+   * The address Antigravity signed in with. Its /usage answer has no account in it, but the
+   * CLI writes the sign-in to its own log, so a Google account is one account here too.
+   */
+  geminiLogEmail(record) {
+    if (record.resident || !/^sub_[a-f0-9]{12}$/.test(record.id)) return "";
+    const logs = join(this.store.home, "subscriptions", record.id, ".gemini", "antigravity-cli", "log");
+    let files;
+    try { files = readdirSync(logs).filter((name) => name.endsWith(".log")).sort(); } catch { return ""; }
+    for (const name of files.reverse()) {
+      const path = join(logs, name);
+      let text;
+      try { if (statSync(path).size > 4 * 1024 * 1024) continue; text = readFileSync(path, "utf8"); } catch { continue; }
+      const matches = [...text.matchAll(/(?:authenticated successfully as|applyAuthResult: email=)\s*([^\s,]+@[^\s,]+)/g)];
+      const email = matches[matches.length - 1]?.[1] || "";
+      if (/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) return email.slice(0, 254);
+    }
+    return "";
+  }
+
   changed(id, patch) {
     if (this.closed) return;
     if (patch.status && patch.status !== "ready") this.usage?.invalidate(id);
@@ -224,6 +318,7 @@ export class Subscriptions {
     stopping.finally(() => { if (this.stopping.get(id) === stopping) this.stopping.delete(id); });
     this.changed(id, { status, ...details });
     login.ready?.();
+    if (status === "ready" && details.email) void this.consolidate(id).catch(() => {});
   }
 
   async start(id, actor = null) {
@@ -477,7 +572,8 @@ export class Subscriptions {
     try { value = JSON.parse(output); } catch {}
     if (value?.status && value.status !== "SUCCESS") return null;
     const text = String(value?.response || output);
-    return { email: text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0]?.slice(0, 254) || "", plan: "" };
+    const email = text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0] || this.geminiLogEmail(record) || "";
+    return { email: email.slice(0, 254), plan: "" };
   }
 
   async geminiModels() {
@@ -544,7 +640,8 @@ export class Subscriptions {
     } catch (error) {
       this.changed(id, { status: "error", issue: error.code === "ISOLATION_UNAVAILABLE" ? "isolation" : "" });
     } finally { await rpc?.close(); this.busy.delete(id); }
-    return this.view(id);
+    const merged = await this.consolidate(id);
+    return this.view(merged.get(id) || id);
   }
 
   async remove(id) {
@@ -603,7 +700,7 @@ export class Subscriptions {
     } finally {
       const left = (this.running.get(id) || 1) - 1;
       if (left) this.running.set(id, left);
-      else this.running.delete(id);
+      else { this.running.delete(id); void this.consolidate().catch(() => {}); }
     }
   }
 
