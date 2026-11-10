@@ -4068,6 +4068,48 @@ describe("talking with the agents", () => {
     assert.equal(posts("Olga").length, before, "disengagement survives a fresh state");
   });
 
+  test("a stop names one agent, a continue keeps the other, and an untagged line does not wake every listener", async () => {
+    const THREAD = "1599000000000000793";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "listen routing" });
+    await sleep(100);
+    const said = (name) => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === name).map((item) => item.content);
+    replies.set("Olga", () => ({ content: "Olga qui." }));
+    replies.set("Pino", () => ({ content: "Pino qui." }));
+    departures = () => [olga.id, pino.id];
+    try {
+      discord.say({ content: "@Olga, resta su questo", channel: THREAD });
+      await waitFor(() => said("Olga").includes("Olga qui."));
+      discord.say({ content: "@Pino, resta anche tu", channel: THREAD });
+      await waitFor(() => said("Pino").includes("Pino qui."));
+      await quiet();
+      assert.deepEqual(new Set(app.orchestrator.state(THREAD).focus.ids), new Set([olga.id, pino.id]));
+      const olgaAt = said("Olga").length;
+      discord.say({ content: "Olga si è fermata quando avevo detto a quell'agent di fermarsi", channel: THREAD });
+      await waitFor(() => said("Pino").filter((text) => text === "Pino qui.").length === 2);
+      await quiet();
+      assert.equal(said("Olga").length, olgaAt, "the other listener does not answer an untagged line");
+      assert.equal(said("Olga").includes("Ho smesso di ascoltare questa conversazione."), false);
+      assert.equal(said("Pino").includes("Ho smesso di ascoltare questa conversazione."), false);
+      discord.say({ content: "@Olga, fermati", channel: THREAD });
+      await waitFor(() => said("Olga").filter((text) => text === "Olga qui.").length === 2);
+      await quiet();
+      assert.equal(said("Olga").includes("Ho smesso di ascoltare questa conversazione."), false, "stopping a task does not end listening");
+      assert.deepEqual(new Set(app.orchestrator.state(THREAD).focus.ids), new Set([olga.id, pino.id]));
+      discord.say({ content: "@Olga, smetti di ascoltare", channel: THREAD });
+      await waitFor(() => said("Olga").includes("Ho smesso di ascoltare questa conversazione."));
+      await quiet();
+      assert.deepEqual(app.orchestrator.state(THREAD).focus.ids, [pino.id], "the model cannot disconnect the agent who was not told to leave");
+      const stopped = said("Pino").filter((text) => text === "Ho smesso di ascoltare questa conversazione.").length;
+      discord.say({ content: "@Pino procedi solo tu", channel: THREAD });
+      await waitFor(() => said("Pino").filter((text) => text === "Pino qui.").length === 3);
+      await quiet();
+      assert.equal(said("Pino").filter((text) => text === "Ho smesso di ascoltare questa conversazione.").length, stopped);
+      assert.deepEqual(app.orchestrator.state(THREAD).focus.ids, [pino.id]);
+    } finally {
+      departures = null;
+    }
+  });
+
   test("after 30 minutes of human silence the reminder asks once, stays connected, survives restart and resets only on human input", async () => {
     const THREAD = "1599000000000000792";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle reminder" });

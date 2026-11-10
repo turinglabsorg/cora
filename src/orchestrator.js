@@ -71,6 +71,73 @@ export function spokenTo(text, name) {
   return Boolean(heard) && new RegExp(`(^|[^\\p{L}\\p{N}_@])${escaped}\\s*[,:!?]|^\\s*${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(normalize(heard));
 }
 
+
+/**
+ * Leaving a conversation is structural. "Fermati" stops a task and does not
+ * end listening. Only an explicit exit does, and only for the agents that exit
+ * names. A model hint cannot disconnect anyone else, nor someone told to go on.
+ */
+const LISTEN_EXIT = /(?:smettere\s+di\s+ascoltare|smetti(?:te)?(?:\s+\p{L}+){0,4}\s+di\s+ascoltare|non\s+ascoltare\s+piu|esci(?:te)?\s+dalla\s+conversazione|scollegat(?:i|evi)|disconnettiti|basta\s+ascoltare|chiudi\s+l'ascolto|non\s+restare\s+in\s+ascolto|lascia(?:te)?\s+(?:questa\s+)?conversazione|stop\s+listening|leave\s+(?:this\s+)?conversation)/u;
+
+export function listenExit(text) {
+  const value = normalize(text)
+    .replace(/«[^»]*»|"[^\"]*"|“[^”]*”/g, " ")
+    .replace(/\b(?:non|senza)(?:\s+\p{L}+){0,6}\s+(?:smettere|smetti\w*|scolleg\w*|disconnett\w*|uscir\w*|esci\w*|stop\s+listening|leave\s+(?:this\s+)?conversation)\b/gu, " ");
+  return LISTEN_EXIT.test(value);
+}
+
+function mentionPositions(text, name) {
+  const escaped = escapeName(name);
+  const positions = [];
+  const patterns = [
+    new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}(?![\\p{L}\\p{N}])`, "giu"),
+    new RegExp(`(^|[^\\p{L}\\p{N}_@])${escaped}\\s*[,:!?]`, "giu"),
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text))) positions.push(match.index + match[1].length);
+  }
+  return positions;
+}
+
+function mentionWindows(text, agents) {
+  const marks = [];
+  for (const agent of agents) for (const at of mentionPositions(text, agent.name)) marks.push({ id: agent.id, at });
+  marks.sort((a, b) => a.at - b.at);
+  const windows = new Map(agents.map((agent) => [agent.id, ""]));
+  for (let index = 0; index < marks.length; index += 1) {
+    const start = index === 0 ? 0 : marks[index].at;
+    const end = index + 1 < marks.length ? marks[index + 1].at : text.length;
+    const id = marks[index].id;
+    windows.set(id, `${windows.get(id) || ""} ${text.slice(start, end)}`);
+  }
+  return windows;
+}
+
+export function listenersLeaving(message, agents) {
+  const text = String(message || "");
+  if (!listenExit(text)) return [];
+  const called = agents.filter((agent) => tagged(text, agent.name) || spokenTo(text, agent.name));
+  if (!called.length) return agents.map((agent) => agent.id);
+  const windows = mentionWindows(text, called);
+  return called.filter((agent) => listenExit(windows.get(agent.id) || "")).map((agent) => agent.id);
+}
+
+function explicitIds(content, agents, voice = false) {
+  return agents.filter((agent) => tagged(content, agent.name) || (voice && spokenTo(content, agent.name))).map((agent) => agent.id);
+}
+
+function lastCalled(history, agents) {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index];
+    if (entry.kind !== "owner" && entry.kind !== "human") continue;
+    const ids = explicitIds(entry.content, agents, entry.voice);
+    if (ids.length) return ids;
+  }
+  return [];
+}
+
+
 function discordConversationMessage(raw, archived = null) {
   return (raw.type === undefined || raw.type === 0 || raw.type === 19)
     && Boolean(raw.content?.trim() || raw.attachments?.length || raw.embeds?.length || raw.sticker_items?.length
@@ -528,20 +595,31 @@ export class Orchestrator {
   async address(state, item) {
     const available = this.agentsFor(state.id).filter((agent) => !this.brain.knowledge || this.brain.knowledge.acceptsMessage(agent, item, state.id));
     if (!state.focus) state.focus = this.engagements[state.id] || null;
-    if (state.focus) state.focus = { ...state.focus, ids: state.focus.ids.filter((id) => available.some((agent) => agent.id === id)) };
+    if (state.focus) {
+      const ids = state.focus.ids.filter((id) => available.some((agent) => agent.id === id));
+      const turn = (state.focus.turn || ids).filter((id) => ids.includes(id));
+      state.focus = { ...state.focus, ids, turn };
+    }
     const previous = state.focus?.ids || [];
     const calls = (agent) => tagged(item.content, agent.name) || (item.voice && spokenTo(item.content, agent.name));
     const named = available.filter(calls).map((agent) => agent.id);
-    const leaving = previous.length ? await this.brain.disengagement({ message: item.content, agents: available.filter((agent) => previous.includes(agent.id)), history: state.history.filter((entry) => entry.id !== item.id) }) : [];
+    const candidates = available.filter((agent) => previous.includes(agent.id) || named.includes(agent.id));
+    // Ask the model only so a slow judgment still holds the turn; it does not choose who leaves.
+    if (previous.length && listenExit(item.content)) await this.brain.disengagement({ message: item.content, agents: candidates, history: state.history.filter((entry) => entry.id !== item.id) });
+    const leaving = listenersLeaving(item.content, candidates);
     // The answer to an agent's question comes from whoever it asked: the owner, or the person the agent belongs to.
     const askedBy = state.request ? this.store.agent(state.request.agentId) : null;
     const asked = state.request && !item.others?.length && (item.kind === "owner" || this.ownsAgent(item, askedBy, state)) ? state.request : null;
     if (asked) state.request = null;
     const direct = roomAgentId(state.id) || this.dmAgentId(state.id);
-    const recipients = named.length ? named : asked ? [asked.agentId] : previous.length ? previous : direct ? [direct] : [];
+    const inferred = lastCalled(state.history, available).filter((id) => previous.includes(id));
+    const remembered = (state.focus?.turn || []).filter((id) => previous.includes(id));
+    const partners = inferred.length ? inferred : (remembered.length ? remembered : previous);
+    const recipients = named.length ? named : asked ? [asked.agentId] : partners.length ? partners : direct ? [direct] : [];
     const ids = [...new Set([...previous, ...recipients])].filter((id) => !leaving.includes(id) && available.some((agent) => agent.id === id));
     const now = Number(item.at) || Date.now();
-    state.focus = ids.length ? { ids, at: now, remindedAt: 0, owner: item.kind === "owner" || Boolean(state.focus?.owner) } : null;
+    const turn = (named.length ? named : partners).filter((id) => ids.includes(id));
+    state.focus = ids.length ? { ids, turn, at: now, remindedAt: 0, owner: item.kind === "owner" || Boolean(state.focus?.owner) } : null;
     this.engagements[state.id] = state.focus;
     this.store.setValue("conversationEngagements", this.engagements);
     item.addressed = recipients.filter((id) => available.some((agent) => agent.id === id));
@@ -1142,7 +1220,7 @@ export class Orchestrator {
     if (item) {
       item.addressed = [...new Set([...(item.addressed || []), agent.id])];
       item.handledBy = (item.handledBy || []).filter((id) => id !== agent.id);
-      state.focus = { ids: [...new Set([...(state.focus?.ids || []), agent.id])], at: Date.now(), remindedAt: 0, owner: true };
+      state.focus = { ids: [...new Set([...(state.focus?.ids || []), agent.id])], turn: [...new Set([...(state.focus?.turn || state.focus?.ids || []), agent.id])], at: Date.now(), remindedAt: 0, owner: true };
       this.engagements[state.id] = state.focus;
       this.store.setValue("conversationEngagements", this.engagements);
       state.humanQueue.set(item.id, item);

@@ -7,7 +7,7 @@ import { LLM } from "../src/llm.js";
 import { toMrkdwn } from "../src/slack.js";
 import { appManifest } from "../src/slack-bots.js";
 import { SlackApps } from "../src/slack-apps.js";
-import { mentions, spokenTo, tagged } from "../src/orchestrator.js";
+import { listenExit, listenersLeaving, mentions, spokenTo, tagged } from "../src/orchestrator.js";
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { drawAvatar } from "../src/avatar.js";
 import { encodePng, pngSize } from "../src/png.js";
@@ -1068,5 +1068,29 @@ describe("slack app on its own account", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+});
+
+describe("who leaves a conversation", () => {
+  const ada = { id: "ag_ada", name: "Ada" };
+  const nico = { id: "ag_nico", name: "Nico" };
+  const agents = [ada, nico];
+
+  test("a stop for one agent does not disconnect the other, and talking about it disconnects nobody", () => {
+    assert.equal(listenExit("@Nico fermati"), false);
+    assert.equal(listenExit("@Ada porco dio fermati"), false);
+    assert.equal(listenExit("E Ada si è fermata quando avevo taggato Nico e avevo detto a quell'agent di fermarsi"), false);
+    assert.deepEqual(listenersLeaving("@Nico fermati", agents), []);
+    assert.deepEqual(listenersLeaving("@Ada porco dio fermati", agents), []);
+    assert.deepEqual(listenersLeaving("E Ada si è fermata quando avevo taggato Nico e avevo detto a quell'agent di fermarsi", agents), []);
+    assert.deepEqual(listenersLeaving("@Nico procedi solo tu", agents), []);
+  });
+
+  test("an explicit exit drops only the agent it names", () => {
+    assert.deepEqual(listenersLeaving("@Ada, smetti di ascoltare", agents), [ada.id]);
+    assert.deepEqual(listenersLeaving("@Ada, esci dalla conversazione e smetti di ascoltare. @Nico procedi solo tu", agents), [ada.id]);
+    assert.deepEqual(listenersLeaving("Potete smettere di ascoltare questa conversazione", agents), [ada.id, nico.id]);
+    assert.equal(listenExit("Non ti sto dicendo di smettere di ascoltare"), false);
+    assert.deepEqual(listenersLeaving("Non ti sto dicendo di smettere di ascoltare", agents), []);
   });
 });
