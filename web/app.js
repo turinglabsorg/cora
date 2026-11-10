@@ -5426,6 +5426,41 @@ function brainDiary({ day: initial = "", onDay = () => {} } = {}) {
   return { element, load, get loaded() { return Boolean(data); } };
 }
 
+const BRAIN_EVENT_ICON = { read: "book", batch: "list", ask: "chat", model: "refresh", reasoning: "bulb", page: "edit", skip: "close", error: "alert", done: "check" };
+
+/** One line of the librarian's run: when, what kind of step, and what it did. */
+function brainEventEl(event) {
+  const text = event.slug && event.kind === "page" ? h("a", { href: brainHref(`#/brain/p/${encodeURIComponent(event.slug)}`) }, raw(event.text)) : h("span", {}, raw(event.text));
+  return h("li", { class: `brain-event ${event.kind || ""}` },
+    h("span", { class: "at" }, fmtTime(event.at)),
+    h("span", { class: "ico", "aria-hidden": "true" }, icon(BRAIN_EVENT_ICON[event.kind] || "info")),
+    text);
+}
+
+/** The last run in the librarian's own page: what it did, and each model call's reasoning on demand. */
+function brainLastRun(lastRun) {
+  if (!lastRun) return null;
+  const events = Array.isArray(lastRun.log) ? lastRun.log : [];
+  const calls = (lastRun.traceIds || []).map((id, index) => {
+    const box = h("div", { class: "steps-log" });
+    let loaded = false;
+    return h("details", { class: "raw", ontoggle: async (event) => {
+      if (!event.target.open || loaded) return;
+      loaded = true;
+      box.replaceChildren(skeleton("rows", 2));
+      const trace = await guard(api(`/api/traces/${id}`));
+      if (!trace) { box.replaceChildren(empty("alert", "Ragionamento non più disponibile.")); return; }
+      const started = Date.parse(trace.startedAt);
+      const steps = (trace.steps || []).filter((step, at, all) => !(step.type === "thinking" && step.hidden && all[at - 1]?.type === "thinking" && all[at - 1]?.hidden));
+      box.replaceChildren(...(steps.length ? steps.map((step) => stepEl(step, started)) : [empty("info", "Il modello ha risposto senza passi intermedi visibili.")]),
+        h("details", { class: "raw" }, h("summary", {}, icon("edit"), h("span", {}, tr("Risposta"))), h("pre", {}, raw(trace.output || trace.error || ""))));
+    } }, h("summary", {}, icon("bulb"), h("span", {}, raw(tr("Ragionamento della chiamata {n}", { n: index + 1 })))), box);
+  });
+  return panel({ icon: "clock", title: "Ultimo giro", hint: tr("{time} · {model} · {seconds} s", { time: fmtTime(lastRun.startedAt || lastRun.at, true), model: modelLabel(lastRun.model, { short: true }), seconds: Math.round((lastRun.ms || 0) / 1000) }) },
+    events.length ? h("ol", { class: "brain-live-events" }, events.map(brainEventEl)) : h("p", { class: "muted" }, tr("Il registro dei passi c'è dai giri successivi a questo aggiornamento.")),
+    ...calls);
+}
+
 function renderBrain() {
   const [, view, slug] = route();
   if (view === "nuova") return renderBrainCreate(slug);
@@ -5446,11 +5481,63 @@ function renderBrain() {
   const reviewButton = btn("Rivedi", { icon: "check", cls: "primary", href: "#/brain/revisione" });
   const addButton = btn("Aggiungi pagina", { icon: "plus", cls: "primary", href: "#/brain/nuova" });
   addButton.hidden = true;
+  const live = h("div", { class: "brain-live" });
+  live.hidden = true;
+  let poll = null;
+  let snapshot = null;
   const runButton = btn("Aggiorna adesso", { icon: "refresh", cls: "ghost", onclick: async () => {
     runButton.disabled = true;
-    if (await guard(api("/api/brain/run", { method: "POST" }), "Il bibliotecario è al lavoro")) setTimeout(load, 4000);
-    runButton.disabled = false;
+    const started = await guard(api("/api/brain/run", { method: "POST" }));
+    if (started && state) { state.running = true; state.progress = null; snapshot = null; draw(); }
+    else drawLive();
   } });
+  function drawLive() {
+    const busy = Boolean(state?.running);
+    runButton.disabled = busy;
+    runButton.setAttribute("aria-busy", String(busy));
+    runButton.querySelector("span").textContent = tr(busy ? "Al lavoro…" : "Aggiorna adesso");
+    live.hidden = !busy;
+    if (!busy) { live.replaceChildren(); return; }
+    const progress = snapshot?.progress || state.progress;
+    const line = progress ? [
+      progress.startedAt ? tr("partito alle {time}", { time: fmtTime(progress.startedAt) }) : "",
+      progress.batches ? tr("lotto {batch} di {batches}", progress) : tr("legge note e messaggi nuovi"),
+      progress.model ? modelLabel(progress.model, { short: true }) : "",
+    ].filter(Boolean).join(" · ") : tr("in coda: parte appena può");
+    const head = h("div", { class: "brain-live-head", role: "status", "aria-live": "polite" },
+      h("span", { class: "subscription-spinner", "aria-hidden": "true" }),
+      h("div", { class: "grow" }, h("b", {}, tr("Il bibliotecario è al lavoro")), h("span", { class: "line" }, line)),
+      h("span", { class: "brain-live-hint" }, tr("in tempo reale")));
+    const keep = [...live.querySelectorAll(".brain-live-scroll")].map((box) => box.scrollHeight - box.scrollTop - box.clientHeight < 40);
+    const events = h("ol", { class: "brain-live-events brain-live-scroll" }, (progress?.events || []).map(brainEventEl));
+    if (!progress?.events?.length) events.append(h("li", { class: "muted" }, tr("Aspetta il primo passo…")));
+    const steps = h("div", { class: "steps-log brain-live-steps brain-live-scroll" });
+    const trace = snapshot?.trace;
+    let lastHidden = false;
+    for (const step of trace?.steps || []) {
+      if (step.type === "thinking" && step.hidden && lastHidden) continue;
+      lastHidden = step.type === "thinking" && Boolean(step.hidden);
+      steps.append(stepEl(step, Date.parse(trace.startedAt)));
+    }
+    if (!steps.children.length) steps.append(empty("bulb", trace ? "Il modello sta leggendo: il suo ragionamento compare qui appena lo scrive." : "Il ragionamento compare qui quando il bibliotecario chiede al modello."));
+    live.replaceChildren(head, h("div", { class: "brain-live-cols" },
+      h("section", {}, h("h3", { class: "label" }, tr("Cosa fa")), events),
+      h("section", {}, h("h3", { class: "label" }, tr("Ragionamento del modello")), steps)));
+    [events, steps].forEach((box, index) => { if (keep[index] ?? true) box.scrollTop = box.scrollHeight; });
+  }
+  function watch() {
+    clearTimeout(poll);
+    if (!state?.running) return;
+    poll = setTimeout(async () => {
+      if (!body.isConnected) return;
+      try {
+        const next = await api("/api/brain/live");
+        if (!body.isConnected) return;
+        if (next.running) { state.running = true; state.progress = next.progress || null; snapshot = next; drawLive(); watch(); }
+        else { snapshot = null; load(); }
+      } catch { watch(); }
+    }, snapshot ? 2000 : 300);
+  }
   async function drawMap() {
     if (map) { map.filter({ kind, query: mapSearch.value.trim() }); return; }
     if (mapLoading) return;
@@ -5568,13 +5655,13 @@ function renderBrain() {
     reviewButton.querySelector("span").textContent = stats.pending + stats.flagged ? tr("Rivedi ({count})", { count: stats.pending + stats.flagged }) : tr("Rivedi");
     reviewButton.className = `btn${stats.pending + stats.flagged ? " primary" : " ghost"}`;
     drawChips();
-    const failed = lastRun?.errors?.length ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("L'ultimo giro del bibliotecario non è riuscito: {error}", { error: lastRun.errors[0] })))) : null;
+    const failed = lastRun?.errors?.length && !state.running ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("L'ultimo giro del bibliotecario non è riuscito: {error}", { error: lastRun.errors[0] })))) : null;
     const configure = state.canConfigure ?? state.canManage;
     const entries = [
       ["elenco", "Elenco", "list", tr("{count} pagine", { count: stats.pages }), [h("div", { class: "brain-search" }, search, listChips), list]],
       ["mappa", "Mappa", "graph", tr("Le pagine e i loro legami"), [h("div", { class: "brain-search" }, mapSearch, mapChips), mapBox]],
       ["diario", "Diario", "clock", tr("Cosa è cambiato, giorno per giorno"), [diary.element]],
-      ...(configure ? [["bibliotecario", "Il bibliotecario", "sliders", failed ? tr("ultimo giro non riuscito") : lastRun ? tr("ultimo giro {when}", { when: fmtTime(lastRun.at, true) }) : tr("Modello, riserve e orari"), [...(failed ? [failed.cloneNode(true)] : []), settingsPanel()]]] : []),
+      ...(configure ? [["bibliotecario", "Il bibliotecario", "sliders", state.running ? tr("al lavoro adesso") : failed ? tr("ultimo giro non riuscito") : lastRun ? tr("ultimo giro {when}", { when: fmtTime(lastRun.at, true) }) : tr("Modello, riserve e orari"), [settingsPanel(), ...(state.running ? [] : [brainLastRun(lastRun)].filter(Boolean))]]] : []),
     ];
     const current = ["elenco", "mappa", "diario", "bibliotecario"].includes(view) && entries.some(([id]) => id === view) ? view : "";
     const workspace = sectionWorkspace({ title: "Brain", base: "#/brain", current, entries, onSelect: (id) => {
@@ -5589,9 +5676,12 @@ function renderBrain() {
         statCard({ icon: "check", value: String(stats.pending + stats.flagged), label: "da rivedere", href: stats.pending + stats.flagged ? "#/brain/revisione" : null }),
         statCard({ icon: "search", value: String(stats.chunks), label: "messaggi cercabili" }),
         statCard({ icon: "clock", value: lastRun ? raw(fmtTime(lastRun.at, true)) : "—", label: "ultimo giro", href: configure ? brainHref("#/brain/bibliotecario") : null,
-          sub: lastRun ? raw(tr("{created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato" })),
+          sub: state.running ? tr("al lavoro adesso") : lastRun ? raw(tr("{created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato" })),
+      live,
       ...(failed ? [failed] : []),
       workspace);
+    drawLive();
+    watch();
   }
   async function load() {
     try {

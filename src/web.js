@@ -35,6 +35,7 @@ const COOKIE = "cora_session";
 // Over HTTPS the session cookie is __Host-: no sibling host under the same domain (a share) can plant one.
 const HOST_COOKIE = "__Host-cora_session";
 const SESSION_DAYS = 30;
+const LIVE_STEPS = 60;
 // Sessions issued before the __Host- name still arrive under the old one; they are moved over once.
 const LEGACY_SESSIONS_UNTIL = Date.parse("2026-11-07T00:00:00Z") + SESSION_DAYS * 86400000;
 const STATIC = {
@@ -637,7 +638,16 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const manage = () => { if (!canManage) throw new HttpError(403, "solo l'owner cambia il brain"); };
       const author = `owner:${user.name || user.email || "Owner"}`;
       if (path === "/api/brain" && method === "GET") {
-        return send(res, 200, { enabled: true, canManage, canConfigure: user.role === "owner", ownerMemory: Boolean(knowledge?.ownerMemory), ownerId: brainOwnerId, scopes: knowledge?.ownerMemory ? knowledge.brainScopes(user) : [], canShare: brainOwnerId === user.id, kinds: BRAIN_KINDS, stats: await userBrain.stats(), lastRun: await userBrain.state("lastRun"), running: Boolean(userLibrarian?.running || userLibrarian?.pending) });
+        return send(res, 200, { enabled: true, canManage, canConfigure: user.role === "owner", ownerMemory: Boolean(knowledge?.ownerMemory), ownerId: brainOwnerId, scopes: knowledge?.ownerMemory ? knowledge.brainScopes(user) : [], canShare: brainOwnerId === user.id, kinds: BRAIN_KINDS, stats: await userBrain.stats(), lastRun: await userBrain.state("lastRun"), running: Boolean(userLibrarian?.running || userLibrarian?.pending), progress: userLibrarian?.running ? userLibrarian.progress : null });
+      }
+      if (path === "/api/brain/live" && method === "GET") {
+        manage();
+        const progress = userLibrarian?.running ? userLibrarian.progress : null;
+        const trace = progress?.traceId && traces ? traces.get(progress.traceId) : null;
+        return send(res, 200, {
+          running: Boolean(userLibrarian?.running || userLibrarian?.pending), progress,
+          trace: trace ? { id: trace.id, model: trace.model, status: trace.status, startedAt: trace.startedAt, steps: (trace.steps || []).slice(-LIVE_STEPS) } : null,
+        });
       }
       if (path === "/api/brain/graph" && method === "GET") return send(res, 200, await userBrain.graph());
       if (path === "/api/brain/sharing" && method === "GET" && knowledge?.ownerMemory) return send(res, 200, {

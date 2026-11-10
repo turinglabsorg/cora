@@ -9,6 +9,7 @@ const RUN_MESSAGES = 1500;
 const BATCH_CHARS = 24000;
 const PAGES_PER_BATCH = 15;
 const INDEX_PAGES = 200;
+const LOG_EVENTS = 200;
 
 const SYSTEM = "Sei il bibliotecario del brain aziendale. Rispondi solo con JSON valido.";
 
@@ -36,6 +37,7 @@ export class Librarian {
     this.workers = new Map();
     this.running = false;
     this.pending = false;
+    this.progress = null;
     this.timer = null;
     this.stopped = false;
     this.idle = Promise.resolve();
@@ -106,10 +108,13 @@ export class Librarian {
     const failures = [];
     for (const [index, { model, subscriptionId, credentialId }] of chain.entries()) {
       const trace = this.traces?.start({ agentId: this.ownerId ? `librarian:${this.ownerId}` : "librarian", kind: "librarian", model, system: SYSTEM, prompt });
+      if (this.progress) Object.assign(this.progress, { model, traceId: trace?.id || null });
+      this.step(index ? "model" : "ask", index ? `Passa alla riserva ${model}` : `Chiede a ${model}`, { model, traceId: trace?.id || null });
       try {
         const result = this.llm.isAgentic(model)
           ? await this.llm.runAgent({ model, subscriptionId: subscriptionId || undefined, credentialId: credentialId || "", system: SYSTEM, prompt, tools: [], execute: null, timeoutMs: 10 * 60 * 1000, onStep: (step) => trace?.add(step) })
           : await this.llm.chat({ model, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }], tools: [] });
+        if (result.thinking) trace?.add({ type: "thinking", text: result.thinking });
         trace?.spent(result.usage);
         trace?.finish({ status: "done", output: result.text });
         this.usedModel = model;
@@ -119,6 +124,7 @@ export class Librarian {
         trace?.finish({ status: "error", error: error.message });
         if (this.stopped) throw error;
         failures.push(`${model} non ha risposto (${String(error.message).replace(/\s+/g, " ").slice(0, 160)})`);
+        this.step("error", `${model} non ha risposto: ${String(error.message).replace(/\s+/g, " ").slice(0, 160)}`, { model });
         this.log({ type: "error", text: `bibliotecario: ${model}: ${error.message}` });
       }
     }
@@ -153,6 +159,7 @@ export class Librarian {
     let finish;
     this.idle = new Promise((resolve) => { finish = resolve; });
     const started = Date.now();
+    this.progress = { startedAt: new Date(started).toISOString(), batch: 0, batches: 0, messages: 0, notes: 0, model: "", traceId: null, events: [] };
     this.usedModel = "";
     try {
       const last = await this.brain.state("lastRun", null);
@@ -168,7 +175,13 @@ export class Librarian {
       const batches = this.batches(messages);
       if (!batches.length && (notes.length || shared.length)) batches.push([]);
       let until = since;
+      Object.assign(this.progress, { batches: batches.length, messages: messages.length, notes: notes.length + shared.length });
+      this.step("read", batches.length
+        ? `Legge ${messages.length} ${messages.length === 1 ? "messaggio nuovo" : "messaggi nuovi"} e ${notes.length + shared.length} ${notes.length + shared.length === 1 ? "nota" : "note"} degli agenti: ${batches.length} ${batches.length === 1 ? "lotto" : "lotti"}`
+        : "Niente di nuovo da leggere dall'ultimo giro");
       for (const [index, batch] of batches.entries()) {
+        this.progress.batch = index + 1;
+        if (batches.length > 1) this.step("batch", `Lotto ${index + 1} di ${batches.length}: ${batch.length} messaggi`);
         try {
           const done = await this.batch(batch, index === 0 ? notes : [], index === 0 ? shared : []);
           for (const key of ["created", "updated", "flagged", "skipped"]) totals[key] += done[key];
@@ -182,19 +195,29 @@ export class Librarian {
         } catch (error) {
           // The rest waits for the next run, which starts from the first message this one did not read.
           totals.errors.push(error.message.slice(0, 200));
+          this.step("error", `Si ferma: ${error.message.slice(0, 200)}`);
           this.log({ type: "error", text: `bibliotecario: ${error.message}` });
           break;
         }
       }
-      const record = { at: new Date().toISOString(), until, reason, model: this.usedModel || this.model, messages: messages.length, notes: notes.length, ms: Date.now() - started, ...totals };
+      if (!totals.errors.length) this.step("done", `Fatto: ${totals.created} ${totals.created === 1 ? "pagina nuova" : "pagine nuove"}, ${totals.updated} ${totals.updated === 1 ? "aggiornata" : "aggiornate"}${totals.skipped ? `, ${totals.skipped} ${totals.skipped === 1 ? "scartata" : "scartate"}` : ""}`);
+      const record = { at: new Date().toISOString(), startedAt: this.progress.startedAt, until, reason, model: this.usedModel || this.model, messages: messages.length, notes: notes.length, ms: Date.now() - started, ...totals, log: this.progress.events.slice(-LOG_EVENTS) };
       await this.brain.setState("lastRun", record);
       if (totals.created || totals.updated) this.log({ type: "brain", text: `bibliotecario: ${totals.created} pagine nuove, ${totals.updated} aggiornate${totals.flagged ? `, ${totals.flagged} da verificare` : ""}` });
       return { status: totals.errors.length ? "partial" : "done", ...record };
     } finally {
       this.running = false;
+      this.progress = null;
       finish();
       this.queueRun();
     }
+  }
+
+  /** One line of what the running librarian is doing, for the panel to follow live. */
+  step(kind, text, extra = {}) {
+    if (!this.progress) return;
+    this.progress.events.push({ at: new Date().toISOString(), kind, text: String(text).slice(0, 1200), ...extra });
+    if (this.progress.events.length > LOG_EVENTS) this.progress.events.shift();
   }
 
   /** The messages in batches a model can read whole, oldest first. */
@@ -250,7 +273,7 @@ export class Librarian {
       lines.length ? `## Conversazioni nuove\n${lines.join("\n")}` : "",
       [
         "Rispondi SOLO con un oggetto JSON:",
-        '{"pages": [{"slug": "slug-esistente-o-nuovo", "kind": "client|project|person|decision|procedure|topic", "title": "…", "summary": "una o due frasi", "body": "il testo COMPLETO della pagina dopo la modifica: elenchi brevi, fatti con la data, [[slug]] per citare altre pagine", "note": "cosa è cambiato, in una riga", "sources": ["m3", "n1"], "conflict": ""}]}',
+        '{"reasoning": "in 2-5 frasi: cosa hai trovato di nuovo, cosa cambi, cosa lasci fuori e perché", "pages": [{"slug": "slug-esistente-o-nuovo", "kind": "client|project|person|decision|procedure|topic", "title": "…", "summary": "una o due frasi", "body": "il testo COMPLETO della pagina dopo la modifica: elenchi brevi, fatti con la data, [[slug]] per citare altre pagine", "note": "cosa è cambiato, in una riga", "sources": ["m3", "n1"], "conflict": ""}]}',
         "Regole:",
         "- Solo sapere durevole dell'azienda: clienti, progetti e il loro stato, persone e ruoli, decisioni (con data e chi), procedure, impegni e scadenze. Niente chiacchiere, saluti, prove tecniche o lavoro ormai superato.",
         "- Ogni fatto nuovo viene dalle conversazioni o dalle note qui sopra: in \"sources\" metti i riferimenti [m…], [n…] o [s…] da cui viene. Non inventare nulla.",
@@ -267,11 +290,14 @@ export class Librarian {
       answer = parseJsonObject(text);
     } catch (error) {
       // A long answer can break its own JSON (a quote left bare): the batch is asked once more, with the error, before the run stops on it.
+      this.step("error", `La risposta non era JSON valido: la richiede (${error.message.slice(0, 120)})`);
       ({ text, traceId } = await this.think(`${prompt}\n\nLa tua risposta precedente non era JSON valido (${error.message.slice(0, 200)}). Rispondi di nuovo con lo stesso contenuto, solo JSON valido: dentro le stringhe le virgolette vanno scritte \\" e gli a capo \\n.`));
       answer = parseJsonObject(text);
     }
     const known = new Map(all.map((page) => [page.slug, page]));
     const done = { created: 0, updated: 0, flagged: 0, skipped: 0, traceId };
+    if (String(answer.reasoning || "").trim()) this.step("reasoning", String(answer.reasoning).trim(), { model: this.usedModel });
+    if (Array.isArray(answer.pages) && !answer.pages.length) this.step("page", "Niente da cambiare nel brain");
     for (const change of (Array.isArray(answer.pages) ? answer.pages : []).slice(0, PAGES_PER_BATCH)) {
       const sources = [...new Set((Array.isArray(change.sources) ? change.sources : []).map(String))].map((ref) => refs.get(ref)).filter(Boolean);
       const slug = slugify(change.slug || change.title);
@@ -280,6 +306,7 @@ export class Librarian {
       // The artifact catalog is Cora's own: it follows the folders, not the chats.
       if (!slug || slug === ARTIFACTS_SLUG || !String(change.title || "").trim() || !body || !sources.length) {
         done.skipped += 1;
+        this.step("skip", `Scarta «${String(change.title || change.slug || "senza titolo").slice(0, 80)}»: ${!sources.length ? "nessuna fonte citata" : slug === ARTIFACTS_SLUG ? "la pagina degli artefatti la tiene Cora" : "pagina incompleta"}`);
         continue;
       }
       const conflict = String(change.conflict || "").trim();
@@ -289,6 +316,7 @@ export class Librarian {
       });
       if (action === "create") done.created += 1;
       else done.updated += 1;
+      this.step("page", `${action === "create" ? "Crea" : "Aggiorna"} «${String(change.title).slice(0, 80)}»${change.note ? `: ${String(change.note).slice(0, 200)}` : ""}${conflict ? " ⚠ contraddizione" : ""}`, { slug, action, sources: sources.length });
       if (conflict) done.flagged += 1;
     }
     return done;
