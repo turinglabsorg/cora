@@ -5885,12 +5885,9 @@ function renderArtifacts() {
     } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
   }
   const parts = level ? level.split("/") : [];
-  const crumbs = level ? h("nav", { class: "art-crumbs", "aria-label": tr("Percorso") },
-    h("a", { href: "#/artefatti" }, icon("archive"), h("span", {}, "Artefatti")),
-    parts.map((part, index) => [h("span", { class: "art-crumb-sep", "aria-hidden": "true" }, "/"),
-      index === parts.length - 1 ? h("b", { "aria-current": "page" }, raw(part)) : h("a", { href: artifactLevelHref(parts.slice(0, index + 1).join("/")) }, raw(part))]).flat()) : null;
+  const crumbs = level ? artifactTrail(artifactLevelSteps(`${level}/`)) : null;
   shell(level
-    ? [btn(raw(parts.length > 1 ? parts.at(-2) : "Artefatti"), { icon: "back", href: artifactLevelHref(parts.slice(0, -1).join("/")), cls: "ghost sm back-link art-back" }), crumbs,
+    ? [crumbs,
       pageHead(raw(parts.at(-1)), tr("Le cartelle e i livelli dentro {path}. Puoi condividerlo tutto con un solo link.", { path: `${level}/` }), [accessButton, shareButton, newButton]), body]
     : [pageHead("Artefatti", "Quello che gli agenti fanno sui loro computer, con tutte le versioni. Ogni caricamento è un commit e va in onda solo quando lo approvi.", [newButton]), body],
   { title: level ? parts.at(-1) : "Artefatti", back: level ? artifactLevelHref(parts.slice(0, -1).join("/")) : "", mode: level ? "artifacts" : "" });
@@ -5898,6 +5895,23 @@ function renderArtifacts() {
 }
 
 const artifactLevelHref = (path) => (path ? `#/artefatti/in/${path.split("/").map(encodeURIComponent).join("/")}` : "#/artefatti");
+
+/** The one way up on every artifact page: Artefatti, each level, the folder, its subfolders; every step but the last is a link. */
+function artifactTrail(steps) {
+  const all = [{ label: "Artefatti", href: "#/artefatti", icon: "archive" }, ...steps];
+  return h("nav", { class: "art-crumbs", "aria-label": tr("Percorso") }, all.map((step, index) => {
+    const body = [step.icon ? icon(step.icon) : null, h("span", {}, index ? raw(step.label) : step.label)];
+    const last = index === all.length - 1;
+    return [index ? h("span", { class: "sep", "aria-hidden": "true" }, "/") : null,
+      last ? h("b", { "aria-current": "page" }, ...body) : h("a", { href: step.href }, ...body)];
+  }).flat().filter(Boolean));
+}
+
+/** The levels a folder path sits in, as trail steps. */
+const artifactLevelSteps = (path) => {
+  const parts = String(path).split("/").slice(0, -1);
+  return parts.map((part, index) => ({ label: part, href: artifactLevelHref(parts.slice(0, index + 1).join("/")) }));
+};
 
 /** What a level holds, one step down: the levels below it, each with all its folders, and its own folders. */
 function artifactLevel(folders, level) {
@@ -6320,9 +6334,10 @@ async function renderArtifactFolder(id, tab, dir = "") {
   const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
   const levelHref = (key) => (key === "file" ? artifactDirHref(folder.id, dir) : `#/artefatti/${folder.id}/${key}${dir ? `?in=${encodeURIComponent(dir)}` : ""}`);
   shell([
-    dir ? btn(raw(parent ? parent.split("/").at(-1) : folder.title), { icon: "back", href: tab === "file" ? artifactDirHref(folder.id, parent) : levelHref(tab).replace(/\?in=.*$/, parent ? `?in=${encodeURIComponent(parent)}` : ""), cls: "ghost sm back-link art-back" })
-      : btn(raw(folder.path.includes("/") ? folder.path.split("/").at(-2) : "Artefatti"), { icon: "back", href: artifactLevelHref(folder.path.split("/").slice(0, -1).join("/")), cls: "ghost sm back-link art-back" }),
-    pageHead(raw(dir ? dir.split("/").at(-1) : folder.title), h("span", { class: "art-head-meta" }, artifactPathLabel(dir ? `${folder.path}/${dir}` : folder.path),
+    artifactTrail([...artifactLevelSteps(folder.path),
+      { label: folder.path.split("/").at(-1), href: tab === "file" ? artifactDirHref(folder.id, "") : `#/artefatti/${folder.id}/${tab}`, icon: "folder" },
+      ...(dir ? dir.split("/") : []).map((part, index, all) => ({ label: part, href: tab === "file" ? artifactDirHref(folder.id, all.slice(0, index + 1).join("/")) : `#/artefatti/${folder.id}/${tab}?in=${encodeURIComponent(all.slice(0, index + 1).join("/"))}` }))]),
+    pageHead(raw(dir ? dir.split("/").at(-1) : folder.title), h("span", { class: "art-head-meta" },
       badge(folder.kind === "site" ? "Sito" : "Cartella", "", folder.kind === "site" ? "globe" : "folder"),
       badge(folder.policy === "direct" ? "Pubblica subito" : "Con revisione", folder.policy === "direct" ? "warn" : "", folder.policy === "direct" ? "spark" : "check"))),
     folder.description && !dir ? h("p", { class: "lead art-lead" }, raw(folder.description)) : dir ? h("p", { class: "lead art-lead" }, raw(tr("Una sottocartella di {title}", { title: folder.title }))) : null,
@@ -6389,10 +6404,6 @@ function artifactFiles(data, head, dir = "") {
     if (scroll && matchMedia("(max-width: 899px)").matches) preview.scrollIntoView({ block: "start", behavior: "smooth" });
   };
   const parts = dir ? dir.split("/") : [];
-  const crumbs = h("nav", { class: "art-crumbs", "aria-label": tr("Dove sei nella cartella") },
-    h("a", { href: artifactDirHref(folder.id, ""), class: parts.length ? "" : "on" }, icon("folder"), raw(folder.path.split("/").at(-1))),
-    parts.map((part, index) => [h("span", { class: "sep", "aria-hidden": "true" }, "/"),
-      h("a", { href: artifactDirHref(folder.id, parts.slice(0, index + 1).join("/")), class: index === parts.length - 1 ? "on" : "" }, raw(part))]).flat());
   const rows = [
     parts.length ? h("a", { class: "art-file art-up", href: artifactDirHref(folder.id, parts.slice(0, -1).join("/")) }, icon("back"), h("span", { class: "grow" }, ".."), h("small", {}, tr("su"))) : null,
     ...[...dirs.values()].sort((a, b) => a.name.localeCompare(b.name)).map((entry) => h("a", { class: "art-file art-subdir", href: artifactDirHref(folder.id, `${here}${entry.name}`) },
@@ -6458,7 +6469,7 @@ function artifactFiles(data, head, dir = "") {
       name.focus?.();
     } }),
     pick, pickDir);
-  const zone = h("div", { class: "stack-sm art-zone" }, data.canUpload === false ? h("p", { class: "notice" }, icon("info"), "Hai accesso in lettura: puoi vedere e scaricare i file.") : drop, head || dir ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, crumbs, list), head ? preview : null) : null);
+  const zone = h("div", { class: "stack-sm art-zone" }, data.canUpload === false ? h("p", { class: "notice" }, icon("info"), "Hai accesso in lettura: puoi vedere e scaricare i file.") : drop, head || dir ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, list), head ? preview : null) : null);
   let depth = 0;
   zone.addEventListener("dragenter", (event) => { if (data.canUpload === false || ![...(event.dataTransfer?.types || [])].includes("Files")) return; event.preventDefault(); depth += 1; zone.classList.add("over"); });
   zone.addEventListener("dragover", (event) => { if ([...(event.dataTransfer?.types || [])].includes("Files")) event.preventDefault(); });
@@ -6997,9 +7008,8 @@ async function renderArtifactCommit(folderId, commitId) {
   });
   const deleted = commit.changed.filter((change) => change.kind === "deleted").length;
   slot.replaceChildren(...[
-    commit.folder ? btn(raw(commit.folder.title || commit.folder.path), { icon: "back", href: `#/artefatti/${commit.folder.id}/commit`, cls: "ghost sm back-link art-back" }) : null,
-    artifactCommitHead(pageHead(raw(commit.message), h("span", { class: "art-head-meta" }, h("code", {}, raw(commit.short)), badge(label, cls),
-      commit.folder ? h("a", { href: `#/artefatti/${commit.folder.id}` }, artifactPathLabel(commit.folder.path)) : null),
+    commit.folder ? artifactTrail([...artifactLevelSteps(commit.folder.path), { label: commit.folder.path.split("/").at(-1), href: `#/artefatti/${commit.folder.id}/commit`, icon: "folder" }, { label: commit.short }]) : null,
+    artifactCommitHead(pageHead(raw(commit.message), h("span", { class: "art-head-meta" }, h("code", {}, raw(commit.short)), badge(label, cls)),
       commit.previewUrl ? [btn("Apri anteprima", { icon: "external", cls: "ghost", href: commit.previewUrl, target: "_blank" })] : null)),
     h("div", { class: "art-byline" }, artifactAuthor(commit.author),
       commit.requestedBy?.name ? h("small", {}, tr("chiesto da {name}", { name: commit.requestedBy.name })) : null,

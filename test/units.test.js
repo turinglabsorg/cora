@@ -611,8 +611,12 @@ test("Artefatti, File: folders to walk into from the address, and files uploaded
   const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   await panel.navigate("#/artefatti/af_000000000001/file/chi-siamo");
   await settle();
-  assert.deepEqual(panel.app.querySelector(".art-crumbs").querySelectorAll("a").map((link) => [link.textContent, link.attributes.href, link.className]),
-    [["sito", "#/artefatti/af_000000000001/file", ""], ["chi-siamo", "#/artefatti/af_000000000001/file/chi-siamo", "on"]], "the path in the address is where you stand");
+  const trail = panel.app.querySelectorAll(".art-crumbs");
+  assert.equal(trail.length, 1, "one trail on the page, no second one inside the files");
+  assert.deepEqual(trail[0].querySelectorAll("a").map((link) => [link.textContent, link.attributes.href]),
+    [["Artefatti", "#/artefatti"], ["clienti", "#/artefatti/in/clienti"], ["acme", "#/artefatti/in/clienti/acme"], ["sito", "#/artefatti/af_000000000001/file"]], "every level above is a link");
+  assert.equal(trail[0].querySelector("b").textContent, "chi-siamo", "the path in the address is where you stand");
+  assert.equal(panel.app.querySelectorAll(".art-back").length, 0, "the trail is the only way up");
   const rows = panel.app.querySelector(".art-tree").children;
   assert.deepEqual(rows.map((row) => row.textContent), ["..su", "img/1 file", "index.html20 B"], "one level at a time: up, the folders inside, then the files");
   assert.equal(rows[0].attributes.href, "#/artefatti/af_000000000001/file");
@@ -755,8 +759,8 @@ test("Artefatti, File: a new subfolder to upload into, a way back, CSV as a tabl
   const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   await panel.navigate("#/artefatti/af_000000000001/file/crm");
   await settle();
-  assert.equal(panel.app.querySelector(".art-back").attributes.href, "#/artefatti/af_000000000001/file", "a way back up one level, on the page itself");
-  assert.equal(panel.app.querySelector(".art-back").textContent, "CRM");
+  assert.deepEqual(panel.app.querySelector(".art-crumbs").querySelectorAll("a").map((link) => [link.textContent, link.attributes.href]),
+    [["Artefatti", "#/artefatti"], ["clienti", "#/artefatti/in/clienti"], ["crm", "#/artefatti/af_000000000001/file"]], "a way back up, on the page itself");
   const create = panel.app.querySelector(".art-drop").querySelectorAll("button").find((button) => button.textContent === "Nuova cartella");
   create.click();
   const form = panel.app.querySelector(".art-newdir");
@@ -871,8 +875,8 @@ test("Artefatti, a subfolder: its own name on top, the way up, and links that st
   await panel.navigate("#/artefatti/af_000000000001/file/landing");
   await settle();
   assert.equal(panel.app.querySelector(".page-title").querySelector("h1").textContent, "landing", "inside a subfolder the page is that subfolder's");
-  assert.equal(panel.app.querySelector(".art-back").textContent, "design");
-  assert.match(panel.app.querySelector(".art-head-meta").textContent, /progetti\/cora\/design\/landing.*Cartella/);
+  assert.equal(panel.app.querySelector(".art-crumbs").textContent, "Artefatti/progetti/cora/design/landing");
+  assert.match(panel.app.querySelector(".art-head-meta").textContent, /Cartella/);
   const tabs = panel.app.querySelector(".tabs").querySelectorAll("a").map((tab) => tab.attributes.href);
   assert.ok(tabs.includes("#/artefatti/af_000000000001/condivisione?in=landing"), "the level goes along to the other tabs");
   const share = panel.app.querySelector(".art-drop").querySelectorAll("a").find((link) => link.textContent === "Condividi questa cartella");
