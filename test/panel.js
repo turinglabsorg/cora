@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import { EN } from "../web/i18n.js";
+import * as character from "../src/character.js";
 
 class Element {
   constructor(tag = "", text = "") {
@@ -144,7 +145,7 @@ export function panelHarness({ source, fetch, hash = "", language = "it" }) {
   document.getElementById = () => app;
   const location = { hash };
   const context = createContext({
-    EN, Node: Element, document, fetch, FormData,
+    EN, ...character, Node: Element, document, fetch, FormData,
     navigator: { language }, location,
     history: { replaceState(_state, _title, url) { location.hash = String(url); } },
     localStorage: { getItem: () => language },
@@ -155,7 +156,7 @@ export function panelHarness({ source, fetch, hash = "", language = "it" }) {
     URL, URLSearchParams,
   });
   const script = source || readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
-  runInContext(script.replace(/^import .*;\n/, "").replace(/boot\(\);\s*$/, ""), context);
+  runInContext(script.replace(/^import .*;\n/gm, "").replace(/boot\(\);\s*$/, ""), context);
   return {
     app,
     run: (expression) => runInContext(expression, context),

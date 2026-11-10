@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { avatarVersion, drawnAvatar } from "./avatar.js";
+import { sanitizeCharacter } from "./character.js";
 import { plainKeys } from "./box.js";
 import { cleanGithubOrg } from "./github-apps.js";
 import { HARNESSES, SUBSCRIPTION_PROVIDERS, isSubscriptionProvider } from "./harnesses.js";
@@ -84,6 +85,8 @@ const AGENT_DEFAULTS = {
   avatarSeed: "",
   color: "#e8a33d",
   personality: "",
+  // An optional character sheet: six traits and two style axes. Off or absent keeps the free text alone.
+  character: null,
   core: "",
   model: "",
   subscriptionId: "",
@@ -293,6 +296,10 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
   if (/discord|clyde/i.test(name)) throw new ValidationError("Discord does not allow 'discord' or 'clyde' in a webhook name");
   const requestedOwners = input.ownerIds !== undefined ? input.ownerIds : input.ownerId !== undefined ? [input.ownerId] : [merged.ownerId, ...(merged.ownerIds || [])];
   const owners = [...new Set((Array.isArray(requestedOwners) ? requestedOwners : []).filter(id => CHAT_PERSON.test(String(id))).map(String))].slice(0, 20);
+  // A character written as a partial update keeps the scores it did not mention.
+  const character = merged.character && previous.character && merged.character !== previous.character
+    ? { ...previous.character, ...merged.character, scores: { ...(previous.character.scores || {}), ...(merged.character.scores || {}) } }
+    : merged.character;
   const agent = {
     id: previous.id || input.id || newId("ag"),
     name,
@@ -301,6 +308,7 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     avatarUpload: /^[0-9a-f]{16}$/.test(previous.avatarUpload || "") ? previous.avatarUpload : "",
     color: /^#[0-9a-fA-F]{6}$/.test(merged.color) ? merged.color : AGENT_DEFAULTS.color,
     personality: cleanText(merged.personality, 8000),
+    character: sanitizeCharacter(character),
     core: cleanText(merged.core, 4000),
     model: checkModel(merged.model),
     subscriptionId: cleanText(merged.subscriptionId, 80).trim(),

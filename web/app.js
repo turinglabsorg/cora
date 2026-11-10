@@ -1,4 +1,5 @@
 import { EN } from "./i18n.js";
+import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, characterType } from "./character.js";
 
 const LANGS = { it: "Italiano", en: "English" };
 const LANG = (() => {
@@ -2234,6 +2235,112 @@ function agentOwnerPanel(agent) {
   root.refreshOwners = load; root.readyOwners = load(); return root;
 }
 
+/* ---------- the character sheet ---------- */
+
+/**
+ * Six traits and two style axes make the Character panel. The same pure module
+ * the server prompts with is imported here, so the preview is the text the
+ * agent will really receive — no second generator to drift.
+ */
+function characterPanel(agent) {
+  const initial = agent.character && typeof agent.character === "object" ? agent.character : null;
+  const start = {
+    ...CHARACTER_DEFAULT,
+    ...(initial || {}),
+    scores: { ...CHARACTER_DEFAULT.scores, ...(initial?.scores || {}) },
+  };
+  const toggle = switchInput("characterOn", "", initial ? initial.enabled !== false : !agent.id);
+  const toggleInput = toggle.querySelector("input");
+  toggleInput.setAttribute("aria-label", tr("Scheda del carattere"));
+
+  const traitInputs = {};
+  const traitValues = {};
+  const traits = h("div", { class: "character-stats" }, CHARACTER_TRAITS.map((trait) => {
+    const input = h("input", { type: "range", class: "fader", name: `char-${trait.key}`, min: 1, max: 20, step: 1, value: Number(start.scores[trait.key]) || 10, "aria-label": LANG === "en" ? trait.labelEn : trait.label });
+    const value = h("b", { class: "character-stat-value" });
+    traitInputs[trait.key] = input;
+    traitValues[trait.key] = value;
+    input.addEventListener("input", draw);
+    return h("div", { class: "character-stat" },
+      h("div", { class: "character-stat-head" },
+        h("span", { class: "character-stat-name" }, h("b", {}, LANG === "en" ? trait.labelEn : trait.label), h("small", {}, trait.abbr)),
+        value),
+      input,
+      h("div", { class: "character-poles" }, h("span", {}, LANG === "en" ? trait.lowEn : trait.low), h("span", {}, LANG === "en" ? trait.highEn : trait.high)));
+  }));
+
+  const methodInput = h("input", { type: "range", class: "fader", name: "char-method", min: 1, max: 20, step: 1, value: Number(start.method) || 10, "aria-label": tr("Metodo") });
+  const focusInput = h("input", { type: "range", class: "fader", name: "char-focus", min: 1, max: 20, step: 1, value: Number(start.focus) || 10, "aria-label": tr("Focus") });
+  methodInput.addEventListener("input", draw);
+  focusInput.addEventListener("input", draw);
+  const methodValue = h("b", { class: "character-align-value" });
+  const focusValue = h("b", { class: "character-align-value" });
+
+  const typeBadge = h("span", { class: "character-badge" });
+  const styleBadge = h("span", { class: "character-badge" });
+  const preview = h("pre", { class: "character-preview" });
+  const notesLabel = h("span", { class: "label" });
+  const notesHint = h("small", {});
+  const notes = h("label", { class: "field character-notes" },
+    notesLabel,
+    // The value is a property, not a text child: the panel's test DOM reads it like a browser does.
+    h("textarea", { name: "personality", class: "tall", value: agent.personality || "", placeholder: tr("Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…") }),
+    notesHint);
+
+  const sheet = h("div", { class: "character-sheet" },
+    h("div", { class: "character-badges" },
+      h("span", { class: "character-badge-label" }, tr("Tipo")), typeBadge,
+      h("span", { class: "character-badge-label" }, tr("Stile")), styleBadge),
+    traits,
+    h("div", { class: "character-align" },
+      h("div", { class: "character-align-row" },
+        h("div", { class: "character-align-head" }, h("span", { class: "label" }, tr("Metodo")), methodValue),
+        methodInput,
+        h("div", { class: "character-poles" }, h("span", {}, tr("Istintivo")), h("span", {}, tr("Adattivo")), h("span", {}, tr("Strutturato")))),
+      h("div", { class: "character-align-row" },
+        h("div", { class: "character-align-head" }, h("span", { class: "label" }, tr("Focus")), focusValue),
+        focusInput,
+        h("div", { class: "character-poles" }, h("span", {}, tr("Risultato")), h("span", {}, tr("Bilanciato")), h("span", {}, tr("Persone"))))),
+    h("div", { class: "character-preview-box" },
+      h("div", { class: "character-preview-head" }, h("span", { class: "label" }, tr("Prompt generato")), h("small", {}, tr("In italiano, la lingua in cui parla l'agente."))),
+      preview));
+
+  function read() {
+    return {
+      version: 1,
+      enabled: Boolean(toggleInput.checked),
+      scores: Object.fromEntries(CHARACTER_TRAITS.map((trait) => [trait.key, Number(traitInputs[trait.key].value)])),
+      method: Number(methodInput.value),
+      focus: Number(focusInput.value),
+    };
+  }
+
+  function draw() {
+    const character = read();
+    for (const trait of CHARACTER_TRAITS) traitValues[trait.key].textContent = String(character.scores[trait.key]);
+    const style = characterStyle(character);
+    typeBadge.textContent = characterType(character.scores).title;
+    styleBadge.textContent = style.label;
+    methodValue.textContent = style.method.label;
+    focusValue.textContent = style.focus.label;
+    preview.textContent = characterSheet(character) || tr("Scheda spenta: il carattere resta il testo libero qui sotto.");
+    sheet.hidden = !character.enabled;
+    notesLabel.textContent = character.enabled ? tr("Storia e note") : tr("Carattere");
+    notesHint.textContent = character.enabled
+      ? tr("Quello che la scheda non cattura: fatti, persone, abitudini.")
+      : tr("Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri.");
+  }
+
+  toggleInput.addEventListener("change", draw);
+  draw();
+
+  const node = panel({ icon: "spark", title: "Carattere", hint: "Sei tratti e due assi scrivono il «Chi sei» dell'agente; il prompt si riscrive mentre li muovi." },
+    setRows(setRow("Scheda del carattere", "Il «Chi sei» viene generato da qui. Quello che scrivi sotto resta come storia.", toggle)),
+    sheet,
+    notes);
+  return { node, value: read };
+}
+
 /**
  * Who the agent is. Brain configuration belongs to the saved agent's own tab.
  */
@@ -2275,8 +2382,7 @@ function agentForm(agent, { only = "" } = {}) {
         setRow("Colore", "Quello della sua immagine e del suo nome nel pannello.", colorInput),
         setRow("Genere", "Come parla di sé, e la voce che gli viene data.", genderInput),
         setRow("Immagine", "La disegna Cora con il colore dell'agente; «Ridisegna» propone un'altra faccia. Una tua viene tagliata quadrata.", picture.node, { stack: true })));
-  const character = panel({ icon: "spark", title: "Carattere", hint: "Chi è, come parla, cosa gli interessa, che rapporto ha con gli altri." },
-    h("textarea", { name: "personality", class: "tall", placeholder: "Chi è, come parla, cosa gli interessa, cosa odia, che rapporto ha con gli altri agenti e con te…" }, agent.personality || ""));
+  const characterPane = characterPanel(agent);
   const listening = panel({ icon: "radio", title: "Ascolto", hint: "Dove ascolta. Parla solo quando qualcuno lo chiama." },
     setRows(platformsOn().map((kind) => platformRow(agent, kind)),
       setRow("In onda", "Spento non ascolta e non parla, da nessuna parte.", switchInput("enabled", "", agent.enabled ?? true))));
@@ -2290,7 +2396,7 @@ function agentForm(agent, { only = "" } = {}) {
         h("div", { class: "set-row stack" }, subscription.node),
         setRow("Ragionamento", "Quanto pensa prima di rispondere: più alto è più accurato ma più lento.", effortSelect(agent)),
         setRow("Usa il suo computer", "Un desktop Linux tutto suo, che vedi anche tu.", switchInput("tools", "", agent.tools ?? true)))) : null,
-    character, listening, owner, voice,
+    characterPane.node, listening, owner, voice,
     h("div", { class: "savebar" },
       isNew ? null : armedButton("Elimina", "Conferma", { onconfirm: async () => {
         if (await guard(api(`/api/agents/${agent.id}`, { method: "DELETE" }), `${agent.name} eliminato`)) {
@@ -2316,6 +2422,7 @@ function agentForm(agent, { only = "" } = {}) {
       ...(form.elements.ownerId ? { ownerId: form.elements.ownerId.value } : {}),
       enabled: form.elements.enabled.checked,
       personality: data.get("personality"),
+      character: characterPane.value(),
       // A voice select left disabled (no Soniox yet) keeps what the agent had.
       voice: data.has("voice") ? data.get("voice") : agent.voice || "",
       voiceLanguage: data.has("voiceLanguage") ? data.get("voiceLanguage") : agent.voiceLanguage || "",
@@ -2341,7 +2448,7 @@ function agentForm(agent, { only = "" } = {}) {
   form.replaceChildren(savebar);
   const entries = [
     ["identita", "Identità", "user", "Nome, immagine e colore", [identity]],
-    ["carattere", "Carattere", "spark", "Personalità e modo di parlare", [character]],
+    ["carattere", "Carattere", "spark", "Personalità e modo di parlare", [characterPane.node]],
     ["ascolto", "Ascolto", "radio", "Canali e presenza", [listening]],
     ["voce", "Voce", "mic", "Lingua e risposte vocali", [voice]],
     ["autorizzazioni", "Autorizzazioni", "shield", "Chi può farlo lavorare", [agentPermissionsPane(agent), owner].filter(Boolean)],

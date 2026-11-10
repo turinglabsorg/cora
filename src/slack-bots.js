@@ -1,4 +1,5 @@
 import { agentSlug } from "./agent-bots.js";
+import { agentTagline } from "./character.js";
 import { Slack, isDirectChannel } from "./slack.js";
 import { ValidationError } from "./store.js";
 
@@ -37,7 +38,7 @@ export function slackAppEnvName(agent) {
 
 /** Slack's short description: its editor refuses 140 characters (132 passed), so under 120, cut at a word. */
 export function shortDescription(agent) {
-  const line = String(agent.personality || "").split("\n")[0].trim() || `${agent.name}, agente di Cora`;
+  const line = agentTagline(agent) || `${agent.name}, agente di Cora`;
   return line.length <= 120 ? line : `${line.slice(0, 119).replace(/\s+\S*$/, "")}…`;
 }
 

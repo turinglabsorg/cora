@@ -7616,3 +7616,55 @@ describe("email channel", () => {
     assert.equal(f.app.email.summary(f.agent).sent, 3);
   });
 });
+
+describe("agent character sheet", () => {
+  test("the generated character is in the system prompt, and the others list names its type", async (t) => {
+    const analyst = app.store.createAgent({ name: "Carattere A", model: "ollama/test-model", enabled: true, tools: false, personality: "Ha lavorato con Seb.", character: { enabled: true, scores: { initiative: 8, speed: 12, endurance: 10, analysis: 18, prudence: 14, warmth: 12 }, method: 18, focus: 16 } });
+    const connector = app.store.createAgent({ name: "Carattere B", model: "ollama/test-model", enabled: true, tools: false, character: { enabled: true, scores: { initiative: 10, speed: 14, endurance: 10, analysis: 10, prudence: 10, warmth: 18 }, method: 4, focus: 6 } });
+    t.after(() => { app.store.deleteAgent(analyst.id); app.store.deleteAgent(connector.id); });
+    const prompt = app.brain.systemPrompt(app.store.agent(analyst.id), { place: "", computer: false });
+    assert.match(prompt, /### Scheda del carattere/);
+    assert.match(prompt, /Tipo: \*\*Analista\*\* · Stile: \*\*Strutturato · Persone\*\*/);
+    assert.match(prompt, /Analisi 18/);
+    assert.match(prompt, /Ha lavorato con Seb\./);
+    assert.match(prompt, /- Carattere B: Connettore · Istintivo · Risultato/);
+    const otherPrompt = app.brain.systemPrompt(app.store.agent(connector.id), { place: "", computer: false });
+    assert.match(otherPrompt, /- Carattere A: Analista · Strutturato · Persone/);
+  });
+
+  test("the profile sliders switch the character on, preview the prompt and save it", async (t) => {
+    const login = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    cookie = login.headers.get("set-cookie").split(";")[0];
+    const agent = app.store.createAgent({ name: "Cursori", model: "ollama/test-model", enabled: false, tools: false, personality: "Nota libera." });
+    t.after(() => app.store.deleteAgent(agent.id));
+    const panel = panelHarness({ language: "en", fetch: (path, options) => fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } }) });
+    await panel.run("boot()");
+    await panel.navigate(`#/agent/${agent.id}/impostazioni`);
+    const fieldNamed = (tag, name) => panel.app.querySelectorAll(tag).find((node) => node.attributes.name === name);
+    await waitFor(() => fieldNamed("input", "char-analysis"), { what: "the character sliders" });
+    const toggle = fieldNamed("input", "characterOn");
+    const notes = fieldNamed("textarea", "personality");
+    assert.equal(Boolean(toggle.checked), false, "an agent saved before the character starts with it off");
+    assert.equal(notes.value, "Nota libera.");
+    toggle.checked = true;
+    toggle.dispatch("change");
+    const analysis = fieldNamed("input", "char-analysis");
+    analysis.value = "18";
+    analysis.dispatch("input");
+    const preview = panel.app.querySelector(".character-preview");
+    assert.match(preview.textContent, /Tipo: \*\*Analista\*\* · Stile: \*\*Adattivo · Bilanciato\*\*/);
+    assert.match(preview.textContent, /Analisi 18/);
+    assert.match(preview.textContent, /\*\*Il tuo limite\.\*\* Analizzo troppo/);
+    const form = panel.app.querySelectorAll("form").find((node) => node.attributes.id === `agent-settings-${agent.id}`);
+    assert.ok(form, "the settings form is the one the sliders belong to");
+    form.dispatch("submit");
+    await waitFor(() => app.store.agent(agent.id).character?.enabled === true, { what: "the character saved" });
+    assert.equal(app.store.agent(agent.id).character.scores.analysis, 18);
+    assert.equal(app.store.agent(agent.id).character.method, 10);
+    assert.equal(app.store.agent(agent.id).personality, "Nota libera.");
+    const savedPrompt = app.brain.systemPrompt(app.store.agent(agent.id), { place: "", computer: false });
+    assert.match(savedPrompt, /### Scheda del carattere/);
+    assert.match(savedPrompt, /Analisi 18/);
+    await waitFor(() => panel.app.querySelectorAll("form").every((node) => node !== form), { what: "the panel to redraw after the save" });
+  });
+});

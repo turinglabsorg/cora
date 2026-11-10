@@ -37,6 +37,8 @@ const LEGACY_SESSIONS_UNTIL = Date.parse("2026-11-07T00:00:00Z") + SESSION_DAYS 
 const STATIC = {
   "/": ["index.html", "text/html; charset=utf-8"],
   "/assets/app.js": ["app.js", "text/javascript; charset=utf-8"],
+  // The same pure module the server uses: the panel previews the prompt it will really get.
+  "/assets/character.js": ["../src/character.js", "text/javascript; charset=utf-8"],
   "/assets/i18n.js": ["i18n.js", "text/javascript; charset=utf-8"],
   "/assets/styles.css": ["styles.css", "text/css; charset=utf-8"],
   "/assets/favicon.svg": ["favicon.svg", "image/svg+xml"],

@@ -10,6 +10,7 @@ import { NO_TRACE } from "./traces.js";
 import { nextRuns } from "./scheduler.js";
 import { writtenReplyEvidence } from "./voice.js";
 import { attachmentImage } from "./images.js";
+import { agentPersona, agentTagline } from "./character.js";
 
 /** A conversation without the computer is short; a task runs until it is done, within these bounds. */
 const CHAT_STEPS = 14;
@@ -248,12 +249,12 @@ export class Brain {
     this.knowledge?.assertCurrent(agent);
     const others = this.store.agents()
       .filter((other) => other.id !== agent.id && other.enabled && (!this.knowledge?.ownerMemory || this.knowledge.ownerId(other) === this.knowledge.ownerId(agent)))
-      .map((other) => `- ${other.name}${PRONOUNS[other.gender] ? ` (${PRONOUNS[other.gender]})` : ""}: ${other.personality.split("\n")[0].slice(0, 140) || "(nessuna descrizione)"}`)
+      .map((other) => `- ${other.name}${PRONOUNS[other.gender] ? ` (${PRONOUNS[other.gender]})` : ""}: ${agentTagline(other).slice(0, 140) || "(nessuna descrizione)"}`)
       .join("\n");
     const self = SELF[agent.gender] || SELF[""];
     const sections = [
       `Sei ${agent.name}. Fai parte di Cora, una squadra di agenti AI che vive dove decide il tuo proprietario: ${self.tied}. ${place ? `In questo momento parlate ${place}.` : ""} ${self.on}: senti tutto quello che si dice e puoi parlare con tutti.${self.line ? ` ${self.line}` : ""}`,
-      `## Chi sei\n${agent.personality.trim() || `Non hai ancora una personalità definita: ${self.plain}.`}`,
+      `## Chi sei\n${agentPersona(agent) || `Non hai ancora una personalità definita: ${self.plain}.`}`,
       ...(agent.brainSource === "external" ? [] : [`## La tua scheda (sempre a mente)\n${agent.core.trim() || "(vuota: riempila con update_core quando sai abbastanza)"}`]),
     ];
     // An agent of a person of the space answers to that person, not to the owner of the space.
@@ -1182,7 +1183,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       }).join("\n");
       const prompt = [
         `Sei ${agent.name}. È notte: è il momento di riordinare la memoria, come quando si dorme.`,
-        `## Chi sei\n${agent.personality.trim().slice(0, 2000) || "(nessuna personalità definita)"}`,
+        `## Chi sei\n${agentPersona(agent).slice(0, 2000) || "(nessuna personalità definita)"}`,
         `## La tua scheda attuale\n${agent.core.trim() || "(vuota)"}`,
         `## I tuoi ricordi attuali\n${facts.length ? facts.map((fact) => `- [${fact.id}] ${fact.text} (${fact.scope === "shared" ? "condiviso" : "privato"}${fact.pinned ? ", fissato" : ""})`).join("\n") : "(nessuno)"}`,
         `## Cosa è successo ${since ? `dal ${formatWhen(since, this.timezone)}` : "finora"}\n${transcript || "(niente di nuovo)"}`,
