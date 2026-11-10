@@ -271,7 +271,7 @@ test("the panel draws the catalogue and the forms from src/connectors, so a new 
     return { ok: response.status < 400, status: response.status, json: async () => response.data };
   } });
   const served = (await f.call("/api/connectors")).data.catalog;
-  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tools[0]]), [["google", "google", "google_email"], ["linear", "key", "linear_teams"], ["asana", "key", "asana_workspaces"], ["canva", "key", "canva_api"]]);
+  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tools[0]]), [["google", "google", "google_email"], ["linear", "key", "linear_teams"], ["asana", "key", "asana_workspaces"], ["canva", "key", "canva_me"]]);
   assert.ok(served.find((item) => item.id === "asana").tools.length > 10, "the catalogue lists every Asana action");
   assert.equal(served.find((item) => item.id === "linear").secret, "CORA_LINEAR_KEY");
   const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
