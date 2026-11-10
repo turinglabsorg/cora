@@ -56,6 +56,10 @@ const DEFAULT_SETTINGS = {
   permissions: [],
   // The company brain: the librarian's model ("" = the default model), the embedding model of its search, and its hours.
   brainModel: "",
+  brainSubscriptionId: "",
+  brainCredentialId: "",
+  // Tried in order when the librarian's model fails (disconnected, out of credits, refused key): { model, subscriptionId, credentialId }.
+  brainBackups: [],
   brainEmbedModel: "bge-m3",
   librarianHour: 3,
   reviewHour: 8,
@@ -350,6 +354,44 @@ const PERSON_ID = /^(discord:\d{5,25}|telegram:\d{1,20}|slack:[UW][A-Z0-9]{4,})$
 const AGENT_ID = /^ag_[0-9a-f]{12}$/;
 
 /** One permission per person; one with no agent left is no permission. "*" means every agent, now and later. */
+const SUBSCRIPTION_ID = /^sub_[a-f0-9]{12}$/;
+const CREDENTIAL_ID = /^key_[a-f0-9]{12}$/;
+const BRAIN_BACKUPS = 3;
+
+function cleanAccountId(value, pattern) {
+  const id = String(value || "").trim();
+  return pattern.test(id) ? id : "";
+}
+
+/** The librarian's backup models, in the order they are tried; an entry without a model is dropped. */
+function cleanBrainBackups(list) {
+  const seen = new Set();
+  const backups = [];
+  for (const entry of Array.isArray(list) ? list : []) {
+    const model = entry?.model ? checkModel(entry.model) : "";
+    if (!model) continue;
+    const backup = { model, subscriptionId: cleanAccountId(entry.subscriptionId, SUBSCRIPTION_ID), credentialId: cleanAccountId(entry.credentialId, CREDENTIAL_ID) };
+    const key = `${backup.model}|${backup.subscriptionId}|${backup.credentialId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    backups.push(backup);
+    if (backups.length === BRAIN_BACKUPS) break;
+  }
+  return backups;
+}
+
+/** The librarian's models in the order they are tried: its own first, then the backups. */
+export function brainChain(settings) {
+  const first = { model: settings.brainModel || settings.defaultModel || "", subscriptionId: settings.brainSubscriptionId || "", credentialId: settings.brainCredentialId || "" };
+  const seen = new Set();
+  return [first, ...(settings.brainBackups || [])].filter((entry) => {
+    const key = `${entry.model}|${entry.subscriptionId || ""}|${entry.credentialId || ""}`;
+    if (!entry.model || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function cleanPermissions(list) {
   const seen = new Set();
   const grants = [];
@@ -395,6 +437,9 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     sshKeys: plainKeys(Array.isArray(merged.sshKeys) ? merged.sshKeys.join("\n") : merged.sshKeys).slice(0, 30),
     permissions: cleanPermissions(merged.permissions),
     brainModel: merged.brainModel ? checkModel(merged.brainModel) : "",
+    brainSubscriptionId: cleanAccountId(merged.brainSubscriptionId, SUBSCRIPTION_ID),
+    brainCredentialId: cleanAccountId(merged.brainCredentialId, CREDENTIAL_ID),
+    brainBackups: cleanBrainBackups(merged.brainBackups),
     brainEmbedModel: cleanText(merged.brainEmbedModel, 80).replace(/[^\w.:/-]/g, "").trim(),
     librarianHour: Math.round(clampNumber(merged.librarianHour, 0, 23, 3)),
     reviewHour: Math.round(clampNumber(merged.reviewHour, 0, 23, 8)),

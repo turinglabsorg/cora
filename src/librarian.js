@@ -1,7 +1,7 @@
 import { BRAIN_SLUG as ARTIFACTS_SLUG } from "./artifacts.js";
 import { BODY_LIMIT, BRAIN_KINDS, slugify } from "./company-brain.js";
 import { parseJsonObject } from "./memory.js";
-import { SHARED } from "./store.js";
+import { SHARED, brainChain } from "./store.js";
 
 // The first night looks back this far; later nights start where the last one stopped.
 const BACKFILL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -96,20 +96,48 @@ export class Librarian {
     return this.store.settings.brainModel || this.store.settings.defaultModel;
   }
 
+  /**
+   * One answer from the librarian's model, or from the first backup that gives one:
+   * a model that is disconnected, out of credits or refused does not stop the night.
+   * The owner hears once a day when a backup was needed, and when none answered.
+   */
   async think(prompt) {
-    const model = this.model;
-    const trace = this.traces?.start({ agentId: this.ownerId ? `librarian:${this.ownerId}` : "librarian", kind: "librarian", model, system: SYSTEM, prompt });
-    try {
-      const result = this.llm.isAgentic(model)
-        ? await this.llm.runAgent({ model, system: SYSTEM, prompt, tools: [], execute: null, timeoutMs: 10 * 60 * 1000, onStep: (step) => trace?.add(step) })
-        : await this.llm.chat({ model, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }], tools: [] });
-      trace?.spent(result.usage);
-      trace?.finish({ status: "done", output: result.text });
-      return { text: result.text, traceId: trace?.id || null };
-    } catch (error) {
-      trace?.finish({ status: "error", error: error.message });
-      throw error;
+    const chain = brainChain(this.store.settings);
+    const failures = [];
+    for (const [index, { model, subscriptionId, credentialId }] of chain.entries()) {
+      const trace = this.traces?.start({ agentId: this.ownerId ? `librarian:${this.ownerId}` : "librarian", kind: "librarian", model, system: SYSTEM, prompt });
+      try {
+        const result = this.llm.isAgentic(model)
+          ? await this.llm.runAgent({ model, subscriptionId: subscriptionId || undefined, credentialId: credentialId || "", system: SYSTEM, prompt, tools: [], execute: null, timeoutMs: 10 * 60 * 1000, onStep: (step) => trace?.add(step) })
+          : await this.llm.chat({ model, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }], tools: [] });
+        trace?.spent(result.usage);
+        trace?.finish({ status: "done", output: result.text });
+        this.usedModel = model;
+        if (index) await this.warn("backup", `Il bibliotecario ha usato il modello di riserva ${model}: ${failures.join(" · ")}`);
+        return { text: result.text, traceId: trace?.id || null };
+      } catch (error) {
+        trace?.finish({ status: "error", error: error.message });
+        if (this.stopped) throw error;
+        failures.push(`${model} non ha risposto (${String(error.message).replace(/\s+/g, " ").slice(0, 160)})`);
+        this.log({ type: "error", text: `bibliotecario: ${model}: ${error.message}` });
+      }
     }
+    const text = failures.length ? `Nessun modello del bibliotecario ha risposto: ${failures.join(" · ")}` : "Il bibliotecario non ha un modello";
+    await this.warn("down", text);
+    throw new Error(text);
+  }
+
+  /** Tells the owner, on the phone and in private, at most once a day for each kind of trouble. */
+  async warn(kind, text) {
+    const day = new Date().toLocaleDateString("sv-SE", { timeZone: this.timezone });
+    const key = `warned:${kind}`;
+    try {
+      if ((await this.brain.state(key, "")) === day) return;
+      await this.brain.setState(key, day);
+    } catch {}
+    const body = text.slice(0, 600);
+    await this.notify({ title: "Brain", body: body.slice(0, 180), url: "/#/brain", tag: `brain-${kind}` }).catch(() => {});
+    await this.messageOwner(`🧠 ${body}\nModelli di riserva: pannello, Brain → Il bibliotecario.`).catch((error) => this.log({ type: "error", text: `brain: messaggio al proprietario: ${error.message}` }));
   }
 
   /** Consolidate notes and chats since the last successful batch. */
@@ -125,6 +153,7 @@ export class Librarian {
     let finish;
     this.idle = new Promise((resolve) => { finish = resolve; });
     const started = Date.now();
+    this.usedModel = "";
     try {
       const last = await this.brain.state("lastRun", null);
       const since = Number(last?.until) || started - BACKFILL_MS;
@@ -157,7 +186,7 @@ export class Librarian {
           break;
         }
       }
-      const record = { at: new Date().toISOString(), until, reason, model: this.model, messages: messages.length, notes: notes.length, ms: Date.now() - started, ...totals };
+      const record = { at: new Date().toISOString(), until, reason, model: this.usedModel || this.model, messages: messages.length, notes: notes.length, ms: Date.now() - started, ...totals };
       await this.brain.setState("lastRun", record);
       if (totals.created || totals.updated) this.log({ type: "brain", text: `bibliotecario: ${totals.created} pagine nuove, ${totals.updated} aggiornate${totals.flagged ? `, ${totals.flagged} da verificare` : ""}` });
       return { status: totals.errors.length ? "partial" : "done", ...record };
