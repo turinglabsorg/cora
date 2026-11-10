@@ -1916,6 +1916,34 @@ function modelPicker(name, current, options) {
   return h("div", { class: "model-pick" }, select, custom);
 }
 
+/**
+ * Which account a librarian model runs on: a subscription for the CLIs, a key for
+ * DeepSeek and Hermes, nothing to choose for the others.
+ */
+function brainAccountSelect(modelId, { subscriptionId = "", credentialId = "" } = {}, label = "Account") {
+  const provider = String(modelId || "").split("/")[0];
+  const backend = keyBackendOf(modelId);
+  if (CLI_NAMES[provider]) {
+    const all = (S.data.subscriptions || []).filter((item) => item.provider === provider);
+    const resident = all.find((item) => item.resident);
+    const options = [h("option", { value: "", selected: !subscriptionId }, raw(`${tr("Account del server")}${resident ? ` · ${tr(SUBSCRIPTION_STATES[resident.status] || resident.status)}` : ""}`)),
+      ...all.filter((item) => !item.resident).map((item) => h("option", { value: item.id, selected: item.id === subscriptionId }, raw(`${item.email || item.label} · ${tr(SUBSCRIPTION_STATES[item.status] || item.status)}`)))];
+    return h("select", { "aria-label": tr(label) }, options);
+  }
+  if (backend) {
+    const keys = (S.data.credentials || []).filter((item) => item.provider === backend);
+    return h("select", { "aria-label": tr(label) }, h("option", { value: "", selected: !credentialId }, tr("Chiave dello space")),
+      ...keys.map((item) => h("option", { value: item.id, selected: item.id === credentialId }, raw(item.label || item.id))));
+  }
+  return null;
+}
+
+function brainAccountChange(modelId, value, plain = false) {
+  const keyed = Boolean(keyBackendOf(modelId));
+  if (plain) return { subscriptionId: keyed ? "" : value, credentialId: keyed ? value : "" };
+  return { brainSubscriptionId: keyed ? "" : value, brainCredentialId: keyed ? value : "" };
+}
+
 /** The model a form asks for: the typed id if there is one, otherwise the list. */
 function pickedModel(data, name) {
   return String(data.get(`${name}Custom`) || "").trim() || data.get(name) || "";
@@ -5354,12 +5382,54 @@ function renderBrain() {
   // The librarian's settings, in the rows of Settings: each saved as it changes.
   const settingsPanel = () => {
     const settings = S.data.settings;
+    const pickedOf = (picker) => picker.querySelector("input").value.trim() || picker.querySelector("select").value;
     const model = modelPicker("brainModel", settings.brainModel || "", { allowDefault: true });
-    const modelRow = setRow("Modello del bibliotecario", "Legge le chat e scrive le pagine: un modello attento sui fatti e sulle fonti.", model, { stack: true });
+    const account = h("div", { class: "brain-account" });
+    const drawAccount = (modelId) => {
+      const select = brainAccountSelect(modelId || settings.defaultModel, { subscriptionId: S.data.settings.brainSubscriptionId, credentialId: S.data.settings.brainCredentialId }, "Account del bibliotecario");
+      account.replaceChildren(...(select ? [select] : []));
+      select?.addEventListener("change", () => saveSettings(brainAccountChange(modelId || settings.defaultModel, select.value), modelRow));
+    };
+    drawAccount(settings.brainModel);
+    const modelRow = setRow("Modello del bibliotecario", "Legge le chat e scrive le pagine: un modello attento sui fatti e sulle fonti.", h("div", { class: "stack-sm" }, model, account), { stack: true });
     model.addEventListener("change", () => {
-      const value = model.querySelector("input").value.trim() || model.querySelector("select").value;
-      if (value !== (S.data.settings.brainModel || "")) saveSettings({ brainModel: value }, modelRow);
+      const value = pickedOf(model);
+      if (value !== (S.data.settings.brainModel || "")) {
+        saveSettings({ brainModel: value, brainSubscriptionId: "", brainCredentialId: "" }, modelRow);
+        drawAccount(value);
+      }
     });
+    const backupsRow = setRow("Modelli di riserva", "Se il modello non risponde (scollegato, crediti finiti), il bibliotecario e il sonno degli agenti provano questi, in ordine.", null, { stack: true });
+    const backupsBox = h("div", { class: "brain-backups" });
+    backupsRow.append(h("div", { class: "set-control" }, backupsBox));
+    const drawBackups = () => {
+      const backups = (S.data.settings.brainBackups || []).map((entry) => ({ ...entry }));
+      const save = (next) => saveSettings({ brainBackups: next }, backupsRow).then(drawBackups);
+      const rows = backups.map((entry, index) => {
+        const picker = modelPicker(`brainBackup${index}`, entry.model, {});
+        const slot = h("div", { class: "brain-account" });
+        const drawSlot = (modelId) => {
+          const select = brainAccountSelect(modelId, entry, "Account della riserva");
+          slot.replaceChildren(...(select ? [select] : []));
+          select?.addEventListener("change", () => save(backups.map((item, at) => at === index ? { ...item, ...brainAccountChange(modelId, select.value, true) } : item)));
+        };
+        drawSlot(entry.model);
+        picker.addEventListener("change", () => {
+          const value = pickedOf(picker);
+          if (value && value !== entry.model) save(backups.map((item, at) => at === index ? { model: value, subscriptionId: "", credentialId: "" } : item));
+        });
+        return h("div", { class: "brain-backup" },
+          h("span", { class: "brain-backup-n", "aria-hidden": "true" }, String(index + 1)),
+          h("div", { class: "grow stack-sm" }, picker, slot),
+          btn("", { icon: "trash", cls: "ghost", title: tr("Togli questa riserva"), onclick: () => save(backups.filter((_, at) => at !== index)) }));
+      });
+      const add = backups.length < 3 ? btn("Aggiungi riserva", { icon: "plus", cls: backups.length ? "ghost" : "", onclick: () => {
+        const fallback = (S.data.models || []).find((item) => item.id !== (S.data.settings.brainModel || S.data.settings.defaultModel))?.id || S.data.settings.defaultModel;
+        if (fallback) save([...backups, { model: fallback, subscriptionId: "", credentialId: "" }]);
+      } }) : null;
+      backupsBox.replaceChildren(...rows, ...(rows.length ? [] : [h("p", { class: "muted" }, tr("Nessuna riserva: se il modello non risponde, il brain resta fermo."))]), ...(add ? [add] : []));
+    };
+    drawBackups();
     const embed = h("input", { type: "text", class: "mono", value: settings.brainEmbedModel || "", autocomplete: "off", spellcheck: "false", "aria-label": tr("Modello per la ricerca") });
     const embedRow = setRow("Modello per la ricerca", "Un modello di embedding dell'Ollama di questa macchina, es. bge-m3. Vuoto: ricerca solo per parole.", embed);
     embed.addEventListener("change", () => saveSettings({ brainEmbedModel: embed.value.trim() }, embedRow));
@@ -5370,7 +5440,7 @@ function renderBrain() {
       return row;
     };
     return panel({ icon: "sliders", title: "Il bibliotecario", hint: "Consolida subito le nuove memorie. Ogni notte rilegge le chat; la mattina ti dice cosa è cambiato. Le modifiche valgono subito, anche se non le rivedi." },
-      setRows(modelRow, embedRow,
+      setRows(modelRow, backupsRow, embedRow,
         hourRow("librarianHour", "Ora del bibliotecario", "Prima fa il backup, poi aggiorna il brain."),
         hourRow("reviewHour", "Ora della revisione", "Ti arriva il riepilogo: sul telefono e in privato.")));
   };
@@ -5399,6 +5469,7 @@ function renderBrain() {
         statCard({ icon: "search", value: String(stats.chunks), label: "messaggi cercabili" }),
         statCard({ icon: "clock", value: lastRun ? raw(fmtTime(lastRun.at, true)) : "—", label: "ultimo giro",
           sub: lastRun ? raw(tr("{created} nuove, {updated} modificate{errors}", { created: lastRun.created, updated: lastRun.updated, errors: lastRun.errors?.length ? tr(", con errori") : "" })) : "il bibliotecario non è ancora passato" })),
+      ...(lastRun?.errors?.length ? [h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(tr("L'ultimo giro del bibliotecario non è riuscito: {error}", { error: lastRun.errors[0] }))))] : []),
       h("div", { class: "brain-search" }, search, h("div", { class: "brain-views" }, chips, views)),
       ...(mapView ? [mapBox] : [list, ...(state.canConfigure ?? state.canManage ? [settingsPanel()] : [])]));
   }

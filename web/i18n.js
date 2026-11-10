@@ -2478,4 +2478,13 @@ export const EN = {
   "Client secret dell'app Asana": "Asana app client secret",
   "Client ID dell'app Canva": "Canva app client ID",
   "Client secret dell'app Canva": "Canva app client secret",
+  "Account del bibliotecario": "Librarian's account",
+  "Account della riserva": "Backup's account",
+  "Chiave dello space": "Space key",
+  "Modelli di riserva": "Backup models",
+  "Se il modello non risponde (scollegato, crediti finiti), il bibliotecario e il sonno degli agenti provano questi, in ordine.": "If the model does not answer (disconnected, out of credits), the librarian and the agents' sleep try these, in order.",
+  "Togli questa riserva": "Remove this backup",
+  "Aggiungi riserva": "Add backup",
+  "Nessuna riserva: se il modello non risponde, il brain resta fermo.": "No backups: if the model does not answer, the brain stands still.",
+  "L'ultimo giro del bibliotecario non è riuscito: {error}": "The librarian's last run failed: {error}",
 };

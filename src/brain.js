@@ -1201,21 +1201,36 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
           `Regole: aggiungi solo fatti duraturi (preferenze, decisioni, persone, progetti, scadenze), non chiacchiere. Fondi i doppioni (aggiorna uno, rimuovi gli altri). Rimuovi ciò che è superato o sbagliato, ma mai i ricordi fissati. ${this.companyBrain?.enabled ? "\"shared\": true solo per fatti utili a tutta l'azienda: non diventano tuoi ricordi, vanno al bibliotecario del brain aziendale." : "\"shared\": true solo per fatti utili a tutti gli agenti."} Non inventare nulla che non risulti dalle conversazioni o dai ricordi.`,
         ].join("\n"),
       ].join("\n\n");
-      const model = agent.model || this.store.settings.defaultModel;
       const system = "Sei un sistema di consolidamento della memoria. Rispondi solo con JSON valido.";
-      const trace = this.startTrace({ agentId: agent.id, kind: "sleep", model, system, prompt });
+      // The agent's own model first; when it cannot answer (disconnected, out of credits, refused key), the space's backups.
+      const own = { model: agent.model || this.store.settings.defaultModel, subscriptionId: agent.subscriptionId, credentialId: agent.credentialId || "", host: agent.ollamaHost || "", effort: effortOf(agent) };
+      const chain = [own, ...(this.store.settings.brainBackups || []).filter((backup) => backup.model !== own.model || (backup.subscriptionId || "") !== (own.subscriptionId || "") || (backup.credentialId || "") !== own.credentialId)];
       let summary;
-      try {
-        const result = this.llm.isAgentic(model)
-          ? await this.llm.runAgent({ model, subscriptionId: agent.subscriptionId, credentialId: agent.credentialId || "", system, prompt, tools: [], execute: null, timeoutMs: 5 * 60 * 1000, onStep: (step) => trace.add(step), effort: effortOf(agent), host: agent.ollamaHost || "" })
-          : await this.llm.chat({ model, messages: [{ role: "system", content: system }, { role: "user", content: prompt }], tools: [], effort: effortOf(agent) });
-        if (result.thinking) trace.add({ type: "thinking", text: result.thinking });
-        summary = this.applySleep(agent, parseJsonObject(result.text));
-        trace.finish({ status: "done", output: result.text });
-      } catch (error) {
-        trace.finish({ status: "error", error: error.message });
-        throw error;
+      const failures = [];
+      for (const { model, subscriptionId, credentialId = "", host = "", effort = "" } of chain) {
+        const trace = this.startTrace({ agentId: agent.id, kind: "sleep", model, system, prompt });
+        let result;
+        try {
+          result = this.llm.isAgentic(model)
+            ? await this.llm.runAgent({ model, subscriptionId: subscriptionId || undefined, credentialId, system, prompt, tools: [], execute: null, timeoutMs: 5 * 60 * 1000, onStep: (step) => trace.add(step), effort, host })
+            : await this.llm.chat({ model, messages: [{ role: "system", content: system }, { role: "user", content: prompt }], tools: [], effort });
+        } catch (error) {
+          trace.finish({ status: "error", error: error.message });
+          failures.push(`${model}: ${String(error.message).replace(/\s+/g, " ").slice(0, 160)}`);
+          continue;
+        }
+        try {
+          if (result.thinking) trace.add({ type: "thinking", text: result.thinking });
+          summary = this.applySleep(agent, parseJsonObject(result.text));
+          trace.finish({ status: "done", output: result.text });
+        } catch (error) {
+          trace.finish({ status: "error", error: error.message });
+          throw error;
+        }
+        if (model !== own.model || failures.length) this.log?.({ type: "sleep", agentId: agent.id, text: `ha dormito con il modello di riserva ${model}: ${failures.join(" · ")}` });
+        break;
       }
+      if (!summary) throw new Error(failures.join(" · ") || "nessun modello per dormire");
       this.store.markSlept(agent.id, new Date(events.length ? events[events.length - 1].at : Date.now()).toISOString());
       this.log?.({ type: "sleep", agentId: agent.id, text: `ha dormito: +${summary.added} ricordi, ${summary.updated} corretti, ${summary.removed} dimenticati${summary.noted ? `, ${summary.noted} note per il brain` : ""}${summary.core ? ", scheda aggiornata" : ""}` });
       return { status: "done", ...summary };
