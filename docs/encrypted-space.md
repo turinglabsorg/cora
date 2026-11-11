@@ -1,6 +1,6 @@
 # Encrypted space
 
-Encrypted space provides per-folder encryption and a separate private document-session runner. Personal encryption is always available. The default-off **Settings > Space > Mandatory encryption** switch requires encrypted storage for all new content across the space and its agents. An agent may independently opt in through **Settings > Security > Encrypted sessions only** while the space requirement is off. Neither policy changes Sealed isolation.
+Encrypted space provides per-folder artifact encryption, encrypted conversations and a separate private document-session runner. Personal encryption is always available. The default-off **Settings > Space > Mandatory encryption** switch requires encrypted storage for all new content across the space and its agents. An agent may independently opt in through **Settings > Security > Encrypted sessions only** while the space requirement is off. Neither policy changes Sealed isolation.
 
 ## Scope and trust boundary
 
@@ -19,7 +19,8 @@ Each folder has an independently generated RSA-OAEP-3072/SHA-256 encryption pair
 Each password or passkey independently wraps the same folder-private bundle with AES-256-GCM:
 
 - Password: PBKDF2-HMAC-SHA-256, 600,000 iterations, independent 256-bit salt, fourteen-character enrollment minimum.
-- Passkey: required user verification and WebAuthn PRF, followed by HKDF-SHA-256 with a Cora/folder domain. A normal passkey without PRF is refused. No PRF output or derived key is persisted.
+- Passkey A: required user verification and WebAuthn PRF, followed by HKDF-SHA-256 with a Cora/folder domain. No PRF output or derived key is persisted.
+- Passkey B: explicitly selected dedicated credential with a random user-handle seed and a weaker password-manager boundary, as described below. There is no silent downgrade from A.
 
 Browser WebCrypto imports operational private and wrapping keys as non-extractable. Plain bundle references exist only within the mounted unlocked view to allow additional unlock methods; they are never written to local/session storage. Locking, leaving the folder, or five minutes of inactivity clears the view and its bundle reference.
 
@@ -27,7 +28,7 @@ The archive uses indexed SQLite tables `encrypted_folders`, `encrypted_documents
 
 ## Approval and revocation
 
-An access request is bound to the authenticated person, agent, isolated session, folder revision, document/version, operation, model, model host and a ten-minute expiry. Only the folder owner may approve it, and that person must also own/manage the selected agent. Space administration grants no implicit folder access. Reading/analysis and an edit proposal are distinct operations; proposals do not overwrite a source document automatically. Export and sharing are separate, explicitly signed panel operations rather than model tools.
+An access request is bound to the authenticated person, agent, isolated session, folder revision, document/version, operation, model, model host and a ten-minute expiry. Only a person with current folder access and an accepted key grant may approve it, and that person must also own/manage the selected agent. The owner needs no separate grant. Space administration grants no implicit folder access. Reading/analysis and an edit proposal are distinct operations; proposals do not overwrite a source document automatically. Export and sharing are separate, explicitly signed panel operations rather than model tools.
 
 Unlock proof signs a server-issued sixty-second challenge with the decrypted folder signing key. The challenge binds the current person, folder revision, chosen wrapper metadata and exact operation. It is consumed once, including failed attempts. Eight failed proofs throttle new challenges for a minute. An audit method identifies the wrapper selected by the client; it is not an independent server-side WebAuthn authentication ceremony. Panel login establishes the person's identity.
 
@@ -77,7 +78,7 @@ Hush and Cora have independent release lifecycles. Fixture verification does not
 
 ## Folder navigation
 
-Every folder owner opens **Cifratura** (`#/artefatti/:id/cifratura`) to initialize encryption. Personal enrollment is available regardless of the space requirement. Folders with commits or sharing links retain their unencrypted history and offer creation of a separate encrypted folder. When mandatory encryption is on, Artifacts and legacy folder pages show a red warning and a working encrypted-folder CTA. File previews and downloads remain available; plaintext edit and upload actions are replaced with encrypted-storage guidance. In an encrypted folder the same tab manages password and passkey wrappers. The previous `impostazioni` route remains a compatibility alias. Ordinary folder settings no longer contain the enrollment form. Team permission rows display the authoritative effective none/read/write grant, independently of inheritance.
+Every folder owner opens **Cifratura** (`#/artefatti/:id/cifratura`) to initialize encryption. Personal enrollment is available regardless of the space requirement. Folders with commits or sharing links retain their unencrypted history and offer creation of a separate encrypted folder. When mandatory encryption is on, Artifacts and legacy folder pages show a red warning and a working encrypted-folder CTA. File previews and downloads remain available; plaintext edit and upload actions are replaced with encrypted-storage guidance. In an encrypted folder the same tab manages password and passkey wrappers. The `impostazioni` route retains native folder settings; `cifratura` manages unlock methods. Ordinary folder settings no longer contain the enrollment form. Team permission rows display the authoritative effective none/read/write grant, independently of inheritance.
 
 ## Passkey compatibility tiers
 
@@ -87,4 +88,4 @@ B creates a random 32-byte `user.id` in the browser. The credential manager reta
 
 This is a compatibility tier, not PRF-equivalent security. WebAuthn does not classify `userHandle` as a confidential cryptographic output, and an unlocked manager may return it to a weaker request. B relies on the selected manager protecting the credential and its metadata. Cora's delivered application, browser and password manager remain trusted. A and B are visibly separate; adding B makes the folder recoverable under B's weaker boundary. Removing a method does not revoke copies already obtained.
 
-The current encrypted-folder editor and private-session runner remain distinct from normal artifact uploads and ordinary conversations. Passkey compatibility alone does not complete file/folder uploads, team key distribution or ordinary chat/reasoning encryption; these acceptance criteria are tracked in NOT-5.
+File/directory uploads, encrypted key delivery and the explicit encrypted Chat path are covered in [Encrypted artifacts and conversations](encrypted-artifacts.md), including limits, byte verification, sharing/revocation and conversation recovery. Existing ordinary transport threads are not migrated. Actual provider coverage remains separate from deterministic integration tests; see NOT-5 for release evidence.

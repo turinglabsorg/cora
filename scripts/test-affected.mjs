@@ -31,7 +31,7 @@ const PANEL = {
 // Each area: the paths it owns, the test files that cover it and the cora.test.js groups (name prefixes).
 const AREAS = [
   { name: "thread topics", paths: [/^src\/thread-topics\.js$/], files: ["thread-topics"], cora: ["talking with the agents"] },
-  { name: "encrypted space", paths: [/^src\/encrypted-space\.js$/, /^web\/encrypted-space\.js$/], files: ["encrypted-space", "artifacts", "sealed", "context"], cora: ["encrypted access tools", "general encryption enforcement"] },
+  { name: "encrypted space", paths: [/^src\/encrypted-space\.js$/, /^web\/encrypted-space\.js$/, /^web\/encrypted-crypto\.js$/, /^web\/encrypted-files\.js$/, /^web\/encrypted-chat\.js$/], files: ["encrypted-space", "encrypted-files", "artifacts", "sealed", "context"], cora: ["encrypted access tools", "general encryption enforcement"] },
   { name: "sealed agents", paths: [/^test\/sealed(?:-box|-artifacts|-network)?\.test\.js$/], files: ["sealed", "sealed-box", "sealed-artifacts", "sealed-network"], cora: [] },
   { name: "panel", paths: [/^web\/(app|i18n|index|sw)\.(js|html)$/, /^web\/styles\.css$/, /^src\/web\.js$/], ...PANEL },
   { name: "hermes keys", paths: [/^src\/(hermes-keys|credentials)\.js$/], files: ["hermes-keys", "deepseek", "connections"], cora: ["what runs the models"] },

@@ -55,6 +55,9 @@ const STATIC = {
   "/sw.js": ["sw.js", "text/javascript; charset=utf-8"],
   "/assets/send.js": ["send.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-space.js": ["encrypted-space.js", "text/javascript; charset=utf-8"],
+  "/assets/encrypted-crypto.js": ["encrypted-crypto.js", "text/javascript; charset=utf-8"],
+  "/assets/encrypted-files.js": ["encrypted-files.js", "text/javascript; charset=utf-8"],
+  "/assets/encrypted-chat.js": ["encrypted-chat.js", "text/javascript; charset=utf-8"],
 };
 const CSP = [
   "default-src 'self'",
@@ -503,16 +506,25 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (actingUser) throw new HttpError(403, "Lo sblocco richiede la sessione personale del browser.");
       const body = method === "GET" || method === "DELETE" ? {} : await readJson(req, 4 * 1024 * 1024);
       if (path === "/api/encrypted/settings" && ["GET", "PUT"].includes(method)) return send(res, 200, encrypted.settings(user, method === "PUT" ? body : null));
+      if (path === "/api/encrypted/folders" && method === "GET") return send(res, 200, { folders: store.artifactFolders().filter(folder => { try { encrypted.folder(folder.id, user); return true; } catch { return false; } }).map(folder => ({ id: folder.id, title: folder.title })) });
       if (path === "/api/encrypted/recipients" && method === "GET") return send(res, 200, encrypted.recipients(user));
       const agentMatch = /^\/api\/encrypted\/agents\/([\w-]+)$/.exec(path);
       if (agentMatch && ["GET", "PUT"].includes(method)) return send(res, 200, encrypted.agentSettings(agentMatch[1], user, method === "PUT" ? body : null));
-      const folderMatch = /^\/api\/encrypted\/folders\/(af_[a-f0-9]{12})(?:\/(configure|challenge|methods|documents|requests|read|share|receive|export))?$/.exec(path);
+      const folderMatch = /^\/api\/encrypted\/folders\/(af_[a-f0-9]{12})(?:\/(configure|challenge|methods|documents|requests|read|share|receive|export|grants|file-start|file-share-start|file-chunk|file-finish|file-cancel))?$/.exec(path);
       if (folderMatch) {
         const [, folderId, action] = folderMatch;
         if (!action && method === "GET") return send(res, 200, encrypted.documents(folderId, user));
+        if (action === "grants" && method === "POST") return send(res, 200, encrypted.grantAccess(folderId, user, body));
         if (action === "documents" && method === "GET") {
-          encrypted.folder(folderId, user); return send(res, 200, encrypted.document(folderId, url.searchParams.get("document"), Number(url.searchParams.get("version"))));
+          const record = encrypted.folder(folderId, user);
+          if (record.owner !== user.id && encrypted.grantFor(folderId, user.id)?.state !== "accepted") throw new HttpError(403, "Accetta prima l’accesso condiviso."); return send(res, 200, encrypted.document(folderId, url.searchParams.get("document"), Number(url.searchParams.get("version"))));
         }
+        if (action === "file-share-start" && method === "POST") return send(res, 201, encrypted.beginSharedFile(folderId, user, body));
+        if (action === "file-start" && method === "POST") return send(res, 201, encrypted.beginFile(folderId, user, body));
+        if (action === "file-chunk" && method === "PUT") return send(res, 200, encrypted.putFileChunk(folderId, user, body));
+        if (action === "file-finish" && method === "POST") return send(res, 201, encrypted.finishFile(folderId, user, body));
+        if (action === "file-cancel" && method === "POST") return send(res, 200, encrypted.cancelFile(folderId, user, body));
+        if (action === "file-chunk" && method === "GET") return send(res, 200, encrypted.readFileChunk(folderId, user, url.searchParams.get("document"), Number(url.searchParams.get("version")), Number(url.searchParams.get("chunk"))));
         if (action === "share" && method === "POST") return send(res, 201, encrypted.share(folderId, user, body));
         if (action === "receive" && method === "POST") return send(res, 200, encrypted.receive(folderId, user, body));
         if (action === "export" && method === "POST") return send(res, 200, encrypted.export(folderId, user, body));
@@ -1848,6 +1860,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       if (method === "DELETE") {
         if (!artifacts.canManage(folder, user)) throw new HttpError(403, "solo il proprietario elimina una cartella");
+        if (encryptedFolder(store, folder.id)) encrypted.deleteFolder(folder.id, user);
         artifacts.deleteFolder(folder.id);
         activity({ type: "artifact", text: `${by.name} ha eliminato la cartella ${folder.path}` });
         return send(res, 200, { ok: true });

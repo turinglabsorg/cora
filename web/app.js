@@ -1,3 +1,4 @@
+import { encryptedChatLauncher } from "./encrypted-chat.js";
 import { encryptedSetting, encryptedSetup, encryptedFolderPanel } from "./encrypted-space.js";
 import { EN } from "./i18n.js";
 import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, characterType, shouldWriteCharacter } from "./character.js";
@@ -4034,7 +4035,10 @@ async function renderAgent() {
   else if (tab === "routine") body = await routineTab(agent, routines);
   else if (tab === "desktop") body = await desktopTab(agent);
   else if (tab === "attivita") body = activityTab(agent);
-  else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent });
+  else if (tab === "chat") {
+    const encrypted = await api(`/api/encrypted/agents/${agent.id}`);
+    body = sub === "cifrata" || (encrypted.encryptedOnly && sub !== "storico") ? await encryptedChatLauncher(encryptedUI(), agent) : [h("div", { class: "row end" }, btn("Chat cifrata", { icon: "lock", href: `#/agent/${agent.id}/chat/cifrata` })), await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent })];
+  }
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
   else if (tab === "cervello") body = brainTab(agent);
   else if (tab === "email") body = await agentEmailTab(agent, isCurrent);
@@ -4143,7 +4147,7 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
-const encryptedUI = () => ({ h, btn, api, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
+const encryptedUI = () => ({ h, btn, api, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
 
 function agentSecurityPane(agent, data) {
   if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));
@@ -6789,7 +6793,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   const { folder } = data;
   if (data.encrypted) {
     try {
-      const workspace = await encryptedFolderPanel(encryptedUI(), folder, tab === "impostazioni" ? "cifratura" : tab, S.data.agents, () => renderArtifactFolder(id, tab, dir));
+      const workspace = await encryptedFolderPanel({ ...encryptedUI(), permissions: () => artifactPermissions(data), folderSettings: () => artifactPermissions(data, { settings: true }) }, folder, tab, S.data.agents, () => renderArtifactFolder(id, route()[2] || tab, dir));
       if (location.hash !== view) return;
       shell([pageHead(raw(folder.title), "Spazio cifrato"), workspace], { title: folder.title, back: "#/artefatti", mode: "artifacts" });
     } catch (error) { slot.replaceChildren(empty("lock", error.message, btn("Riprova", { onclick: () => renderArtifactFolder(id, tab, dir) }))); }
@@ -7407,8 +7411,8 @@ function artifactPermissions(data, { settings = false } = {}) {
     if (await guard(api(`/api/artifacts/folders/${folder.id}`, { method: "DELETE" }), "Cartella eliminata")) location.hash = "#/artefatti";
   } })) : null;
   return settings
-    ? panel({ icon: "sliders", title: "Impostazioni" }, setRows(titleRow, descriptionRow, defaultRow, directRow, removeRow))
-    : panel({ icon: "shield", title: "Permessi", hint: editable ? null : "Li cambiano il proprietario e i revisori della cartella." }, setRows(writersRow, memberAccessRow, reviewersRow));
+    ? panel({ icon: "sliders", title: "Impostazioni" }, setRows(titleRow, descriptionRow, defaultRow, data.encrypted ? null : directRow, removeRow))
+    : panel({ icon: "shield", title: "Permessi", hint: data.encrypted ? "Il permesso non consegna la chiave: completa l’accesso nella scheda Condivisione. Gli agenti ricevono solo accessi temporanei autorizzati." : editable ? null : "Li cambiano il proprietario e i revisori della cartella." }, setRows(data.encrypted ? null : writersRow, memberAccessRow, data.encrypted ? null : reviewersRow));
 }
 
 /** One changed file, opened: the lines it lost and gained, or the two pictures side by side. */
