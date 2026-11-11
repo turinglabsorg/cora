@@ -1787,10 +1787,15 @@ test("Linear workspace panel manages independent grants and keeps legacy connect
   const cards = () => pane.querySelector(".connector-detail").querySelectorAll(".panel");
   assert.equal(cards().length, 2);
   assert.match(cards()[0].textContent, /firstspace/); assert.match(cards()[1].textContent, /secondspace/);
+  for (const card of cards()) { assert.equal(card.tagName, "details"); assert.equal(card.getAttribute("open"), null); }
+  cards()[0].open = true; cards()[0].dispatch("toggle");
+
   const check = (card, agentName) => card.querySelectorAll("input").find(input => input.getAttribute("aria-label") === `Autorizza ${agentName}`);
   check(cards()[0], firstAgent.name).checked = true; check(cards()[0], firstAgent.name).dispatch("change");
   await waitFor(() => fixture.app.keyConnectors.linearConnections().find(item => item.id === legacy.id).agents.includes(firstAgent.id));
   await sleep(50);
+  assert.equal(cards()[0].getAttribute("open"), "");
+  assert.equal(cards()[1].getAttribute("open"), null);
   check(cards()[1], secondAgent.name).checked = true; check(cards()[1], secondAgent.name).dispatch("change");
   await waitFor(() => fixture.app.keyConnectors.linearConnections().find(item => item.id === second.data.record.id).agents.includes(secondAgent.id));
   await sleep(50);
@@ -1850,6 +1855,27 @@ test("Linear app editing replaces only the selected card and cancels without wri
   assert.equal(records.length, 2);
   assert.equal(records.find(item => item.id === apps[0].id).appVersion, apps[0].appVersion);
   assert.equal(fixture.app.keyConnectors.appCredentials("linear", records.find(item => item.id === apps[1].id)).clientId, "fixture-new-client");
+});
+
+test("connector setup collapses completed Asana and Canva details without changing connections", async (t) => {
+  const f = await subscriptionApp(t);
+  const records = ["asana", "canva"].map(service => ({ service, status: "connected", mode: "oauth", account: "Fixture account", agents: [] }));
+  f.app.store.setValue("keyConnectors", records);
+  for (const service of ["asana", "canva"]) {
+    const panel = panelHarness({ hash: `#/settings/connettori/${service}`, fetch: async (path, init = {}) => {
+      assert.equal(init.method || "GET", "GET");
+      const response = await f.request(path);
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
+    await panel.run("boot()");
+    const pane = panel.run('document.querySelector(".connectors-pane")'); await pane.readyConnectors;
+    const card = pane.querySelector(".connector-connected");
+    assert.ok(card); assert.equal(card.tagName, "details"); assert.equal(card.getAttribute("open"), null);
+    assert.match(card.querySelector("summary").textContent, /Collegato.*Dettagli/);
+    assert.ok(card.querySelector(".panel-body").querySelectorAll("button").some(button => button.textContent === "Scollega"));
+    card.open = true; card.dispatch("toggle");
+    assert.equal(f.app.keyConnectors.records().length, 2);
+  }
 });
 
 test("connector setup preserves mounted forms and catalog across background updates", async (t) => {
@@ -8276,6 +8302,10 @@ describe("email channel", () => {
     assert.equal(panel.run("location.hash"), "#/settings/connettori/google");
     assert.equal(node.querySelector(".connector-catalog").hidden, true);
     assert.equal(node.querySelectorAll("button").find(button => /Collega un altro/.test(button.textContent)).getAttribute("disabled"), "");
+    const connected = node.querySelectorAll(".connector-connected");
+    assert.equal(connected.length, 2);
+    for (const card of connected) assert.equal(card.getAttribute("open"), null);
+    connected[1].open = true; connected[1].dispatch("toggle");
     const input = node.querySelectorAll("input").find(input => input.getAttribute("type") === "checkbox");
     input.checked = true; input.dispatch("change");
     assert.equal(input.disabled, true);

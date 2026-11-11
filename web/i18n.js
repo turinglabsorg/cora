@@ -2481,6 +2481,8 @@ export const EN = {
   "Come collegare {name}": "How to connect {name}",
   ". Gli agenti autorizzati la prendono da l\u00ec, senza vederla.": ". Authorized agents take it from there, without seeing it.",
   "Solo gli agenti spuntati possono usare questo connettore.": "Only the checked agents may use this connector.",
+  "Dettagli": "Details",
+  "Toglie l’accesso a questo account Google agli agenti autorizzati.": "Removes authorized agents’ access to this Google account.",
   "Toglie la chiave dalla cassaforte e l'accesso agli agenti.": "Removes the key from the vault and the agents' access.",
   "Connettore scollegato": "Connector disconnected",
   "Canva lasciata spenta": "Canva left off",

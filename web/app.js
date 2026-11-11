@@ -3312,7 +3312,7 @@ function connectorsPane() {
   const filters = h("div", { class: "segmented", role: "group", "aria-label": "Filtra connettori" });
   const filterButtons = new Map();
   let data = null, filter = "all", current = route()[2] || "";
-  const modeChoice = new Map(), optionalOpen = new Set();
+  const modeChoice = new Map(), optionalOpen = new Set(), expandedConnectors = new Set();
   let linearSetupOpen = false, linearEditingId = "";
   const services = () => data?.catalog || [];
   const serviceOf = (id) => services().find((service) => service.id === id) || null;
@@ -3393,6 +3393,18 @@ function connectorsPane() {
     return h("div", { class: "stack-sm" }, choices.length ? h("div", { class: "email-folders" }, choices.map((item) => item.node)) : h("p", { class: "muted" }, "Crea un agente per autorizzarlo."), feedback);
   };
 
+  const connectedCard = (key, { icon: name, title, hint, actions }, ...body) => {
+    const card = h("details", { class: "panel connector-connected", open: expandedConnectors.has(key) },
+      h("summary", { class: "panel-head" },
+        h("span", { class: "panel-ico" }, icon(name)),
+        h("div", { class: "panel-title" }, h("h2", {}, title), h("p", {}, hint)),
+        h("div", { class: "panel-actions" }, actions),
+        h("span", { class: "connector-disclosure-label" }, "Dettagli", icon("next"))),
+      h("div", { class: "panel-body" }, body));
+    card.addEventListener("toggle", () => { if (card.open) expandedConnectors.add(key); else expandedConnectors.delete(key); });
+    return card;
+  };
+
   const connectedPanel = (service, record) => {
     const feedback = h("p", { class: "muted", role: "status" });
     const disconnect = armedButton("Scollega", "Conferma scollegamento", { icon: "power", onconfirm: async () => {
@@ -3400,7 +3412,7 @@ function connectorsPane() {
       try { await api(connectorPath(service.id, record), { method: "DELETE" }); await load(); toast("Connettore scollegato"); }
       catch (error) { toast(error.message, true); disconnect.disabled = false; }
     } });
-    return panel({ icon: service.icon, title: service.id === "linear" ? raw(record.workspace) : service.name, hint: tr(service.meta), actions: tag(record.workspace || tr("Collegato"), "ok") },
+    return connectedCard(`${service.id}:${record.id || record.workspace || "default"}`, { icon: service.icon, title: service.id === "linear" ? raw(record.workspace) : service.name, hint: tr(service.meta), actions: tag("Collegato", "ok") },
       h("p", {}, tr(service.intro)),
       setRows(
         setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, ` · ${record.account}`) : null), tag("Collegato", "ok")),
@@ -3555,12 +3567,12 @@ function connectorsPane() {
         try { await api(`/api/connectors/${connection.id}`, { method: "DELETE" }); await load(); }
         catch (error) { toast(error.message, true); disconnect.disabled = !data.canManage; }
       } });
-      return panel({ icon: "mail", title: raw(connection.email), hint: "Account Google collegato", actions: disconnect },
+      return connectedCard(`google:${connection.id}`, { icon: "mail", title: raw(connection.email), hint: "Account Google collegato", actions: tag("Collegato", "ok") },
         h("p", { class: "label" }, "2. Autorizza gli agenti"),
-        choices.length ? h("div", { class: "email-folders" }, choices.map((item) => item.node)) : h("p", { class: "muted" }, "Crea un agente per assegnargli questo account."), feedback, senders);
+        choices.length ? h("div", { class: "email-folders" }, choices.map((item) => item.node)) : h("p", { class: "muted" }, "Crea un agente per assegnargli questo account."), feedback, senders, setRows(setRow("Scollega", "Toglie l’accesso a questo account Google agli agenti autorizzati.", disconnect)));
     });
     return [back(),
-      panel({ icon: "mail", title: "Google", hint: "Gmail e Google Workspace", actions: tag(data.connections.length ? "Collegato" : "Da collegare", data.connections.length ? "ok" : "agent") },
+      (data.connections.length ? (options, ...body) => connectedCard("google:setup", options, ...body) : panel)({ icon: "mail", title: "Google", hint: "Gmail e Google Workspace", actions: tag(data.connections.length ? "Collegato" : "Da collegare", data.connections.length ? "ok" : "agent") },
         h("p", {}, "Collega Gmail o Google Workspace con Fluxkit per inviare email dal tuo indirizzo."),
         h("p", { class: "muted" }, "Scegli quali agenti possono usare ogni account. La posta in arrivo di Google resta nel tuo account."),
         data.notice ? h("p", { role: "status" }, raw(tr(data.notice))) : null,
