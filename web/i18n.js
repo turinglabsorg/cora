@@ -1742,6 +1742,7 @@ export const EN = {
   "Un canale alla volta: quando ne accendi uno, l'altro si spegne. Il salotto del pannello c'è sempre.": "One channel at a time: turning one on turns the other off. The panel's lounge is always there.",
   "I turni degli agenti e la continuità delle conversazioni.": "Agent turns and conversation continuity.",
   "Avviso di inattività": "Inactivity reminder",
+  "Minuti senza messaggi prima di chiedere se restare in ascolto. Minimo 5; ∞ toglie l’avviso e mantiene l’ascolto.": "Minutes without messages before asking whether to keep listening. Minimum 5; ∞ disables the reminder and keeps listening.",
   "Minuti senza messaggi": "Minutes without messages",
   "minuti": "minutes",
   "∞ Nessun avviso": "∞ No reminder",

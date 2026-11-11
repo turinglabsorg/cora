@@ -307,4 +307,11 @@ Secrets uses `sectionWorkspace()` at `#/artefatti/segreti` with Secrets (`elenco
 
 ## Conversation inactivity control
 
-Settings → Regia has one autosaved Inactivity reminder row. A labelled integer input accepts at least five minutes without a product upper limit; a labelled ∞ No reminder switch disables the question and the numeric control. Keep the controls in the existing stacked setting row, with the minute unit beside the input. The initial duration is thirty minutes. Explain that the value applies to all conversations and never disconnects agents. Disable both controls while saving; a rejected save restores the last accepted value.
+Settings → Regia has one autosaved Inactivity reminder row. A labelled integer input accepts at least five minutes without a product upper limit; a labelled ∞ No reminder switch disables the question and the numeric control. Use the same compact two-column setting row as the other scalar preferences: title and short hint on the left, the 92px numeric input and the small ∞ rocker aligned on the right. Keep both columns on narrow phones. The ∞ rocker has the full accessible name and tooltip; the hint states that the value is in minutes. Never give this scalar preference a full-width stacked layout. The initial duration is thirty minutes. Explain that the value applies to all conversations and never disconnects agents. Disable both controls while saving; a rejected save restores the last accepted value.
+
+
+## Compact settings and permanently open orchestration panels
+
+Owner requirement, 11 November 2026: Settings must always preserve the same compact UX. Reuse the existing setting rows, input sizes, rocker and spacing. Scalar preferences keep title and explanation on the left and controls on the right on desktop and phones; shorten hints instead of creating oversized blocks. Do not introduce a bespoke layout for another numeric preference.
+
+Settings → Regia (including its Decisore panel) and Settings → Modelli e sonno are always visible section panels, never disclosures or accordions. They have no Details label, chevron or click-to-collapse header. Route changes, refreshes and saved previous disclosure state must not hide their controls. Preserve the Settings rail and its established mobile navigation.

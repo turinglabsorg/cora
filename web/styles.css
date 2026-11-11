@@ -666,6 +666,7 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .avatar-pick .avatar-actions { align-self: center; }
 .set-saved { font: 500 10px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--green); opacity: 0; transition: opacity 0.2s ease; }
 .set-saved.on { opacity: 1; }
+.inactivity-control { display: grid; justify-items: end; gap: 8px; }
 input.num { width: 92px; text-align: right; font-family: var(--mono); }
 .set-switches { display: grid; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); overflow: hidden; }
 .set-switches > .switch { padding: 10px 14px; }
