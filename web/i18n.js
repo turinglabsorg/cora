@@ -2574,6 +2574,7 @@ export const EN = {
   "Al lavoro adesso": "At work now",
   "Gli ultimi 60 turni, dal più recente.": "The last 60 turns, newest first.",
   "Ogni turno, dal più recente.": "Every turn, newest first.",
+  "Passi, dal più recente": "Steps, newest first",
   "Gestisci": "Manage",
   "Contesto e istruzioni": "Context and instructions",
   "Nessun turno in questo thread, per ora.": "No turn in this thread yet.",

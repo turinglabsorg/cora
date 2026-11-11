@@ -8632,7 +8632,7 @@ function threadFlow(flow) {
       h("p", { class: "thread-meta" }, raw([threadWhen(flow.startedAt), flow.endedAt ? threadWhen(flow.endedAt) : ""].filter(Boolean).join(" · ")))),
     h("div", { class: "thread-flow-actions" },
       flow.traceId ? btn("", { icon: "bulb", cls: "sm", title: "Ragionamento", href: `#/agent/${flow.agentId}/ragionamento/${flow.traceId}` }) : null,
-      live && (flow.canStop || S.data?.currentUser?.role === "owner") ? btn("Ferma", { icon: "stop", cls: "sm danger", onclick: () => guard(api("/api/threads/stop", { method: "POST", body: { id: flow.channelId, agentId: flow.agentId } }), "Sessione fermata").then(() => renderThreads()) }) : null));
+      live && (flow.canStop || S.data?.currentUser?.role === "owner") ? btn("Ferma", { icon: "stop", cls: "sm danger", onclick: () => guard(api("/api/threads/stop", { method: "POST", body: { id: flow.channelId, agentId: flow.agentId } }), "Sessione fermata").then(threadsRefresh) }) : null));
 }
 
 function threadHref(id) {
@@ -8645,12 +8645,45 @@ function threadPlace(thread) {
   return thread.parentName ? `${where} · #${thread.parentName}` : where;
 }
 
+/** The open Thread view refreshes in place; only when it is gone is the page drawn again. */
+function threadsRefresh() {
+  if (S.threadsRefresh?.()) return;
+  renderThreads();
+}
+
+/** A signature of what a thread shows: the heartbeat changes every few seconds and shows nothing. */
+function threadSig(value) {
+  return JSON.stringify(value, (key, item) => key === "heartbeatAt" ? undefined : item);
+}
+
+/** A node someone is using: typing in it, a name edited and not saved, a control with the focus. */
+function threadBusy(node) {
+  if (node.contains(document.activeElement) && document.activeElement !== document.body) return true;
+  return [...node.querySelectorAll("input.thread-name")].some((input) => input.value !== input.dataset.name);
+}
+
+/** Puts the keyed nodes in order and builds again only those whose data changed and nobody is using. */
+function keyedChildren(container, items, keep = threadBusy) {
+  const old = new Map([...container.children].filter((node) => node.dataset.key).map((node) => [node.dataset.key, node]));
+  const nodes = items.map(({ key, sig, build }) => {
+    const node = old.get(key);
+    if (node && (node.dataset.sig === sig || keep(node))) return node;
+    const fresh = build(node);
+    fresh.dataset.key = key;
+    fresh.dataset.sig = sig;
+    return fresh;
+  });
+  const wanted = new Set(nodes);
+  for (const node of [...container.children]) if (!wanted.has(node)) node.remove();
+  nodes.forEach((node, index) => { if (container.children[index] !== node) container.insertBefore(node, container.children[index] || null); });
+}
+
 function threadCard(thread, { history = false } = {}) {
   const flows = history ? thread.flows.filter((flow) => flow.status !== "active") : thread.flows.filter((flow) => flow.status === "active");
   if (!flows.length && history) return null;
   if (!flows.length && !history && !(thread.thread && thread.open)) return null;
   const manage = S.data?.currentUser?.role === "owner" || S.data?.access?.canManage;
-  const name = h("input", { type: "text", class: "thread-name", value: thread.name, "aria-label": tr("Nome del thread"), disabled: !manage });
+  const name = h("input", { type: "text", class: "thread-name", value: thread.name, "data-name": thread.name, "aria-label": tr("Nome del thread"), disabled: !manage });
   return h("article", { class: `thread-card${thread.closed ? " closed" : ""}` },
     h("header", {},
       h("span", { class: "panel-ico" }, icon(thread.kind === "slack" ? "slack" : "hash")),
@@ -8664,59 +8697,97 @@ function threadCard(thread, { history = false } = {}) {
       : h("p", { class: "thread-meta" }, tr("Nessuna sessione attiva")),
     manage && thread.thread ? h("div", { class: "thread-manage" },
       name,
-      btn("Rinomina", { cls: "sm", onclick: () => guard(api("/api/threads/rename", { method: "POST", body: { id: thread.id, name: name.value } }), "Nome aggiornato").then(() => renderThreads()) }),
-      !history && thread.thread ? btn("Chiudi", { icon: "stop", cls: "sm", onclick: () => guard(api("/api/threads/close", { method: "POST", body: { id: thread.id } }), "Thread chiuso").then(() => renderThreads()) }) : null) : null);
+      btn("Rinomina", { cls: "sm", onclick: () => guard(api("/api/threads/rename", { method: "POST", body: { id: thread.id, name: name.value } }), "Nome aggiornato").then((done) => { if (done) name.dataset.name = name.value; threadsRefresh(); }) }),
+      !history && thread.thread ? btn("Chiudi", { icon: "stop", cls: "sm", onclick: () => guard(api("/api/threads/close", { method: "POST", body: { id: thread.id } }), "Thread chiuso").then(threadsRefresh) }) : null) : null);
 }
-
 
 async function renderThreads() {
   const view = route()[1] || "";
   if (view === "t" && route()[2]) return renderThreadPage(decodeURIComponent(route()[2]));
   const section = view === "storico" || view === "attivi" ? view : "";
-  const key = location.hash;
+  const ticket = S.threadsTicket = (S.threadsTicket || 0) + 1;
+  const listing = () => route()[0] === "thread" && route()[1] !== "t" && S.threadsTicket === ticket;
   let board = { threads: [], parents: [] };
   let failed = "";
   try { board = await api("/api/threads"); }
   catch (error) { failed = error.message; }
-  if (location.hash !== key && route()[0] !== "thread") return;
+  // A click elsewhere while the list was loading wins: an old answer never covers the page just opened.
+  if (!listing()) return;
   const manage = S.data?.currentUser?.role === "owner" || S.data?.access?.canManage;
-  const parents = board.parents || [];
-  const parentSelect = h("select", { "aria-label": tr("Canale") }, parents.map((parent) => h("option", { value: parent.id }, raw(`${parent.kind === "slack" ? "Slack" : "Discord"} · ${parent.name}`))));
+  const parentSelect = h("select", { "aria-label": tr("Canale") });
   const nameInput = h("input", { type: "text", placeholder: tr("Nome del thread"), "aria-label": tr("Nome del thread"), maxlength: "100" });
-  const liveCards = (board.threads || []).map((thread) => threadCard(thread, { history: false })).filter(Boolean);
-  const pastCards = (board.threads || []).map((thread) => threadCard(thread, { history: true })).filter(Boolean);
-  const create = manage ? panel({ icon: "plus", title: "Nuovo thread", hint: "Si apre sul canale e resta abbinato 1:1." },
-    parents.length ? h("form", { class: "thread-create", onsubmit: (event) => {
-      event.preventDefault();
-      const parentId = parentSelect.value;
-      const name = nameInput.value.trim();
-      if (!parentId || !name) return;
-      guard(api("/api/threads", { method: "POST", body: { parentId, name } }), "Thread aperto").then(() => renderThreads());
-    } },
-    field("Canale", parentSelect),
-    field("Nome", nameInput),
-    btn("Crea", { icon: "plus", cls: "primary", type: "submit" })) : h("p", { class: "thread-meta" }, "Nessun canale Discord o Slack acceso.")) : null;
+  const createForm = h("form", { class: "thread-create", onsubmit: (event) => {
+    event.preventDefault();
+    const parentId = parentSelect.value;
+    const name = nameInput.value.trim();
+    if (!parentId || !name) return;
+    guard(api("/api/threads", { method: "POST", body: { parentId, name } }), "Thread aperto").then((made) => { if (made) nameInput.value = ""; threadsRefresh(); });
+  } },
+  field("Canale", parentSelect),
+  field("Nome", nameInput),
+  btn("Crea", { icon: "plus", cls: "primary", type: "submit" }));
+  const noParents = h("p", { class: "thread-meta" }, "Nessun canale Discord o Slack acceso.");
+  const createBody = h("div", {});
+  const create = manage ? panel({ icon: "plus", title: "Nuovo thread", hint: "Si apre sul canale e resta abbinato 1:1." }, createBody) : null;
+  const liveList = h("div", { class: "thread-list" });
+  const pastList = h("div", { class: "thread-list" });
+  const liveEmpty = empty("hash", "Nessun thread attivo.");
+  const pastEmpty = empty("clock", "Nessuna sessione passata.");
+  const banner = h("div", {});
+  let parentsSig = "";
+  let boardSig = "";
+  const draw = (next, error) => {
+    banner.replaceChildren(...(error ? [h("p", { class: "banner err" }, raw(error))] : []));
+    if (error) return;
+    const parents = next.parents || [];
+    const nextParents = JSON.stringify(parents);
+    if (nextParents !== parentsSig && document.activeElement !== parentSelect) {
+      const chosen = parentSelect.value;
+      parentSelect.replaceChildren(...parents.map((parent) => h("option", { value: parent.id, selected: parent.id === chosen }, raw(`${parent.kind === "slack" ? "Slack" : "Discord"} · ${parent.name}`))));
+      createBody.replaceChildren(parents.length ? createForm : noParents);
+      parentsSig = nextParents;
+    }
+    const nextBoard = threadSig(next.threads || []);
+    if (nextBoard === boardSig) return;
+    boardSig = nextBoard;
+    const cards = (history) => (next.threads || []).map((thread) => {
+      const card = threadCard(thread, { history });
+      return card ? { key: thread.id, sig: threadSig([thread, history, manage]), build: () => threadCard(thread, { history }) } : null;
+    }).filter(Boolean);
+    const live = cards(false);
+    const past = cards(true);
+    keyedChildren(liveList, live);
+    keyedChildren(pastList, past);
+    liveList.hidden = !live.length;
+    pastList.hidden = !past.length;
+    liveEmpty.hidden = Boolean(live.length);
+    pastEmpty.hidden = Boolean(past.length);
+  };
   const entries = [
-    ["attivi", "Attivi", "hash", "Chi sta lavorando adesso", [
-      create,
-      liveCards.length ? h("div", { class: "thread-list" }, liveCards) : empty("hash", "Nessun thread attivo."),
-    ].filter(Boolean)],
-    ["storico", "Storico", "clock", "Sessioni già chiuse", [
-      pastCards.length ? h("div", { class: "thread-list" }, pastCards) : empty("clock", "Nessuna sessione passata."),
-    ]],
+    ["attivi", "Attivi", "hash", "Chi sta lavorando adesso", [create, liveList, liveEmpty].filter(Boolean)],
+    ["storico", "Storico", "clock", "Sessioni già chiuse", [pastList, pastEmpty]],
   ];
   const workspace = sectionWorkspace({ title: "Thread", base: "#/thread", current: section, entries });
+  draw(board, failed);
   shell([
     pageHead("Thread", "Una sessione per agente, legata al thread Discord o Slack."),
-    failed ? h("p", { class: "banner err" }, raw(failed)) : null,
+    banner,
     workspace,
-  ].filter(Boolean), { title: "Thread" });
-  const timer = setInterval(() => {
-    if (route()[0] !== "thread") return;
-    if (document.activeElement?.matches("input, textarea, select")) return;
-    renderThreads();
-  }, 4000);
-  S.timers.push(timer);
+  ], { title: "Thread" });
+  let loading = false;
+  const refresh = async () => {
+    if (loading || !liveList.isConnected || !listing()) return;
+    loading = true;
+    try { draw(await api("/api/threads"), ""); }
+    catch (error) { if (liveList.isConnected) draw(null, error.message); }
+    finally { loading = false; }
+  };
+  S.threadsRefresh = () => {
+    if (!liveList.isConnected || !listing()) return false;
+    void refresh();
+    return true;
+  };
+  S.timers.push(setInterval(() => { if (!document.hidden) void refresh(); }, 4000));
 }
 
 function threadTurn(trace, open) {
@@ -8727,7 +8798,7 @@ function threadTurn(trace, open) {
     if (step.type === "thinking" && step.hidden && lastHidden) return;
     lastHidden = step.type === "thinking" && Boolean(step.hidden);
     steps.querySelector(".empty")?.remove();
-    steps.append(stepEl(step, startedAt));
+    steps.prepend(stepEl(step, startedAt));
   };
   (trace.steps || []).forEach(addStep);
   if (!(trace.steps || []).length) steps.append(empty("info", trace.status === "running" ? "In attesa del primo passo…" : "Nessun passo intermedio: ha risposto direttamente."));
@@ -8746,14 +8817,20 @@ function threadTurn(trace, open) {
       h("span", { class: "badges" }, tag(label, cls), tokens ? h("span", { class: "thread-meta" }, tokens) : null),
       icon("next", "thread-turn-chev")),
     h("div", { class: "thread-turn-body" },
-      steps,
       h("h3", { class: "label" }, trace.status === "pass" ? "Risposta (ha deciso di passare)" : "Risposta"),
       answer,
+      h("h3", { class: "label" }, "Passi, dal più recente"),
+      steps,
       h("div", { class: "thread-turn-foot" },
         trace.model ? tag(modelLabel(trace.model, { short: true })) : null,
         btn("Contesto e istruzioni", { icon: "eye", cls: "sm ghost", href: `#/agent/${trace.agentId}/ragionamento/${trace.id}` }))));
   card.addStep = addStep;
   return card;
+}
+
+/** What a turn shows once it is over; while it runs its steps arrive live and do not redraw it. */
+function turnSig(trace) {
+  return JSON.stringify([trace.status, trace.output || "", trace.error || "", trace.tokensIn || 0, trace.tokensOut || 0, trace.endedAt || "", trace.status === "running" ? 0 : (trace.steps || []).length, trace.agentName, trace.model || ""]);
 }
 
 async function renderThreadPage(id) {
@@ -8770,65 +8847,129 @@ async function renderThreadPage(id) {
     ], { title: "Thread", back: "#/thread" });
     return;
   }
-  const { thread, traces } = detail;
   const manage = S.data?.currentUser?.role === "owner" || S.data?.access?.canManage;
-  const agents = [...new Map(traces.map((trace) => [trace.agentId, { id: trace.agentId, name: trace.agentName, color: trace.color }])).values()];
   let only = "";
+  let traces = [];
+  let thread = detail.thread;
   const list = h("div", { class: "thread-turns" });
-  const cards = new Map();
-  traces.forEach((trace, index) => {
-    const card = threadTurn(trace, index < 2);
-    cards.set(trace.id, card);
-    list.append(card);
-  });
-  if (!traces.length) list.append(empty("bulb", "Nessun turno in questo thread, per ora."));
-  const chips = agents.length > 1 ? h("div", { class: "chips thread-who", role: "group", "aria-label": tr("Agenti") },
-    [{ id: "", name: tr("Tutti") }, ...agents].map((agent) => h("button", { type: "button", class: `chip${agent.id === only ? " on" : ""}`, "aria-pressed": String(agent.id === only), onclick: (event) => {
-      only = agent.id;
-      for (const chip of event.currentTarget.parentElement.children) { chip.classList.toggle("on", chip === event.currentTarget); chip.setAttribute("aria-pressed", String(chip === event.currentTarget)); }
-      for (const card of cards.values()) card.hidden = Boolean(only) && card.dataset.agent !== only;
-    } }, agent.id ? avatar(agent, "xs") : null, raw(agent.name)))) : null;
-  const toggleAll = traces.length > 2 ? btn("Apri tutti", { icon: "layers", cls: "sm ghost", onclick: (event) => {
-    const opening = [...cards.values()].some((card) => !card.open);
-    for (const card of cards.values()) card.open = opening;
+  const listEmpty = empty("bulb", "Nessun turno in questo thread, per ora.");
+  const chipsSlot = h("div", {});
+  const sum = h("div", { class: "thread-sum" });
+  const flowsSlot = h("div", {});
+  const manageSlot = h("div", {});
+  const title = h("h1", {});
+  const place = h("p", {});
+  const linkSlot = h("div", { class: "page-actions" });
+  const toggleAll = btn("Apri tutti", { icon: "layers", cls: "sm ghost", onclick: (event) => {
+    const cards = [...list.children].filter((card) => !card.hidden);
+    const opening = cards.some((card) => !card.open);
+    for (const card of cards) card.open = opening;
     event.currentTarget.querySelector("span").textContent = tr(opening ? "Chiudi tutti" : "Apri tutti");
-  } }) : null;
-  const live = thread.flows.filter((flow) => flow.status === "active");
-  const flows = live.length ? h("div", { class: "thread-flows" }, live.map((flow) => threadFlow({ ...flow, channelId: thread.id }))) : null;
-  const tokensIn = traces.reduce((sum, trace) => sum + Number(trace.tokensIn || 0), 0);
-  const tokensOut = traces.reduce((sum, trace) => sum + Number(trace.tokensOut || 0), 0);
-  shell([
-    btn("Thread", { icon: "back", href: "#/thread", cls: "ghost sm back-link" }),
-    pageHead(raw(thread.name), raw(threadPlace(thread)), [
-      thread.link ? btn(thread.kind === "slack" ? "Apri su Slack" : "Apri su Discord", { icon: "external", cls: "ghost", href: thread.link, target: "_blank" }) : null,
-    ].filter(Boolean)),
-    h("div", { class: "thread-sum" },
+  } });
+  const reasoning = panel({ icon: "bulb", title: "Ragionamento", hint: "Ogni turno, dal più recente.", actions: toggleAll }, chipsSlot, list, listEmpty);
+  const hint = reasoning.querySelector(".panel-title p");
+  const sigs = { agents: "", flows: "", manage: "", head: "" };
+  const draw = (next) => {
+    thread = next.thread;
+    traces = next.traces;
+    const agents = [...new Map(traces.map((trace) => [trace.agentId, { id: trace.agentId, name: trace.agentName, color: trace.color }])).values()];
+    const head = JSON.stringify([thread.name, threadPlace(thread), thread.link, thread.kind]);
+    if (head !== sigs.head) {
+      sigs.head = head;
+      title.textContent = thread.name;
+      place.textContent = threadPlace(thread);
+      linkSlot.replaceChildren(...(thread.link ? [btn(thread.kind === "slack" ? "Apri su Slack" : "Apri su Discord", { icon: "external", cls: "ghost", href: thread.link, target: "_blank" })] : []));
+      linkSlot.hidden = !thread.link;
+      const appTitle = app.querySelector(".appbar h1, .appbar .title");
+      if (appTitle) appTitle.textContent = thread.name;
+    }
+    const live = thread.flows.filter((flow) => flow.status === "active");
+    const tokensIn = traces.reduce((total, trace) => total + Number(trace.tokensIn || 0), 0);
+    const tokensOut = traces.reduce((total, trace) => total + Number(trace.tokensOut || 0), 0);
+    sum.replaceChildren(
       h("span", {}, h("b", {}, raw(String(traces.length))), tr("turni")),
       h("span", {}, h("b", {}, raw(String(agents.length))), tr(agents.length === 1 ? "agente" : "agenti")),
       h("span", {}, h("b", {}, raw(shortTokens(tokensIn))), tr("in")),
       h("span", {}, h("b", {}, raw(shortTokens(tokensOut))), tr("out")),
-      thread.closed ? tag("Chiuso") : live.length ? tag("In corso", "agent") : null),
-    flows ? panel({ icon: "spark", title: "Al lavoro adesso" }, flows) : null,
-    panel({ icon: "bulb", title: "Ragionamento", hint: traces.length >= 60 ? "Gli ultimi 60 turni, dal più recente." : "Ogni turno, dal più recente.", actions: toggleAll },
-      chips, list),
-    manage && thread.thread ? panel({ icon: "edit", title: "Gestisci" }, threadManage(thread)) : null,
-  ].filter(Boolean), { title: thread.name, back: "#/thread" });
-  S.live = (entry) => {
-    if (entry.type !== "trace") return;
-    if (entry.event === "step" && entry.channelId === thread.id) cards.get(entry.traceId)?.addStep(entry.step);
-    if ((entry.event === "start" || entry.event === "end") && entry.trace?.channelId === thread.id) {
-      clearTimeout(S.threadReload);
-      S.threadReload = setTimeout(() => { if (location.hash === key) renderThreadPage(id); }, entry.event === "end" ? 600 : 200);
+      ...[thread.closed ? tag("Chiuso") : live.length ? tag("In corso", "agent") : null].filter(Boolean));
+    const flows = threadSig(live);
+    if (flows !== sigs.flows && !threadBusy(flowsSlot)) {
+      sigs.flows = flows;
+      flowsSlot.replaceChildren(...(live.length ? [panel({ icon: "spark", title: "Al lavoro adesso" }, h("div", { class: "thread-flows" }, live.map((flow) => threadFlow({ ...flow, channelId: thread.id }))))] : []));
+    }
+    const managing = JSON.stringify([manage, thread.thread, thread.name, thread.closed]);
+    if (managing !== sigs.manage && !threadBusy(manageSlot)) {
+      sigs.manage = managing;
+      manageSlot.replaceChildren(...(manage && thread.thread ? [panel({ icon: "edit", title: "Gestisci" }, threadManage(thread))] : []));
+    }
+    const team = JSON.stringify(agents);
+    if (team !== sigs.agents) {
+      sigs.agents = team;
+      if (only && !agents.some((agent) => agent.id === only)) only = "";
+      chipsSlot.replaceChildren(...(agents.length > 1 ? [h("div", { class: "chips thread-who", role: "group", "aria-label": tr("Agenti") },
+        [{ id: "", name: tr("Tutti") }, ...agents].map((agent) => h("button", { type: "button", class: `chip${agent.id === only ? " on" : ""}`, "aria-pressed": String(agent.id === only), onclick: (event) => {
+          only = agent.id;
+          for (const chip of event.currentTarget.parentElement.children) { chip.classList.toggle("on", chip === event.currentTarget); chip.setAttribute("aria-pressed", String(chip === event.currentTarget)); }
+          for (const card of list.children) card.hidden = Boolean(only) && card.dataset.agent !== only;
+        } }, agent.id ? avatar(agent, "xs") : null, raw(agent.name))))] : []));
+    }
+    const first = !list.children.length;
+    keyedChildren(list, traces.map((trace, index) => ({
+      key: trace.id,
+      sig: turnSig(trace),
+      build: (old) => threadTurn(trace, old ? old.open : first ? index < 2 : true),
+    })), () => false);
+    for (const card of list.children) card.hidden = Boolean(only) && card.dataset.agent !== only;
+    listEmpty.hidden = Boolean(traces.length);
+    toggleAll.hidden = traces.length <= 2;
+    if (hint) hint.textContent = tr(traces.length >= 60 ? "Gli ultimi 60 turni, dal più recente." : "Ogni turno, dal più recente.");
+  };
+  draw(detail);
+  shell([
+    btn("Thread", { icon: "back", href: "#/thread", cls: "ghost sm back-link" }),
+    h("div", { class: "page-head" }, h("div", { class: "page-title" }, title, place), linkSlot),
+    sum,
+    flowsSlot,
+    reasoning,
+    manageSlot,
+  ], { title: thread.name, back: "#/thread" });
+  let loading = false;
+  let again = false;
+  const refresh = async () => {
+    if (loading) { again = true; return; }
+    loading = true;
+    try {
+      const next = await api(`/api/threads/${encodeURIComponent(id)}`);
+      if (location.hash === key && list.isConnected) draw(next);
+    } catch {}
+    finally {
+      loading = false;
+      if (again) { again = false; void refresh(); }
     }
   };
+  S.threadsRefresh = () => {
+    if (location.hash !== key || !list.isConnected) return false;
+    void refresh();
+    return true;
+  };
+  S.live = (entry) => {
+    if (entry.type !== "trace") return;
+    if (entry.event === "step" && entry.channelId === thread.id) list.querySelector(`[data-trace="${CSS.escape(String(entry.traceId))}"]`)?.addStep?.(entry.step);
+    if ((entry.event === "start" || entry.event === "end") && entry.trace?.channelId === thread.id) {
+      clearTimeout(S.threadReload);
+      S.threadReload = setTimeout(() => { if (location.hash === key) void refresh(); }, entry.event === "end" ? 600 : 200);
+    }
+  };
+  // The live events carry the turns; a slow check catches a session that starts or stops without one.
+  S.timers.push(setInterval(() => { if (!document.hidden) void refresh(); }, 15000));
 }
 
 function threadManage(thread) {
-  const name = h("input", { type: "text", class: "thread-name", value: thread.name, "aria-label": tr("Nome del thread"), maxlength: "100" });
+  const name = h("input", { type: "text", class: "thread-name", value: thread.name, "data-name": thread.name, "aria-label": tr("Nome del thread"), maxlength: "100" });
   return h("div", { class: "thread-manage" },
     name,
-    btn("Rinomina", { cls: "sm", onclick: () => guard(api("/api/threads/rename", { method: "POST", body: { id: thread.id, name: name.value } }), "Nome aggiornato").then(() => renderThreadPage(thread.id)) }),
-    !thread.closed ? btn("Chiudi", { icon: "stop", cls: "sm", onclick: () => guard(api("/api/threads/close", { method: "POST", body: { id: thread.id } }), "Thread chiuso").then(() => renderThreadPage(thread.id)) }) : null);
+    btn("Rinomina", { cls: "sm", onclick: () => guard(api("/api/threads/rename", { method: "POST", body: { id: thread.id, name: name.value } }), "Nome aggiornato").then((done) => { if (done) name.dataset.name = name.value; threadsRefresh(); }) }),
+    !thread.closed ? btn("Chiudi", { icon: "stop", cls: "sm", onclick: () => guard(api("/api/threads/close", { method: "POST", body: { id: thread.id } }), "Thread chiuso").then(threadsRefresh) }) : null);
 }
 
 async function render() {
