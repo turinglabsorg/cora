@@ -4787,6 +4787,53 @@ describe("talking with the agents", () => {
     assert.equal(reminders().length, 1, "nobody asks again after the goodbye");
   });
 
+  test("closing answers to the idle question persist departure, survive restart and reopen only when called", async () => {
+    const THREAD = "1599000000000000803";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle closing answer" });
+    await sleep(100);
+    const said = () => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === "Olga").map((item) => item.content);
+    replies.set("Olga", () => ({ content: "Ricevuto." }));
+    try {
+      for (const message of ["si certo ciao", "@Olga ok tutto a posto"]) {
+        departures = () => [];
+        const before = said().length;
+        discord.say({ content: "@Olga controlla questa review", channel: THREAD });
+        await waitFor(() => said().length > before);
+        await quiet();
+        // Outside the idle question, completion acknowledgements keep listening.
+        discord.say({ content: "@Olga ok tutto a posto", channel: THREAD });
+        await waitFor(() => said().length > before + 1);
+        await quiet();
+        assert.deepEqual(app.orchestrator.engagements[THREAD]?.ids, [olga.id]);
+        await app.orchestrator.checkEngagements(app.orchestrator.engagements[THREAD].at + 30 * 60000);
+        const reminders = said().filter((text) => /30 minuti/.test(text)).length;
+        const answers = said().filter((text) => text === "Ricevuto.").length;
+        departures = (body) => {
+          const input = JSON.parse(body.messages[1].content);
+          assert.equal(input.reminded, true);
+          assert.equal(input.message, message);
+          assert.match(input.history.at(-1).content, /Devo rimanere in ascolto/);
+          return [olga.id];
+        };
+        discord.say({ content: message, channel: THREAD });
+        await waitFor(() => app.store.value("conversationEngagements")[THREAD] === null);
+        await quiet();
+        assert.equal(said().at(-1), "Ho smesso di ascoltare questa conversazione.");
+        assert.equal(said().filter((text) => text === "Ricevuto.").length, answers, "a closing answer cannot start another model turn");
+        app.orchestrator.states.delete(THREAD);
+        app.orchestrator.engagements = app.store.value("conversationEngagements");
+        await app.orchestrator.checkEngagements(Date.now() + 90 * 60000);
+        assert.equal(said().filter((text) => /30 minuti/.test(text)).length, reminders);
+        departures = () => [];
+        discord.say({ content: "altra nota senza chiamata", channel: THREAD });
+        await sleep(1500);
+        await quiet();
+        assert.equal(app.store.value("conversationEngagements")[THREAD], null);
+        assert.equal(said().filter((text) => text === "Ricevuto.").length, answers, "an untagged note cannot reengage the departed listener");
+      }
+    } finally { departures = null; }
+  });
+
   test("an agent at work is never asked whether it still wants to listen, and its own answers restart the count", async () => {
     const THREAD = "1599000000000000794";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle at work" });
