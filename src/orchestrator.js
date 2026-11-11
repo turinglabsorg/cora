@@ -1390,28 +1390,31 @@ export class Orchestrator {
     state.working.add(agent.id);
     this.log({ type: "settings", agentId: agent.id, channelId: state.id, text: "riprende il lavoro interrotto dal riavvio" });
     let replyTo;
+    const working = this.showWorking(state, agent, null);
     try {
       await this.ensureHistory(state);
       replyTo = trace.steps?.findLast((step) => step.replyTo)?.replyTo
         || state.history.findLast((item) => ["human", "owner"].includes(item.kind) && item.at <= Date.parse(trace.startedAt));
+      const delegationAuthorized = replyTo?.kind === "owner" || Boolean(replyTo?.delegated) || this.authorized(replyTo, agent, state);
       const english = this.store.settings.language === "en";
-      await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.", undefined, undefined, this.replyDelivery(replyTo));
+      await this.postAs(agent, state, english ? "Cora restarted while I was working: picking up where I left off." : "Cora si è riavviata mentre lavoravo: riprendo da dove ero.", undefined, undefined, { ...this.replyDelivery(replyTo), delegationAuthorized });
       const occupied = await this.withSession(agent, state.id, trace.kind || "chat", () => this.brain.resumeTurn({
         agent, trace, channel: this.turnChannel(state.id), replyTo,
-        postFile: (file, caption, options = {}) => this.postAs(agent, state, caption, file, options.traceId, this.replyDelivery(options.replyTo || replyTo)),
-        say: (text, target = state.id, options = {}) => this.postDirect(agent, state, target, text, { ...options, ...(target === state.id ? this.replyDelivery(options.replyTo || replyTo) : {}) }),
+        postFile: (file, caption, options = {}) => this.postAs(agent, state, caption, file, options.traceId, { ...this.replyDelivery(options.replyTo || replyTo), delegationAuthorized }),
+        say: (text, target = state.id, options = {}) => this.postDirect(agent, state, target, text, { ...options, delegationAuthorized, ...(target === state.id ? this.replyDelivery(options.replyTo || replyTo) : {}) }),
         inbox: this.inbox(state, state.history), routine,
         onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
       }));
       if (occupied.busy) return;
       const result = occupied.value;
-      if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId, { ...this.replyDelivery(result.replyTo || replyTo), returnToAgentId: !result.stopped && !result.asked ? this.colleagueRequester(replyTo, state) : "", delegationAuthorized: Boolean(replyTo?.delegated) });
+      if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId, { ...this.replyDelivery(result.replyTo || replyTo), returnToAgentId: !result.stopped && !result.asked ? this.colleagueRequester(replyTo, state) : "", delegationAuthorized });
       else this.returnSpokenResult(state, agent, replyTo, result, Date.parse(trace.startedAt));
       this.acknowledge(state, agent.id, result.handledMessageIds || []);
     } catch (error) {
       if (error.userMessage) await this.postAs(agent, state, error.userMessage, undefined, undefined, this.replyDelivery(replyTo)).catch(() => {});
       throw error;
     } finally {
+      working.stop();
       state.working.delete(agent.id);
       this.threadWork.delete(state.id, agent.id);
       if (state.humanQueue.size) this.schedule(state, 300);
