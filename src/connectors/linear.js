@@ -1,7 +1,9 @@
 import { count, defined, fail, FILE_PARAMS, list, localFile, pick, text } from "./tooling.js";
 
 /**
- * Linear: a personal API key made by the person who connects it. Authorised agents get
+ * Linear: a personal API key made by the person who connects it (writes carry that
+ * person's name), or an OAuth app authorised with actor=app (each issue and comment
+ * carries the name and avatar of the agent that wrote it). Authorised agents get
  * one tool per action (linear_create_issue, linear_comment, …); every tool sends its
  * GraphQL with Cora's key and resolves teams, states, labels, people, projects and
  * cycles by name, so an agent never needs the ids first.
@@ -26,7 +28,7 @@ const ISSUE_FULL = `id identifier title description url priority priorityLabel e
 const PROJECT_LIST = "id name url description status { name type } lead { name } startDate targetDate progress teams(first: 10) { nodes { key } }";
 
 /** The Linear GraphQL client a tool works with: Cora's key and the API from api. */
-function client({ token, request, api }) {
+function client({ token, request, api, record, agent }) {
   const authorization = token.startsWith("lin_api_") ? token : `Bearer ${token}`;
   const gql = async (query, variables) => {
     const { status, data } = await request(api.linear, { method: "POST", headers: { Authorization: authorization, "Content-Type": "application/json" }, body: { query, variables } });
@@ -35,7 +37,11 @@ function client({ token, request, api }) {
     if (status >= 400 || !data?.data) fail(`Linear answered ${status}`);
     return data.data;
   };
-  return { gql, authorization };
+  // An app authorised with actor=app writes as itself; Linear then shows the agent's name and avatar on what it creates.
+  const signature = record?.mode === "oauth" && agent?.name
+    ? defined({ createAsUser: String(agent.name).slice(0, 80), displayIconUrl: /^https:\/\//.test(agent.avatarUrl || "") ? agent.avatarUrl : undefined })
+    : {};
+  return { gql, authorization, signed: (input) => ({ ...input, ...signature }) };
 }
 
 const flat = (value) => {
@@ -166,7 +172,7 @@ async function upload(args, ctx) {
 const TOOLS = [
   {
     name: "linear_teams",
-    description: (record) => `Linear${record.workspace ? `, workspace ${record.workspace}` : ""}${record.account ? `, acting as ${record.account}` : ""}. Start here: who the key acts as and every team with its key, workflow states, labels and active cycle. Cora adds the key to every Linear tool; you never see it.`,
+    description: (record) => `Linear${record.workspace ? `, workspace ${record.workspace}` : ""}${record.mode === "oauth" ? `, through the app ${record.account || "Cora"}: issues and comments you create show your own name and avatar` : record.account ? `, acting as ${record.account}` : ""}. Start here: who the key acts as and every team with its key, workflow states, labels and active cycle. Cora adds the key to every Linear tool; you never see it.`,
     parameters: { type: "object", properties: { team: { type: "string", description: "optional: only this team key" } } },
     async run(args, ctx) {
       // Linear caps a query's complexity: teams with their states, then the labels in a second call.
@@ -273,7 +279,7 @@ const TOOLS = [
     async run(args, ctx) {
       if (!text(args.title)) fail("title is required");
       const team = await teamOf(args.team, ctx);
-      const input = { teamId: team.id, ...await issueInput(args, team, ctx) };
+      const input = ctx.linear.signed({ teamId: team.id, ...await issueInput(args, team, ctx) });
       const data = await ctx.linear.gql(`mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { ${ISSUE_LIST} } } }`, { input });
       if (!data.issueCreate?.success) fail("Linear did not create the issue");
       return flat(data.issueCreate.issue);
@@ -300,11 +306,11 @@ const TOOLS = [
   {
     name: "linear_comment",
     write: true,
-    description: "Linear: add a Markdown comment to an issue, or a reply to one of its comments. It carries the connected account's name.",
+    description: (record) => `Linear: add a Markdown comment to an issue, or a reply to one of its comments. ${record?.mode === "oauth" ? "It shows your name and avatar (via the Cora app)." : "It carries the connected account's name."}`,
     parameters: { type: "object", properties: { issue: ISSUE, body: { type: "string", description: "Markdown" }, reply_to: { type: "string", description: "optional comment id to answer" } }, required: ["issue", "body"] },
     async run(args, ctx) {
       const found = await issueId(args.issue, ctx);
-      const input = defined({ issueId: found.id, body: text(args.body) || fail("body is required"), parentId: args.reply_to ? text(args.reply_to, 100) : undefined });
+      const input = ctx.linear.signed(defined({ issueId: found.id, body: text(args.body) || fail("body is required"), parentId: args.reply_to ? text(args.reply_to, 100) : undefined }));
       const data = await ctx.linear.gql("mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id url createdAt user { name } } } }", { input });
       if (!data.commentCreate?.success) fail("Linear did not add the comment");
       return { issue: found.identifier, ...flat(data.commentCreate.comment) };
@@ -334,7 +340,7 @@ const TOOLS = [
       if (!args.issue) return { filename: file.filename, assetUrl: file.assetUrl, markdown };
       const found = await issueId(args.issue, ctx);
       const body = [text(args.comment), markdown].filter(Boolean).join("\n\n");
-      const data = await ctx.linear.gql("mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id url } } }", { input: { issueId: found.id, body } });
+      const data = await ctx.linear.gql("mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id url } } }", { input: ctx.linear.signed({ issueId: found.id, body }) });
       if (!data.commentCreate?.success) fail("Linear did not add the comment with the file");
       return { issue: found.identifier, filename: file.filename, assetUrl: file.assetUrl, comment: data.commentCreate.comment };
     },
@@ -435,15 +441,36 @@ export const linear = {
   id: "linear",
   name: "Linear",
   secret: "CORA_LINEAR_KEY",
+  appSecrets: ["CORA_LINEAR_CLIENT_ID", "CORA_LINEAR_CLIENT_SECRET"],
   label: "workspace",
+  oauth: {
+    authorize: "https://linear.app/oauth/authorize",
+    token: "https://api.linear.app/oauth/token",
+    scopes: ["read", "write"],
+    scopeSeparator: ",",
+    params: { actor: "app", prompt: "consent" },
+    clientAuth: "body",
+    async identify({ access, request, api }) {
+      const { data } = await request(api.linear, { method: "POST", headers: { Authorization: `Bearer ${access}`, "Content-Type": "application/json" }, body: { query: "query { viewer { name } organization { name urlKey } }" } });
+      if (!data?.data?.organization?.urlKey) fail("Linear did not confirm the workspace");
+      return { workspace: String(data.data.organization.urlKey).slice(0, 80), account: String(data.data.viewer?.name || "").slice(0, 120) };
+    },
+  },
   card: {
     icon: "list",
     description: "Gli agenti leggono e creano issue nel workspace che colleghi.",
     meta: "Linear · Issue e progetti",
+    writes: {
+      oauth: "Issue e commenti mostrano nome e avatar dell'agente che li scrive, tramite l'app.",
+      key: "Issue e commenti risultano scritti dalla persona che ha creato la chiave.",
+    },
     intro: "Gli agenti leggono e creano issue nel workspace che colleghi. La chiave resta nella cassaforte, mai nel pannello.",
     modes: [{
       id: "key",
+      label: "Chiave personale",
+      intro: "Con la chiave personale issue e commenti degli agenti risultano scritti da te, la persona che ha creato la chiave.",
       notice: "Servono due dati, che si trovano in Linear: il workspace e una chiave API personale.",
+      body: { mode: "key" },
       rows: [
         { title: "1. Il workspace", hint: "Il nome che compare in linear.app/<workspace>, per esempio turinglabs.", field: { name: "workspace", type: "text", placeholder: "turinglabs", label: "Workspace di Linear" } },
         { title: "2. La chiave API", steps: [
@@ -452,6 +479,24 @@ export const linear = {
           ["incollala qui: Cora la verifica su Linear e la salva nella cassaforte come ", { code: "CORA_LINEAR_KEY" }, ", senza mostrarla più."],
         ], field: { name: "token", type: "password", label: "Chiave API di Linear" }, submit: "Verifica e collega" },
         { title: "3. Gli agenti", hint: "Dopo il collegamento scegli quali agenti possono usare la chiave.", note: "Il passo si sblocca appena il workspace è collegato." },
+      ],
+    }, {
+      id: "oauth",
+      label: "App OAuth",
+      ready: "app",
+      intro: "Con un'app OAuth Linear ogni issue e ogni commento mostra nome e avatar dell'agente che l'ha scritto (per esempio «Nico (via Cora)»), senza occupare posti nel workspace.",
+      notice: "Servono client ID e client secret di un'app OAuth creata in Linear; poi la autorizzi da qui come app del workspace e Cora salva i token nella cassaforte.",
+      body: { mode: "oauth" },
+      rows: [
+        { title: "L'app Linear", steps: [
+          ["apri ", { href: "https://linear.app/settings/api/applications/new", text: "Linear → Settings → API → OAuth applications" }, " e crea una nuova app (nome e icona sono quelli dell'app, per esempio Cora);"],
+          ["in Callback URLs aggiungi l'indirizzo di ritorno di Cora mostrato qui sotto, ", { code: "…/connectors/oauth/linear/callback" }, ";"],
+          ["copia client ID e client secret e incollali qui: finiscono nella cassaforte come ", { code: "CORA_LINEAR_CLIENT_ID" }, " e ", { code: "CORA_LINEAR_CLIENT_SECRET" }, ";"],
+          "poi premi «Autorizza Linear»: serve un amministratore del workspace, perché l'app si installa come app del workspace.",
+        ], fields: [
+          { name: "clientId", type: "text", title: "Client ID", label: "Client ID dell'app Linear" },
+          { name: "clientSecret", type: "password", title: "Client secret", label: "Client secret dell'app Linear" },
+        ], submit: "Salva l'app" },
       ],
     }],
   },
