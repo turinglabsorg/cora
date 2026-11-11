@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { asksToStop, claimsWork, cleanReply, deliveryNote } from "../src/brain.js";
+import { Brain, asksToStop, claimsWork, cleanReply, deliveryNote } from "../src/brain.js";
+import { executeTool } from "../src/tools.js";
 import { Channels } from "../src/channels.js";
 import { DIRECT_MESSAGE_INTENTS, Discord, LISTENING_INTENTS, splitMessage } from "../src/discord.js";
 import { LLM } from "../src/llm.js";
@@ -11,7 +12,7 @@ import { idleDecline, listenExit, listenersLeaving, mentions, spokenTo, tagged }
 import { cronMatches, nextRuns, parseCron, zonedParts } from "../src/scheduler.js";
 import { drawAvatar } from "../src/avatar.js";
 import { encodePng, pngSize } from "../src/png.js";
-import { SHARED, Store, ftsQuery } from "../src/store.js";
+import { SHARED, Store, decisionChain, sanitizeSettings, ftsQuery } from "../src/store.js";
 import { Traces } from "../src/traces.js";
 import { redactSecrets } from "../src/company-brain.js";
 import { panelHarness } from "./panel.js";
@@ -1124,4 +1125,61 @@ describe("who leaves a conversation", () => {
 test("the answers that decline the thirty-minute question", () => {
   for (const text of ["no", "No ciao a dopo", "no grazie", "ciao!", "a dopo", "vai pure", "basta così", "nope", "<@123> no"]) assert.ok(idleDecline(text), text);
   for (const text of ["sì", "si resta", "no aspetta", "no, resta qui", "no ma continua", "ok", "nonna", "ciaone resta", ""]) assert.ok(!idleDecline(text), text);
+});
+
+
+describe("conversation departure model chain", () => {
+  const agents = [{ id: "nico", name: "Nico" }, { id: "vera", name: "Vera" }];
+  test("uses its own account and backup after provider failure and invalid JSON", async () => {
+    const calls = [], logs = [];
+    const brain = {
+      store: { settings: { defaultModel: "ollama/unavailable", brainModel: "grok/must-not-run", brainBackups: [{ model: "grok/must-not-run-either" }], decisionModel: "grok/primary", decisionSubscriptionId: "sub_primary", decisionCredentialId: "cr_primary", decisionBackups: [{ model: "gemini/invalid", subscriptionId: "sub_invalid" }, { model: "ollama/backup", credentialId: "cr_backup" }] } },
+      log: (entry) => logs.push(entry),
+      llm: {
+        isAgentic: (model) => !model.startsWith("ollama/"),
+        runAgent: async (options) => { calls.push(options); if (options.model === "grok/primary") throw new Error("monthly limit"); return { text: "not JSON" }; },
+        chat: async (options) => { calls.push(options); return { text: JSON.stringify({ leave: ["nico", "unrelated"] }) }; },
+      },
+    };
+    const result = await Brain.prototype.disengagement.call(brain, { message: "Nico, puoi congedarti", agents, reminded: true });
+    assert.deepEqual(result, ["nico"]);
+    assert.deepEqual(calls.map(({ model, subscriptionId, credentialId }) => [model, subscriptionId, credentialId]), [["grok/primary", "sub_primary", "cr_primary"], ["gemini/invalid", "sub_invalid", ""], ["ollama/backup", undefined, "cr_backup"]]);
+    assert.equal(JSON.parse(calls[0].prompt).reminded, true);
+    assert.equal(logs.length, 2);
+  });
+  test("an empty leave decision is authoritative and does not call another model", async () => {
+    let count = 0;
+    const brain = { store: { settings: { decisionModel: "ollama/primary", decisionBackups: [{ model: "ollama/backup" }] } }, llm: { isAgentic: () => false, chat: async () => { count++; return { text: '{"leave":[]}' }; } } };
+    assert.deepEqual(await Brain.prototype.disengagement.call(brain, { message: "grazie, resta qui", agents }), []);
+    assert.equal(count, 1);
+  });
+  test("all unavailable models return a distinct failure for the emergency path", async () => {
+    const brain = { store: { settings: { decisionModel: "ollama/unavailable" } }, llm: { isAgentic: () => false, chat: async () => { throw new Error("unavailable"); } } };
+    assert.equal(await Brain.prototype.disengagement.call(brain, { message: "a dopo", agents }), null);
+  });
+});
+
+
+test("a closing farewell cannot end another conversation or a non-human turn", async () => {
+  let calls = 0;
+  const ctx = { agent: {}, channelId: "thread-current", canEndConversation: true, say: async () => { calls++; return []; } };
+  for (const args of [{ text: "Goodbye", end_conversation: true, channel_id: "thread-other" }]) {
+    assert.match((await executeTool({ name: "say", args }, ctx)).text, /^error:/);
+  }
+  assert.match((await executeTool({ name: "say", args: { text: "Goodbye", end_conversation: true } }, { ...ctx, canEndConversation: false })).text, /^error:/);
+  assert.equal(calls, 0);
+});
+
+
+test("decision settings keep their model, accounts and reserves separate from the Brain", () => {
+  const previous = sanitizeSettings({ decisionModel: "gemini/flash", decisionSubscriptionId: "sub_123456789abc", decisionBackups: [{ model: "ollama/small", credentialId: "cr_123456789abc" }], brainModel: "grok/large" });
+  const next = sanitizeSettings({ brainModel: "claude/new", defaultModel: "ollama/other" }, previous);
+  assert.deepEqual(decisionChain(next), decisionChain(previous));
+  assert.equal(next.decisionModel, "gemini/flash");
+  assert.equal(next.decisionSubscriptionId, "sub_123456789abc");
+  const cleaned = sanitizeSettings({ decisionSubscriptionId: "invalid", decisionCredentialId: "invalid", decisionBackups: [{ model: "ollama/small" }, { model: "ollama/small" }, { model: "" }] });
+  assert.equal(cleaned.decisionSubscriptionId, "");
+  assert.equal(cleaned.decisionCredentialId, "");
+  assert.equal(cleaned.decisionBackups.length, 1);
+  assert.equal(decisionChain(cleaned)[0].model, "ollama/gpt-oss:20b");
 });

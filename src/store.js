@@ -33,6 +33,10 @@ const DEFAULT_SETTINGS = {
   maxRepliesPerRound: 2,
   historySize: 30,
   defaultModel: "ollama/deepseek-v4.1-flash",
+  decisionModel: "ollama/gpt-oss:20b",
+  decisionSubscriptionId: "",
+  decisionCredentialId: "",
+  decisionBackups: [],
   // Goal mode is off until it yields to the owner: a goal it cannot drop fights whoever asked for it.
   goalMode: false,
   useResidentSubscriptions: true,
@@ -327,6 +331,8 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     coOwnerIds: [...new Set((Array.isArray(merged.coOwnerIds) ? merged.coOwnerIds : []).map(id => cleanText(id, 160).trim()).filter(id => id && id !== merged.brainOwnerId))].slice(0, 20),
     brainSource: merged.brainSource === "external" ? "external" : "internal",
     brainOwnerId: cleanText(merged.brainOwnerId, 160).trim(),
+    // Sealed: only its own card, diary and memories, and only what it is given by name.
+    sealed: Boolean(merged.sealed),
     // Ollama decides the card when it starts, so one server per card is how an agent picks one.
     ollamaHost: cleanUrl(merged.ollamaHost),
     chattiness: clampNumber(merged.chattiness, 0, 1, 0.5),
@@ -392,6 +398,17 @@ export function brainChain(settings) {
   });
 }
 
+export function decisionChain(settings) {
+  const first = { model: settings.decisionModel || DEFAULT_SETTINGS.decisionModel, subscriptionId: settings.decisionSubscriptionId || "", credentialId: settings.decisionCredentialId || "" };
+  const seen = new Set();
+  return [first, ...(settings.decisionBackups || [])].filter((entry) => {
+    const key = `${entry.model}|${entry.subscriptionId || ""}|${entry.credentialId || ""}`;
+    if (!entry.model || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function cleanPermissions(list) {
   const seen = new Set();
   const grants = [];
@@ -416,6 +433,10 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
     maxRepliesPerRound: Math.round(clampNumber(merged.maxRepliesPerRound, 1, 6, 2)),
     historySize: Math.round(clampNumber(merged.historySize, 5, 100, 30)),
     defaultModel: checkModel(merged.defaultModel) || DEFAULT_SETTINGS.defaultModel,
+    decisionModel: checkModel(merged.decisionModel) || DEFAULT_SETTINGS.decisionModel,
+    decisionSubscriptionId: cleanAccountId(merged.decisionSubscriptionId, SUBSCRIPTION_ID),
+    decisionCredentialId: cleanAccountId(merged.decisionCredentialId, CREDENTIAL_ID),
+    decisionBackups: cleanBrainBackups(merged.decisionBackups),
     goalMode: Boolean(merged.goalMode),
     useResidentSubscriptions: Boolean(merged.useResidentSubscriptions),
     sleepHour: Math.round(clampNumber(merged.sleepHour, 0, 23, 4)),

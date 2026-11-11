@@ -413,6 +413,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     return agent ? knowledge.ownerId(agent) : "";
   };
   const ownsEntry = (entry, viewer) => {
+    const candidateId = entry.agentId || entry.trace?.agentId || (entry.room?.startsWith("web-ag_") ? entry.room.slice(4) : "") || (entry.channelId?.startsWith("web-ag_") ? entry.channelId.slice(4) : "");
+    if (knowledge?.isSealed(store.agent(candidateId))) return knowledge.canManage(store.agent(candidateId), viewer);
     if (!knowledge?.ownerMemory) return true;
     const personalRoom = isSalotto(entry.room) || isSalotto(entry.channelId) || isSalotto(entry.trace?.channelId);
     const agentId = entry.agentId || entry.trace?.agentId || (entry.room?.startsWith("web-ag_") ? entry.room.slice(4) : "");
@@ -428,7 +430,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     ({ id, provider, label, email, plan, status, resident, installed, usage: subscriptions.usage.get(id) }));
   const providerQuotasFor = (viewer) => viewer.role === "owner" ? subscriptions.usage.connections().filter((record) => canReadQuota(record, viewer)) : [];
   const checkAgentMemory = (id, viewer) => {
-    if (knowledge?.ownerMemory && !knowledge.canManage(store.agent(id), viewer)) throw new HttpError(403, "Questi dati appartengono al proprietario dell'agente.");
+    if ((knowledge?.ownerMemory || knowledge?.isSealed(store.agent(id))) && !knowledge.canManage(store.agent(id), viewer)) throw new HttpError(403, "Questi dati appartengono al proprietario dell'agente.");
   };
 
   const routineView = (routine) => {
@@ -492,7 +494,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       res.once("finish", () => { if (res.statusCode < 400) { try { store.auditAccess(user.id, action); } catch {} } });
     }
     const scopedAgent = /^\/api\/agents\/([\w-]+)(?:\/|$)/.exec(path);
-    if (scopedAgent && knowledge?.ownerMemory && !ownerTransport(user, path)) checkAgentMemory(scopedAgent[1], user);
+    if (scopedAgent && (knowledge?.isSealed(store.agent(scopedAgent[1])) || (knowledge?.ownerMemory && !ownerTransport(user, path)))) checkAgentMemory(scopedAgent[1], user);
     if (path === "/api/mcp/tokens") {
       if (method === "GET") return send(res, 200, panelMcp.view(user, req));
       if (method === "POST") return send(res, 201, panelMcp.create(user, await readJson(req, 4096)));
@@ -1292,6 +1294,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (user?.role !== "owner") delete body.ownerId;
         delete body.brainSource;
         delete body.brainOwnerId;
+        // The seal is set in the agent's Brain, where only its owners reach; named grants stay.
+        delete body.sealed;
         delete body.coOwnerIds; delete body.ownerIds;
         if (body.core !== undefined) checkAgentMemory(agent.id, user);
         if (knowledge?.ownerMemory && body.subscriptionId && body.subscriptionId !== agent.subscriptionId && store.subscription(body.subscriptionId)?.connectedBy?.id !== user.id) throw new HttpError(403, "Subscription privata.");
@@ -1343,7 +1347,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const agent = store.agent(match[1]);
       if (!agent) throw new HttpError(404, "agente non trovato");
       const [, , section, itemId] = match;
-      if (knowledge?.ownerMemory && !knowledge.canManage(agent, user)) throw new HttpError(403, "Solo il proprietario dell'agente può accedere alla sua memoria.");
+      const sealed = Boolean(knowledge?.isSealed(agent));
+      if ((knowledge?.ownerMemory || sealed) && !knowledge.canManage(agent, user)) throw new HttpError(403, "Solo il proprietario dell'agente può accedere alla sua memoria.");
       if (agent.brainSource === "external") {
         if (!knowledge?.canManage(agent, user)) throw new HttpError(403, "Solo il proprietario dell'agente può accedere al suo Brain.");
         if (section === "memories" && !itemId && method === "GET") return send(res, 200, { source: "external", readonly: true, knowledge: knowledge.view(agent, user), core: "", coreHistory: [], facts: [], shared: [], brain: true, diary: [], lastSleepAt: "", sleeping: false });
@@ -1354,11 +1359,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           source: "internal", knowledge: knowledge?.view(agent, user),
           core: agent.core,
           coreHistory: store.coreHistory(agent.id),
-          facts: knowledge?.ownerMemory ? knowledge.ownerKeys(agent.id).flatMap((key) => store.memories(key)) : store.memories(agent.id),
+          facts: knowledge?.ownerMemory || sealed ? knowledge.ownerKeys(agent.id).flatMap((key) => store.memories(key)) : store.memories(agent.id),
+          sealed,
           ownerMemory: Boolean(knowledge?.ownerMemory),
           // With a company brain, what everyone knows lives there: once the librarian has read the shared memories, agents no longer get them.
-          shared: knowledge?.ownerMemory || companyBrain?.holdsShared ? [] : store.memories(SHARED),
-          brain: Boolean(companyBrain?.enabled),
+          shared: knowledge?.ownerMemory || sealed || companyBrain?.holdsShared ? [] : store.memories(SHARED),
+          brain: Boolean(companyBrain?.enabled) && !sealed,
           diary: store.diary(agent.id),
           lastSleepAt: agent.lastSleepAt,
           sleeping: brain.sleeping.has(agent.id),
@@ -1366,19 +1372,19 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       if (section === "memories" && !itemId && method === "POST") {
         const body = await readJson(req);
-        if (body.shared && companyBrain?.enabled) return send(res, 201, { noted: await noteForBrain(body.text, agent, user) });
-        const memory = store.addMemory(knowledge?.ownerMemory ? knowledge.memoryKey(agent) : body.shared ? SHARED : agent.id, body.text, "manual", { pinned: body.pinned });
+        if (body.shared && companyBrain?.enabled && !sealed) return send(res, 201, { noted: await noteForBrain(body.text, agent, user) });
+        const memory = store.addMemory(knowledge?.ownerMemory || sealed ? knowledge.memoryKey(agent) : body.shared ? SHARED : agent.id, body.text, "manual", { pinned: body.pinned });
         return send(res, 201, memory);
       }
       if (section === "memories" && itemId) {
         const found = store.findMemory(itemId);
-        if (!found || (knowledge?.ownerMemory ? !knowledge.ownerKeys(agent.id).includes(found.key) : found.key !== agent.id && found.key !== SHARED)) throw new HttpError(404, "ricordo non trovato");
+        if (!found || (knowledge?.ownerMemory || sealed ? !knowledge.ownerKeys(agent.id).includes(found.key) : found.key !== agent.id && found.key !== SHARED)) throw new HttpError(404, "ricordo non trovato");
         if (method === "PUT") {
           const body = await readJson(req);
           let key = found.key;
           // Sharing a memory, with a company brain, hands it to the librarian: the agent keeps its own copy.
-          if (body.shared === true && key !== SHARED && companyBrain?.enabled) return send(res, 200, { ...found.memory, noted: await noteForBrain(found.memory.text, agent, user) });
-          if (!knowledge?.ownerMemory && body.shared !== undefined && Boolean(body.shared) !== (key === SHARED)) {
+          if (body.shared === true && key !== SHARED && companyBrain?.enabled && !sealed) return send(res, 200, { ...found.memory, noted: await noteForBrain(found.memory.text, agent, user) });
+          if (!knowledge?.ownerMemory && !sealed && body.shared !== undefined && Boolean(body.shared) !== (key === SHARED)) {
             const target = body.shared ? SHARED : agent.id;
             store.moveMemory(key, itemId, target);
             key = target;
@@ -1460,7 +1466,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     if (match && method === "GET") {
       const trace = traces ? traces.get(match[1]) : store.trace(match[1]);
       if (!trace) throw new HttpError(404, "ragionamento non trovato");
-      if (knowledge?.ownerMemory && !ownsEntry(trace, user)) throw new HttpError(403, "Questo ragionamento appartiene a un altro proprietario.");
+      if (!ownsEntry(trace, user)) throw new HttpError(403, "Questo ragionamento appartiene a un altro proprietario.");
       return send(res, 200, trace);
     }
 
@@ -1809,7 +1815,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         } else {
           const sha = match[2].slice("objects/".length);
           // A file the commit replaced or removed: what the reviewer compares against.
-          if (artifacts.commitHolds(commit.id, sha)) file = { sha, path: url.searchParams.get("name") || sha, size: statSync(artifacts.objectPath(sha)).size };
+          const held = artifacts.objectInCommit(commit.id, sha);
+          if (held) file = { ...held, path: url.searchParams.get("name") || sha };
         }
         if (!file) throw new HttpError(404, "file non trovato");
         return inertFile(req, res, file, url.searchParams.get("download") === "1");
@@ -1940,12 +1947,12 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   }
 
   /** One stored file for the panel: media inline (with ranges), text as plain text, the rest as a download. */
-  function inertFile(req, res, file, download) {
+  async function inertFile(req, res, file, download) {
     const name = file.path.split("/").at(-1) || "file";
     const extension = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
     let type = download ? "" : INERT_MEDIA[extension] || "";
     if (!type && !download && file.size <= 2 * 1024 * 1024) {
-      const data = artifacts.readObject(file.sha);
+      const data = await artifacts.readFile(file);
       if (data && !data.subarray(0, 8192).includes(0) && TEXTUAL.test(data.subarray(0, 8192).toString("utf8"))) type = "text/plain; charset=utf-8";
     }
     const headers = {
@@ -1968,11 +1975,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       res.writeHead(206, { ...headers, "Content-Range": `bytes ${start}-${end}/${file.size}`, "Content-Length": end - start + 1 });
       if (req.method === "HEAD") return res.end();
-      return artifacts.stream(file.sha, { start, end }).on("error", () => res.destroy()).pipe(res);
+      return artifacts.stream(file.sha, { start, end }, file.storage).on("error", () => res.destroy()).pipe(res);
     }
     res.writeHead(200, { ...headers, "Content-Length": file.size });
     if (req.method === "HEAD") return res.end();
-    artifacts.stream(file.sha).on("error", () => res.destroy()).pipe(res);
+    artifacts.stream(file.sha, null, file.storage).on("error", () => res.destroy()).pipe(res);
   }
 
   /**

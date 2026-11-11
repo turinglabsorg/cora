@@ -255,7 +255,7 @@ export class Orchestrator {
   agentsFor(channelId) {
     if (isWebRoom(channelId)) {
       const only = roomAgentId(channelId);
-      return this.store.agents().filter((agent) => agent.enabled && (!only || agent.id === only) && (!this.brain.knowledge?.ownerMemory || only || channelId === ownerRoom(this.brain.knowledge.ownerId(agent))));
+      return this.store.agents().filter((agent) => agent.enabled && (!only || agent.id === only) && (only || !agent.sealed) && (!this.brain.knowledge?.ownerMemory || only || channelId === ownerRoom(this.brain.knowledge.ownerId(agent))));
     }
     const dm = this.dmAgentId(channelId);
     if (dm) {
@@ -267,7 +267,9 @@ export class Orchestrator {
     return this.store.agents().filter((agent) => {
       if (!agent.enabled || !this.channels.agentOn(agent, transport)) return false;
       const chosen = agent.channelIds.filter((id) => transportOf(id) === transport);
-      return !chosen.length || chosen.includes(channelId) || Boolean(info?.parentId && chosen.includes(info.parentId));
+      // Listening everywhere stops at a channel a sealed agent was put in alone.
+      if (!chosen.length) return !agent.sealed && !this.brain.knowledge?.sealedChannel(channelId, info?.parentId ?? undefined);
+      return chosen.includes(channelId) || Boolean(info?.parentId && chosen.includes(info.parentId));
     });
   }
 
@@ -627,11 +629,11 @@ export class Orchestrator {
     const calls = (agent) => tagged(item.content, agent.name) || (item.voice && spokenTo(item.content, agent.name));
     const named = available.filter(calls).map((agent) => agent.id);
     const candidates = available.filter((agent) => previous.includes(agent.id) || named.includes(agent.id));
-    // Ask the model only so a slow judgment still holds the turn; it does not choose who leaves.
-    if (previous.length && listenExit(item.content)) await this.brain.disengagement({ message: item.content, agents: candidates, history: state.history.filter((entry) => entry.id !== item.id) });
-    const exits = listenersLeaving(item.content, candidates);
+    const recipientsForExit = named.length ? candidates.filter((agent) => named.includes(agent.id)) : candidates;
+    const decision = recipientsForExit.length ? await this.brain.disengagement({ message: item.content, agents: recipientsForExit, history: state.history.filter((entry) => entry.id !== item.id), reminded: Boolean(state.focus?.remindedAt) }) : null;
+    const exits = decision === null ? listenersLeaving(item.content, recipientsForExit) : recipientsForExit.filter((agent) => decision.includes(agent.id)).map((agent) => agent.id);
     // A "no" to the thirty-minute question lets go of whoever it was asked for, or of those it tags.
-    const declined = !exits.length && state.focus?.remindedAt && idleDecline(item.content) ? (named.length ? named : previous).filter((id) => previous.includes(id)) : [];
+    const declined = decision === null && !exits.length && state.focus?.remindedAt && idleDecline(item.content) ? (named.length ? named : previous).filter((id) => previous.includes(id)) : [];
     const leaving = exits.length ? exits : declined;
     // The answer to an agent's question comes from whoever it asked: the owner, or the person the agent belongs to.
     const askedBy = state.request ? this.store.agent(state.request.agentId) : null;
@@ -1126,8 +1128,8 @@ export class Orchestrator {
       const delegationAuthorized = queued ? queued.kind === "owner" || Boolean(queued.delegated) : state.ownerOrigin;
       const started = Date.now();
       if (computer) this.threadWork.set(state.id, agent.id);
-      const say = (text, target = state.id, { voice = false, replyTo = queued, traceId } = {}) =>
-        this.postDirect(agent, state, target, text, { voice, traceId, ...(target === state.id ? this.replyDelivery(replyTo) : {}), delegationAuthorized });
+      const say = (text, target = state.id, { voice = false, endConversation = false, replyTo = queued, traceId } = {}) =>
+        this.postDirect(agent, state, target, text, { voice, endConversation, traceId, ...(target === state.id ? this.replyDelivery(replyTo) : {}), delegationAuthorized });
       // An agent at work shows it the way a person does: the typing indicator, kept alive
       // for as long as the turn lasts. Where the platform has none — Slack gives bots
       // nothing — it marks the message it took instead. No line in the channel either way.
@@ -1457,12 +1459,25 @@ export class Orchestrator {
     return { stop: () => clearInterval(timer) };
   }
 
+  endListening(state, agentId) {
+    const focus = state.focus || this.engagements[state.id];
+    const ids = (focus?.ids || []).filter((id) => id !== agentId);
+    state.focus = ids.length ? { ...focus, ids, turn: (focus.turn || []).filter((id) => id !== agentId) } : null;
+    this.engagements[state.id] = state.focus;
+    this.store.setValue("conversationEngagements", this.engagements);
+    this.acknowledge(state, agentId, [...state.humanQueue.keys()]);
+  }
+
   async postDirect(agent, current, target, text, options = {}) {
+    if (options.endConversation) {
+      if (target && target !== current.id) throw new Error("only the current conversation can be ended");
+      this.endListening(current, agent.id);
+    }
     if (!target || target === current.id) return this.postAs(agent, current, text, undefined, undefined, options);
     let info = this.channels.listFor(agent).find((channel) => channel.id === target);
     // A thread under a channel it may write to counts too, even one opened since the list was made.
     if (!info && transportOf(target) === "discord") info = await this.threadFor(agent, target);
-    const allowed = target === (this.brain.knowledge?.ownerMemory ? ownerRoom(this.brain.knowledge.ownerId(agent)) : SALOTTO) || target === privateRoom(agent.id) || telegramBotAgent(target) === agent.id || Boolean(info);
+    const allowed = (!agent.sealed && target === (this.brain.knowledge?.ownerMemory ? ownerRoom(this.brain.knowledge.ownerId(agent)) : SALOTTO)) || target === privateRoom(agent.id) || telegramBotAgent(target) === agent.id || Boolean(info);
     if (!allowed || !this.channels.isActive(target)) throw new Error("destination not authorized; use list_channels");
     const state = this.state(target);
     if (transportOf(target) === "discord") {

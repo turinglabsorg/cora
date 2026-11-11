@@ -4260,6 +4260,43 @@ describe("talking with the agents", () => {
     assert.ok(!app.store.recentMessages(CHANNEL, 10).some((item) => item.content === "(messaggio vuoto)"), "system messages are not archived");
   });
 
+  test("Regia saves its own decision model, account and backups without changing the librarian", async (t) => {
+    const before = { ...app.store.settings };
+    t.after(() => app.store.updateSettings(before));
+    const response = await call("/api/settings", { method: "PUT", body: { brainModel: "ollama/library", brainBackups: [{ model: "ollama/library-backup" }], decisionModel: "ollama/small", decisionBackups: [] } });
+    assert.equal(response.status, 200);
+    const panel = panelHarness({ hash: "#/settings/regia", fetch: async (path, init = {}) => {
+      const result = await call(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+      return { ok: result.status < 400, status: result.status, json: async () => result.data };
+    } });
+    await panel.run("boot()");
+    const primary = panel.app.querySelectorAll("select").find((field) => field.attributes.name === "decisionModel");
+    assert.ok(primary);
+    primary.value = "gemini/test-model";
+    primary.parent.dispatch("change");
+    await waitFor(() => app.store.settings.decisionModel === "gemini/test-model");
+    const account = panel.app.querySelectorAll("select").find((field) => field.attributes["aria-label"] === "Account del decisore");
+    assert.ok(account);
+    account.value = subscriptionIds.gemini;
+    account.dispatch("change");
+    await waitFor(() => app.store.settings.decisionSubscriptionId === subscriptionIds.gemini);
+    const add = panel.app.querySelectorAll("button").find((button) => button.textContent === "Aggiungi riserva");
+    add.click();
+    await waitFor(() => app.store.settings.decisionBackups.length === 1);
+    const backup = panel.app.querySelectorAll("select").find((field) => field.attributes.name === "decisionBackup0");
+    backup.value = "ollama/small-backup";
+    backup.parent.dispatch("change");
+    await waitFor(() => app.store.settings.decisionBackups[0].model === "ollama/small-backup");
+    const saved = new Store(home);
+    assert.equal(saved.settings.decisionModel, "gemini/test-model");
+    assert.equal(saved.settings.decisionSubscriptionId, subscriptionIds.gemini);
+    assert.deepEqual(saved.settings.brainBackups, [{ model: "ollama/library-backup", subscriptionId: "", credentialId: "" }]);
+    assert.equal(saved.settings.brainModel, "ollama/library");
+    saved.close();
+    panel.app.querySelectorAll("button").find((button) => button.attributes.title === "Togli questa riserva").click();
+    await waitFor(() => app.store.settings.decisionBackups.length === 0);
+  });
+
   test("thread engagement survives silence and a fresh state; only an explicit disengagement ends it", async () => {
     const THREAD = "1599000000000000791";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "persistent listening" });
@@ -4296,6 +4333,128 @@ describe("talking with the agents", () => {
     assert.equal(posts("Olga").length, before, "disengagement survives a fresh state");
   });
 
+  test("an explicit detach ends listening before a model farewell and stays detached after restart", async () => {
+    const THREAD = "1599000000000000799";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "explicit detach regression" });
+    await sleep(100);
+    const said = () => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === "Olga").map((item) => item.content);
+    replies.set("Olga", () => ({ content: "Ricevuto, mi stacco. A posto 👍" }));
+    discord.say({ content: "@Olga, controlla questo", channel: THREAD });
+    await waitFor(() => said().length === 1);
+    await quiet();
+    assert.deepEqual(app.store.value("conversationEngagements")[THREAD].ids, [olga.id]);
+    departures = (body) => {
+      const input = JSON.parse(body.messages[1].content);
+      assert.equal(input.message, "ok, staccati dal thread a posto");
+      assert.deepEqual(input.agents.map((agent) => agent.id), [olga.id]);
+      return [olga.id];
+    };
+    discord.say({ content: "ok, staccati dal thread a posto", channel: THREAD });
+    await waitFor(() => said().length === 2);
+    await quiet();
+    assert.equal(said()[1], "Ho smesso di ascoltare questa conversazione.", "the structural exit replaces an unsupported model farewell");
+    assert.equal(app.store.value("conversationEngagements")[THREAD], null);
+    assert.equal(app.orchestrator.state(THREAD).humanQueue.size, 0);
+    const restored = new app.orchestrator.constructor(app.orchestrator);
+    assert.equal(restored.state(THREAD).focus, null, "a fresh orchestrator restores the persisted exit");
+    await restored.checkEngagements(Date.now() + 90 * 60000);
+    assert.equal(said().length, 2, "restart cannot send another thirty-minute question");
+    app.orchestrator.states.delete(THREAD);
+    discord.say({ content: "messaggio senza chiamata", channel: THREAD });
+    await sleep(1600);
+    await quiet();
+    assert.equal(said().length, 2, "an ordinary message cannot re-engage the departed agent");
+    departures = () => [];
+    discord.say({ content: "@Olga, torna qui", channel: THREAD });
+    await waitFor(() => said().length === 3);
+    await quiet();
+    assert.deepEqual(app.store.value("conversationEngagements")[THREAD].ids, [olga.id], "an explicit new call can re-engage the agent");
+  });
+
+  test("an agent atomically ends its own listening with its farewell when the classifier is unavailable", async () => {
+    const THREAD = "1599000000000000802";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "atomic farewell" });
+    await sleep(100);
+    departures = () => null;
+    const said = (name) => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === name).map((item) => item.content);
+    replies.set("Olga", () => ({ content: "Olga qui." }));
+    replies.set("Pino", () => ({ content: "Pino qui." }));
+    discord.say({ content: "@Olga, resta qui", channel: THREAD });
+    await waitFor(() => said("Olga").length === 1);
+    await quiet();
+    discord.say({ content: "@Pino, resta anche tu", channel: THREAD });
+    await waitFor(() => said("Pino").length === 1);
+    await quiet();
+    let calls = 0;
+    replies.set("Olga", () => {
+      calls++;
+      return { tool_calls: [{ function: { name: "say", arguments: { text: "Ok, alla prossima!", end_conversation: true } } }, { function: { name: "shell", arguments: { command: "must-not-run-after-farewell" } } }] };
+    });
+    const shell = app.boxes.shell;
+    let commands = 0;
+    app.boxes.shell = async () => { commands++; return { code: 0, output: "unexpected" }; };
+    try {
+      discord.say({ content: "@Olga puoi congedarti, qui abbiamo finito", channel: THREAD });
+      await waitFor(() => said("Olga").includes("Ok, alla prossima!"));
+      await quiet();
+      assert.equal(commands, 0, "the closing tool stops later work in the same response");
+      assert.equal(calls, 1);
+      assert.deepEqual(app.store.value("conversationEngagements")[THREAD].ids, [pino.id], "a farewell only disconnects its own speaker");
+      const trace = app.store.traces(olga.id, 1)[0];
+      assert.ok(app.store.trace(trace.id).steps.some((step) => step.name === "say" && /"conversation_closed":true/.test(step.result)));
+      const restored = new app.orchestrator.constructor(app.orchestrator);
+      assert.deepEqual(restored.state(THREAD).focus.ids, [pino.id]);
+      await restored.checkEngagements(Date.now() + 90 * 60000);
+      assert.equal(said("Olga").filter((text) => /30 minuti/.test(text)).length, 0);
+      app.orchestrator.states.delete(THREAD);
+      discord.say({ content: "altra nota senza chiamata", channel: THREAD });
+      await waitFor(() => said("Pino").length > 1);
+      await quiet();
+      assert.equal(calls, 1, "ordinary followups do not wake the departed agent");
+    } finally { app.boxes.shell = shell; }
+  });
+
+  test("semantic departures apply unfamiliar wording, preserve other listeners and ignore unrelated ids", async () => {
+    const THREAD = "1599000000000000801";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "semantic departures" });
+    await sleep(100);
+    const said = (name) => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === name).map((item) => item.content);
+    replies.set("Olga", () => ({ content: "Olga qui." }));
+    replies.set("Pino", () => ({ content: "Pino qui." }));
+    for (const wording of ["per oggi puoi congedarti da questa conversazione", "la tua presenza qui non serve più, ti libero", "you can bow out of this conversation now"]) {
+      departures = () => [];
+      const before = said("Olga").length;
+      discord.say({ content: "@Olga, torna qui", channel: THREAD });
+      await waitFor(() => said("Olga").length > before);
+      await quiet();
+      departures = (body) => {
+        assert.equal(JSON.parse(body.messages[1].content).message, wording);
+        return [olga.id, "unrelated-agent"];
+      };
+      discord.say({ content: wording, channel: THREAD });
+      await waitFor(() => app.store.value("conversationEngagements")[THREAD] === null);
+      await quiet();
+      assert.equal(said("Olga").at(-1), "Ho smesso di ascoltare questa conversazione.");
+    }
+    departures = () => [];
+    discord.say({ content: "@Olga, rimani qui", channel: THREAD });
+    await waitFor(() => app.orchestrator.engagements[THREAD]?.ids.includes(olga.id));
+    await quiet();
+    discord.say({ content: "@Pino, partecipa anche tu", channel: THREAD });
+    await waitFor(() => app.orchestrator.engagements[THREAD]?.ids.includes(pino.id));
+    await quiet();
+    departures = (body) => {
+      const input = JSON.parse(body.messages[1].content);
+      assert.deepEqual(input.agents.map((agent) => agent.id), [olga.id]);
+      return [olga.id, pino.id, "unrelated-agent"];
+    };
+    discord.say({ content: "@Olga puoi congedarti da qui", channel: THREAD });
+    await waitFor(() => app.orchestrator.engagements[THREAD]?.ids.length === 1);
+    await quiet();
+    assert.deepEqual(app.store.value("conversationEngagements")[THREAD].ids, [pino.id]);
+    assert.equal(said("Pino").includes("Ho smesso di ascoltare questa conversazione."), false);
+  });
+
   test("a stop names one agent, a continue keeps the other, and an untagged line does not wake every listener", async () => {
     const THREAD = "1599000000000000793";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "listen routing" });
@@ -4303,7 +4462,7 @@ describe("talking with the agents", () => {
     const said = (name) => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === name).map((item) => item.content);
     replies.set("Olga", () => ({ content: "Olga qui." }));
     replies.set("Pino", () => ({ content: "Pino qui." }));
-    departures = () => [olga.id, pino.id];
+    departures = (body) => JSON.parse(body.messages[1].content).message === "@Olga, smetti di ascoltare" ? [olga.id, pino.id] : [];
     try {
       discord.say({ content: "@Olga, resta su questo", channel: THREAD });
       await waitFor(() => said("Olga").includes("Olga qui."));
@@ -4414,6 +4573,7 @@ describe("talking with the agents", () => {
     const focus = app.orchestrator.engagements[THREAD];
     await app.orchestrator.checkEngagements(focus.at + 30 * 60000);
     assert.equal(reminders().length, 1);
+    departures = (body) => JSON.parse(body.messages[1].content).reminded ? [olga.id] : [];
     discord.say({ content: "no ciao a dopo", channel: THREAD });
     await waitFor(() => said().includes("Ho smesso di ascoltare questa conversazione."), { what: "Olga leaving" });
     await quiet();
@@ -6824,7 +6984,7 @@ describe("thread goal lifecycle", () => {
     const routing = new Promise((resolve) => { releaseRouting = resolve; });
     let entered = false, deciding = false, commands = 0;
     goals = () => "il documento è completo";
-    departures = async () => { deciding = true; await routing; return [iris.id]; };
+    departures = async (body) => { if (!JSON.parse(body.messages[1].content).message.includes("esci")) return []; deciding = true; await routing; return [iris.id]; };
     replies.set("Iris", async () => { entered = true; await actor; return { tool_calls: [{ function: { name: "shell", arguments: { command: "must-not-run-after-disengagement" } } }] }; });
     app.boxes.shell = async () => { commands++; return { code: 0, output: "unexpected" }; };
     try {

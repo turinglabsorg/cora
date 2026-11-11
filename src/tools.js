@@ -101,6 +101,7 @@ export const TOOL_DEFS = [
       properties: {
         text: { type: "string" },
         channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" },
+        end_conversation: { type: "boolean", description: "true only when the person explicitly ends your participation in this conversation. Atomically stop your own listening here and send this farewell. Interpret the person's intent in context; completing work or saying thanks alone does not end listening. Only the current conversation can be ended; colleagues and other conversations stay connected." },
         voice: { type: "boolean", description: "true: also send these words as a voice message (Soniox) when someone asks for it. For replies to voice messages, Cora chooses voice-only by default and honors the person's explicit request for text or both; this flag never overrides that preference." },
       },
       required: ["text"],
@@ -438,14 +439,16 @@ async function shareLevel(ctx, level, args) {
   const artifacts = ctx.artifacts;
   const userId = ctx.artifactUserId || (store?.panelUser?.(ctx.requester?.id) ? ctx.requester.id : "");
   const mine = artifacts.groupFolders(level).filter((folder) => artifacts.canWrite(folder, agent)
-    && (!ctx.knowledge?.ownerMemory || artifacts.canReadMember(folder, store.panelUser(ctx.knowledge.ownerId(agent))))
+    && (!ctx.knowledge?.ownerMemory || ctx.knowledge.isSealed(agent) || artifacts.canReadMember(folder, store.panelUser(ctx.knowledge.ownerId(agent))))
     && (!userId || artifacts.canReview(folder, store.panelUser(userId))));
   if (!mine.length) return `error: you may not share ${level}: none of its folders is one you may push to`;
+  if (ctx.knowledge?.isSealed(agent) && mine.length !== artifacts.groupFolders(level).length) return "error: this level contains folders not assigned to you; share an assigned folder by name";
   const root = artifacts.cleanShareRoot(args.subfolder);
   const view = args.view === "site" ? "site" : "files";
   const mode = ["people", "password", "public"].includes(args.access) ? args.access : "people";
   const password = mode === "password" ? String(args.password || "") || randomBytes(9).toString("base64url") : "";
-  const direct = Boolean(ctx.requester);
+  // A sealed agent talks with people who are not its owners: its links always wait for them.
+  const direct = Boolean(ctx.requester) && !ctx.knowledge?.isSealed(agent);
   const share = artifacts.createShare(`ag:${level}`, {
     label: args.label, root, view, access: { mode, emails: args.emails || [], domains: args.domains || [], password },
     expiresAt: Number(args.days) > 0 ? Date.now() + Math.min(Number(args.days), 365) * 86400000 : 0, status: direct ? "active" : "proposed",
@@ -465,16 +468,19 @@ export async function executeTool(call, ctx) {
   const args = call.args || {};
   try {
     const memoryCall = ["remember", "forget", "recall", "update_core", "brain_search", "brain_page", "brain_note"].includes(call.name);
-    if (memoryCall) ctx.knowledge?.assertCurrent(agent);
+    ctx.knowledge?.assertCurrent(agent);
     const externalBrain = agent.brainSource === "external";
     const selectedBrain = memoryCall && ctx.knowledge ? ctx.knowledge.forAgent(agent) : externalBrain ? null : ctx.companyBrain;
     if (memoryCall && externalBrain && ["remember", "forget", "update_core", "brain_note"].includes(call.name)) return { text: "error: the external Brain is read-only; internal memory writes are also disabled" };
     if (memoryCall && externalBrain && !selectedBrain) return { text: "error: the external Brain is unavailable; internal memory remains excluded" };
     const artifactUserId = ctx.artifactUserId || (call.name.startsWith("artifact_") && store?.panelUser?.(ctx.requester?.id) ? ctx.requester.id : "");
-    if (ctx.knowledge?.ownerMemory && call.name.startsWith("artifact_") && call.name !== "artifact_folders" && ctx.artifacts) {
+    const sealed = Boolean(ctx.knowledge?.isSealed(agent));
+    if ((ctx.knowledge?.ownerMemory || sealed) && call.name.startsWith("artifact_") && call.name !== "artifact_folders" && ctx.artifacts) {
       const folder = ctx.artifacts.findFolder(args.folder);
-      if (folder && !ctx.artifacts.canWrite(folder, agent) && !ctx.artifacts.canReadMember(folder, store.panelUser(ctx.knowledge.ownerId(agent)))) return { text: "error: folder not available" };
+      // A sealed agent reaches only the folders it was given by name, never through its owner's rights.
+      if (folder && !ctx.artifacts.canWrite(folder, agent) && (sealed || !ctx.artifacts.canReadMember(folder, store.panelUser(ctx.knowledge.ownerId(agent))))) return { text: "error: folder not available" };
     }
+    if (sealed && ["brain_search", "brain_page", "brain_note"].includes(call.name)) return { text: "error: you are a sealed agent: the company brain is off for you; your own memories are in recall" };
     if (call.name.startsWith("artifact_") && call.name !== "artifact_folders" && ctx.artifacts && artifactUserId) {
       const folder = ctx.artifacts.findFolder(args.folder);
       if (folder) {
@@ -573,14 +579,15 @@ export async function executeTool(call, ctx) {
           ctx.log?.({ type: "memory", agentId: agent.id, text: `(per il brain) ${text.slice(0, 300)}` });
           return { text: ctx.knowledge?.ownerMemory ? "noted for this owner's Brain; sharing with other owners requires their explicit sharing settings" : "noted for the company brain (shared facts go there): immediate librarian consolidation queued" };
         }
-        const key = ctx.knowledge?.ownerMemory ? ctx.knowledge.memoryKey(agent) : args.shared ? SHARED : agent.id;
+        const key = ctx.knowledge?.ownerMemory || sealed ? ctx.knowledge.memoryKey(agent) : args.shared ? SHARED : agent.id;
         const memory = store.addMemory(key, String(args.fact || ""), "agent", { by: agent.name });
-        ctx.log?.({ type: "memory", agentId: agent.id, text: `${args.shared ? "(condiviso) " : ""}${memory.text}` });
-        return { text: `saved [${memory.id}]${args.shared ? " (shared)" : ""}` };
+        const shared = args.shared && !sealed;
+        ctx.log?.({ type: "memory", agentId: agent.id, text: `${shared ? "(condiviso) " : ""}${memory.text}` });
+        return { text: `saved [${memory.id}]${shared ? " (shared)" : sealed && args.shared ? " in your own memories: a sealed agent shares nothing" : ""}` };
       }
       case "forget": {
         const found = store.findMemory(String(args.memory_id || ""));
-        if (!found || (ctx.knowledge?.ownerMemory ? !ctx.knowledge.ownerKeys(agent.id).includes(found.key) : found.key !== agent.id && found.key !== SHARED)) return { text: "error: no memory with that id" };
+        if (!found || (ctx.knowledge?.ownerMemory || sealed ? !ctx.knowledge.ownerKeys(agent.id).includes(found.key) : found.key !== agent.id && found.key !== SHARED)) return { text: "error: no memory with that id" };
         store.deleteMemory(found.key, found.memory.id);
         ctx.log?.({ type: "memory", agentId: agent.id, text: `dimenticato: ${found.memory.text}` });
         return { text: "deleted" };
@@ -590,7 +597,7 @@ export async function executeTool(call, ctx) {
         if (!query.trim()) return { text: "error: empty query" };
         if (externalBrain) return { text: JSON.stringify({ source: "external", readonly: true, pages: await selectedBrain.search(query, { limit: 10 }) }) };
         const facts = ctx.memory.searchFacts(agent.id, query, 10).map((doc) => ({ doc }));
-        const messages = ctx.memory.searchArchive(ctx.channelIds || [], query, { limit: ctx.knowledge?.ownerMemory ? 48 : 12 }).filter((message) => !ctx.knowledge?.ownerMemory || ctx.knowledge.messageOwner(message) === ctx.knowledge.ownerId(agent)).slice(0, 12);
+        const messages = ctx.memory.searchArchive(ctx.channelIds || [], query, { limit: ctx.knowledge?.ownerMemory ? 48 : 12 }).filter((message) => !ctx.knowledge || ctx.knowledge.ownsMessage(agent, message)).slice(0, 12);
         const diary = bm25(store.diary(agent.id), query, (item) => item.text, { limit: 3 });
         const lines = [];
         lines.push("Memories:", ...(facts.length ? facts.map(({ doc }) => `- [${doc.id}] ${doc.text}${doc.scope === "shared" ? " (shared)" : ""}`) : ["- none"]));
@@ -720,16 +727,18 @@ export async function executeTool(call, ctx) {
         if (!text) return { text: "error: empty message" };
         if (!ctx.say) return { text: "error: there is no conversation to post to right now" };
         const target = String(args.channel_id || channelId || "");
+        if (args.end_conversation === true && (!ctx.canEndConversation || target !== channelId)) return { text: "error: only a human chat turn can end its own current conversation" };
         if (target !== channelId && !ctx.postingChannels?.some((channel) => channel.id === target)) {
           // A thread under a channel the agent may write to counts, even one opened since this turn began.
           const thread = await ctx.threadFor?.(target).catch(() => null);
           if (!thread) return { text: "error: destination not authorized; choose a channel from list_channels" };
           ctx.postingChannels.push({ id: thread.id, name: thread.name, kind: thread.kind });
         }
-        const sent = await ctx.say(text.slice(0, 4000), target, { voice: args.voice === true });
+        const sent = await ctx.say(text.slice(0, 4000), target, { voice: args.voice === true, endConversation: args.end_conversation === true });
         const messages = Array.isArray(sent) ? sent : [];
         const receipt = {
           channel_id: target,
+          ...(args.end_conversation === true ? { conversation_closed: true } : {}),
           channel_name: ctx.postingChannels?.find((channel) => channel.id === target)?.name || "",
           message_ids: messages.map((item) => String(item.id || item.message_id || "")).filter(Boolean),
           mentions: [...new Set(messages.flatMap((item) => [...String(item.content || "").matchAll(/<@!?(\d+)>/g)].map((match) => match[1])))],
@@ -757,6 +766,7 @@ export async function executeTool(call, ctx) {
       case "share_file": {
         const wanted = String(args.agent || "").trim().toLowerCase();
         const recipient = store.agents().find((other) => other.id === wanted || other.name.toLowerCase() === wanted);
+        if (sealed || (recipient && ctx.knowledge?.isSealed(recipient))) return { text: "error: a sealed agent neither sends nor receives files from other agents" };
         if (!recipient || recipient.id === agent.id || !recipient.enabled || !recipient.tools || (ctx.knowledge?.ownerMemory && ctx.knowledge.ownerId(recipient) !== ctx.knowledge.ownerId(agent))) return { text: "error: recipient must be another enabled Cora agent with a desktop" };
         await boxes.ensure(agent);
         await boxes.ensure(recipient);
@@ -804,7 +814,7 @@ export async function executeTool(call, ctx) {
         const mode = ["people", "password", "public"].includes(args.access) ? args.access : "people";
         const password = mode === "password" ? String(args.password || "") || randomBytes(9).toString("base64url") : "";
         // Live at once only for a person talking to the agent now: a routine or another bot only asks.
-        const direct = Boolean(ctx.requester);
+        const direct = Boolean(ctx.requester) && !sealed;
         const share = ctx.artifacts.createShare(folder.id, {
           label: args.label, root, view, access: { mode, emails: args.emails || [], domains: args.domains || [], password },
           expiresAt: Number(args.days) > 0 ? Date.now() + Math.min(Number(args.days), 365) * 86400000 : 0, status: direct ? "active" : "proposed",
