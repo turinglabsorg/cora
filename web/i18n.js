@@ -1,6 +1,7 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Nasce nel tuo account GitHub.": "It is created in your GitHub account.",
   "Intelligenza": "Intelligence",
   "{count} chiavi salvate": "{count} saved keys",
   "Prima il dominio, poi il suo account Resend.": "First the domain, then its Resend account.",
@@ -2377,7 +2378,6 @@ export const EN = {
   "App GitHub scollegata": "GitHub app disconnected",
   "Crea l'app di {name}": "Create {name}'s app",
   "Nasce nell'organizzazione {org}.": "It is created in the {org} organization.",
-  "Nasce nel tuo account GitHub: l'organizzazione si sceglie in Impostazioni → GitHub.": "It is created in your GitHub account: the organization is chosen in Settings → GitHub.",
   "Su GitHub premi Create, poi la installi sui repo che scegli: due clic, e torni qui da solo.": "On GitHub press Create, then install it on the repositories you choose: two clicks, and you come back here by yourself.",
   "Nessuna app": "No app",
   "La sua app": "Its app",

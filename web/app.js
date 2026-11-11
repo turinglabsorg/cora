@@ -2956,7 +2956,7 @@ function githubAccount(agent) {
       document.body.append(form);
       form.submit();
     } });
-    const where = gh.org ? tr("Nasce nell'organizzazione {org}.", { org: gh.org }) : tr("Nasce nel tuo account GitHub: l'organizzazione si sceglie in Impostazioni → GitHub.");
+    const where = gh.org ? tr("Nasce nell'organizzazione {org}.", { org: gh.org }) : tr("Nasce nel tuo account GitHub.");
     return panel({ ...head, actions: badge("Nessuna app", "", "github") },
       setRows(setRow("La sua app", `${where} ${tr("Su GitHub premi Create, poi la installi sui repo che scegli: due clic, e torni qui da solo.")}`, create)));
   }
@@ -8429,7 +8429,7 @@ function renderSettings() {
     const root = h("div", { class: "stack" }, back(), content);
     const unchanged = ["connettori", "mcp", "email", "server", "spazio", "accesso", "ssh", "controlli", "preferenze", ...SUBSCRIPTION_HARNESSES].includes(id);
     const configured = ["discord", "telegram", "slack"].includes(id) ? transportInfo(id).state !== "missing-token" || S.data.agents.some((agent) => id === "discord" ? agent.bot?.user : id === "telegram" ? agent.telegramBot?.user : agent.slackBot?.user)
-      : id === "github" ? Boolean(settings.githubOrg) : true;
+      : true;
     pages.set(id, unchanged ? root : settingsDisclosures(root, id, expanded, configured));
   };
 
@@ -8762,11 +8762,6 @@ function renderSettings() {
   page("modelli", panel({ icon: "chip", title: "Modelli e sonno", hint: "Il modello di chi non ne sceglie uno, e l'ora in cui riordinano la memoria." },
     setRows(modelRow, hourRow, setRow("Cosa gira qui", "Gli harness e i provider che questa macchina può usare adesso.", providerBadges, { stack: true }))));
 
-  // Where the agents' own GitHub Apps are made.
-  const githubOrg = h("input", { type: "text", class: "mono", value: settings.githubOrg || "", placeholder: tr("nome-organizzazione"), autocomplete: "off", spellcheck: "false", "aria-label": tr("Organizzazione GitHub"), disabled: !manage });
-  const githubRow = setRow("Organizzazione", "Il nome dell'organizzazione GitHub dove nascono le app degli agenti, come appare in github.com/nome. Vuoto: nel tuo account. Si salva quando esci dal campo.", githubOrg);
-  githubOrg.addEventListener("change", () => saveSettings({ githubOrg: githubOrg.value.trim() }, githubRow).then(() => { githubOrg.value = S.data.settings.githubOrg || ""; drawNav(); }));
-  page("github", panel({ icon: "github", title: "GitHub", hint: "Ogni agente può avere la sua app GitHub: si crea dalla sua pagina, Impostazioni → GitHub, con due clic su GitHub." }, setRows(githubRow)));
   page("domini", mailDomainsPane());
 
   /* ---------- Persone ---------- */
@@ -8798,7 +8793,6 @@ function renderSettings() {
       const known = S.data.models.find((item) => item.id === S.data.settings.defaultModel);
       return [known && known.usable !== false ? null : "warn", S.data.settings.defaultModel || tr("nessun modello")];
     } },
-    { id: "github", group: "Agenti", label: "GitHub", mark: "github", state: () => [null, S.data.settings.githubOrg || tr("le app nel tuo account")] },
     { id: "domini", group: "Agenti", label: "Domini", mark: "globe", state: () => [null, tr("Account Resend e domini email")] },
     { id: "accesso", group: "Persone", label: "Accesso", mark: "shield", state: () => [null, tr("chi entra nella tua Cora")] },
     { id: "ssh", group: "Persone", label: "Chiavi SSH", mark: "key", state: () => [null, keyCount ? (keyCount === 1 ? tr("1 chiave in più") : tr("{count} chiavi in più", { count: keyCount })) : tr("solo quelle dell'host")] },
@@ -8846,7 +8840,8 @@ function renderSettings() {
   drawResidents();
   const requested = legacy[first] || first;
   const keyRoute = CONNECTION_KEYS.some(([provider]) => provider === requested);
-  show(keyRoute ? "chiavi-api" : requested, { updateRoute: keyRoute });
+  const retiredRoute = requested === "github";
+  show(keyRoute ? "chiavi-api" : retiredRoute ? "" : requested, { updateRoute: keyRoute || retiredRoute });
   shell([pageHead("Impostazioni", "Canali, account e preferenze della tua Cora."), root], { title: "Impostazioni", mode: "rail" });
 }
 
