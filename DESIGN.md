@@ -224,6 +224,8 @@ A key connector's page is a numbered guide, never a form to fill blind. It names
 
 Opening a card shows its own detail at `#/settings/connettori/google`, with a local Catalog back action. Keep the catalog search and filter mounted while moving to the detail. The Google flow separates connecting the account, authorizing individual agents and choosing a sender from that agent's Email page. Existing connections remain manageable when new connections are unavailable. Serialize assignment changes within an account, restore a rejected change and show its actual error. Preserve the existing two-click disconnect action. On phones the search and filters each occupy a full row; cards fit the detail column without horizontal scrolling.
 
+Connector setup remains mounted across background chat discovery and visibility changes, even when a field has lost focus. Keep the selected connection mode, unsubmitted fields, catalog query, filters and confirmation state in the current view; only explicit navigation and completed connector actions rebuild it. Never persist draft credentials in browser storage.
+
 ## External agents through MCP
 
 Settings → External agents (MCP), in the Connectors group, keeps personal access separate from the service catalog. Show the actual caller's name, endpoint, HTTP transport and Bearer header placeholder. Reuse setting rows, mono read-only fields and 44px copy controls. Explain that the client keeps the person's current permissions and private sharing boundaries.

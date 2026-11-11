@@ -1115,7 +1115,7 @@ test("Discord images reach Gemini through Cora attachment tools without a false 
   const f = await knowledgeWorld({ discordToken: "fixture-discord-vision", discordApi: network.url, geminiBin: native.gemini });
   t.after(async () => { await f.close(); await network.close(); });
   f.app.store.updateSettings({ transport: "discord", transports: ["discord"], guildIds: [GUILD], ownerIds: [OWNER] });
-  f.app.subscriptions.geminiModels = async () => [{ name: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }];
+  f.app.subscriptions.models = async (provider) => provider === "gemini" ? [{ name: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }] : [];
   const account = f.app.store.createSubscription({ provider: "gemini", label: "Vision", connectedBy: { id: f.alice.user.id, name: "Alice" } });
   f.app.store.updateSubscription(account.id, { status: "ready" });
   const agent = f.app.store.createAgent({ name: "GeminiPixel", model: "gemini/gemini-4-argon-high", subscriptionId: account.id, tools: false, brainOwnerId: f.alice.user.id, ownerId: "discord:" + OWNER, channelIds: [CHANNEL], chattiness: 0 });
@@ -1762,6 +1762,55 @@ test("a managed default email domain keeps its real provider status and never by
   await f.app.boxes.ensureMailbox(agent);
   assert.match(f.app.store.value(`agentMailbox:${agent.id}`).email, /@team-default\.test$/);
   assert.equal((await f.call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: "default-agent", domain: domain.name } })).status, 200);
+});
+
+test("connector setup preserves mounted forms and catalog across background updates", async (t) => {
+  const fixture = await subscriptionApp(t);
+  let stateReads = 0;
+  const panel = panelHarness({ hash: "#/settings/connettori/linear", fetch: async (path, init = {}) => {
+    if (path === "/api/state") stateReads++;
+    const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  await panel.run("boot()");
+  const pane = panel.run('document.querySelector(".connectors-pane")');
+  await pane.readyConnectors;
+  const buttons = () => pane.querySelectorAll("button");
+  buttons().find(button => button.textContent === "App OAuth").click();
+  const inputs = pane.querySelector(".connector-detail").querySelectorAll("input");
+  assert.equal(inputs.length, 2);
+  inputs[0].value = "fixture-client-draft"; inputs[1].value = "fixture-secret-draft";
+  const expectDraft = () => {
+    assert.equal(panel.run('document.querySelector(".connectors-pane")'), pane);
+    assert.equal(pane.querySelector(".connector-detail").querySelectorAll("input")[0], inputs[0]);
+    assert.equal(inputs[0].value, "fixture-client-draft");
+    assert.equal(inputs[1].value, "fixture-secret-draft");
+    assert.equal(buttons().find(button => button.textContent === "App OAuth").getAttribute("aria-pressed"), "true");
+  };
+  for (let index = 0; index < 3; index++) {
+    const reads = stateReads;
+    panel.run('document.activeElement=null;S.events.onmessage({data:JSON.stringify({type:"telegram-chats"})})');
+    await waitFor(() => stateReads > reads);
+    await sleep(50);
+    expectDraft();
+    await panel.run('document.hidden=true;document.listeners.visibilitychange[0]()');
+    await panel.run('document.hidden=false;document.listeners.visibilitychange[0]()');
+    expectDraft();
+  }
+  pane.querySelector(".connector-back").click();
+  const search = pane.querySelector("input");
+  search.value = "Linear"; search.dispatch("input");
+  buttons().find(button => button.textContent === "Collegati").click();
+  await panel.run('document.activeElement=null;document.listeners.visibilitychange[0]()');
+  assert.equal(panel.run('document.querySelector(".connectors-pane")'), pane);
+  assert.equal(search.value, "Linear");
+  assert.equal(buttons().find(button => button.textContent === "Collegati").getAttribute("aria-pressed"), "true");
+  panel.run('location.hash="#/settings/telegram";renderSettings()');
+  const channelPage = panel.run('document.querySelector(".rail")');
+  const reads = stateReads;
+  panel.run('S.events.onmessage({data:JSON.stringify({type:"telegram-chats"})})');
+  await waitFor(() => stateReads > reads);
+  await waitFor(() => panel.run('document.querySelector(".rail")') !== channelPage);
 });
 
 test("Claude OAuth keeps the current authorization form when returning from the provider page", async (t) => {

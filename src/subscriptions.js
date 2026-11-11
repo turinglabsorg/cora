@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { resolve as resolvePath, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ValidationError } from "./store.js";
@@ -9,6 +9,10 @@ import { geminiScope, prepareGeminiProfile } from "./gemini-profile.js";
 import { geminiQuotaMessage } from "./gemini-quota.js";
 
 const LOGIN_MS = 10 * 60 * 1000;
+// How long a provider's model list holds before Cora asks again; an older one is shown while it does.
+const CATALOG_MS = 10 * 60 * 1000;
+const CATALOG_TIMEOUT_MS = 45000;
+const CATALOG_WAIT_MS = 8000;
 const BROWSER_HELPER = fileURLToPath(new URL("./subscription-browser.js", import.meta.url));
 const TERMINAL_HELPER = fileURLToPath(new URL("./subscription-terminal.py", import.meta.url));
 const USAGE_HELPER = fileURLToPath(new URL("./subscription-usage-worker.js", import.meta.url));
@@ -576,10 +580,116 @@ export class Subscriptions {
     return { email: email.slice(0, 254), plan: "" };
   }
 
-  async geminiModels() {
-    const record = this.store.subscriptions().find((item) => item.provider === "gemini" && item.status === "ready" && !this.logins.has(item.id));
-    if (!record || !this.installed("gemini")) return [];
-    try {
+  /** The account a provider's models are asked through: the machine's own while it is in use, else a connected one. */
+  catalogAccount(provider) {
+    const ready = this.store.subscriptions().filter((record) => record.provider === provider && record.status === "ready" && !this.logins.has(record.id)
+      && (!record.resident || this.store.settings.useResidentSubscriptions));
+    return ready.find((record) => record.resident) || ready[0] || null;
+  }
+
+  catalogFile() { return join(this.store.home, "model-catalogs.json"); }
+
+  /**
+   * The models a provider serves today, as its own CLI lists them for a connected account:
+   * a model the provider adds shows up here without a new Cora. The last answer is kept,
+   * on disk too, so a slow or failed check never empties the list.
+   */
+  async models(provider, { fresh = false } = {}) {
+    if (provider === "claude") return [];
+    const record = this.catalogAccount(provider);
+    if (!record || !this.installed(provider)) return [];
+    if (!this.catalogs) {
+      try { this.catalogs = JSON.parse(readFileSync(this.catalogFile(), "utf8")); } catch { this.catalogs = {}; }
+    }
+    this.catalogLoads ||= new Map();
+    const known = this.catalogs[provider];
+    const other = !known || known.account !== record.id;
+    if ((other || fresh || Date.now() - known.at > CATALOG_MS) && !this.catalogLoads.has(provider)) {
+      const load = this.readCatalog(provider, record).then((models) => {
+        if (!models.length) return;
+        this.catalogs[provider] = { at: Date.now(), account: record.id, models };
+        try { writeFileSync(this.catalogFile(), JSON.stringify(this.catalogs), { mode: 0o600 }); } catch {}
+      }).catch(() => {}).finally(() => this.catalogLoads.delete(provider));
+      this.catalogLoads.set(provider, load);
+    }
+    // A first answer is waited for a little; a slow CLI fills the list on the next look.
+    if (other || fresh) await Promise.race([this.catalogLoads.get(provider), new Promise((done) => setTimeout(done, CATALOG_WAIT_MS).unref())]);
+    return this.catalogs[provider]?.models || [];
+  }
+
+  /** One conversation with a CLI over its stdout lines; `onLine` answers the value that ends it. */
+  catalogCommand(record, args, { input = "", onLine = null, open = false } = {}) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.bins[record.provider], args, { env: this.environment(record), cwd: record.resident ? this.store.home : this.directory(record), stdio: ["pipe", "pipe", "ignore"] });
+      let output = "", buffer = "", done = false;
+      const finish = (error, value) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        terminate(child);
+        error ? reject(error) : resolve(value);
+      };
+      const timer = setTimeout(() => finish(new Error(`${HARNESSES[record.provider].product}: nessuna lista dei modelli`)), CATALOG_TIMEOUT_MS);
+      const write = (line) => { if (!done) child.stdin.write(`${JSON.stringify(line)}\n`); };
+      child.stdin.on("error", () => {});
+      child.stdout.on("data", (chunk) => {
+        if (output.length < 4 * 1024 * 1024) output += chunk;
+        if (!onLine) return;
+        buffer += chunk;
+        let end;
+        while ((end = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, end);
+          buffer = buffer.slice(end + 1);
+          let message;
+          try { message = JSON.parse(line); } catch { continue; }
+          const value = onLine(message, write);
+          if (value) return finish(null, value);
+        }
+      });
+      child.on("error", () => finish(new Error(`${HARNESSES[record.provider].product} non disponibile`)));
+      child.on("close", (code) => finish(null, onLine ? [] : code === 0 ? output : ""));
+      if (input) child.stdin.write(input);
+      if (!open) child.stdin.end();
+    });
+  }
+
+  async readCatalog(provider, record) {
+    // Claude keeps Cora's own list: its picker answers aliases and context variants, not the model ids agents run on.
+    if (provider === "codex") {
+      const output = await this.catalogCommand(record, [...(!record.resident ? ["-c", 'cli_auth_credentials_store="file"'] : []), "debug", "models"]);
+      const data = JSON.parse(output || "{}");
+      return (Array.isArray(data) ? data : data.models || [])
+        .filter((model) => model.slug && (model.visibility || "list") === "list")
+        .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
+        .map((model) => ({ name: model.slug, label: String(model.display_name || model.slug) }));
+    }
+    if (provider === "grok") {
+      const output = await this.catalogCommand(record, ["models"]);
+      const seen = new Map();
+      for (const line of output.replace(/\x1b\[[0-9;]*m/g, "").split("\n")) {
+        const name = line.match(/^\s*[*-]\s+([a-z0-9][a-z0-9._:-]*)/i)?.[1];
+        if (name && !seen.has(name)) seen.set(name, { name, label: name.split("-").map((part) => `${part[0].toUpperCase()}${part.slice(1)}`).join(" ") });
+      }
+      return [...seen.values()];
+    }
+    if (provider === "muse") {
+      // Muse lists its provider's catalog over MSP, the protocol of `muse serve`.
+      return this.catalogCommand(record, ["serve"], {
+        input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "cora", version: "1" } } })}\n`,
+        open: true,
+        onLine: (message, write) => {
+          if (message.id === 1 && message.result) {
+            write({ jsonrpc: "2.0", method: "initialized", params: {} });
+            write({ jsonrpc: "2.0", id: 2, method: "model/list", params: {} });
+          }
+          if (message.id === 1 && message.error) return [];
+          if (message.id !== 2) return null;
+          return (message.result?.models || []).filter((model) => model.modelId)
+            .map((model) => ({ name: model.modelId, label: String(model.displayLabel || model.modelId) }));
+        },
+      });
+    }
+    if (provider === "gemini") {
       const { code, output } = await this.geminiCommand(record, ["models"]);
       if (code !== 0) return [];
       const models = new Map();
@@ -588,7 +698,8 @@ export class Subscriptions {
         if (match) models.set(match[1], { name: match[1], label: match[2] });
       }
       return [...models.values()];
-    } catch { return []; }
+    }
+    return [];
   }
 
   readClaude(record, signal) {

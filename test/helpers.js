@@ -655,6 +655,29 @@ if (flavor === "gemini" && argv.includes("/usage")) {
   process.stdout.write(JSON.stringify(options.geminiUsage || { status: "SUCCESS", response: "Account: fixture@example.test" }));
   process.exit(options.geminiUsageFailed ? 1 : 0);
 }
+if (flavor === "codex" && argv.includes("debug") && argv.includes("models")) {
+  fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ flavor: "codex-catalog", argv, home: process.env.CODEX_HOME }) + "\\n");
+  process.stdout.write(JSON.stringify({ models: [{ slug: "gpt-6.1-terra", display_name: "GPT-6.1 Terra", visibility: "list", priority: 1 }, { slug: "gpt-6-sol", display_name: "GPT-6-Sol", visibility: "list", priority: 2 }, { slug: "gpt-reserve", display_name: "GPT-Reserve", visibility: "hide", priority: 3 }] }));
+  process.exit(0);
+}
+if (flavor === "grok" && argv[0] === "models") {
+  process.stdout.write("You are logged in with grok.com.\\nDefault model: grok-4.8\\nAvailable models:\\n  * grok-4.8 (default)\\n  - grok-4.7-build-fast\\n");
+  process.exit(0);
+}
+if (flavor === "muse" && argv[0] === "serve") {
+  let pending = "";
+  process.stdin.on("data", (chunk) => {
+    pending += chunk;
+    let end;
+    while ((end = pending.indexOf("\\n")) >= 0) {
+      const message = JSON.parse(pending.slice(0, end));
+      pending = pending.slice(end + 1);
+      if (message.method === "initialize") process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) + "\\n");
+      if (message.method === "model/list") process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { source: "providerCatalog", models: [{ modelId: "muse-wonder-1.1", displayLabel: "Muse Wonder 1.1" }] } }) + "\\n");
+    }
+  });
+  return;
+}
 if (flavor === "gemini" && argv[0] === "models") {
   process.stdout.write("gemini-4-argon-high  Gemini 4 Argon (High)\\ngemini-3.8-flash-medium  Gemini 3.8 Flash (Medium)\\n");
   process.exit(0);

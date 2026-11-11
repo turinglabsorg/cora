@@ -107,7 +107,13 @@ export class KeyConnectors {
     const agents = previous?.agents || [];
     const base = { service, agents, connectedBy: user.id, connectedAt: new Date().toISOString() };
     let next;
-    if (service === "linear") {
+    if (input.mode === "oauth" && ["linear", "asana"].includes(service)) {
+      const app = this.appInput(input, service);
+      this.vaultReady();
+      await this.vault.put({ name: meta.appSecrets[0], value: app.clientId, description: `Connettore ${meta.name} · client ID dell'app`, agents: [], by: this.by(user) });
+      await this.vault.put({ name: meta.appSecrets[1], value: app.clientSecret, description: `Connettore ${meta.name} · client secret dell'app`, agents: [], by: this.by(user) });
+      next = { ...base, status: "app", mode: "oauth", workspace: "", account: "" };
+    } else if (service === "linear") {
       const workspace = clean(input.workspace, 80);
       const token = clean(input.token, 4000);
       if (!workspace) throw new KeyConnectorError("Scrivi il workspace di Linear, quello che compare nell'indirizzo linear.app/<workspace>.");
@@ -117,20 +123,12 @@ export class KeyConnectors {
       this.vault.put({ name: meta.secret, value: token, description: `Connettore Linear · workspace ${checked.workspace}`, agents, by: this.by(user) });
       next = { ...base, ...checked, status: "connected", mode: "key" };
     } else if (service === "asana") {
-      if (input.mode === "oauth") {
-        const app = this.appInput(input, service);
-        this.vaultReady();
-        await this.vault.put({ name: meta.appSecrets[0], value: app.clientId, description: "Connettore Asana · client ID dell'app", agents: [], by: this.by(user) });
-        await this.vault.put({ name: meta.appSecrets[1], value: app.clientSecret, description: "Connettore Asana · client secret dell'app", agents: [], by: this.by(user) });
-        next = { ...base, status: "app", mode: "oauth", workspace: "", account: "" };
-      } else {
-        const token = clean(input.token, 4000);
-        if (!token) throw new KeyConnectorError("Incolla il token personale di Asana, oppure scegli di collegarla con un'app.");
-        const checked = await this.checkAsana(token);
-        this.vaultReady();
-        this.vault.put({ name: meta.secret, value: token, description: `Connettore Asana · token personale di ${checked.account}`, agents, by: this.by(user) });
-        next = { ...base, ...checked, status: "connected", mode: "pat" };
-      }
+      const token = clean(input.token, 4000);
+      if (!token) throw new KeyConnectorError("Incolla il token personale di Asana, oppure scegli di collegarla con un'app.");
+      const checked = await this.checkAsana(token);
+      this.vaultReady();
+      this.vault.put({ name: meta.secret, value: token, description: `Connettore Asana · token personale di ${checked.account}`, agents, by: this.by(user) });
+      next = { ...base, ...checked, status: "connected", mode: "pat" };
     } else {
       if (input.decision === "later") {
         next = { ...base, status: "later", mode: "later", workspace: "", account: "" };
@@ -172,7 +170,8 @@ export class KeyConnectors {
     url.search = new URLSearchParams({
       response_type: "code", client_id: clientId, redirect_uri: redirectUri, state: nonce,
       code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
-      ...(oauth.scopes?.length ? { scope: oauth.scopes.join(" ") } : {}),
+      ...(oauth.scopes?.length ? { scope: oauth.scopes.join(oauth.scopeSeparator || " ") } : {}),
+      ...(oauth.params || {}),
     });
     return { url: url.href, nonce };
   }
@@ -319,7 +318,8 @@ export class KeyConnectors {
         if (!answer.status) throw new Error(`${connector.name} does not answer: try again shortly`);
         return answer;
       };
-      const base = { token, request, api: this.api(), record, readFile, writeFile };
+      const dressed = this.store.agent?.(agent.id) || agent;
+      const base = { token, request, api: this.api(), record, agent: { id: agent.id, name: dressed.name || agent.name || "", avatarUrl: dressed.avatarUrl || "" }, readFile, writeFile };
       result = { data: await tool.run(args || {}, connector.context ? connector.context(base) : base) };
     } catch (error) {
       result = { error: error.message };

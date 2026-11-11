@@ -482,6 +482,10 @@ function subscriptionLoginActive() {
   return [...document.querySelectorAll(".accounts"), ...document.querySelectorAll(".account"), ...document.querySelectorAll(".subscription-picker")].some((node) => node.getAttribute("aria-busy") === "true" || node.classList.contains("connecting") || node.getAttribute("data-state") === "connecting" || (node.classList.contains("subscription-picker") && !node.hidden));
 }
 
+function connectorViewActive() {
+  return route()[0] === "settings" && route()[1] === "connettori" && Boolean(document.querySelector(".connectors-pane"));
+}
+
 function refreshSubscriptionViews() {
   for (const node of [...document.querySelectorAll(".accounts"), ...document.querySelectorAll(".subscription-picker")]) node.refreshSubscription?.();
 }
@@ -557,6 +561,7 @@ function connectEvents() {
         const view = location.hash, keepLogin = subscriptionLoginActive();
         guard(loadState()).then(() => {
           if (location.hash !== view) return;
+          if (connectorViewActive()) return;
           if (keepLogin) refreshSubscriptionViews(); else renderSettings();
         });
       }
@@ -3395,6 +3400,7 @@ function connectorsPane() {
         record.mode === "oauth"
           ? setRow("Autorizzazione", h("span", {}, "Token OAuth nella cassaforte come ", h("code", {}, service.secret), ". Cora lo rinnova da solo quando scade."), authorizeButton(service, "Autorizza di nuovo"))
           : setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, service.secret), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
+        service.writes ? setRow("Chi firma", tr(record.mode === "oauth" ? service.writes.oauth : service.writes.key)) : null,
         service.tools?.length ? setRow("Strumenti degli agenti", h("span", { class: "connector-tools" }, "Gli agenti autorizzati hanno uno strumento di Cora per ogni azione, e Cora aggiunge la chiave a ogni chiamata: ", ...service.tools.flatMap((name, index) => [index ? ", " : "", h("code", {}, name)]), ".")) : null,
         setRow("Agenti autorizzati", "Solo gli agenti spuntati possono usare questo connettore.", agentChoices(record, service.id), { stack: true }),
         setRow("Scollega", "Toglie la chiave dalla cassaforte e l'accesso agli agenti.", disconnect)),
@@ -9328,6 +9334,7 @@ document.addEventListener("visibilitychange", async () => {
   await guard(loadState());
   if (location.hash !== view) return;
   if (keepLogin) { refreshSubscriptionViews(); return; }
+  if (connectorViewActive()) return;
   if (!document.activeElement?.matches("input, textarea, select") && !document.querySelector(".chat-input")?.value) render();
 });
 

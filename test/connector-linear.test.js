@@ -63,7 +63,7 @@ async function fakeLinear(t) {
     return { status: response.status, data };
   };
   const files = { "/home/agent/work/shot.png": Buffer.from("PNG proof") };
-  const run = (name, args = {}, key = KEY) => toolFor(name).run(args, linear.context({ token: key, request, api: { linear: `${base}/graphql` }, record: { workspace: "refracto" }, readFile: async (path) => { if (!files[path]) throw new Error("missing"); return files[path]; } }));
+  const run = (name, args = {}, key = KEY, extra = {}) => toolFor(name).run(args, linear.context({ token: key, request, api: { linear: `${base}/graphql` }, record: { workspace: "refracto" }, ...extra, readFile: async (path) => { if (!files[path]) throw new Error("missing"); return files[path]; } }));
   const last = (pattern) => [...calls].reverse().find((call) => pattern.test(call.query));
   return { run, calls, last, uploads };
 }
@@ -145,4 +145,23 @@ test("the Linear tools create, change, comment, attach, relate and delete with n
   assert.deepEqual(l.last(/projectUpdateCreate/).variables.input, { projectId: "prj-1", health: "atRisk", body: "Sources slow" });
 
   assert.deepEqual(await l.run("linear_graphql", { query: "query($id: String!) { issue(id: $id) { id } }", variables: { id: "REF-62" } }), { issue: { id: "iss-62", identifier: "REF-62", team: { key: "REF" } } });
+});
+
+test("only an OAuth app signs issues and comments with the agent; a personal key writes as its owner", async (t) => {
+  const l = await fakeLinear(t);
+  const agent = { id: "ag1", name: "Nico", avatarUrl: "https://space.example/avatars/ag1.png?v=3" };
+  await l.run("linear_create_issue", { team: "REF", title: "As key" }, KEY, { agent });
+  await l.run("linear_comment", { issue: "REF-62", body: "As key" }, KEY, { agent });
+  assert.equal(l.last(/issueCreate\(/).variables.input.createAsUser, undefined, "a personal key cannot sign as someone else");
+  assert.equal(l.last(/commentCreate\(/).variables.input.createAsUser, undefined);
+
+  const app = { record: { workspace: "refracto", mode: "oauth", account: "Cora" }, agent };
+  await l.run("linear_create_issue", { team: "REF", title: "As agent" }, KEY, app);
+  assert.deepEqual([l.last(/issueCreate\(/).variables.input.createAsUser, l.last(/issueCreate\(/).variables.input.displayIconUrl], ["Nico", agent.avatarUrl]);
+  await l.run("linear_comment", { issue: "REF-62", body: "As agent", reply_to: "c1" }, KEY, app);
+  assert.deepEqual(l.last(/commentCreate\(/).variables.input, { issueId: "iss-62", body: "As agent", parentId: "c1", createAsUser: "Nico", displayIconUrl: agent.avatarUrl });
+  await l.run("linear_attach", { issue: "REF-62", path: "/home/agent/work/shot.png" }, KEY, app);
+  assert.equal(l.last(/commentCreate\(/).variables.input.createAsUser, "Nico", "the comment with a file is signed too");
+  await l.run("linear_comment", { issue: "REF-62", body: "No picture" }, KEY, { ...app, agent: { name: "Vera", avatarUrl: "http://127.0.0.1/avatars/v.png" } });
+  assert.deepEqual([l.last(/commentCreate\(/).variables.input.createAsUser, l.last(/commentCreate\(/).variables.input.displayIconUrl], ["Vera", undefined], "Linear only takes a public https avatar");
 });
