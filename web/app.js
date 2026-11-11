@@ -2131,6 +2131,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
 function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   const accounts = () => [...new Map([...(S.data.quotaAccounts || []).filter(item => item.id === currentId), ...(S.data.subscriptions || [])].map(item => [item.id, item])).values()];
   let provider = "";
+  let initialProvider = null;
   let selectedId = currentId || "";
   let choosing = !selectedId;
   let requestBusy = false;
@@ -2269,6 +2270,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       if (record?.resident) {
         content.append(h("p", { class: "subscription-description" }, "Nessun account residente disponibile. Collega un altro account oppure controlla i collegamenti nelle impostazioni."),
           h("div", { class: "subscription-footer" }, btn(tr("Collega {provider}", { provider: name }), { icon: "external", cls: "primary", onclick: connectNew }),
+            records.length ? btn("Cambia account", { cls: "ghost", onclick: changeAccount }) : null,
             btn("Impostazioni", { cls: "ghost", href: `#/settings/${provider}` })));
       } else content.append(h("div", { class: "subscription-footer" },
         btn(requestBusy ? "Preparazione dell'accesso…" : tr("Collega {provider}", { provider: name }), { icon: requestBusy ? "refresh" : "external", cls: "primary", onclick: record
@@ -2307,11 +2309,24 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       const needs = SUBSCRIPTION_HARNESSES.includes(provider);
       root.hidden = !needs;
       input.disabled = !needs;
+      if (initialProvider === null) initialProvider = value;
       if (previous !== provider) {
+        // Every account already signed in for this brain: the server's and the linked subscriptions.
+        const ready = accounts().filter((item) => item.provider === provider && item.status === "ready"
+          && (!item.resident || (!manage && S.data.settings.useResidentSubscriptions)));
         // A new agent starts on the account its creator signed in themselves, when there is one.
-        const own = isNew ? accounts().find((item) => item.provider === provider && item.status === "ready" && isOwnAccount(item)) : null;
-        selectedId = selections.has(provider) ? selections.get(provider) : (accounts().find((item) => item.id === currentId && item.provider === provider)?.id) || own?.id || "";
-        choosing = !selectedId && (manage || !S.data.settings.useResidentSubscriptions);
+        const own = isNew ? ready.find(isOwnAccount) : null;
+        // An agent moving to another brain starts on an account already signed in, never on a fresh sign-in:
+        // the only one there is, otherwise the list of them to choose from.
+        const switching = !isNew && !manage && provider !== initialProvider;
+        const kept = selections.has(provider) ? selections.get(provider) : accounts().find((item) => item.id === currentId && item.provider === provider)?.id;
+        if (kept !== undefined || own || !switching || !ready.length) {
+          selectedId = kept ?? own?.id ?? "";
+          choosing = !selectedId && (manage || !S.data.settings.useResidentSubscriptions);
+        } else {
+          selectedId = ready.length === 1 && !ready[0].resident ? ready[0].id : "";
+          choosing = ready.length > 1;
+        }
         actionError = "";
         authCode.value = "";
       }
