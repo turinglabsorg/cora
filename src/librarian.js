@@ -9,6 +9,11 @@ const RUN_MESSAGES = 1500;
 const BATCH_CHARS = 24000;
 const PAGES_PER_BATCH = 15;
 const INDEX_PAGES = 200;
+// Grok Build keeps only the first ~96 KB and the last ~4 KB of a longer prompt and
+// drops the middle; smaller models have small windows too. The batch's chats, notes
+// and rules always go whole: what is left holds the pages, whole or not at all.
+const PROMPT_BYTES = 80000;
+const bytes = (text) => Buffer.byteLength(text, "utf8");
 const LOG_EVENTS = 200;
 
 const SYSTEM = "Sei il bibliotecario del brain aziendale. Rispondi solo con JSON valido.";
@@ -262,27 +267,56 @@ export class Librarian {
       }),
     ];
     const all = await this.brain.pages();
-    const index = all.slice(0, INDEX_PAGES).map((page) => `- ${page.slug} | ${page.kind} | ${page.title}${page.summary ? ` — ${page.summary.slice(0, 160)}` : ""}`);
     const probe = [...messages.map((message) => message.content), ...notes.map((note) => note.text), ...shared.map((memory) => memory.text)].join(" ").slice(0, 4000);
-    const near = await Promise.all((await this.brain.search(probe, { limit: 8 })).map((page) => this.brain.page(page.slug)));
+    const near = (await Promise.all((await this.brain.search(probe, { limit: 8 })).map((page) => this.brain.page(page.slug)))).filter(Boolean);
+    const head = "Sei il bibliotecario di quest'azienda: tieni il brain aziendale, le pagine che dicono cosa sa l'azienda. Ogni pagina è un cliente (client), un progetto (project), una persona (person), una decisione (decision), una procedura (procedure) o un tema (topic).";
+    const notesPart = noteLines.length ? `## Note degli agenti e ricordi condivisi\n${noteLines.join("\n")}` : "";
+    const chatsPart = lines.length ? `## Conversazioni nuove\n${lines.join("\n")}` : "";
+    const rules = [
+      "Rispondi SOLO con un oggetto JSON:",
+      '{"reasoning": "in 2-5 frasi: cosa hai trovato di nuovo, cosa cambi, cosa lasci fuori e perché", "pages": [{"slug": "slug-esistente-o-nuovo", "kind": "client|project|person|decision|procedure|topic", "title": "…", "summary": "una o due frasi", "body": "il testo COMPLETO della pagina dopo la modifica: elenchi brevi, fatti con la data, [[slug]] per citare altre pagine", "note": "cosa è cambiato, in una riga", "sources": ["m3", "n1"], "conflict": ""}]}',
+      "Regole:",
+      "- Solo sapere durevole dell'azienda: clienti, progetti e il loro stato, persone e ruoli, decisioni (con data e chi), procedure, impegni e scadenze. Niente chiacchiere, saluti, prove tecniche o lavoro ormai superato.",
+      "- Ogni fatto nuovo viene dalle conversazioni o dalle note qui sopra: in \"sources\" metti i riferimenti [m…], [n…] o [s…] da cui viene. Non inventare nulla.",
+      "- Per cambiare una pagina esistente usa il suo slug e riscrivi il testo completo, tenendo tutto ciò che è ancora vero. Cambia solo le pagine che vedi qui sopra per intero: le altre dell'elenco servono a non creare doppioni.",
+      "- Se una cosa nuova contraddice la pagina non scegliere: scrivi entrambe le versioni con le date e spiega la contraddizione in \"conflict\".",
+      "- Una pagina nuova solo se l'argomento non ne ha già una. Al massimo 15 pagine per risposta; se non c'è niente di nuovo da sapere, {\"pages\": []}.",
+      "- Mai password, token, chiavi o altri segreti nelle pagine, nemmeno se compaiono nelle conversazioni: al più dove sono conservati (es. «in hush come NOME»).",
+      "- Scrivi nella lingua delle conversazioni.",
+    ].join("\n");
+    let room = PROMPT_BYTES - bytes([head, notesPart, chatsPart, rules].join("\n\n")) - 200;
+    const listed = all.slice(0, INDEX_PAGES);
+    const bare = listed.map((page) => `- ${page.slug} | ${page.kind} | ${page.title}`);
+    const shown = [];
+    let nearSize = 0;
+    for (const page of near) {
+      const text = `### ${page.slug} (${page.kind}): ${page.title}\n${page.summary}\n${page.body}`;
+      if (nearSize + bytes(text) + 2 > room - bytes(bare.join("\n")) - 40) continue;
+      shown.push({ page, text });
+      nearSize += bytes(text) + 2;
+    }
+    room -= nearSize;
+    let index = [];
+    for (const width of [160, 60, 0]) {
+      const lines = listed.map((page, at) => `${bare[at]}${width && page.summary ? ` — ${page.summary.slice(0, width)}` : ""}`);
+      if (bytes(lines.join("\n")) + 40 <= room) { index = lines; break; }
+    }
+    if (!index.length) {
+      let size = 40;
+      for (const line of bare) {
+        if (size + bytes(line) + 1 > room) break;
+        index.push(line);
+        size += bytes(line) + 1;
+      }
+    }
+    const whole = new Set(shown.map(({ page }) => page.slug));
     const prompt = [
-      "Sei il bibliotecario di quest'azienda: tieni il brain aziendale, le pagine che dicono cosa sa l'azienda. Ogni pagina è un cliente (client), un progetto (project), una persona (person), una decisione (decision), una procedura (procedure) o un tema (topic).",
-      `## Pagine esistenti\n${index.length ? index.join("\n") : "(ancora nessuna)"}`,
-      near.length ? `## Pagine che potrebbero cambiare, per intero\n${near.filter(Boolean).map((page) => `### ${page.slug} (${page.kind}): ${page.title}\n${page.summary}\n${page.body}`).join("\n\n")}` : "",
-      noteLines.length ? `## Note degli agenti e ricordi condivisi\n${noteLines.join("\n")}` : "",
-      lines.length ? `## Conversazioni nuove\n${lines.join("\n")}` : "",
-      [
-        "Rispondi SOLO con un oggetto JSON:",
-        '{"reasoning": "in 2-5 frasi: cosa hai trovato di nuovo, cosa cambi, cosa lasci fuori e perché", "pages": [{"slug": "slug-esistente-o-nuovo", "kind": "client|project|person|decision|procedure|topic", "title": "…", "summary": "una o due frasi", "body": "il testo COMPLETO della pagina dopo la modifica: elenchi brevi, fatti con la data, [[slug]] per citare altre pagine", "note": "cosa è cambiato, in una riga", "sources": ["m3", "n1"], "conflict": ""}]}',
-        "Regole:",
-        "- Solo sapere durevole dell'azienda: clienti, progetti e il loro stato, persone e ruoli, decisioni (con data e chi), procedure, impegni e scadenze. Niente chiacchiere, saluti, prove tecniche o lavoro ormai superato.",
-        "- Ogni fatto nuovo viene dalle conversazioni o dalle note qui sopra: in \"sources\" metti i riferimenti [m…], [n…] o [s…] da cui viene. Non inventare nulla.",
-        "- Per cambiare una pagina esistente usa il suo slug e riscrivi il testo completo, tenendo tutto ciò che è ancora vero.",
-        "- Se una cosa nuova contraddice la pagina non scegliere: scrivi entrambe le versioni con le date e spiega la contraddizione in \"conflict\".",
-        "- Una pagina nuova solo se l'argomento non ne ha già una. Al massimo 15 pagine per risposta; se non c'è niente di nuovo da sapere, {\"pages\": []}.",
-        "- Mai password, token, chiavi o altri segreti nelle pagine, nemmeno se compaiono nelle conversazioni: al più dove sono conservati (es. «in hush come NOME»).",
-        "- Scrivi nella lingua delle conversazioni.",
-      ].join("\n"),
+      head,
+      `## Pagine esistenti\n${index.length ? index.join("\n") : listed.length ? "(troppe per elencarle qui)" : "(ancora nessuna)"}`,
+      shown.length ? `## Pagine che potrebbero cambiare, per intero\n${shown.map(({ text }) => text).join("\n\n")}` : "",
+      notesPart,
+      chatsPart,
+      rules,
     ].filter(Boolean).join("\n\n");
     let { text, traceId } = await this.think(prompt);
     let answer;
@@ -307,6 +341,12 @@ export class Librarian {
       if (!slug || slug === ARTIFACTS_SLUG || !String(change.title || "").trim() || !body || !sources.length) {
         done.skipped += 1;
         this.step("skip", `Scarta «${String(change.title || change.slug || "senza titolo").slice(0, 80)}»: ${!sources.length ? "nessuna fonte citata" : slug === ARTIFACTS_SLUG ? "la pagina degli artefatti la tiene Cora" : "pagina incompleta"}`);
+        continue;
+      }
+      // A page the model did not read whole would lose what it did not see.
+      if (known.has(slug) && !whole.has(slug)) {
+        done.skipped += 1;
+        this.step("skip", `Scarta «${String(change.title).slice(0, 80)}»: la pagina esistente non era nel prompt per intero`, { slug });
         continue;
       }
       const conflict = String(change.conflict || "").trim();
