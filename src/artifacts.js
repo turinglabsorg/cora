@@ -1,4 +1,4 @@
-import { encryptedFolder } from "./encrypted-space.js";
+import { encryptedFolder, encryptionRequired, encryptedOnly } from "./encrypted-space.js";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
@@ -178,7 +178,13 @@ export class Artifacts {
     return existsSync(this.objectPath(sha));
   }
 
+  assertPlaintextAllowed(folderId = "") {
+    if (encryptedFolder(this.store, folderId)) throw new ArtifactError("Encrypted folder: use the encrypted-space controls.", 409);
+    if (encryptionRequired(this.store)) throw new ArtifactError("La cifratura è obbligatoria: usa i controlli cifrati. I nuovi contenuti devono essere cifrati; lo storico resta accessibile.", 409);
+  }
+
   putBytes(data) {
+    this.assertPlaintextAllowed();
     const buffer = Buffer.from(data);
     const sha = sha256(buffer);
     const target = this.objectPath(sha);
@@ -200,6 +206,7 @@ export class Artifacts {
 
   /** A writer for one file arriving from a desktop: hashed as it comes, kept only if it is what was announced. */
   objectWriter({ sha256: expected, size }) {
+    this.assertPlaintextAllowed();
     const temporary = join(this.dir, "tmp", randomBytes(12).toString("hex"));
     const fd = openSync(temporary, "wx", 0o600);
     const hash = createHash("sha256");
@@ -211,6 +218,7 @@ export class Artifacts {
     };
     return {
       write: (chunk) => {
+        if (encryptionRequired(this.store)) { close(); rmSync(temporary, { force: true }); this.assertPlaintextAllowed(); }
         written += chunk.length;
         if (written > size) {
           close();
@@ -221,6 +229,7 @@ export class Artifacts {
         writeSync(fd, chunk);
       },
       end: () => {
+        if (encryptionRequired(this.store)) { close(); rmSync(temporary, { force: true }); this.assertPlaintextAllowed(); }
         fsyncSync(fd);
         close();
         const digest = hash.digest("hex");
@@ -622,6 +631,7 @@ export class Artifacts {
    * where the folder says so.
    */
   async push({ agent, folder: folderRef, path, to = "", message = "", mirror = false, create = null, requester = null, memberUserId = "", channelId = "", traceId = "" }) {
+    if (encryptedOnly(this.store, agent)) throw new ArtifactError("Encrypted-only mode: plaintext filesystem access is disabled.", 409);
     if (encryptedFolder(this.store, this.findFolder(folderRef)?.id)) throw Object.assign(new Error("Encrypted folder: plaintext pushes are disabled."), { status: 409 });
     if (!this.boxes) throw new ArtifactError("there are no desktops here");
     const wanted = String(folderRef || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
@@ -767,6 +777,7 @@ export class Artifacts {
    * written, kept under its hash, and remembered as theirs for this folder.
    */
   async receive(folderId, user, body, size) {
+    this.assertPlaintextAllowed(folderId);
     if (encryptedFolder(this.store, folderId)) throw Object.assign(new Error("Encrypted folder: use the encrypted-space controls."), { status: 409 });
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
@@ -780,11 +791,13 @@ export class Artifacts {
     let written = 0;
     try {
       for await (const chunk of body) {
+        this.assertPlaintextAllowed(folderId);
         written += chunk.length;
         if (written > size) throw new ArtifactError("il file è più grande di quanto annunciato", 400);
         hash.update(chunk);
         writeSync(fd, chunk);
       }
+      this.assertPlaintextAllowed(folderId);
       if (written !== size) throw new ArtifactError("il file è arrivato a metà: riprova", 400);
       if (!this.canUpload(this.store.artifactFolder(folder.id), user)) throw new ArtifactError("il permesso di caricamento è stato revocato", 403);
       fsyncSync(fd);
@@ -811,6 +824,7 @@ export class Artifacts {
    * looking at. A reviewer of the folder publishes it at once; anyone else proposes it.
    */
   async commitUpload(folderId, { user, dir = "", base, files, message = "" }) {
+    this.assertPlaintextAllowed(folderId);
     if (encryptedFolder(this.store, folderId)) throw Object.assign(new Error("Encrypted folder: use the encrypted-space controls."), { status: 409 });
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
@@ -845,6 +859,7 @@ export class Artifacts {
    * version the person was looking at. A reviewer publishes it at once; anyone else proposes it.
    */
   async removeFiles(folderId, { user, base, paths, message = "" }) {
+    this.assertPlaintextAllowed(folderId);
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
     if (!this.canUpload(folder, user)) throw new ArtifactError("non puoi caricare o modificare file in questa cartella", 403);
@@ -871,8 +886,10 @@ export class Artifacts {
 
   /** A change made from the panel, as a commit on the version it started from: published at once by a reviewer, proposed otherwise. */
   panelCommit(folder, user, { base, to = "", sent = 0, uploaded = false, change, unchanged, message, said }) {
+    this.assertPlaintextAllowed(folder.id);
     const by = { kind: "user", id: user.id, name: user.name || user.email || "Owner" };
     return this.withLock(folder.id, async () => {
+      this.assertPlaintextAllowed(folder.id);
       const current = this.store.artifactFolder(folder.id);
       if (!this.canUpload(current, user)) throw new ArtifactError("non puoi caricare o modificare file in questa cartella", 403);
       const review = this.canReview(current, user);
@@ -960,6 +977,7 @@ export class Artifacts {
    * otherwise its changes are laid over the head, unless both touched the same file.
    */
   publishLocked(folder, commit, { by, note = "", force = false }) {
+    this.assertPlaintextAllowed(folder.id);
     const head = folder.head || "";
     const next = { ...commit };
     if ((commit.base || "") !== head) {
@@ -1016,6 +1034,7 @@ export class Artifacts {
 
   /** Publishes an older version again as a new commit on top of the current head. */
   async restore(folderId, commitId, user) {
+    this.assertPlaintextAllowed(folderId);
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
     if (!this.canReview(folder, user)) throw new ArtifactError("ripristinano una versione solo il proprietario e i revisori della cartella", 403);
@@ -1046,6 +1065,7 @@ export class Artifacts {
 
   /** Brings a folder's served version (or a given commit) onto an agent's desktop. */
   async pull({ agent, folder: folderRef, commit: commitRef = "", overwrite = false, memberUserId = "" }) {
+    if (encryptedOnly(this.store, agent)) throw new ArtifactError("Encrypted-only mode: plaintext filesystem access is disabled.", 409);
     if (!this.boxes) throw new ArtifactError("there are no desktops here");
     const folder = this.findFolder(folderRef);
     if (!folder) throw new ArtifactError("no such folder: list them with artifact_folders", 404);

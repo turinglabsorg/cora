@@ -150,13 +150,14 @@ function fuse(lists, limit) {
 
 export class CompanyBrain {
   /** `embed(texts)` → vectors, or null when no embedding model is set; `embedModel` names it. */
-  constructor({ url = "", embed = null, embedModel = () => "", log = () => {}, schema = "", connection = null } = {}) {
+  constructor({ url = "", embed = null, embedModel = () => "", log = () => {}, schema = "", connection = null, assertWritable = () => {} } = {}) {
     this.url = url;
     this.embed = embed;
     this.embedModel = embedModel;
     this.log = log;
     this.schema = schema;
     this.connection = connection;
+    this.assertWritable = assertWritable;
     this.owners = new Map();
     this.onNote = null;
     this.db = null;
@@ -196,7 +197,7 @@ export class CompanyBrain {
     if (!ownerId || ownerId === "space-owner") return this;
     if (!this.owners.has(ownerId)) {
       const schema = `owner_${createHash("sha256").update(ownerId).digest("hex").slice(0, 24)}`;
-      const brain = new CompanyBrain({ url: this.url, embed: this.embed, embedModel: this.embedModel, log: this.log, schema, connection: () => this.connect() });
+      const brain = new CompanyBrain({ url: this.url, embed: this.embed, embedModel: this.embedModel, log: this.log, schema, connection: () => this.connect(), assertWritable: this.assertWritable });
       brain.onNote = () => this.onNote?.();
       this.owners.set(ownerId, brain);
     }
@@ -266,6 +267,7 @@ export class CompanyBrain {
 
   async q(sql, params = []) {
     const db = await this.connect();
+    if (/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)) this.assertWritable();
     return db.query(sql, params);
   }
 
@@ -449,7 +451,12 @@ export class CompanyBrain {
 
   async transaction(work) {
     const db = await this.connect();
-    return db.transaction(work);
+    this.assertWritable();
+    return db.transaction(async (tx) => {
+      const result = await work({ query: (sql, params) => { this.assertWritable(); return tx.query(sql, params); } });
+      this.assertWritable();
+      return result;
+    });
   }
 
   /* ---------- review ---------- */

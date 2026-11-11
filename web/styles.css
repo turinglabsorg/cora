@@ -448,6 +448,13 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .notice.warn { border-color: var(--amber-line); background: var(--amber-wash); color: var(--text); }
 .notice > svg { flex: none; margin-top: 3px; color: var(--amber); }
 .notice .stack-sm { gap: 8px; }
+.encryption-warning { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; padding: 16px; margin-bottom: 16px; border: 1px solid var(--red); border-left: 4px solid var(--red); border-radius: var(--r-md); background: #1c0e0c; color: var(--text); overflow-wrap: anywhere; }
+.encryption-warning[hidden] { display: none; }
+.encryption-warning > svg { flex: none; color: var(--red); margin-top: 2px; }
+.encryption-warning .grow { min-width: min(240px, 100%); flex-basis: 240px; }
+.encryption-warning p { margin: 0; font-size: 13px; color: var(--text); }
+.encryption-warning strong { font-size: 15px; }
+.encryption-warning .btn { flex-shrink: 0; max-width: 100%; }
 /* The app manifest a provider is created from: folded away, mono, never in the way. */
 .manifest > summary { cursor: pointer; color: var(--muted); font: 500 11px/1.4 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; list-style: none; }
 .manifest > summary::-webkit-details-marker { display: none; }

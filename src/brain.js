@@ -471,6 +471,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
   }
 
   async chatTurn({ agent, history, channel, forced, computer, authorized = false, requestAuthorized = false, belongsTo = false, computerDenied = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
+    if (encryptedOnly(this.store, agent)) return { text: forced ? "La cifratura è obbligatoria per questo agente. Apri una sessione cifrata dal pannello: questa chat non elabora file o contenuti privati." : "", steps: 0, traceId: "", stopped: true };
     if (this.knowledge?.resetAt) history = history.filter((message) => this.knowledge.afterReset(message));
     const transcript = formatTranscript(history, agent, this.timezone);
     const last = replyTo || history[history.length - 1];
@@ -730,6 +731,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
   }
 
   async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, imageMessages = [], task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null, requester = null, replyTo = null, requestAuthorized = false, topics = null }) {
+    if (encryptedOnly(this.store, agent)) throw Object.assign(new Error("Encrypted-only mode: use the separate encrypted session."), { status: 409 });
     const selectedBrain = this.knowledge ? this.knowledge.forAgent(agent) : agent.brainSource === "external" ? null : this.companyBrain;
     const model = agent.model || this.store.settings.defaultModel;
     const caps = await this.llm.capabilities(model);
@@ -1347,6 +1349,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
    * rewrite the core card, add/merge/remove facts and write a diary page.
    */
   async sleep(agent, { force = false } = {}) {
+    if (encryptedOnly(this.store, agent)) return { status: "encrypted-only" };
     if (agent.brainSource === "external") return { status: "external-readonly" };
     if (this.sleeping.has(agent.id)) return { status: "busy" };
     this.sleeping.add(agent.id);

@@ -1,3 +1,4 @@
+import { encryptionRequired } from "./encrypted-space.js";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -475,6 +476,7 @@ export class Orchestrator {
   }
 
   async onMessage(raw, viaAgentId = null) {
+    if (encryptionRequired(this.store)) return;
     const guildId = raw.guild_id || this.channels.discordInfo(raw.channel_id)?.guildId;
     if (!guildId || !this.allowedGuild(guildId)) return;
     // Only real messages and replies: joins, pins, boosts and the like have no text for the agents.
@@ -559,6 +561,7 @@ export class Orchestrator {
    * the agent listens to no channel.
    */
   async onDirectMessage(agentId, raw) {
+    if (encryptionRequired(this.store)) return;
     const agent = this.store.agent(agentId);
     if (!agent?.enabled) return;
     if (!discordConversationMessage(raw)) return;
@@ -797,6 +800,7 @@ export class Orchestrator {
    * by any of them, once.
    */
   async onTelegramMessage(message, viaAgentId = null) {
+    if (encryptionRequired(this.store)) return;
     if (!this.channels.on("telegram") || !message?.chat) return;
     const chatId = String(message.chat.id);
     const privateWith = viaAgentId && message.chat.type === "private" ? viaAgentId : null;
@@ -915,6 +919,7 @@ export class Orchestrator {
    * thread belongs to that thread, where agents speak only when summoned.
    */
   async onSlackMessage(event, viaAgentId = null) {
+    if (encryptionRequired(this.store)) return;
     if (!this.channels.on("slack") || !event?.channel) return;
     // Edits, deletions, joins and the rest carry no new words for the agents.
     if (event.subtype && !SLACK_SUBTYPES.has(event.subtype)) return;
@@ -941,6 +946,7 @@ export class Orchestrator {
 
   /** A direct message to an agent's own Slack app: a private conversation only that agent answers. */
   async onSlackDirect(agentId, event) {
+    if (encryptionRequired(this.store)) return;
     if (!this.channels.on("slack") || !event?.channel) return;
     const agent = this.store.agent(agentId);
     if (!agent?.enabled) return;
@@ -1921,6 +1927,7 @@ export class Orchestrator {
 
   /** The owner writing from the panel: same flow as a Discord message from the owner. */
   async onWebMessage({ room, text, user }) {
+    if (encryptionRequired(this.store)) throw Object.assign(new Error("La cifratura è obbligatoria: apri una sessione cifrata dal pannello."), { status: 409 });
     const content = String(text || "").trim().slice(0, 3000);
     if (!content) return null;
     const state = this.state(room);
@@ -2287,6 +2294,7 @@ export class Orchestrator {
   }
 
   async runRoutine(routine, { manual = false, resumeTrace = null, resumeRunId = "" } = {}) {
+    if (encryptionRequired(this.store)) return { status: "encrypted-only" };
     routine = this.store.routine(routine.id);
     if (!routine) return { status: "archived" };
     if (this.routineRuns.has(routine.id)) return { status: "busy" };

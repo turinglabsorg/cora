@@ -32,15 +32,14 @@ async function world(t) {
   f.approve = async (r) => f.aliceApi(`/api/encrypted/requests/${r.id}/approve`, { method: "POST", body: { content: payload, instruction: "Synthetic private instruction", proof: await f.a.proof(`approve:${r.id}`) } });
   return f;
 }
-test("encrypted space defaults off, isolates owners/admin and refuses plaintext artifact writes", async (t) => {
+test("enforcement defaults off while personal encryption remains available and owner-isolated", async (t) => {
   const f = await knowledgeWorld(); t.after(() => f.close());
   assert.equal((await f.request(f.admin, "/api/encrypted/settings")).data.enabled, false);
   assert.equal((await f.request(f.alice, "/api/encrypted/settings", { method: "PUT", body: { enabled: true } })).status, 403);
   const a = await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "synthetic/a" } });
   const keys = await createFolderKeys(a.data.id, "password", password);
-  assert.equal((await f.request(f.alice, `/api/encrypted/folders/${a.data.id}/configure`, { method: "POST", body: keys })).status, 409);
-  await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: true } });
   assert.equal((await f.request(f.alice, `/api/encrypted/folders/${a.data.id}/configure`, { method: "POST", body: keys })).status, 201);
+  await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: true } });
   for (const actor of [f.bob, f.admin]) assert.equal((await f.request(actor, `/api/encrypted/folders/${a.data.id}`)).status, 404);
   for (const action of ["blobs", "upload", "shares", "remove"]) assert.equal((await f.request(f.alice, `/api/artifacts/folders/${a.data.id}/${action}`, { method: "POST", body: {} })).status, 409);
   await assert.rejects(f.app.artifacts.receive(a.data.id, f.alice.user, null, 0), /Encrypted folder/);
@@ -122,10 +121,10 @@ test("revocation, expiry, changed versions, foreign ownership and encrypted-only
   assert.equal((await f.request(f.bob, `/api/encrypted/agents/${f.agent.id}`, { method: "PUT", body: { encryptedOnly: false } })).status, 404);
   await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: false } });
   const records = await f.a.api(`/api/encrypted/folders/${f.a.folder.id}`); assert.equal(records.documents.length, 1);
-  await assert.rejects(f.requestAccess(doc), (e) => e.status === 409);
+  assert.equal((await f.requestAccess({ ...doc, version: 2 })).state, "pending");
 });
 
-test("expired approvals, rejected tools, provider errors and disabled space fail closed", async (t) => {
+test("expired approvals, rejected tools and provider errors fail closed while personal encryption survives policy changes", async (t) => {
   const f = await world(t), doc = await f.save(), service = encryptedSpaceFor(f.app.store);
   const expired = await f.requestAccess(doc); service.saveRequest({ ...expired, expires: Date.now() - 1 });
   await assert.rejects(f.approve(expired), (e) => e.status === 409);
@@ -138,8 +137,9 @@ test("expired approvals, rejected tools, provider errors and disabled space fail
   await assert.rejects(f.approve(providerError), (e) => e.status === 409 && !e.message.includes("SYNTHETIC_PROVIDER"));
   const disabled = await f.requestAccess(doc);
   await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: false } });
-  await assert.rejects(f.approve(disabled), (e) => e.status === 409);
-  assert.equal((await f.aliceApi(`/api/encrypted/requests/${disabled.id}`)).state, "revoked");
+  assert.equal((await f.aliceApi(`/api/encrypted/requests/${disabled.id}`)).state, "pending");
+  f.app.llm.chat = async () => ({ text: "SYNTHETIC_PRIVATE_RESULT", thinking: "" });
+  assert.equal((await f.approve(disabled)).state, "complete");
   await assert.rejects(decryptDocument(f.a.bundle, doc.envelope, `cora:${f.a.folder.id}:substituted-document:1`), /versione richiesta/);
 });
 test("folder-method and person revocation invalidate pending/running access; interrupted workers never resume plaintext", async (t) => {
@@ -181,4 +181,81 @@ test("folder managers see effective none/read/write including inherited grants w
   assert.equal(data.effectiveAccess[f.bob.user.id], "write", "an explicit none cannot cancel an inherited write grant");
   f.app.store.setValue("artifactLevelAccess", {});
   assert.equal((await detail()).effectiveAccess[f.bob.user.id], "none");
+});
+
+
+test("forward-only enforcement preserves historic bytes, versions and shares while rejecting every new plaintext write", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "synthetic/legacy" } })).data;
+  const bytes = Buffer.from("SYNTHETIC_LEGACY_CONTENT");
+  const response = await fetch(f.base + `/api/artifacts/folders/${folder.id}/blobs`, { method: "POST", headers: { ...f.alice.headers, "X-Cora": "1" }, body: bytes });
+  assert.equal(response.status, 201);
+  const { sha } = await response.json();
+  const committed = await f.request(f.alice, `/api/artifacts/folders/${folder.id}/upload`, { method: "POST", body: { base: "", files: [{ path: "history.txt", sha }], message: "Synthetic history" } });
+  assert.equal(committed.status, 201);
+  const commit = committed.data.commit;
+  f.app.artifacts.shareSuffix = "synthetic.test";
+  const share = f.app.artifacts.createShare(folder.id, { label: "legacy-share", view: "files", access: { mode: "public" }, createdBy: { kind: "user", id: f.alice.user.id } });
+  const writer = f.app.artifacts.objectWriter({ sha256: sha, size: bytes.length });
+  writer.write(bytes);
+  const agent = f.app.store.createAgent({ name: "History", model: "ollama/fixture", brainOwnerId: f.alice.user.id });
+  f.app.store.addMemory(agent.id, "SYNTHETIC_LEGACY_MEMORY");
+  f.app.store.appendArchive("synthetic", { id: "legacy-message", content: "SYNTHETIC_LEGACY_CHAT" });
+  const result = await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: true } });
+  assert.equal(result.status, 200); assert.equal(result.data.required, true); assert.ok(result.data.requiredSince > 0);
+  assert.throws(() => writer.end(), (e) => e.status === 409);
+  assert.deepEqual(f.app.artifacts.readObject(sha), bytes);
+  assert.equal(f.app.artifacts.treeOf(commit.id).get("history.txt").sha, sha);
+  const stream = f.app.artifacts.stream(sha); const chunks = []; for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(Buffer.concat(chunks), bytes);
+  assert.ok(f.app.artifacts.resolveHost(share.label));
+  const detail = (await f.request(f.alice, `/api/artifacts/folders/${folder.id}`)).data;
+  assert.equal(detail.legacyPlaintext, true); assert.equal(detail.tree[0].path, "history.txt");
+  assert.equal((await f.request(f.alice, `/api/artifacts/commits/${commit.id}`)).status, 200);
+  const download = await fetch(f.base + `/api/artifacts/commits/${commit.id}/files/history.txt?download=1`, { headers: f.alice.headers });
+  assert.equal(download.status, 200); assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
+  const listing = (await f.request(f.alice, "/api/artifacts")).data;
+  assert.equal(listing.legacyFolders, 1); assert.equal((await f.request(f.bob, "/api/artifacts")).data.legacyFolders, 0);
+  assert.equal((await f.request(f.alice, "/api/encrypted/settings")).data.plaintext, undefined);
+  assert.equal(f.app.store.memories(agent.id)[0].text, "SYNTHETIC_LEGACY_MEMORY");
+  assert.equal(f.app.store.db.prepare("SELECT content FROM messages WHERE id = ?").get("legacy-message").content, "SYNTHETIC_LEGACY_CHAT");
+  for (const action of ["blobs", "upload", "restore", "remove"]) assert.equal((await f.request(f.alice, `/api/artifacts/folders/${folder.id}/${action}`, { method: "POST", body: {} })).status, 409);
+  assert.throws(() => f.app.artifacts.putBytes(bytes), (e) => e.status === 409);
+  await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: false } });
+  assert.equal((await f.request(f.alice, `/api/artifacts/folders/${folder.id}`)).data.legacyPlaintext, false);
+  assert.deepEqual(f.app.artifacts.readObject(sha), bytes);
+});
+
+test("general enforcement stops ordinary chat, memory, reasoning and transport ingestion before private content is persisted", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const agent = f.app.store.createAgent({ name: "Synthetic encrypted worker", model: "ollama/fixture", brainOwnerId: f.alice.user.id, tools: true });
+  assert.equal((await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: true } })).status, 200);
+  f.app.brain.memoryContext = () => { throw Error("must not read plaintext memory"); };
+  f.app.llm.capabilities = () => { throw Error("must not start ordinary model"); };
+  const result = await f.app.brain.chatTurn({ agent, history: [{ content: "SYNTHETIC_PRIVATE_INPUT" }], channel: { id: "synthetic" }, forced: true });
+  assert.equal(result.stopped, true); assert.equal(result.traceId, ""); assert.match(result.text, /sessione cifrata/);
+  await assert.rejects(f.app.brain.loop({ agent }), (e) => e.status === 409);
+  assert.equal((await f.app.brain.sleep(agent)).status, "encrypted-only");
+  const writes = [
+    () => f.app.store.appendArchive("synthetic", { id: "private", content: "SYNTHETIC_PRIVATE_INPUT" }),
+    () => f.app.store.addMemory(agent.id, "SYNTHETIC_PRIVATE_INPUT"),
+    () => f.app.store.setCore(agent.id, "SYNTHETIC_PRIVATE_INPUT"),
+    () => f.app.store.updateAgent(agent.id, { core: "SYNTHETIC_PRIVATE_INPUT" }),
+    () => f.app.store.addDiary(agent.id, "SYNTHETIC_PRIVATE_INPUT"),
+    () => f.app.store.saveContextDocument({ name: "synthetic", content: "SYNTHETIC_PRIVATE_INPUT" }),
+    () => f.app.store.saveTrace({ prompt: "SYNTHETIC_PRIVATE_INPUT" }),
+  ];
+  for (const write of writes) assert.throws(write, (e) => e.status === 409);
+  for (const table of ["messages", "memories", "diary", "context_documents", "traces"]) assert.equal(f.app.store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
+  await assert.rejects(f.app.knowledge.forUser(f.alice.user).note({ text: "SYNTHETIC_NEW_PLAINTEXT" }), (e) => e.status === 409);
+  await assert.rejects(f.app.knowledge.forUser(f.alice.user).write({ title: "Synthetic new page", body: "SYNTHETIC_NEW_PLAINTEXT", author: "fixture" }), (e) => e.status === 409);
+  assert.equal((await f.app.librarian.run()).status, "encrypted-only");
+  assert.equal((await f.app.orchestrator.runRoutine({ id: "synthetic", agentId: agent.id })).status, "encrypted-only");
+  assert.throws(() => f.app.store.createRoutine(agent.id, { prompt: "SYNTHETIC_NEW_PLAINTEXT" }), (e) => e.status === 409);
+  await f.app.orchestrator.onMessage({});
+  await f.app.orchestrator.onDirectMessage(agent.id, {});
+  await f.app.orchestrator.onTelegramMessage({});
+  await f.app.orchestrator.onSlackMessage({});
+  await f.app.orchestrator.onSlackDirect(agent.id, {});
+  await assert.rejects(f.app.orchestrator.onWebMessage({ room: "synthetic", text: "private" }), (e) => e.status === 409);
 });

@@ -927,6 +927,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       ]);
       return send(res, 200, {
         settings: store.settings,
+        encryptionRequired: encrypted.enabled,
         currentUser: user,
         access: { hosted: Boolean(cloud), canManage: user.role === "owner" },
         transport: channels.active,
@@ -1763,6 +1764,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, {
         folders: store.artifactFolders().filter((folder) => artifacts.canReadMember(folder, user)).map((folder) => artifacts.folderView(folder)),
         reviews: artifacts.reviewsFor(user).map((commit) => artifacts.commitSummary(commit)),
+        encryptionRequired: encrypted.enabled,
+        legacyFolders: encrypted.enabled ? store.artifactFolders().filter((folder) => artifacts.canReadMember(folder, user) && !encryptedFolder(store, folder.id) && (folder.head || store.artifactCommits(folder.id, { limit: 1 }).length)).length : 0,
         quota: artifacts.space(),
         people: store.sharingPeople(user),
         canManage: Boolean(knowledge?.ownerMemory || user.role === "owner"),
@@ -1784,7 +1787,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const folder = store.artifactFolder(match[1]);
       if (!folder) throw new HttpError(404, "cartella non trovata");
       if (!artifacts.canReadMember(folder, user)) throw new HttpError(403, "non hai accesso a questa cartella");
-      if (encryptedFolder(store, folder.id) && method !== "GET") throw new HttpError(409, "Questa cartella usa lo Spazio cifrato: usa i suoi controlli di sblocco.");
+      if (method === "POST" && ((encryptedFolder(store, folder.id) && ["restore", "shares", "blobs", "upload", "remove"].includes(match[2])) || (encrypted.enabled && ["restore", "blobs", "upload", "remove"].includes(match[2])))) throw new HttpError(409, "Questa cartella usa lo Spazio cifrato: usa i suoi controlli di sblocco.");
       // Uploads from the panel: each file on its own as raw bytes, then one commit that places them.
       if (match[2] === "blobs" && method === "POST") {
         const length = req.headers["content-length"] === undefined ? NaN : Number(req.headers["content-length"]);
@@ -1820,7 +1823,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 200, {
           folder: artifacts.folderView(folder),
           encrypted: encryptedFolder(store, folder.id),
-          encryptedEnabled: encrypted.enabled,
+          encryptedEnabled: true,
+          encryptionRequired: encrypted.enabled,
+          legacyPlaintext: encrypted.enabled && !encryptedFolder(store, folder.id) && Boolean(head || store.artifactCommits(folder.id, { limit: 1 }).length),
           canEncrypt: (folder.ownerId || (folder.createdBy?.kind === "user" ? folder.createdBy.id : "")) === user.id,
           canReview: artifacts.canReview(folder, user),
           canUpload: artifacts.canUpload(folder, user),

@@ -672,7 +672,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
       back ? h("a", { class: "icon-btn", href: back, "aria-label": "Indietro" }, icon("back")) : h("a", { class: "appbar-brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "Cora" })),
       h("h1", {}, title),
       accountButton("bar")),
-    h("main", { class: "content" }, h("div", { class: "wrap" }, content)),
+    h("main", { class: "content" }, h("div", { class: "wrap" }, S.data?.encryptionRequired && (["brain", "thread", "salotto", "contesto"].includes(section) || section === "agent" && ["chat", "memoria", "ragionamento"].includes(route()[2])) ? encryptionWarning("Lo storico precedente all’attivazione può contenere dati in chiaro e resta accessibile.") : null, content)),
     h("nav", { class: "tabbar" }, nav.map(([key, label, name, active, count]) => h("a", { href: `#/${key}`, class: active ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "nav-count", "aria-label": tr("{count} da rivedere", { count }) }, raw(String(count))) : null)))));
   updateLamp();
   if (scroll?.top || scroll?.left) restoreScroll(scroll);
@@ -4143,7 +4143,7 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
-const encryptedUI = () => ({ h, btn, api, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace });
+const encryptedUI = () => ({ h, btn, api, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
 
 function agentSecurityPane(agent, data) {
   if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));
@@ -6210,7 +6210,7 @@ function renderArtifacts() {
   if (id && id !== "in") return renderArtifactFolder(id, view || "file", view === "file" || !view ? artifactDir(route().slice(3)) : artifactDir(String(new URLSearchParams(location.hash.split("?")[1] || "").get("in") || "").split("/")));
   const body = h("div", { class: "stack" }, skeleton("rows", 4));
   let data = null;
-  let creating = false;
+  let creating = new URLSearchParams(location.hash.split("?")[1] || "").get("encrypt") === "1";
   const search = h("input", { type: "search", placeholder: tr("Cerca tra le cartelle…"), "aria-label": tr("Cerca tra le cartelle"), autocomplete: "off" });
   const newButton = btn("Nuova cartella", { icon: "plus", cls: "primary", onclick: () => { creating = !creating; draw(); if (creating) body.querySelector(".art-new input")?.focus(); } });
   search.addEventListener("input", () => drawList());
@@ -6267,14 +6267,14 @@ function renderArtifacts() {
       const wrong = where.problem();
       if (wrong) return toast(wrong, true);
       const created = await guard(api("/api/artifacts/folders", { method: "POST", body: { path: where.value(), title: values.get("title"), description: values.get("description"), kind: kind.value, policy: values.get("direct") ? "direct" : "review" } }), "Cartella creata");
-      if (created) location.hash = `#/artefatti/${created.id}`;
+      if (created) location.hash = `#/artefatti/${created.id}${data.encryptionRequired || new URLSearchParams(location.hash.split("?")[1] || "").get("encrypt") === "1" ? "/cifratura" : ""}`;
     });
     return panel({ icon: "folder", title: "Nuova cartella", hint: "Gli agenti la trovano nel brain e con artifact_folders: scrivi bene cosa ci va." }, form);
   }
 
   function draw() {
     if (level) {
-      body.replaceChildren(...[creating ? newFolderForm() : null, data.folders.length > 6 ? h("div", { class: "art-search" }, search) : null, list, levelAccess, levelShares].filter(Boolean));
+      body.replaceChildren(...[data.encryptionRequired && data.legacyFolders ? encryptionWarning() : null, creating ? newFolderForm() : null, data.folders.length > 6 ? h("div", { class: "art-search" }, search) : null, list, levelAccess, levelShares].filter(Boolean));
       drawList();
       return;
     }
@@ -6282,6 +6282,7 @@ function renderArtifacts() {
     const onAir = data.folders.filter((folder) => folder.head).length;
     body.replaceChildren(...[
       artifactsSwitch(""),
+      data.encryptionRequired && data.legacyFolders ? encryptionWarning() : null,
       h("div", { class: "stats" },
         statCard({ icon: "archive", value: String(data.folders.length), label: "cartelle" }),
         statCard({ icon: "check", value: String(reviews.length), label: "da rivedere", href: reviews.length ? `#/artefatti/${reviews[0].folderId}/c/${reviews[0].id}` : null }),
@@ -6450,6 +6451,7 @@ function artifactKind(path) {
  * text as text with line numbers, anything else to download. Never rendered as a page.
  */
 async function artifactPreview(url, path, size, edit = null) {
+  if (S.data?.encryptionRequired) edit = null;
   const kind = artifactKind(path);
   const download = btn("Scarica", { icon: "download", cls: "sm ghost", href: `${url}?download=1` });
   // Full screen: the browser's own when it has one, otherwise the preview covers the page until Esc.
@@ -6807,6 +6809,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
     pageHead(raw(dir ? dir.split("/").at(-1) : folder.title), h("span", { class: "art-head-meta" },
       badge(folder.kind === "site" ? "Sito" : "Cartella", "", folder.kind === "site" ? "globe" : "folder"),
       badge(folder.policy === "direct" ? "Pubblica subito" : "Con revisione", folder.policy === "direct" ? "warn" : "", folder.policy === "direct" ? "spark" : "check"))),
+    data.legacyPlaintext ? encryptionWarning("Cifratura obbligatoria attiva: questi file sono ancora in chiaro.") : null,
     folder.description && !dir ? h("p", { class: "lead art-lead" }, raw(folder.description)) : dir ? h("p", { class: "lead art-lead" }, raw(tr("Una sottocartella di {title}", { title: folder.title }))) : null,
     h("div", { class: `art-onair${head ? " on" : ""}` },
       h("span", { class: `art-lamp${head ? " on" : ""}` }, h("i"), h("span", {}, head ? tr("In onda") : tr("Spento"))),
@@ -6826,10 +6829,15 @@ async function renderArtifactFolder(id, tab, dir = "") {
   content.replaceChildren(...[shown].flat().filter(Boolean));
 }
 
+function encryptionWarning(message = "Cifratura obbligatoria attiva: alcune cartelle contengono ancora file in chiaro.") {
+  return h("aside", { class: "encryption-warning", role: "note", "aria-label": tr("Avviso cifratura") }, icon("alert"),
+    h("div", { class: "stack-sm grow" }, h("strong", {}, message), h("p", {}, "Lo storico resta accessibile. I nuovi contenuti devono essere cifrati; nessun dato precedente viene convertito automaticamente.")),
+    btn("Crea cartella cifrata", { icon: "lock", cls: "sm ghost", href: "#/artefatti?encrypt=1" }));
+}
+
 function artifactEncryption(data, reload) {
   if (!data.canEncrypt) return panel({ icon: "lock", title: "Spazio cifrato" }, h("p", {}, "Solo il proprietario della cartella può attivare la cifratura."));
-  if (!data.encryptedEnabled) return panel({ icon: "lock", title: "Spazio cifrato" }, h("p", {}, "Abilita Spazio cifrato nelle impostazioni dello spazio, poi proteggi questa cartella."), btn("Impostazioni dello spazio", { icon: "sliders", href: "#/settings/spazio" }));
-  if (data.commits.length || data.shares.length) return panel({ icon: "lock", title: "Spazio cifrato" }, h("p", {}, "La cifratura si attiva su una cartella nuova e vuota, senza commit o link di condivisione. I file esistenti non vengono convertiti."));
+  if (data.commits.length || data.shares.length) return panel({ icon: "lock", title: "Spazio cifrato" }, h("p", {}, "I file e le versioni esistenti restano accessibili in chiaro. Per i prossimi documenti crea una cartella cifrata: lo storico non viene convertito automaticamente."), btn("Crea cartella cifrata", { icon: "lock", cls: "primary", href: "#/artefatti?encrypt=1" }));
   return encryptedSetup(encryptedUI(), data.folder, reload);
 }
 
@@ -6866,7 +6874,7 @@ function artifactFiles(data, head, dir = "") {
     for (const item of list.querySelectorAll(".art-file")) item.classList.toggle("on", item === row);
     preview.replaceChildren(skeleton("rows", 2));
     const shown = await artifactPreview(`/api/artifacts/commits/${head.id}/files/${artifactPath(file.path)}`, file.path, file.size, data.canUpload === false ? null : {
-      folder, head, canReview: data.canReview,
+      folder, head, canReview: data.canReview && !data.encryptionRequired,
       onSaved: (commit) => {
         if (commit.status !== "published") { location.hash = `#/artefatti/${folder.id}/c/${commit.id}`; return; }
         S.reopenFile = file.path;
@@ -6897,7 +6905,7 @@ function artifactFiles(data, head, dir = "") {
   const pickDir = h("input", { type: "file", multiple: true, webkitdirectory: true, hidden: true });
   const verb = data.canReview ? "Carica qui" : "Proponi qui";
   const send = async (items) => {
-    if (data.canUpload === false || !items.length || drop.classList.contains("busy")) return;
+    if (data.encryptionRequired || data.canUpload === false || !items.length || drop.classList.contains("busy")) return;
     drop.classList.add("busy");
     try {
       const done = await uploadArtifactFiles(folder, { dir, base: head?.id || "", items, onProgress: ({ done: count, count: all, sent, total }) => {
@@ -6943,7 +6951,7 @@ function artifactFiles(data, head, dir = "") {
       name.focus?.();
     } }),
     pick, pickDir);
-  const zone = h("div", { class: "stack-sm art-zone" }, data.canUpload === false ? h("p", { class: "notice" }, icon("info"), "Hai accesso in lettura: puoi vedere e scaricare i file.") : drop, head || dir ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, list), head ? preview : null) : null);
+  const zone = h("div", { class: "stack-sm art-zone" }, data.encryptionRequired ? h("p", { class: "notice" }, icon("lock"), "Per aggiungere o modificare contenuti usa una cartella cifrata. Puoi continuare a leggere e scaricare questi file.") : data.canUpload === false ? h("p", { class: "notice" }, icon("info"), "Hai accesso in lettura: puoi vedere e scaricare i file.") : drop, head || dir ? h("div", { class: "art-files" }, h("div", { class: "stack-sm" }, list), head ? preview : null) : null);
   let depth = 0;
   zone.addEventListener("dragenter", (event) => { if (data.canUpload === false || ![...(event.dataTransfer?.types || [])].includes("Files")) return; event.preventDefault(); depth += 1; zone.classList.add("over"); });
   zone.addEventListener("dragover", (event) => { if ([...(event.dataTransfer?.types || [])].includes("Files")) event.preventDefault(); });

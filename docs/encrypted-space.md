@@ -1,6 +1,6 @@
 # Encrypted space
 
-Encrypted space is an opt-in, per-folder encrypted archive and a separate private document-session runner. It defaults **off**. An agent's independent **Settings > Security > Encrypted space** option defaults off and does not change its Sealed setting.
+Encrypted space provides per-folder encryption and a separate private document-session runner. Personal encryption is always available. The default-off **Settings > Space > Mandatory encryption** switch requires encrypted storage for all new content across the space and its agents. An agent may independently opt in through **Settings > Security > Encrypted sessions only** while the space requirement is off. Neither policy changes Sealed isolation.
 
 ## Scope and trust boundary
 
@@ -31,7 +31,7 @@ An access request is bound to the authenticated person, agent, isolated session,
 
 Unlock proof signs a server-issued sixty-second challenge with the decrypted folder signing key. The challenge binds the current person, folder revision, chosen wrapper metadata and exact operation. It is consumed once, including failed attempts. Eight failed proofs throttle new challenges for a minute. An audit method identifies the wrapper selected by the client; it is not an independent server-side WebAuthn authentication ceremony. Panel login establishes the person's identity.
 
-Changing unlock methods invalidates pending and running grants. Removing the final method is refused. Turning the feature off cancels work and leaves encrypted archives readable by their owners. Ownership/admission and current configuration are rechecked before committing output. Interrupted runs are marked interrupted on startup and never resumed from persisted plaintext. A failed, expired or revoked request needs a fresh request and manual approval.
+Changing unlock methods invalidates pending and running grants. Removing the final method is refused. Turning mandatory encryption off preserves encrypted archives and independently authorized private sessions; it restores the independent agent choices without decrypting documents. Ownership/admission and current configuration are rechecked before committing output. Interrupted runs are marked interrupted on startup and never resumed from persisted plaintext. A failed, expired or revoked request needs a fresh request and manual approval.
 
 Removing a wrapper does not rotate the folder's underlying key or invalidate private material a person already obtained. Replacing a password therefore requires no document re-encryption. There is no recovery backdoor: losing every usable method loses the documents.
 
@@ -41,15 +41,15 @@ A recipient explicitly enables encrypted proposals on their own folder. The send
 
 ## Migration and disabling
 
-Only a new empty artifact folder with no commits or share links can be enabled. There is no automatic import, bulk conversion or decryption of existing artifacts, messages or reasoning. Existing normal chats remain normal chats; instruction, answer and reasoning belonging to the isolated private session are stored encrypted together. There is no agent-content export to transport chat or file attachments.
+Only a new empty artifact folder with no commits or share links can be enabled. There is no automatic import, bulk conversion or decryption of existing artifacts, messages or reasoning. Existing chats, reasoning, memories, artifact versions and authorized share links remain accessible under their original permissions. Activation never blocks, converts or deletes this history. New plaintext payloads, uploads, commits, normal chat persistence, Brain writes and routine prompts are refused while mandatory encryption is on; use the separate encrypted session for new private content. Instruction, answer and reasoning belonging to that session are stored encrypted together. There is no agent-content export to transport chat or file attachments.
 
-The encrypted-only agent option removes shell, connectors, memory tools and file delivery from its regular tool list and rejects forced calls at execution. Global plaintext context documents are excluded from that agent's system prompt. The ordinary chat remains a place to request a private session, not an encrypted editor: users should enter confidential content only through the unlocked folder panel.
+The encrypted-only agent option removes shell, connectors, memory tools and file delivery from its regular tool list and rejects forced calls at execution. Global plaintext context documents are excluded from that agent's system prompt. Ordinary model and transport ingestion do not process or save new private content while encrypted-only policy applies. Enter private content through the unlocked folder panel. Red warnings identify legacy plaintext without denying access. The Artifacts CTA opens folder creation and then password/passkey enrollment for new encrypted content; it does not migrate or remove earlier files.
 
 ## API
 
 All endpoints require the actual authenticated panel browser and the normal same-origin/X-Cora checks. External panel MCP calls cannot unlock or approve.
 
-- `GET|PUT /api/encrypted/settings`: space feature state; only the space owner changes it.
+- `GET|PUT /api/encrypted/settings`: forward-only space requirement, activation time and owner-only legacy plaintext counts; only the space owner changes it.
 - `GET|PUT /api/encrypted/agents/:id`: independent encrypted-only option, checked against agent ownership.
 - `GET /api/encrypted/folders/:id`: own wrappers, public keys, ciphertext versions, request/inbox metadata and own audit.
 - `POST .../configure`: initialise a new empty folder.
@@ -77,4 +77,4 @@ Hush and Cora have independent release lifecycles. Fixture verification does not
 
 ## Folder navigation
 
-Every folder owner opens **Cifratura** (`#/artefatti/:id/cifratura`) to initialize encryption. When space encryption is off, this tab links to Settings > Spazio; folders with commits or sharing links explain why they cannot be converted. In an encrypted folder the same tab manages password and passkey wrappers. The previous `impostazioni` route remains a compatibility alias. Ordinary folder settings no longer contain the enrollment form. Team permission rows display the authoritative effective none/read/write grant, independently of inheritance.
+Every folder owner opens **Cifratura** (`#/artefatti/:id/cifratura`) to initialize encryption. Personal enrollment is available regardless of the space requirement. Folders with commits or sharing links retain their unencrypted history and offer creation of a separate encrypted folder. When mandatory encryption is on, Artifacts and legacy folder pages show a red warning and a working encrypted-folder CTA. File previews and downloads remain available; plaintext edit and upload actions are replaced with encrypted-storage guidance. In an encrypted folder the same tab manages password and passkey wrappers. The previous `impostazioni` route remains a compatibility alias. Ordinary folder settings no longer contain the enrollment form. Team permission rows display the authoritative effective none/read/write grant, independently of inheritance.

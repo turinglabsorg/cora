@@ -77,16 +77,17 @@ export function encryptedSetting(ui, agent = null) {
   const url = agent ? `/api/encrypted/agents/${agent.id}` : "/api/encrypted/settings";
   api(url).then((state) => {
     const name = agent ? "encryptedOnly" : "enabled";
-    const toggle = switchInput(name, "Spazio cifrato", state[name], agent ? "Solo sessioni cifrate. Shell, memoria e connettori esclusi." : "Password e passkey proteggono le chiavi delle singole cartelle. Spento di default.");
-    const input = toggle.querySelector("input"); input.disabled = !agent && !state.canManage;
+    const toggle = switchInput(name, agent ? "Solo sessioni cifrate" : "Cifratura obbligatoria", state[name], agent ? (state.requiredBySpace ? "Obbligatoria per tutto lo spazio. Questo agente non può lavorare su file in chiaro." : "Solo sessioni cifrate. Shell, memoria e connettori esclusi.") : "Da quando è attiva, tutti i nuovi contenuti devono essere cifrati. Lo storico resta accessibile e non viene convertito. Quando è spenta, la cifratura personale resta disponibile.");
+    const input = toggle.querySelector("input"); input.disabled = agent ? state.requiredBySpace : !state.canManage;
     const status = h("p", { class: "muted", role: "status" });
     input.addEventListener("change", async () => {
       input.disabled = true;
-      try { await api(url, { method: "PUT", body: { [name]: input.checked } }); status.textContent = tr("Salvato. I documenti esistenti restano cifrati."); }
+      try { await api(url, { method: "PUT", body: { [name]: input.checked } }); if (!agent) ui.policyChanged?.(input.checked); status.textContent = tr("Salvato. Lo storico resta accessibile. Disattivare l’obbligo non decifra i documenti."); migration.hidden = !input.checked || !Object.keys(state.plaintext || {}).length; }
       catch (error) { input.checked = !input.checked; status.textContent = tr(error.message); }
-      finally { input.disabled = !agent && !state.canManage; }
+      finally { input.disabled = agent ? state.requiredBySpace : !state.canManage; }
     });
-    box.replaceChildren(setRows(setRow(agent ? "Documenti" : "Documenti e sessioni", agent ? "Sblocco temporaneo dal pannello, indipendente da Sigillato." : "Disattivarlo interrompe le sessioni e non converte i file in chiaro.", toggle, { stack: true })), status);
+    const migration = h("div", { class: "encryption-warning", hidden: Boolean(agent) || !state.required || !Object.keys(state.plaintext || {}).length, role: "note" }, h("div", { class: "stack-sm" }, h("strong", {}, "Cifratura obbligatoria attiva: lo storico contiene ancora dati in chiaro."), h("p", {}, "Lo storico resta accessibile. I nuovi contenuti devono essere cifrati; nessun dato precedente viene convertito automaticamente."), btn("Apri gli artefatti", { href: "#/artefatti", cls: "sm ghost" })));
+    box.replaceChildren(...(migration ? [migration] : []), setRows(setRow(agent ? "Documenti" : "Documenti e sessioni", agent ? "Sblocco temporaneo dal pannello, indipendente da Sigillato." : "La cifratura personale è sempre disponibile. L’obbligo generale non può essere aggirato dalle impostazioni degli utenti o degli agenti.", toggle, { stack: true })), status);
   }).catch((error) => box.replaceChildren(h("p", { role: "alert" }, error.message), btn("Riprova", { onclick: () => box.replaceChildren(encryptedSetting(ui, agent)) })));
   return agent ? box : panel({ icon: "lock", title: "Spazio cifrato" }, box);
 }
@@ -134,7 +135,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     await refresh(); status.textContent = tr("Versione cifrata salvata.");
   };
   const unlock = panel({ icon: "lock", title: "Sblocca la cartella", hint: "La chiave viene aperta solo in questo browser. Non viene inviata al server." }, methodSelect, password,
-    btn("Sblocca", { cls: "primary", icon: "key", onclick: () => run(async () => {
+    btn("Sblocca cartella", { cls: "primary", icon: "key", onclick: () => run(async () => {
       chosenMethod = data.folder.methods.find((m) => m.id === methodSelect.value);
       bundle = await unlockBundle(folder.id, chosenMethod, password.value); password.value = "";
       await api(`/api/encrypted/folders/${folder.id}/read`, { method: "POST", body: { proof: await proof("read") } });

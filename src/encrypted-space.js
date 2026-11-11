@@ -44,7 +44,8 @@ function publicKey(input, algorithm) {
   } catch { fail(400, "Chiave pubblica non valida."); }
 }
 
-export const encryptedOnly = (store, agent) => Boolean(store.value(`encryptedOnly:${agent.id}`, false));
+export const encryptionRequired = (store) => store.value("encryptedSpaceEnabled", false) === true;
+export const encryptedOnly = (store, agent) => encryptionRequired(store) || Boolean(store.value(`encryptedOnly:${agent.id}`, false));
 export const encryptedFolder = (store, folderId) => Boolean(store.value(`encryptedFolder:${folderId}`, false));
 export const ENCRYPTED_CHAT_TOOLS = new Set(["say", "ask_owner", "list_channels", "encrypted_request"]);
 export function encryptedSpaceFor(store, options = {}) {
@@ -59,8 +60,7 @@ export class EncryptedSpace {
       const req = parse(row); this.saveRequest({ ...req, state: "interrupted" }); this.audit(req.owner, "session", req, "interrupted");
     }
   }
-  get enabled() { return this.store.value("encryptedSpaceEnabled", false) === true; }
-  requireEnabled() { if (!this.enabled) fail(409, "Lo Spazio cifrato è spento. I documenti esistenti restano cifrati."); }
+  get enabled() { return encryptionRequired(this.store); }
   folder(folderId, user) {
     const currentUser = this.store.panelUser(user.id);
     if (!currentUser || currentUser.blocked || !this.store.allowsPanelUser({ ...currentUser, emailVerified: true })) fail(404, "Cartella cifrata non disponibile.");
@@ -73,28 +73,34 @@ export class EncryptedSpace {
     const data = { actor: owner, event, folder: scope.folder || scope.id || "", document: scope.document || "", version: scope.version || 0, agent: scope.agent || "", session: scope.session || "", operation: scope.operation || "", method: methodId || scope.method || "", outcome };
     this.store.db.prepare("INSERT INTO encrypted_audit(owner, at, data) VALUES (?, ?, ?)").run(owner, Date.now(), JSON.stringify(data));
   }
+  plaintextState() {
+    const tables = ["artifact_objects", "artifact_commits", "artifact_uploads", "messages", "traces", "trace_systems", "memories", "diary", "core_history", "context_documents", "routines", "routine_runs"];
+    return Object.fromEntries([
+      ...tables.map((table) => [table, Number(this.store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n)]),
+      ["agentContent", Number(this.store.db.prepare("SELECT COUNT(*) AS n FROM agents WHERE COALESCE(json_extract(data, '$.core'), '') <> ''").get().n)],
+    ].filter(([, n]) => n));
+  }
   settings(user, changes) {
     if (changes) {
       if (user.role !== "owner") fail(403, "Solo il proprietario gestisce lo Spazio cifrato dello spazio.");
       if (typeof changes.enabled !== "boolean") fail(400, "Scegli attivo o spento.");
+      if (changes.enabled && !this.enabled) this.store.setValue("encryptionRequiredSince", Date.now());
       this.store.setValue("encryptedSpaceEnabled", changes.enabled);
-      if (!changes.enabled) for (const row of this.store.db.prepare("SELECT * FROM encrypted_requests WHERE state IN ('pending', 'running')").all()) this.cancel(parse(row), "revoked");
     }
-    return { enabled: this.enabled, canManage: user.role === "owner" };
+    return { enabled: this.enabled, required: this.enabled, requiredSince: this.store.value("encryptionRequiredSince", 0), available: true, canManage: user.role === "owner", ...(user.role === "owner" ? { plaintext: this.plaintextState() } : {}) };
   }
   agentSettings(agentId, user, changes) {
     const agent = this.store.agent(agentId);
     if (!agent || !this.knowledge.canManage(agent, user)) fail(404, "Agente non disponibile.");
     if (changes) {
       if (typeof changes.encryptedOnly !== "boolean") fail(400, "Scegli attivo o spento.");
-      if (changes.encryptedOnly) this.requireEnabled();
+      if (this.enabled && !changes.encryptedOnly) fail(409, "La cifratura è obbligatoria per tutto lo spazio e non può essere disattivata per un agente.");
       this.store.setValue(`encryptedOnly:${agentId}`, changes.encryptedOnly);
       for (const row of this.store.db.prepare("SELECT * FROM encrypted_requests WHERE agent = ? AND state IN ('pending', 'running')").all(agentId)) this.cancel(parse(row), "revoked");
     }
-    return { encryptedOnly: encryptedOnly(this.store, agent), enabled: this.enabled };
+    return { encryptedOnly: encryptedOnly(this.store, agent), personalEncryptedOnly: Boolean(this.store.value(`encryptedOnly:${agentId}`, false)), requiredBySpace: this.enabled, enabled: this.enabled, available: true };
   }
   configure(folderId, user, input) {
-    this.requireEnabled();
     if (encryptedFolder(this.store, folderId)) fail(409, "La cartella ha già una chiave.");
     const base = this.store.artifactFolder(folderId);
     if (!base || (base.ownerId || (base.createdBy?.kind === "user" ? base.createdBy.id : "")) !== user.id) fail(403, "Solo il proprietario della cartella può cifrarla.");
@@ -177,7 +183,7 @@ export class EncryptedSpace {
     return this.store.db.prepare("SELECT data FROM encrypted_folders WHERE owner != ?").all(user.id).map(parse).filter((folder) => folder.acceptShares && people.has(folder.owner) && this.store.artifactFolder(folder.id)).map((folder) => ({ id: folder.id, owner: folder.owner, name: people.get(folder.owner).name || people.get(folder.owner).email, title: this.store.artifactFolder(folder.id).title, publicKey: folder.publicKey }));
   }
   share(folderId, user, input) {
-    this.requireEnabled(); const folder = this.folder(folderId, user), doc = this.document(folderId, input.document, input.version);
+    const folder = this.folder(folderId, user), doc = this.document(folderId, input.document, input.version);
     const target = this.recipients(user).find((recipient) => recipient.id === input.target);
     if (!target) fail(404, "Destinatario non disponibile o non aperto alla condivisione.");
     this.prove(folder, user, input.proof, `share:${doc.id}:${doc.version}:${target.id}:${input.targetDocument}`);
@@ -211,7 +217,6 @@ export class EncryptedSpace {
   }
   saveRequest(request) { this.store.db.prepare("INSERT INTO encrypted_requests(id, folder, owner, agent, state, expires, data) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state, data=excluded.data").run(request.id, request.folder, request.owner, request.agent, request.state, request.expires, JSON.stringify(request)); }
   request(agent, input, userId) {
-    this.requireEnabled();
     const user = this.store.panelUser(userId);
     if (!user || !this.knowledge.canManage(agent, user)) fail(403, "Il proprietario deve richiedere l'accesso.");
     const folder = this.folder(input.folder, user);
@@ -231,7 +236,6 @@ export class EncryptedSpace {
     const next = { ...request, state }; this.saveRequest(next); this.audit(request.owner, "session", request, state); return next;
   }
   async approve(requestId, user, input) {
-    this.requireEnabled();
     const request = this.getRequest(requestId, user), folder = this.folder(request.folder, user);
     if (request.state !== "pending" || request.expires <= Date.now() || request.folderRevision !== folder.revision) fail(409, "Richiesta già usata, scaduta o revocata.");
     const agent = this.store.agent(request.agent);
@@ -249,7 +253,7 @@ export class EncryptedSpace {
         { role: "user", content: JSON.stringify({ operation: request.operation, document: input.content, instruction: input.instruction }) },
       ] });
       const current = this.getRequest(requestId, user);
-      if (!this.enabled || controller.signal.aborted || current.state !== "running" || Date.now() >= request.expires || !this.knowledge.canManage(this.store.agent(request.agent), this.store.panelUser(user.id)) || this.folder(folder.id, user).revision !== folder.revision) fail(409, "Accesso scaduto o revocato. Risultato eliminato.");
+      if (controller.signal.aborted || current.state !== "running" || Date.now() >= request.expires || !this.knowledge.canManage(this.store.agent(request.agent), this.store.panelUser(user.id)) || this.folder(folder.id, user).revision !== folder.revision) fail(409, "Accesso scaduto o revocato. Risultato eliminato.");
       if (response.toolCalls?.length) fail(409, "Il modello ha richiesto strumenti non disponibili. Nessuna azione eseguita.");
       const result = JSON.stringify({ instruction: input.instruction, answer: response.text || "", reasoning: response.thinking || "", source: { document: request.document, version: request.version }, operation: request.operation });
       if (Buffer.byteLength(result) > MAX_BYTES) fail(413, "Risultato troppo grande.");

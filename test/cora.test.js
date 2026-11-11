@@ -8752,3 +8752,34 @@ test("encrypted access tools return only a scoped panel link and reject unverifi
   assert.equal(f.app.store.db.prepare("SELECT COUNT(*) AS n FROM encrypted_requests").get().n, 1);
   assert.doesNotMatch(f.app.brain.systemPrompt(agent, {}), /PRIVATE_HANDOFF_NEVER_IN_TOOL_OUTPUT/);
 });
+
+
+test("general encryption enforcement overrides agent opt-out and preserves optional personal encryption", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const agent = f.app.store.createAgent({ name: "Encryption policy fixture", model: "ollama/fixture", brainOwnerId: f.alice.user.id, enabled: false, tools: true });
+  const agentPath = `/api/encrypted/agents/${agent.id}`;
+  assert.equal((await f.request(f.alice, agentPath, { method: "PUT", body: { encryptedOnly: true } })).status, 200);
+  assert.equal((await f.request(f.alice, agentPath)).data.requiredBySpace, false);
+  assert.equal((await f.request(f.alice, agentPath, { method: "PUT", body: { encryptedOnly: false } })).status, 200);
+  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "fixture/enforcement" } })).data;
+  const policy = await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: true } });
+  assert.equal(policy.status, 200); assert.equal(policy.data.required, true);
+  const effective = (await f.request(f.alice, agentPath)).data;
+  assert.equal(effective.encryptedOnly, true); assert.equal(effective.personalEncryptedOnly, false); assert.equal(effective.requiredBySpace, true);
+  assert.equal((await f.request(f.alice, agentPath, { method: "PUT", body: { encryptedOnly: false } })).status, 409);
+  for (const name of ["shell", "artifact_push", "artifact_pull", "share_file", "brain_search", "email_send"]) {
+    assert.match((await executeTool({ name, args: {} }, { agent, store: f.app.store })).text, /encrypted-only mode/);
+  }
+  const before = f.app.store.db.prepare("SELECT COUNT(*) AS n FROM artifact_objects").get().n;
+  assert.throws(() => f.app.artifacts.putBytes(Buffer.from("SYNTHETIC_PLAINTEXT_MUST_BE_REFUSED")), (e) => e.status === 409);
+  await assert.rejects(f.app.artifacts.push({ agent, folder: folder.path, path: "/home/agent/work" }), (e) => e.status === 409);
+  await assert.rejects(f.app.artifacts.pull({ agent, folder: folder.path }), (e) => e.status === 409);
+  assert.equal((await f.request(f.alice, `/api/artifacts/folders/${folder.id}/upload`, { method: "POST", body: { files: [] } })).status, 409);
+  assert.equal(f.app.store.db.prepare("SELECT COUNT(*) AS n FROM artifact_objects").get().n, before);
+  const keys = await createFolderKeys(folder.id, "password", "synthetic optional cipher password");
+  assert.equal((await f.request(f.alice, `/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: keys })).status, 201);
+  assert.equal((await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: false } })).status, 200);
+  const restored = (await f.request(f.alice, agentPath)).data;
+  assert.equal(restored.encryptedOnly, false); assert.equal(restored.requiredBySpace, false);
+  assert.equal((await f.request(f.alice, `/api/encrypted/folders/${folder.id}`)).status, 200);
+});

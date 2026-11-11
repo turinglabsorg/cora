@@ -153,6 +153,7 @@ export class Librarian {
 
   /** Consolidate notes and chats since the last successful batch. */
   async run({ reason = "notte" } = {}) {
+    try { this.store.assertContentWriteAllowed(); } catch (error) { if (error.status === 409) return { status: "encrypted-only" }; throw error; }
     if (this.knowledge?.ownerMemory && !this.ownerId) return this.runOwners({ reason });
     if (this.stopped) return { status: "stopped" };
     if (!this.brain?.enabled) return { status: "disabled" };

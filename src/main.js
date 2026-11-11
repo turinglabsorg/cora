@@ -129,7 +129,7 @@ export function startCora(overrides = {}) {
   const doc = new Doc({ root: findDoc(cfg.docDir), key: cfg.typesafeKey, usageLog: join(cfg.home, "doc-usage.jsonl"), rulesFile: join(cfg.home, "doc-rules.json") });
   const voice = new Voice({ key: cfg.sonioxKey, api: cfg.sonioxApi, ttsUrl: cfg.sonioxTtsUrl, ffmpeg: cfg.ffmpeg });
   // The company brain lives in Postgres (pgvector); without its URL the agents simply have no brain to read.
-  const companyBrain = new CompanyBrain({ url: cfg.brainDatabaseUrl, embed: (model, texts) => llm.embed(model, texts, cfg.brainEmbedUrl), embedModel: () => store.settings.brainEmbedModel, log: activity });
+  const companyBrain = new CompanyBrain({ url: cfg.brainDatabaseUrl, embed: (model, texts) => llm.embed(model, texts, cfg.brainEmbedUrl), embedModel: () => store.settings.brainEmbedModel, log: activity, assertWritable: () => store.assertContentWriteAllowed() });
   const knowledge = new KnowledgeSources({ store, internal: companyBrain, storeSecret, tokenFor, allowLocal: cfg.knowledgeAllowLocal === true, ownerMemory: cfg.ownerMemory === true });
   knowledge.onSealChanged = async (agent) => {
     const desktop = await boxes.inspect(agent.id);

@@ -1,3 +1,4 @@
+import { encryptionRequired } from "./encrypted-space.js";
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -738,7 +739,12 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
     return this.contextDocuments().find((document) => document.id === id) || null;
   }
 
+  assertContentWriteAllowed() {
+    if (encryptionRequired(this)) throw Object.assign(new Error("La cifratura è obbligatoria: questo contenuto deve essere salvato in una sessione cifrata."), { status: 409 });
+  }
+
   saveContextDocument(input, { id = "", userId = "" } = {}) {
+    this.assertContentWriteAllowed();
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new ValidationError("file di contesto non valido");
     const previous = id ? this.contextDocument(id) : null;
     if (id && !previous) throw new ValidationError("file di contesto non trovato");
@@ -1054,6 +1060,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
 
   createAgent(input) {
     const agent = sanitizeAgent(input, {}, { avatarBase: this.avatarBase });
+    if (agent.core) this.assertContentWriteAllowed();
     this.checkAgentSubscription(agent);
     this.checkAgentCredential(agent);
     if (this.cachedAgents.some((other) => other.name.toLowerCase() === agent.name.toLowerCase())) {
@@ -1069,6 +1076,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
     if (index < 0) return null;
     const agent = sanitizeAgent(input, this.cachedAgents[index], { avatarBase: this.avatarBase });
     const previous = this.cachedAgents[index];
+    if (agent.core !== previous.core) this.assertContentWriteAllowed();
     this.checkAgentSubscription(agent, { unchanged: (agent.subscriptionId || "") === (previous.subscriptionId || "") && (agent.model || this.settings.defaultModel).split("/")[0] === (previous.model || this.settings.defaultModel).split("/")[0] });
     this.checkAgentCredential(agent);
     if (this.cachedAgents.some((other) => other.id !== id && other.name.toLowerCase() === agent.name.toLowerCase())) {
@@ -1109,6 +1117,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   setCore(agentId, text, by = "manual") {
+    this.assertContentWriteAllowed();
     const agent = this.agent(agentId);
     if (!agent) return null;
     const clean = cleanText(text, 4000);
@@ -1143,6 +1152,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   addMemory(key, text, source = "manual", { pinned = false, by = "" } = {}) {
+    this.assertContentWriteAllowed();
     const clean = cleanText(text, 1000).trim();
     if (!clean) throw new ValidationError("memory text is required");
     const duplicate = this.stmt("SELECT * FROM memories WHERE owner = ? AND lower(text) = lower(?)").get(key, clean);
@@ -1159,6 +1169,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   updateMemory(key, memoryId, patch) {
+    this.assertContentWriteAllowed();
     const row = this.stmt("SELECT * FROM memories WHERE id = ? AND owner = ?").get(memoryId, key);
     if (!row) return null;
     let text = row.text;
@@ -1200,6 +1211,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   addDiary(agentId, text) {
+    this.assertContentWriteAllowed();
     const clean = cleanText(text, 4000).trim();
     if (!clean) return null;
     const entry = { id: newId("day"), text: clean, createdAt: new Date().toISOString() };
@@ -1213,6 +1225,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
 
   /* ---------- message archive ---------- */
   appendArchive(channelId, item) {
+    this.assertContentWriteAllowed();
     const meta = {};
     if (item.traceId) meta.traceId = item.traceId;
     if (item.file) meta.file = item.file;
@@ -1331,6 +1344,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   createRoutine(agentId, input) {
+    this.assertContentWriteAllowed();
     const routine = sanitizeRoutine({ ...input, agentId });
     this.cachedRoutines.push(routine);
     this.writeRoutine(routine);
@@ -1338,6 +1352,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   updateRoutine(id, input) {
+    this.assertContentWriteAllowed();
     const index = this.cachedRoutines.findIndex((routine) => routine.id === id);
     if (index < 0 || this.cachedRoutines[index].archivedAt) return null;
     this.cachedRoutines[index] = sanitizeRoutine(input, this.cachedRoutines[index]);
@@ -1395,6 +1410,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   beginRoutineRun(routine, { manual = false, resumeRunId = "" } = {}) {
+    this.assertContentWriteAllowed();
     const active = this.stmt("SELECT data FROM routine_runs WHERE routine_id = ? AND ended_at IS NULL").get(routine.id);
     if (active && JSON.parse(active.data).id !== resumeRunId) return null;
     const run = active ? JSON.parse(active.data) : this.routineRunSnapshot(routine);
@@ -1501,6 +1517,7 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   saveTrace(trace) {
+    this.assertContentWriteAllowed();
     const tools = [...new Set(trace.steps.filter((step) => step.type === "tool").map((step) => step.name))].join(",");
     let systemHash = null;
     if (trace.system) {
