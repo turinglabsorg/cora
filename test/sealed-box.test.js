@@ -15,7 +15,7 @@ case "$1" in
   image) echo sha256:test; exit 0 ;;
   network) [ "$2" = inspect ] && exit 1; echo ok; exit 0 ;;
   inspect)
-    case "$2" in cora-net-*) printf '{"Running":true}\\t{"6080/tcp":[{"HostIp":"127.0.0.1","HostPort":"1"}],"22/tcp":[{"HostIp":"127.0.0.1","HostPort":"2201"}]}\\tguard-id\\tsealed-v1\\n'; exit 0 ;; esac
+    case "$2" in cora-net-*) printf '{"Running":true}\\t{"6080/tcp":[{"HostIp":"127.0.0.1","HostPort":"1"}],"22/tcp":[{"HostIp":"127.0.0.1","HostPort":"2201"}]}\\tguard-id\\tsealed-v2\\n'; exit 0 ;; esac
     printf '{"Running":true,"Status":"running"}\\t{"6080/tcp":[{"HostIp":"127.0.0.1","HostPort":"1"}],"22/tcp":[{"HostIp":"127.0.0.1","HostPort":"2201"}]}\\tsha256:test\\t/home/agent,/var/lib/cora,\\t%s\\n' "$(cat "${dir}/network" 2>/dev/null || echo bridge)"; exit 0 ;;
   *) echo ok; exit 0 ;;
 esac
@@ -32,6 +32,8 @@ test("desktops never reach each other: a sealed one has a network of its own and
   await boxes.create({ id: "ag_sealed", name: "Cliente" });
   const calls = fake.calls();
   assert.ok(calls.some((line) => line.startsWith("network create") && line.includes("enable_icc=false") && line.endsWith(" cora-sealed-ag_sealed")));
+  const guard = calls.find((line) => line.startsWith("run ") && line.includes("--name cora-net-"));
+  assert.match(guard, /--dns 1\.1\.1\.1 --dns 9\.9\.9\.9/, "the seal uses public resolvers independently of private host DNS");
   const run = calls.find((line) => line.startsWith("run ") && line.includes("--name cora-box-"));
   assert.match(run, /--network container:cora-net-ag_sealed/);
   assert.doesNotMatch(run, /docker\.sock|--privileged|--cap-add/);

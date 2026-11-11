@@ -2597,7 +2597,7 @@ function characterPanel(agent) {
 /**
  * Who the agent is. Brain configuration belongs to the saved agent's own tab.
  */
-function agentForm(agent, { only = "" } = {}) {
+function agentForm(agent, { only = "", knowledge = null } = {}) {
   const isNew = !agent.id;
   const wantsBrain = !isNew && only !== "profile";
   const nameInput = h("input", { type: "text", name: "name", value: agent.name || "", required: true, maxlength: 32, placeholder: "es. Marta", autocomplete: "off" });
@@ -2709,6 +2709,7 @@ function agentForm(agent, { only = "" } = {}) {
     ["carattere", "Carattere", "spark", "Personalità e modo di parlare", [characterPane.node]],
     ["ascolto", "Ascolto", "radio", "Canali e presenza", [listening]],
     ["voce", "Voce", "mic", "Lingua e risposte vocali", [voice]],
+    ["sicurezza", "Sicurezza", "lock", "Isolamento e protezione", [agentSecurityPane(agent, knowledge)]],
     ["autorizzazioni", "Autorizzazioni", "shield", "Chi può farlo lavorare", [agentPermissionsPane(agent), owner].filter(Boolean)],
     ...platformsOn().map((kind) => [kind, TRANSPORTS[kind].label, TRANSPORTS[kind].icon, "Account e collegamento", [kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)]]),
     ["github", "GitHub", "github", "App e repository", [githubAccount(agent)]],
@@ -3913,7 +3914,10 @@ async function renderAgent() {
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
   else if (tab === "cervello") body = brainTab(agent);
   else if (tab === "email") body = await agentEmailTab(agent, isCurrent);
-  else body = agentForm(agent, { only: "profile" });
+  else {
+    const knowledge = await guard(api(`/api/agents/${agent.id}/knowledge`));
+    body = agentForm(agent, { only: "profile", knowledge });
+  }
   if (isCurrent()) slot.replaceChildren(...[body].flat().filter(Boolean));
 }
 
@@ -4015,11 +4019,27 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
-function agentKnowledgePane(agent, data) {
+function agentSecurityPane(agent, data) {
+  if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));
   const seal = switchInput("sealed", "Sigillato", data.sealed,
     "Ricordi personali e canali assegnati. Nessun accesso al Brain condiviso. Computer isolato; artefatti nel suo volume.");
-  const sealInput = seal.querySelector("input");
-  sealInput.disabled = !data.canManage;
+  const input = seal.querySelector("input");
+  input.disabled = !data.canManage;
+  const feedback = h("p", { role: "status", class: "muted" });
+  const save = btn("Salva sicurezza", { icon: "check", cls: "primary", disabled: !data.canManage, onclick: async () => {
+    save.disabled = true;
+    try {
+      await api(`/api/agents/${agent.id}/knowledge`, { method: "PUT", body: { sealed: input.checked } });
+      await loadState();
+      renderAgent();
+    } catch (error) { feedback.textContent = tr(error.message); save.disabled = false; }
+  } });
+  return panel({ icon: "lock", title: "Sicurezza", hint: "Isolamento dell’agente, del computer e dei suoi artefatti." },
+    setRows(setRow("Agente sigillato", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true })),
+    h("div", { class: "row end" }, save), feedback);
+}
+
+function agentKnowledgePane(agent, data) {
   const source = h("select", { "aria-label": tr("Fonte della memoria"), disabled: !data.canManage || data.sealed },
     h("option", { value: "internal", selected: data.source === "internal" }, "Brain interno"),
     h("option", { value: "external", selected: data.source === "external" }, "Brain esterno · sola lettura"));
@@ -4031,14 +4051,13 @@ function agentKnowledgePane(agent, data) {
   const externalRow = setRow("Brain esterno", null, external, { stack: true });
   externalRow.hidden = source.value !== "external";
   const syncSeal = () => {
-    source.disabled = !data.canManage || sealInput.checked;
-    sourceRow.hidden = sealInput.checked;
-    check.hidden = sealInput.checked || source.value !== "external";
-    externalRow.hidden = sealInput.checked || source.value !== "external";
-    check.disabled = !data.canManage || sealInput.checked || source.value !== "external";
+    source.disabled = !data.canManage || data.sealed;
+    sourceRow.hidden = data.sealed;
+    check.hidden = data.sealed || source.value !== "external";
+    externalRow.hidden = data.sealed || source.value !== "external";
+    check.disabled = !data.canManage || data.sealed || source.value !== "external";
   };
   source.addEventListener("change", syncSeal);
-  sealInput.addEventListener("change", syncSeal);
   const owner = data.owners ? h("select", { "aria-label": tr("Proprietario del Brain") },
     h("option", { value: "", selected: !data.owner }, "Non assegnato"),
     data.owners.map((person) => h("option", { value: person.id, selected: person.id === data.owner?.id }, raw(person.name)))) : null;
@@ -4051,14 +4070,14 @@ function agentKnowledgePane(agent, data) {
   } });
   const save = btn("Salva configurazione", { icon: "check", cls: "primary", disabled: !data.canManage, onclick: async () => {
     save.disabled = true;
-    const body = { sealed: sealInput.checked, source: sealInput.checked ? "internal" : source.value, ...(link.value.trim() ? { url: link.value.trim() } : {}), ...(owner ? { ownerId: owner.value } : {}) };
+    const body = { source: data.sealed ? "internal" : source.value, ...(link.value.trim() ? { url: link.value.trim() } : {}), ...(owner ? { ownerId: owner.value } : {}) };
     link.value = "";
     try { await api(`/api/agents/${agent.id}/knowledge`, { method: "PUT", body }); await loadState(); renderAgent(); }
     catch (error) { feedback.textContent = tr(error.message); save.disabled = false; }
   } });
   syncSeal();
   return panel({ icon: "book", title: "Memoria e knowledge", cls: "agent-knowledge", hint: "La fonte che l'agente usa per ricordare e recuperare informazioni." },
-    setRows(setRow("Isolamento", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true }), sourceRow, externalRow,
+    setRows(data.sealed ? setRow("Sigillato", "L’isolamento si gestisce in Impostazioni → Sicurezza.", btn("Sicurezza", { icon: "lock", cls: "ghost", href: `#/agent/${agent.id}/impostazioni/sicurezza` })) : null, sourceRow, externalRow,
       owner ? setRow("Proprietario del Brain", "Gestisce questa memoria.", owner) : null),
     h("div", { class: "row end" }, !data.sealed && data.source === "internal" && data.owner ? btn("Apri Brain", { icon: "book", cls: "ghost", href: "#/brain?" + new URLSearchParams({ ownerId: data.owner.id }) }) : null, check, save), feedback);
 }

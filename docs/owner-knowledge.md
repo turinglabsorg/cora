@@ -60,3 +60,7 @@ After a deliberate reset, an operator may set the existing settings value `knowl
 Owners have separate Postgres schemas over the existing Brain connection, including independent revision queues and librarian checkpoints. Chat messages are filtered by owner before the ingestion limit. Unknown and external-agent sources do not enter an internal owner's archive. Shared SQLite facts from the previous global mode are not imported. Private notifications are delivered only to the owner's registered devices or configured chat contact, with no fallback to another administrator.
 
 The scheduled backup includes all known owner namespaces. Integration coverage exercises real PGlite namespaces, separate owners with identical client slugs, explicit sharing and revocation, denied direct access, live-event filtering, owner-only notifications, stable memory after agent replacement, external-source failure and concurrent source changes.
+
+Sealed isolation is configured in Agent → Settings → Security, with its own save action. Memory → Source continues to configure only the knowledge source.
+
+Sealed desktops use explicit public DNS resolvers (1.1.1.1 and 9.9.9.9), so a private host DNS upstream cannot break public name resolution. The network policy version recreates outdated sealed network guards while preserving desktop volumes.

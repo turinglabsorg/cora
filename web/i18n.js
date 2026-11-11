@@ -12,6 +12,12 @@ export const EN = {
   "Nessuna riserva: resta disponibile lo sgancio esplicito dell’agente.": "No backup: the agent can still explicitly end its own participation.",
   "Scelte brevi sulla conversazione, con una configurazione propria.": "Brief conversation decisions, with their own configuration.",
 
+  "Sicurezza": "Security",
+  "Sicurezza non disponibile": "Security unavailable",
+  "Salva sicurezza": "Save security",
+  "Isolamento e protezione": "Isolation and protection",
+  "Isolamento dell’agente, del computer e dei suoi artefatti.": "Isolation of the agent, its desktop and its artifacts.",
+  "L’isolamento si gestisce in Impostazioni → Sicurezza.": "Manage isolation in Settings → Security.",
   "Sigillato": "Sealed",
   "Agente sigillato": "Sealed agent",
   "Isolamento": "Isolation",
