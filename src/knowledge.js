@@ -5,8 +5,8 @@ import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
 import { BRAIN_KINDS, redactSecrets, slugify } from "./company-brain.js";
 import { bm25 } from "./memory.js";
-import { transportOf } from "./channels.js";
-import { ownerRoom } from "./rooms.js";
+import { telegramBotAgent, transportOf } from "./channels.js";
+import { ownerRoom, roomAgentId } from "./rooms.js";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const privateNetworks = new BlockList();
@@ -109,6 +109,13 @@ export class ExternalBrain {
   async note() { throw new KnowledgeError("Il Brain esterno è in sola lettura. Non sono consentite scritture né nella memoria interna né in quella esterna."); }
 }
 
+/** What a sealed agent gets in place of a brain: nothing to read, nowhere to write. */
+const SEALED_BRAIN = Object.freeze({
+  enabled: false, sealed: true, holdsShared: false,
+  async search() { return []; }, async pages() { return []; }, async page() { return null; }, async searchArchive() { return []; },
+  async note() { throw new KnowledgeError("Agente sigillato: il brain aziendale è spento per lui."); },
+});
+
 export class KnowledgeSources {
   constructor({ store, internal = null, storeSecret, tokenFor = () => "", allowLocal = false, isBusy = () => false, ownerMemory = false }) {
     Object.assign(this, { store, internal, storeSecret, tokenFor, allowLocal, isBusy, ownerMemory });
@@ -117,15 +124,44 @@ export class KnowledgeSources {
   }
   keyName(agent) { return this.store.value(`agentBrainLink:${agent.id}`, null)?.secretName || `CORA_KNOWLEDGE_${agent.id.toUpperCase()}`; }
   isExternal(agent) { return agent.brainSource === "external"; }
+  /** A sealed agent sees only what is its own: its card, diary and personal memories, and what it is given by name. */
+  isSealed(agent) { return Boolean(agent?.sealed); }
   ownerId(agent) { return agent.brainOwnerId || `agent:${agent.id}`; }
   get resetAt() { return this.ownerMemory ? Date.parse(this.store.value("knowledgeResetAt", "")) || 0 : 0; }
   afterReset(message) { const cutoff = this.resetAt; return !cutoff || message.at == null || (Number(message.at) || Date.parse(message.at)) >= cutoff; }
-  memoryKey(agent) { return "owner:" + this.ownerId(agent); }
+  memoryKey(agent) { return this.isSealed(agent) ? agent.id : "owner:" + this.ownerId(agent); }
   ownerKeys(agentId) {
     const agent = this.store.agent(agentId);
     if (!agent) return [];
+    if (this.isSealed(agent)) return [agent.id];
     const owner = this.ownerId(agent);
-    return [this.memoryKey(agent), ...this.store.agents().filter((other) => !this.isExternal(other) && this.ownerId(other) === owner).map((other) => other.id)];
+    return [this.memoryKey(agent), ...this.store.agents().filter((other) => !this.isExternal(other) && !this.isSealed(other) && this.ownerId(other) === owner).map((other) => other.id)];
+  }
+  /**
+   * A channel only sealed agents hear: its private panel room, the chats of its own bot, or a channel
+   * picked by a sealed agent that no other agent picked by name. Agents that listen everywhere by default
+   * stay out of it, and what is said there stays out of the owner's brain.
+   */
+  sealedChannel(channelId, parentId) {
+    const id = String(channelId || "");
+    if (!id || !this.store.agents().some((agent) => this.isSealed(agent))) return false;
+    const own = roomAgentId(id) || telegramBotAgent(id);
+    if (own) { const agent = this.store.agent(own); return Boolean(agent && this.isSealed(agent)); }
+    let parent = parentId;
+    if (parent === undefined) { try { parent = this.channelParent?.(id) || null; } catch { parent = null; } }
+    const picks = (agent) => (agent.channelIds || []).some((chosen) => chosen === id || (parent && chosen === parent));
+    const agents = this.store.agents();
+    return agents.some((agent) => this.isSealed(agent) && picks(agent)) && !agents.some((agent) => !this.isSealed(agent) && picks(agent));
+  }
+  /** A message the shared brain never takes: written by a sealed agent, or said where only sealed agents listen. */
+  sealedMessage(message) {
+    const agent = message.agentId ? this.store.agent(message.agentId) : null;
+    return Boolean((agent && this.isSealed(agent)) || this.sealedChannel(message.channelId));
+  }
+  /** Whether an archived message belongs to what this agent may remember: its owner's, or, sealed, only its own channels'. */
+  ownsMessage(agent, message) {
+    if (this.isSealed(agent)) return this.afterReset(message);
+    return !this.ownerMemory || this.messageOwner(message) === this.ownerId(agent);
   }
   ownerIds() { return [...new Set([...(this.store.value("brainOwnerScopes", [])), ...this.store.agents().filter((agent) => !this.isExternal(agent)).map((agent) => this.ownerId(agent)), ...this.store.panelUsers().filter((user) => !user.blocked).map((user) => user.id)])]; }
   contactFor(ownerId) { return this.store.agents().find((agent) => this.ownerId(agent) === ownerId && agent.ownerId)?.ownerId || ""; }
@@ -138,7 +174,7 @@ export class KnowledgeSources {
   }
   proprietorIds(agent) { return [...new Set([agent?.brainOwnerId, ...(agent?.coOwnerIds || [])].filter(Boolean))]; }
   brainScopes(user) {
-    const ids = [...new Set([user.id, ...this.agentsFor(user).filter(agent => !this.isExternal(agent)).map(agent => this.ownerId(agent))])];
+    const ids = [...new Set([user.id, ...this.agentsFor(user).filter(agent => !this.isExternal(agent) && !this.isSealed(agent)).map(agent => this.ownerId(agent))])];
     return ids.map(id => { const person = this.store.panelUser(id); return { id, name: person?.name || person?.email || id }; });
   }
   forUser(user, ownerId = user.id) {
@@ -146,15 +182,16 @@ export class KnowledgeSources {
     if (!this.brainScopes(user).some(scope => scope.id === ownerId)) throw new KnowledgeError("Brain privato.", 403);
     return new OwnerBrain({ sources: this, ownerId });
   }
-  messageOwner(message) {
+  messageOwner(message, { inSealed = false } = {}) {
     if (!this.afterReset(message)) return "";
     const agent = message.agentId ? this.store.agent(message.agentId) : message.channelId?.startsWith("web-ag_") ? this.store.agent(message.channelId.slice(4)) : null;
-    if (agent) return this.isExternal(agent) ? "" : this.ownerId(agent);
+    if (agent) return this.isExternal(agent) || this.isSealed(agent) ? "" : this.ownerId(agent);
     if (message.kind === "agent") return "";
+    if (!inSealed && this.sealedChannel(message.channelId)) return "";
     const person = this.store.panelUser(message.authorId);
     if (person && !person.blocked) return person.id;
     const id = `${transportOf(message.channelId)}:${message.authorId}`;
-    const owners = [...new Set(this.store.agents().filter((agent) => !this.isExternal(agent) && this.store.agentOwnerChats(agent).includes(id)).map((agent) => this.ownerId(agent)))];
+    const owners = [...new Set(this.store.agents().filter((agent) => !this.isExternal(agent) && !this.isSealed(agent) && this.store.agentOwnerChats(agent).includes(id)).map((agent) => this.ownerId(agent)))];
     if (owners.length === 1) return owners[0];
     const ownerIds = this.store.settings[({ discord: "ownerIds", slack: "slackOwnerIds", telegram: "telegramOwnerIds" })[transportOf(message.channelId)]] || [];
     const admins = this.store.panelUsers().filter((user) => !user.blocked && user.role === "owner");
@@ -171,11 +208,11 @@ export class KnowledgeSources {
     }
     const person = !sender && this.store.panelUser(message.authorId);
     if (person && !person.blocked && this.proprietorIds(agent).includes(person.id)) return true;
-    const owner = sender ? this.ownerId(sender) : person && !person.blocked ? person.id : this.messageOwner({ ...message, channelId });
+    const owner = sender ? this.ownerId(sender) : person && !person.blocked ? person.id : this.messageOwner({ ...message, channelId }, { inSealed: true });
     return owner === this.ownerId(agent);
   }
   messagesSince(ownerId, since, limit) {
-    const agents = this.store.agents().filter((agent) => !this.isExternal(agent) && this.ownerId(agent) === ownerId);
+    const agents = this.store.agents().filter((agent) => !this.isExternal(agent) && !this.isSealed(agent) && this.ownerId(agent) === ownerId);
     const ids = agents.map((agent) => agent.id), rooms = agents.map((agent) => `web-${agent.id}`);
     const conditions = ["(kind IN ('owner','human') AND author_id = ?)"];
     const params = [ownerId];
@@ -201,22 +238,29 @@ export class KnowledgeSources {
     this.store.setValue("brainPageShares", [...records.filter((item) => item.id !== share.id), share]);
     return { visibility: share.team ? "team" : share.users.length ? "people" : "private", users: share.users };
   }
-  canManage(agent, user) { return Boolean(agent && user && !user.blocked && (this.ownerMemory ? this.proprietorIds(agent).includes(user.id) : user.role === "owner" || this.proprietorIds(agent).includes(user.id))); }
-  agentsFor(user) { return this.store.agents().filter((agent) => !this.ownerMemory || this.canManage(agent, user)); }
+  canManage(agent, user) {
+    if (!agent || !user || user.blocked) return false;
+    const proprietors = this.proprietorIds(agent);
+    // A sealed agent is its owners' alone: the owner of the space does not open it unless they own it.
+    if (this.ownerMemory || (this.isSealed(agent) && proprietors.length)) return proprietors.includes(user.id);
+    return user.role === "owner" || proprietors.includes(user.id);
+  }
+  agentsFor(user) { return this.store.agents().filter((agent) => (!this.ownerMemory && !this.isSealed(agent)) || this.canManage(agent, user)); }
   roomFor(user) { return this.ownerMemory ? ownerRoom(user.id) : "web"; }
   view(agent, user) {
     const link = this.store.value(`agentBrainLink:${agent.id}`, null);
     const owner = agent.brainOwnerId ? this.store.panelUser(agent.brainOwnerId) : null;
-    return { source: this.isExternal(agent) ? "external" : "internal", external: link ? { host: link.host, configured: true } : { host: "", configured: false }, canManage: this.canManage(agent, user), readonly: this.isExternal(agent), owner: owner ? { id: owner.id, name: owner.name || owner.email } : null,
+    return { source: this.isExternal(agent) ? "external" : "internal", sealed: Boolean(agent.sealed), external: link ? { host: link.host, configured: true } : { host: "", configured: false }, canManage: this.canManage(agent, user), readonly: this.isExternal(agent), owner: owner ? { id: owner.id, name: owner.name || owner.email } : null,
       ...(user?.role === "owner" && (!this.ownerMemory || agent.brainOwnerId === user.id) ? { owners: this.store.panelUsers().filter((person) => !person.blocked).map(({ id, name, email }) => ({ id, name: name || email })) } : {}) };
   }
   assertCurrent(agent) {
     if (this.changes.has(agent.id)) throw new KnowledgeError("La configurazione del Brain è in aggiornamento. Riprova tra poco.");
     const current = this.store.agent(agent.id);
-    if (current && ((current.brainSource || "internal") !== (agent.brainSource || "internal") || (current.brainOwnerId || "") !== (agent.brainOwnerId || ""))) throw new KnowledgeError("La fonte del Brain è cambiata. Riprendi il compito con la nuova configurazione.");
+    if (current && ((current.brainSource || "internal") !== (agent.brainSource || "internal") || (current.brainOwnerId || "") !== (agent.brainOwnerId || "") || Boolean(current.sealed) !== Boolean(agent.sealed))) throw new KnowledgeError("La fonte del Brain è cambiata. Riprendi il compito con la nuova configurazione.");
   }
   forAgent(agent) {
     this.assertCurrent(agent);
+    if (this.isSealed(agent)) return SEALED_BRAIN;
     if (!this.isExternal(agent)) return this.ownerMemory ? new OwnerBrain({ sources: this, ownerId: this.ownerId(agent), agent }) : this.internal;
     if (!this.external.has(agent.id)) this.external.set(agent.id, new ExternalBrain({ url: () => this.links.get(agent.id) || this.tokenFor(this.keyName(agent)), allowLocal: this.allowLocal }));
     return this.external.get(agent.id);
@@ -231,9 +275,10 @@ export class KnowledgeSources {
   async configureNow(agent, input, user) {
     if (!agent) throw new KnowledgeError("Agente non trovato.", 404);
     if (!this.canManage(agent, user)) throw new KnowledgeError("Solo il proprietario dell'agente può configurare il suo Brain.", 403);
-    const source = input.source ?? agent.brainSource ?? "internal";
+    const source = (input.sealed ?? agent.sealed) ? "internal" : input.source ?? agent.brainSource ?? "internal";
     if (!["internal", "external"].includes(source)) throw new KnowledgeError("Scegli Brain interno o esterno.", 400);
     const patch = { brainSource: source };
+    if (input.sealed !== undefined) patch.sealed = Boolean(input.sealed);
     if (input.ownerId !== undefined) {
       if (user.role !== "owner" || (this.ownerMemory && agent.brainOwnerId !== user.id)) throw new KnowledgeError("Solo il proprietario originale può riassegnare il Brain.", 403);
       const owner = input.ownerId ? this.store.panelUser(String(input.ownerId)) : null;
@@ -259,7 +304,9 @@ export class KnowledgeSources {
       this.external.delete(agent.id);
       this.store.setValue(`agentBrainLink:${agent.id}`, { host: linked.url.host, secretName: linked.secretName, updatedAt: new Date().toISOString() });
     }
-    return this.store.updateAgent(agent.id, patch);
+    const updated = this.store.updateAgent(agent.id, patch);
+    if (input.sealed !== undefined) await this.onSealChanged?.(updated);
+    return updated;
   }
 }
 

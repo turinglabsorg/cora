@@ -1,8 +1,88 @@
 import { spawn } from "node:child_process";
+import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const STORE_ARTIFACT_SCRIPT = String.raw`import hashlib,json,os,re,stat,sys,tempfile
+work=os.path.realpath('/home/agent/work')
+root=os.path.realpath(os.path.join(work,sys.argv[1]))
+if not (root==work or root.startswith(work+os.sep)): sys.exit(1)
+objects='/home/agent/.local/share/cora/artifact-objects'
+os.makedirs(objects,mode=0o700,exist_ok=True)
+for rel,size,sha in json.load(sys.stdin):
+  if not re.fullmatch('[a-f0-9]{64}',sha) or not isinstance(size,int) or size<0 or size>104857600: sys.exit(1)
+  if rel.startswith('/') or any(p in ('','.','..') for p in rel.split('/')): sys.exit(1)
+  source=os.path.join(root,rel)
+  if not os.path.realpath(source).startswith(root+os.sep): sys.exit(1)
+  fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+  temporary=None
+  try:
+    st=os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_size!=size: sys.exit(1)
+    out,temporary=tempfile.mkstemp(dir=objects)
+    h=hashlib.sha256();count=0
+    with os.fdopen(fd,'rb') as src,os.fdopen(out,'wb') as dst:
+      while True:
+        chunk=src.read(1048576)
+        if not chunk: break
+        count+=len(chunk)
+        if count>size: sys.exit(1)
+        h.update(chunk);dst.write(chunk)
+      dst.flush();os.fsync(dst.fileno())
+    if count!=size or h.hexdigest()!=sha: sys.exit(1)
+    os.replace(temporary,os.path.join(objects,sha));temporary=None
+  finally:
+    if temporary is not None: os.unlink(temporary)
+`;
+
+const READ_ARTIFACT_SCRIPT = String.raw`import hashlib,os,re,stat,sys
+sha=sys.argv[1]
+if not re.fullmatch('[a-f0-9]{64}',sha): sys.exit(1)
+path='/home/agent/.local/share/cora/artifact-objects/'+sha
+fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+with os.fdopen(fd,'rb') as src:
+  st=os.fstat(src.fileno())
+  if not stat.S_ISREG(st.st_mode) or st.st_size>104857600: sys.exit(1)
+  if len(sys.argv)>4 and st.st_size>int(sys.argv[4]): sys.exit(3)
+  data=src.read(104857601)
+  if len(data)!=st.st_size or hashlib.sha256(data).hexdigest()!=sha: sys.exit(1)
+  start=int(sys.argv[2]);end=int(sys.argv[3])
+  if start<0 or end<-1: sys.exit(1)
+  sys.stdout.buffer.write(data[start:None if end<0 else end+1])
+`;
+
+export const SEALED_NETWORK_POLICY = "sealed-v1";
+export const SEALED_FIREWALL = `set -eu
+iptables-restore <<'RULES'
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT DROP [0:0]
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -p tcp -m multiport --dports 22,6080 -j ACCEPT
+-A OUTPUT -o lo -j ACCEPT
+-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+${["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4"].map((net) => `-A OUTPUT -d ${net} -j REJECT`).join("\n")}
+-A OUTPUT -j ACCEPT
+COMMIT
+RULES
+ip6tables-restore <<'RULES'
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT DROP [0:0]
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A OUTPUT -o lo -j ACCEPT
+-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+COMMIT
+RULES
+touch /run/cora-network-ready
+exec sleep infinity
+`;
 
 const OUTPUT_LIMIT = 24000;
 const MAIL_CLIENT_SCRIPT = readFileSync(new URL("./desktop-mail.mjs", import.meta.url), "utf8");
@@ -275,10 +355,13 @@ export function slug(name) {
   return String(name).toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30) || "box";
 }
 
+export const DESKTOP_NETWORK = "cora-desktops";
+
 export class Boxes {
   /** `access(agent)` gives the box's SSH port on the host and the public keys allowed in. */
-  constructor({ docker, image, timezone, access = () => ({}), mailbox = null, gitAttribution = null }) {
+  constructor({ docker, image, timezone, access = () => ({}), mailbox = null, gitAttribution = null, sealed = () => false }) {
     this.docker = docker;
+    this.sealed = sealed;
     this.image = image;
     this.timezone = timezone;
     this.access = access;
@@ -292,6 +375,8 @@ export class Boxes {
   }
 
   name(agentId) { return `cora-box-${agentId}`; }
+
+  networkGuard(agentId) { return `cora-net-${agentId}`; }
 
   volume(agentId) { return `cora-home-${agentId}`; }
 
@@ -312,10 +397,19 @@ export class Boxes {
 
   async inspect(agentId) {
     const result = await runProcess(this.docker, [
-      "inspect", this.name(agentId), "--format", "{{json .State}}\t{{json .NetworkSettings.Ports}}\t{{.Image}}\t{{range .Mounts}}{{.Destination}},{{end}}",
+      "inspect", this.name(agentId), "--format", "{{json .State}}\t{{json .NetworkSettings.Ports}}\t{{.Image}}\t{{range .Mounts}}{{.Destination}},{{end}}\t{{.HostConfig.NetworkMode}}",
     ], { timeoutMs: 20000 });
     if (result.code !== 0) return { exists: false, running: false, port: null, status: "missing" };
-    const [stateJson, portsJson, image = "", mounts = ""] = result.stdout.toString("utf8").trim().split("\t");
+    const [stateJson, desktopPorts, image = "", mounts = "", networkMode = ""] = result.stdout.toString("utf8").trim().split("\t");
+    let portsJson = desktopPorts, guard = null;
+    if (this.sealed(agentId)) {
+      const checked = await runProcess(this.docker, ["inspect", this.networkGuard(agentId), "--format", "{{json .State}}\t{{json .NetworkSettings.Ports}}\t{{.Id}}\t{{index .Config.Labels \"cora.networkPolicy\"}}"], { timeoutMs: 20000 });
+      if (checked.code === 0) {
+        const [state, ports, id, policy] = checked.stdout.toString("utf8").trim().split("\t");
+        guard = { running: Boolean(JSON.parse(state).Running), id, policy };
+        portsJson = ports;
+      }
+    }
     const state = JSON.parse(stateJson || "{}");
     let port = null;
     let sshPort = null;
@@ -325,7 +419,12 @@ export class Boxes {
       if (ports?.["22/tcp"]?.[0]?.HostPort) sshPort = Number(ports["22/tcp"][0].HostPort);
     } catch {}
     const current = await this.imageId();
-    const outdated = Boolean(current && image && image !== current) || !mounts.split(",").includes("/var/lib/cora") || !sshPort;
+    // Desktops never reach one another: a box on any other network than its own is rebuilt.
+    const wrongNetwork = this.sealed(agentId)
+      ? !guard?.running || guard.policy !== SEALED_NETWORK_POLICY || ![`container:${guard.id}`, `container:${this.networkGuard(agentId)}`].includes(networkMode)
+      : networkMode !== "" && networkMode !== this.network(agentId);
+    const exposed = Object.values(JSON.parse(portsJson || "{}") || {}).some((bindings) => (bindings || []).some((binding) => binding.HostIp !== "127.0.0.1"));
+    const outdated = Boolean(current && image && image !== current) || !mounts.split(",").includes("/var/lib/cora") || !sshPort || wrongNetwork || exposed;
     return { exists: true, running: Boolean(state.Running), port, sshPort, outdated, status: state.Status || "unknown", startedAt: state.StartedAt };
   }
 
@@ -427,7 +526,7 @@ export class Boxes {
 
   async ensureNow(agent, { upgrade = false } = {}) {
     const current = await this.inspect(agent.id);
-    if (current.exists && current.running && !(upgrade && current.outdated)) return current;
+    if (current.exists && current.running && !current.outdated) return current;
     if (current.exists && !current.outdated) {
       const started = await runProcess(this.docker, ["start", this.name(agent.id)], { timeoutMs: 60000 });
       if (started.code !== 0) throw new Error(`docker start failed: ${started.stderr.trim().slice(0, 300)}`);
@@ -443,21 +542,64 @@ export class Boxes {
     return this.ensure(agent, { upgrade: true });
   }
 
+  /**
+   * The bridge a desktop lives on. Every desktop shares one where containers cannot talk to each other
+   * (no inter-container traffic), a sealed one has a network all its own. Ports stay published on 127.0.0.1 only.
+   */
+  network(agentId) {
+    return this.sealed(agentId) ? `cora-sealed-${agentId}` : DESKTOP_NETWORK;
+  }
+
+  async ensureNetwork(network, agentId) {
+    const exists = await runProcess(this.docker, ["network", "inspect", network, "--format", "{{.Name}}"], { timeoutMs: 20000 });
+    if (exists.code === 0) {
+      const policy = await runProcess(this.docker, ["network", "inspect", network, "--format", '{{index .Options "com.docker.network.bridge.enable_icc"}}'], { timeoutMs: 20000 });
+      if (policy.code !== 0 || policy.stdout.toString("utf8").trim() !== "false") throw new Error("desktop network must disable inter-container traffic");
+      return;
+    }
+    const made = await runProcess(this.docker, ["network", "create", "--driver", "bridge", "-o", "com.docker.network.bridge.enable_icc=false",
+      "--label", network === DESKTOP_NETWORK ? "cora.desktops=1" : `cora.agent=${agentId}`, network], { timeoutMs: 20000 });
+    if (made.code !== 0 && !/already exists/.test(String(made.stderr))) throw new Error(`docker network create failed: ${String(made.stderr).trim().slice(0, 300)}`);
+  }
+
+  async createNetworkGuard(agent, network, sshPort) {
+    const name = this.networkGuard(agent.id);
+    await runProcess(this.docker, ["rm", "-f", name], { timeoutMs: 60000 });
+    const made = await runProcess(this.docker, ["run", "-d", "--name", name, "--restart", "unless-stopped",
+      "--network", network, "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges",
+      "--read-only", "--tmpfs", "/run:rw,noexec,nosuid,size=1m", "--memory", "64m", "--cpus", "0.1",
+      "-p", "127.0.0.1::6080", ...(sshPort ? ["-p", `127.0.0.1:${sshPort}:22`] : []),
+      "--label", `cora.networkPolicy=${SEALED_NETWORK_POLICY}`, "--label", `cora.agent=${agent.id}`,
+      "--entrypoint", "/bin/sh", this.image, "-c", SEALED_FIREWALL], { timeoutMs: 60000 });
+    if (made.code !== 0) throw new Error("could not create the sealed network guard");
+    const ready = await runProcess(this.docker, ["exec", name, "sh", "-c", "i=0; until test -f /run/cora-network-ready; do i=$((i+1)); test $i -lt 100 || exit 1; sleep 0.1; done"], { timeoutMs: 20000 });
+    if (ready.code !== 0) {
+      await runProcess(this.docker, ["rm", "-f", name], { timeoutMs: 20000 });
+      throw new Error("sealed network firewall is unavailable; the desktop was not started");
+    }
+  }
+
   async create(agent) {
     if (!(await this.imageExists())) throw new Error(`the desktop image ${this.image} is not built`);
     const { sshPort } = this.access(agent);
+    const network = this.network(agent.id);
+    await this.ensureNetwork(network, agent.id);
+    const isolated = this.sealed(agent.id);
+    if (isolated) await this.createNetworkGuard(agent, network, sshPort);
+    else await runProcess(this.docker, ["rm", "-f", this.networkGuard(agent.id)], { timeoutMs: 60000 });
     const created = await runProcess(this.docker, [
       "run", "-d",
       "--name", this.name(agent.id),
-      "--hostname", slug(agent.name),
+      ...(!isolated ? ["--hostname", slug(agent.name)] : []),
       "--restart", "unless-stopped",
       "--security-opt", `seccomp=${BROWSER_SECCOMP}`,
       "--shm-size", "1g",
       "--memory", "2g",
       "--cpus", "2",
-      "-p", "127.0.0.1::6080",
+      ...(!isolated ? ["-p", "127.0.0.1::6080"] : ["--cap-drop", "NET_RAW"]),
       "-e", `TZ=${this.timezone}`,
-      ...(sshPort ? ["-p", `127.0.0.1:${sshPort}:22`] : []),
+      ...(!isolated && sshPort ? ["-p", `127.0.0.1:${sshPort}:22`] : []),
+      "--network", isolated ? `container:${this.networkGuard(agent.id)}` : network,
       "-v", `${this.volume(agent.id)}:/home/agent`,
       "-v", `${this.sysVolume(agent.id)}:/var/lib/cora`,
       "--label", `cora.agent=${agent.id}`,
@@ -474,7 +616,13 @@ export class Boxes {
     await runProcess(this.docker, this.execArgs(agent.id, ["sh", "-c", "umask 022 && cat > /etc/ssh/cora_authorized_keys.new && mv /etc/ssh/cora_authorized_keys.new /etc/ssh/cora_authorized_keys"], { root: true }), {
       input: keys.length ? `${keys.join("\n")}\n` : "", timeoutMs: 20000,
     });
-    this.keepTailscaleSsh(agent).catch(() => {});
+    if (this.sealed(agent.id)) await this.leaveTailnet(agent).catch(() => {});
+    else this.keepTailscaleSsh(agent).catch(() => {});
+  }
+
+  /** A sealed desktop is never on the tailnet: whatever state its volume kept, it logs out. */
+  leaveTailnet(agent) {
+    return runProcess(this.docker, this.execArgs(agent.id, ["tailscale", "logout"], { root: true }), { timeoutMs: 20000 });
   }
 
   /** tailscaled needs a moment after a start; once the box is on the tailnet, Tailscale SSH stays on. */
@@ -515,6 +663,7 @@ export class Boxes {
 
   /** Put the box on the tailnet with Tailscale SSH; returns the login link when the owner has to approve it. */
   async tailscaleConnect(agent) {
+    if (this.sealed(agent.id)) throw new Error("un agente sigillato non entra nel tailnet: il suo computer resta isolato");
     let status = await this.tailscale(agent.id);
     if (status.state === "Running") {
       await this.tailscaleSet(agent);
@@ -542,6 +691,7 @@ export class Boxes {
 
   async remove(agentId, { volume = false } = {}) {
     await runProcess(this.docker, ["rm", "-f", this.name(agentId)], { timeoutMs: 60000 });
+    await runProcess(this.docker, ["rm", "-f", this.networkGuard(agentId)], { timeoutMs: 60000 });
     if (volume) await runProcess(this.docker, ["volume", "rm", "-f", this.volume(agentId), this.sysVolume(agentId)], { timeoutMs: 60000 });
   }
 
@@ -667,6 +817,44 @@ print(len(data))`, String(path)]), { input: Buffer.from(bytes), timeoutMs: 60000
    * `{write(chunk), end()}` for each file in turn. A file that changed since the
    * listing, or a writer that refuses, stops the transfer.
    */
+  async artifactStore(agentId, root, files) {
+    const result = await runProcess(this.docker, this.execArgs(agentId, ["python3", "-c", STORE_ARTIFACT_SCRIPT, String(root)]), {
+      input: Buffer.from(JSON.stringify(files.map((file) => [file.path, file.size, file.sha256]))), timeoutMs: 300000, maxBytes: 65536,
+    });
+    if (result.code !== 0 || result.truncated) throw new Error("the desktop could not retain the artifact files");
+  }
+
+  artifactStream(agentId, sha, range = null) {
+    if (!/^ag_[a-f0-9]{12}$/.test(agentId) || !/^[a-f0-9]{64}$/.test(sha)) throw new Error("invalid desktop object");
+    const args = this.execArgs(agentId, ["python3", "-c", READ_ARTIFACT_SCRIPT, sha, String(range?.start ?? 0), String(range?.end ?? -1)]);
+    const docker = this.docker;
+    return Readable.from((async function* () {
+      const child = spawn(docker, args, { stdio: ["ignore", "pipe", "pipe"] });
+      let error = null;
+      child.stderr.resume();
+      const exited = new Promise((resolve) => {
+        child.once("error", () => { error = new Error("desktop artifact is unavailable"); resolve(-1); });
+        child.once("close", resolve);
+      });
+      const timer = setTimeout(() => child.kill("SIGKILL"), 120000);
+      try {
+        for await (const chunk of child.stdout) yield chunk;
+        if (await exited !== 0 || error) throw error || new Error("desktop artifact is unavailable or changed");
+      } finally {
+        clearTimeout(timer);
+        if (child.exitCode === null) child.kill("SIGKILL");
+      }
+    })());
+  }
+
+  async artifactRead(agentId, sha, max) {
+    if (!/^ag_[a-f0-9]{12}$/.test(agentId) || !/^[a-f0-9]{64}$/.test(sha) || !Number.isSafeInteger(max) || max < 0 || max > 2 * 1024 * 1024) throw new Error("invalid desktop object read");
+    const result = await runProcess(this.docker, this.execArgs(agentId, ["python3", "-c", READ_ARTIFACT_SCRIPT, sha, "0", "-1", String(max)]), { timeoutMs: 20000, maxBytes: max });
+    if (result.code === 3) return null;
+    if (result.code !== 0 || result.truncated) throw new Error("desktop artifact is unavailable or changed");
+    return result.stdout;
+  }
+
   async artifactSend(agentId, root, files, open) {
     let index = -1;
     let left = 0;

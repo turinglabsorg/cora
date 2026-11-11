@@ -225,7 +225,9 @@ export class Channels {
     const picked = (channel) => {
       if (!this.agentOn(agent, channel.kind)) return false;
       const ids = chosen(channel.kind);
-      return !ids.length || ids.includes(channel.id) || ids.includes(channel.parentId);
+      // A sealed agent is only where it was put, never everywhere by default.
+      if (!ids.length) return agent.sealed ? channel.kind === "telegram" && telegramBotAgent(channel.id) === agent.id : !this.sealedChannel?.(channel.id, channel.parentId || null);
+      return ids.includes(channel.id) || ids.includes(channel.parentId);
     };
     return [...new Map(channels.filter((channel) => scoped(channel) && picked(channel)).map((channel) => [channel.id, channel])).values()];
   }

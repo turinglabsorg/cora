@@ -94,7 +94,7 @@ export function startCora(overrides = {}) {
     return [...new Set([...host, ...store.settings.sshKeys])];
   };
   const mailboxFor = (agent) => store.value(`agentMailbox:${agent.id}`, null);
-  const boxes = new Boxes({ docker: cfg.docker, image: cfg.boxImage, timezone: cfg.timezone, access: (agent) => ({ sshPort: store.sshPort(agent.id), keys: sshKeys() }),
+  const boxes = new Boxes({ docker: cfg.docker, image: cfg.boxImage, timezone: cfg.timezone, access: (agent) => ({ sshPort: store.sshPort(agent.id), keys: sshKeys() }), sealed: (id) => Boolean(store.agent(id)?.sealed),
     gitAttribution: { enabled: cfg.gitAttribution, email: cfg.gitCoauthorEmail },
     mailbox: { endpoint: cfg.mailEndpoint, domain: cfg.mailDomain, namespace: cfg.mailNamespace, token: cfg.mailRegistrationToken, identity: mailboxFor,
       changed: (agent, state) => {
@@ -131,6 +131,10 @@ export function startCora(overrides = {}) {
   // The company brain lives in Postgres (pgvector); without its URL the agents simply have no brain to read.
   const companyBrain = new CompanyBrain({ url: cfg.brainDatabaseUrl, embed: (model, texts) => llm.embed(model, texts, cfg.brainEmbedUrl), embedModel: () => store.settings.brainEmbedModel, log: activity });
   const knowledge = new KnowledgeSources({ store, internal: companyBrain, storeSecret, tokenFor, allowLocal: cfg.knowledgeAllowLocal === true, ownerMemory: cfg.ownerMemory === true });
+  knowledge.onSealChanged = async (agent) => {
+    const desktop = await boxes.inspect(agent.id);
+    if (desktop.exists || agent.tools) await boxes.upgrade(agent);
+  };
   const brain = new Brain({ store, llm, boxes, channels, timezone: cfg.timezone, log: activity, ownerInstructionsPath: cfg.ownerInstructions, traces, push, doc, companyBrain,
     knowledge,
     gitAttribution: { enabled: cfg.gitAttribution, email: cfg.gitCoauthorEmail },
@@ -139,6 +143,8 @@ export function startCora(overrides = {}) {
   const filesDir = join(cfg.home, "files");
   const orchestrator = new Orchestrator({ store, discord, brain, log: activity, bots, channels, telegram, tgBots, slack, skBots, emit: live, filesDir, notifier: push, watching: () => web?.watching(), voice });
   knowledge.agentChannels = (agent) => brain.channelIdsFor(agent);
+  channels.sealedChannel = (channelId, parentId) => knowledge.sealedChannel(channelId, parentId);
+  knowledge.channelParent = (channelId) => channels.info(channelId)?.parentId || null;
   if (knowledge.ownerMemory) {
     push.ownerForAgent = (agent) => knowledge.ownerId(agent);
     orchestrator.memoryOwner = (agent) => knowledge.ownerId(agent);
