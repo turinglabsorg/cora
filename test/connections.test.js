@@ -294,6 +294,90 @@ test("an account says whose it is, and a member's new agent starts on the accoun
   assert.equal((await request(owner, "/api/subscriptions")).data.filter((record) => record.provider === "codex" && !record.resident).length, 2);
 });
 
+test("changing an agent's brain offers the accounts already signed in, the server's and the linked ones, instead of a new sign-in", async (t) => {
+  const keys = passKeys("fixture-connections-signing-seed-0123456789abcdef");
+  const home = tempHome();
+  const identity = identityCli();
+  const residentCodex = join(home, "resident-codex");
+  const residentClaude = join(home, "resident-claude");
+  mkdirSync(residentCodex);
+  mkdirSync(residentClaude);
+  writeFileSync(join(residentCodex, "fixture-account.json"), JSON.stringify({ type: "chatgpt", email: "server@example.test", planType: "pro" }));
+  const app = startCora({ home, host: "127.0.0.1", port: 0, insecureCookies: true,
+    adminPassword: "fixture-password", sessionKey: "fixture-session-switch", residentDirectories: { codex: residentCodex, claude: residentClaude },
+    cloudUrl: "https://usecora.test", cloudKey: keys.publicKey, cloudSpace: "alpha",
+    discordToken: "", telegramToken: "", ollamaKey: "", orcaKey: "", claudeBin: identity.claude, codexBin: identity.codex, hermesBin: "/missing/hermes",
+    grokBin: "/missing/grok", museBin: "/missing/muse", botTokenFor: () => "",
+    docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
+  });
+  await app.ready;
+  t.after(() => app.stop());
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const pass = signPass(keys.privateKey, { aud: "alpha.usecora.test", emailVerified: true, sub: "ac_owner", role: "owner", name: "Owner", email: "owner@example.test" });
+  const owner = (await fetch(`${base}/auth/cloud?${new URLSearchParams({ pass })}`, { redirect: "manual" })).headers.get("set-cookie")?.split(";")[0] || "";
+  assert.ok(owner);
+  const request = async (path, { method = "GET", body } = {}) => {
+    const response = await fetch(`${base}${path}`, { method, headers: { Cookie: owner, "X-Cora": "1", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, data: await response.json() };
+  };
+  await waitFor(() => app.store.residentSubscription("codex")?.status === "ready");
+  assert.notEqual(app.store.residentSubscription("claude")?.status, "ready");
+
+  // The owner's own Claude account is signed in; the server's Claude is not.
+  identity.set({ complete: false, email: "owner-claude@example.test" });
+  const claude = await request("/api/subscriptions", { method: "POST", body: { provider: "claude", label: "Claude" } });
+  await request(`/api/subscriptions/${claude.data.id}/login`, { method: "POST" });
+  await request(`/api/subscriptions/${claude.data.id}/code`, { method: "POST", body: { code: "fixture-authorization-code" } });
+  await waitFor(() => app.store.subscription(claude.data.id).status === "ready");
+
+  const panel = panelHarness({ language: "en", fetch: (path, init) => fetch(`${base}${path}`, { ...init, headers: { ...init?.headers, Cookie: owner } }) });
+  const boot = async () => {
+    await panel.run("boot()");
+    await waitFor(() => panel.run("Boolean(S.data && S.data.subscriptions && S.data.currentUser)"));
+  };
+  const switchBrain = (currentId, from, to) => panel.run(`(() => {
+    const picker = subscriptionPicker(${JSON.stringify(currentId)}, {});
+    picker.setProvider(${JSON.stringify(from)});
+    picker.setProvider(${JSON.stringify(to)});
+    const node = picker.node;
+    return { text: node.textContent, value: picker.value(), options: [...node.querySelectorAll(".subscription-option")].map((option) => option.textContent),
+      buttons: [...node.querySelectorAll("button")].map((button) => button.textContent.trim()).filter(Boolean) };
+  })()`);
+  await boot();
+
+  // An agent on the server's ChatGPT moves to Claude: it lands on the Claude account already signed in, not on a new sign-in.
+  const toClaude = switchBrain("", "codex", "claude");
+  assert.equal(toClaude.value, claude.data.id);
+  assert.match(toClaude.text, /owner-claude@example\.test/);
+  assert.match(toClaude.text, /This agent will use your account\./);
+  assert.doesNotMatch(toClaude.text, /No resident account is available/);
+
+  // An agent still on the server's Claude, which is not signed in, can pick the linked account from there.
+  const onResident = switchBrain("", "claude", "claude");
+  assert.equal(onResident.value, "");
+  assert.match(onResident.text, /No resident account is available/);
+  assert.ok(onResident.buttons.includes("Change account"), JSON.stringify(onResident.buttons));
+
+  // With both the server's ChatGPT and a linked ChatGPT ready, moving to ChatGPT lists both to choose from.
+  identity.set({ complete: false, email: "owner-chatgpt@example.test" });
+  const codex = await request("/api/subscriptions", { method: "POST", body: { provider: "codex", label: "ChatGPT" } });
+  await request(`/api/subscriptions/${codex.data.id}/login`, { method: "POST" });
+  identity.set({ complete: true, email: "owner-chatgpt@example.test" });
+  await waitFor(() => app.store.subscription(codex.data.id).status === "ready");
+  await boot();
+  const toCodex = switchBrain(claude.data.id, "claude", "codex");
+  assert.match(toCodex.text, /Choose the account this agent will use\./);
+  assert.equal(toCodex.options.length, 2);
+  assert.match(toCodex.options[0], /Server account/);
+  assert.match(toCodex.options[1], /owner-chatgpt@example\.test/);
+  assert.doesNotMatch(toCodex.text, /Connect ChatGPT/);
+
+  // An agent that keeps its brain keeps its account: the server's ChatGPT stays the default.
+  const kept = switchBrain("", "codex", "codex");
+  assert.equal(kept.value, "");
+  assert.match(kept.text, /Server account · default/);
+});
+
 test("Gemini connects through Google's manual authorization and keeps each subscription in its own profile", async (t) => {
   const { app, home, identity, request } = await fixture(t, { harnesses: ["claude", "codex", "gemini"] });
   assert.equal(app.store.residentSubscription("gemini"), null, "the machine's shared keyring is never borrowed");
