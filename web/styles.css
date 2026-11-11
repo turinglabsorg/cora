@@ -2555,3 +2555,6 @@ input.thread-search { height: 38px; }
   .email-channel .email-settings-tabs { flex-wrap: wrap; }
   .email-channel .email-settings-tabs button { flex: 1 1 calc(50% - 3px); white-space: normal; }
 }
+
+.encrypted-file-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
+.encrypted-file-image { max-width: 100%; height: auto; }

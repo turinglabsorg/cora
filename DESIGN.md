@@ -319,3 +319,15 @@ Settings → Regia (including its Decisore panel) and Settings → Modelli e son
 ### Encryption passkey methods
 
 Keep **A · PRF** and **B** as separate, labelled enrollment/add-method actions. Show the B password-manager trust limitation before selection, using the existing muted text and wrapping button row. Never silently select B after A fails. Method rows distinguish A and B while preserving user-supplied labels; all fixed copy is translated. No new colors or components.
+
+
+### Encrypted binary artifacts
+
+The existing encrypted Files rail includes a file/folder upload panel above the document editor. Reuse wrapping action rows, muted progress and the existing status role. Keep filenames, relative paths, size and preview in the unlocked pane. Binary uploads use their own download/preview controls; never put binary content in the text editor or enable text-save for a binary selection. Clear previews and object URLs on lock. Show the actual file/folder limits before selection and explicitly explain that matching paths create versions and empty directories are excluded. Show completed-file counts after cancellation or error, preserving completed versions.
+
+
+### Encrypted shared access and conversations
+
+Encrypted folders retain the native Permissions and Settings rails. Folder permissions and encrypted key delivery remain visibly separate; pending recipients unlock their personal encrypted folder to accept a grant. Never imply that revocation retrieves exported copies or keys. Read-only access disables all persistence/upload controls.
+
+The Conversations rail uses the existing panels, status text, wrapping rows and inert, wrapping preformatted content. Keep the full temporary model-access boundary visible above the composer. Chat entry offers a folder selector and a clear path back to ordinary history. Lock clears previews, messages and drafts and revokes running requests. Conversation history is ciphertext; never render encrypted reasoning into the ordinary trace log.
