@@ -5626,6 +5626,129 @@ describe("hosted on usecora.space", () => {
   });
 });
 
+describe("harness recovery", () => {
+  async function fixture(t, { restart = true, twice = false, startup = false, pendingDecision = null } = {}) {
+    const settings = app.store.settings;
+    app.store.updateSettings({ goalMode: true, decisionModel: "ollama/test-model", decisionBackups: [] });
+    goals = () => "Il record di prova è aggiornato e verificato.";
+    const agent = app.store.createAgent({ name: "Recovery fixture", model: "codex/test-model", subscriptionId: subscriptionIds.codex, tools: true, chattiness: 0 });
+    const channelId = `web-${agent.id}`;
+    const original = app.boxes.shell;
+    let writes = 0, decisions = 0, decisionInput;
+    app.boxes.shell = async (id, command) => {
+      assert.equal(id, agent.id);
+      if (command === "fixture-write") { writes += 1; return { code: 0, output: "WRITE_RECEIPT_123" }; }
+      return { code: 0, output: "READ_RECEIPT_123" };
+    };
+    const from = cli.calls().filter((item) => item.flavor === "codex").length;
+    cli.set({ from, runs: [
+      { tool: startup ? null : "shell", args: { command: "fixture-write" }, killAfterTool: !startup, exitBeforeReply: startup ? 1 : 0, reply: "" },
+      { tool: twice ? null : "shell", args: { command: "fixture-read" }, killAfterTool: twice, reply: "Verifica completata." },
+    ] });
+    replies.set("*", async (body) => {
+      if (!body.messages[0].content.startsWith("Decidi se sostituire un harness")) return { content: "PASS" };
+      decisions += 1;
+      decisionInput = JSON.parse(body.messages[1].content);
+      if (pendingDecision) await pendingDecision();
+      return { content: typeof restart === "boolean" ? JSON.stringify({ restart, reason: restart ? "Processo interrotto, lavoro ancora aperto." : "Serve un intervento del proprietario." }) : restart };
+    });
+    t.after(() => {
+      app.boxes.shell = original; app.store.deleteAgent(agent.id); cli.set({ reply: "ok" });
+      app.store.updateSettings({ goalMode: settings.goalMode, decisionModel: settings.decisionModel, decisionBackups: settings.decisionBackups });
+    });
+    const history = [{ id: "recovery-owner", at: Date.now(), kind: "owner", authorId: OWNER, authorName: "Seb", content: "Aggiorna il record di prova e verifica." }];
+    const notices = [];
+    const run = () => app.orchestrator.withSession(agent, channelId, "chat", () => app.brain.chatTurn({ agent, channel: { id: channelId, name: "Recovery" }, history, replyTo: history[0], computer: true, forced: true, say: async (text) => notices.push(text) }));
+    return { agent, channelId, run, notices, calls: () => cli.calls().filter((item) => item.flavor === "codex").slice(from), evidence: () => ({ writes, decisions, decisionInput }) };
+  }
+
+  test("a real CLI signal after a successful write reaches the decider and resumes with the receipt", async (t) => {
+    const f = await fixture(t);
+    const result = await f.run();
+    assert.match(result.value.text, /Verifica completata/);
+    const { writes, decisions, decisionInput } = f.evidence();
+    assert.equal(writes, 1); assert.equal(decisions, 1);
+    assert.equal(decisionInput.failure.exitCode, null); assert.equal(decisionInput.failure.signal, "SIGTERM");
+    assert.ok(decisionInput.steps.some((step) => step.name === "shell" && step.result.includes("WRITE_RECEIPT_123")));
+    assert.equal(f.calls().length, 2);
+    assert.match(f.calls()[1].stdin, /WRITE_RECEIPT_123/);
+    assert.match(f.calls()[1].stdin, /senza ripetere invii o modifiche già riusciti/);
+    const rows = app.store.threadSessions().filter((row) => row.channelId === f.channelId);
+    const first = rows.find((row) => row.status === "error"), next = rows.find((row) => row.status === "done");
+    assert.ok(first); assert.ok(next); assert.equal(next.replaces, first.id);
+    assert.equal(first.traceId, result.value.traceId); assert.equal(next.traceId, result.value.traceId);
+    assert.equal(app.store.activeThreadSession(f.agent.id, f.channelId), null);
+    assert.equal(f.notices.length, 1);
+    assert.equal(app.store.trace(result.value.traceId).steps.find((step) => step.harnessFailure)?.harnessFailure.signal, "SIGTERM");
+  });
+
+  test("a numeric startup exit reaches the decider without hidden CLI retries", async (t) => {
+    const f = await fixture(t, { startup: true });
+    await f.run();
+    assert.equal(f.calls().length, 2);
+    assert.equal(f.evidence().decisions, 1);
+    assert.equal(f.evidence().writes, 0);
+    assert.equal(f.evidence().decisionInput.failure.exitCode, 1);
+  });
+
+  test("the decider can refuse replacement", async (t) => {
+    const f = await fixture(t, { restart: false });
+    await assert.rejects(f.run, /exited with null/);
+    assert.equal(f.calls().length, 1); assert.equal(f.evidence().decisions, 1);
+    assert.equal(app.store.threadSessions().filter((row) => row.channelId === f.channelId).length, 1);
+    const row = app.store.threadSessions().find((row) => row.channelId === f.channelId);
+    assert.ok(row.traceId); assert.equal(row.status, "error");
+  });
+
+  test("an invalid decision fails closed", async (t) => {
+    const f = await fixture(t, { restart: "not JSON" });
+    await assert.rejects(f.run, /exited with null/);
+    assert.equal(f.calls().length, 1); assert.equal(f.evidence().decisions, 1);
+  });
+
+  test("a second harness failure cannot create a third instance", async (t) => {
+    const f = await fixture(t, { twice: true });
+    await assert.rejects(f.run, /exited with null/);
+    assert.equal(f.calls().length, 2); assert.equal(f.evidence().decisions, 1);
+    assert.equal(app.store.threadSessions().filter((row) => row.channelId === f.channelId).length, 2);
+    assert.equal(app.store.activeThreadSession(f.agent.id, f.channelId), null);
+  });
+
+  test("panel stop while the decider is answering prevents the replacement", async (t) => {
+    let release, entered;
+    const started = new Promise((resolve) => { entered = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    const f = await fixture(t, { pendingDecision: async () => { entered(); await gate; } });
+    const running = f.run();
+    await started;
+    app.orchestrator.stopThread(f.channelId, f.agent.id);
+    release(); const result = await running;
+    assert.equal(result.value.stopped, true);
+    assert.equal(f.calls().length, 1);
+    const rows = app.store.threadSessions().filter((row) => row.channelId === f.channelId);
+    assert.equal(rows.length, 1); assert.equal(rows[0].status, "stopped");
+  });
+});
+
+test("thread privacy enforces ownership for live traces, full history and a revoked co-owner", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const agent = f.app.store.createAgent({ name: "Private history", brainOwnerId: f.bob.user.id, coOwnerIds: [f.alice.user.id] });
+  const id = "155500000000000711";
+  const trace = f.app.brain.traces.start({ agentId: agent.id, kind: "chat", channelId: id });
+  trace.add({ type: "thinking", text: "PRIVATE_REASONING_SENTINEL" });
+  const session = f.app.orchestrator.sessions.begin({ agentId: agent.id, channelId: id, kind: "chat" });
+  assert.equal((await f.request(f.alice, `/api/threads/${id}`)).data.traces[0].steps[0].text, "PRIVATE_REASONING_SENTINEL");
+  f.app.store.updateAgent(agent.id, { coOwnerIds: [] });
+  for (const actor of [f.alice, f.admin]) {
+    assert.equal((await f.request(actor, `/api/threads/${id}`)).status, 404);
+    assert.doesNotMatch(JSON.stringify((await f.request(actor, "/api/threads")).data), /Private history|PRIVATE_REASONING_SENTINEL/);
+  }
+  trace.finish({ status: "done", output: "PRIVATE_RESULT_SENTINEL" });
+  f.app.orchestrator.sessions.finish(session);
+  assert.equal((await f.request(f.bob, `/api/threads/${id}`)).data.traces[0].output, "PRIVATE_RESULT_SENTINEL");
+  assert.equal((await f.request(f.alice, `/api/threads/${id}`)).status, 404);
+});
+
 describe("what runs the models", () => {
   test("a model on this machine is told apart from one in the cloud, and the panel can see the cards", async () => {
     const state = (await call("/api/state")).data;

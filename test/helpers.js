@@ -809,6 +809,8 @@ const handle = async () => {
     child.kill();
   }
   fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(record) + "\\n");
+  if (control.exitBeforeReply) process.exit(control.exitBeforeReply);
+  if (control.killAfterTool) { process.kill(process.pid, "SIGTERM"); return; }
   const answer = control.reply + (record.output ? " [" + record.output + "]" : "");
   const line = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
   if (flavor === "hermes") {

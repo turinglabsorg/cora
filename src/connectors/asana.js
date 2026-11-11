@@ -514,7 +514,7 @@ export const asana = {
           ["apri ", { href: "https://developers.asana.com/docs/authentication", text: "developers.asana.com" }, " → My apps → Create new app;"],
           "copia client ID e client secret dell'app;",
           ["incollali qui: finiscono nella cassaforte come ", { code: "CORA_ASANA_CLIENT_ID" }, " e ", { code: "CORA_ASANA_CLIENT_SECRET" }, ";"],
-          ["in OAuth aggiungi come redirect URL l'indirizzo di ritorno di Cora mostrato qui sotto, ", { code: "…/connectors/oauth/asana/callback" }, ";"],
+          ["in OAuth aggiungi come redirect URL l'indirizzo di ritorno di Cora, ", { redirect: true }, ";"],
           "poi premi «Autorizza Asana» e accetta con il tuo account.",
         ], fields: [
           { name: "clientId", type: "text", title: "Client ID", label: "Client ID dell'app Asana" },

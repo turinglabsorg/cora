@@ -2133,6 +2133,10 @@ a.share-stats:hover { color: var(--amber); }
 .connector-feedback:empty { display: none; }
 .connector-detail .steps a { color: var(--amber); }
 .connector-detail .steps { margin: 0; }
+.connector-redirect-value { display: inline; overflow-wrap: anywhere; }
+.connector-redirect-value code { white-space: normal; overflow-wrap: anywhere; }
+.connector-redirect-value .btn { display: inline-flex; vertical-align: middle; margin-left: 6px; }
+.connector-redirect-value .btn .ico { width: 15px; height: 15px; }
 @media (max-width: 600px) {
   .connector-toolbar { align-items: stretch; }
   .connector-search { min-width: 0; flex-basis: 100%; }

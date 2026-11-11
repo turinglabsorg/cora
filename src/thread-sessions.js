@@ -4,6 +4,7 @@ import { hostname, uptime } from "node:os";
 
 /** The CLI child started by the turn running in this async context. */
 export const noteChildPid = new AsyncLocalStorage();
+export const recoverHarness = new AsyncLocalStorage();
 
 const STALE_MS = 45000;
 

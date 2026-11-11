@@ -389,7 +389,7 @@ export const canva = {
         { title: "L'integrazione Canva", steps: [
           ["apri ", { href: "https://www.canva.com/developers/integrations", text: "canva.com/developers" }, " → Your integrations → Create an integration;"],
           "in Scopes attiva lettura e scrittura di design, asset, cartelle, commenti, brand template e profilo;",
-          ["in Authentication aggiungi l'indirizzo di ritorno di Cora mostrato qui sotto, ", { code: "…/connectors/oauth/canva/callback" }, ";"],
+          ["in Authentication aggiungi l'indirizzo di ritorno di Cora, ", { redirect: true }, ";"],
           ["copia client ID e client secret e incollali qui: finiscono nella cassaforte come ", { code: "CORA_CANVA_CLIENT_ID" }, " e ", { code: "CORA_CANVA_CLIENT_SECRET" }, ";"],
           "poi premi «Autorizza Canva» e accetta con il tuo account.",
         ], fields: [

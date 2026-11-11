@@ -1,3 +1,4 @@
+import { recoverHarness } from "./thread-sessions.js";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -722,7 +723,7 @@ export class LLM {
         return await once();
       } catch (error) {
         runSignal?.throwIfAborted();
-        if (error.code === "GEMINI_QUOTA_EXHAUSTED" || attempt >= RETRIES || used || !TRANSIENT.test(String(error.message || ""))) throw error;
+        if (recoverHarness.getStore() || error.code === "GEMINI_QUOTA_EXHAUSTED" || attempt >= RETRIES || used || !TRANSIENT.test(String(error.message || ""))) throw error;
         onStep?.({ type: "note", text: `${error.message} — riprovo (${attempt + 1}/${RETRIES}).` });
         await wait(RETRY_WAIT_MS * (attempt + 1));
       }
