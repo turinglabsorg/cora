@@ -389,6 +389,16 @@ function hermesSteps({ home, input, since, onStep }) {
   };
   return {
     read,
+    answer(id = "") {
+      const handle = open();
+      if (!handle) return "";
+      try {
+        const session = id || sessionId || handle.prepare("SELECT m.session_id AS id FROM sessions s JOIN messages m ON m.session_id = s.id WHERE s.started_at >= ? AND m.role = 'user' AND m.content = ? ORDER BY s.started_at DESC LIMIT 1").get(since, input)?.id;
+        if (!session) return "";
+        const row = handle.prepare("SELECT role, content, tool_calls FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1").get(session);
+        return row?.role === "assistant" && (!row.tool_calls || ["[]", "null"].includes(row.tool_calls)) ? String(row.content || "").trim() : "";
+      } catch { return ""; }
+    },
     finish(id, answer) {
       read(id);
       texts.finish(answer);
@@ -418,7 +428,10 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   const input = `${system}\n\n---\n\n${prompt}`;
   const usageFile = join(workDir, `hermes-usage-${randomBytes(6).toString("hex")}.json`);
   // In one-shot mode an MCP server's toolset is named after the server, and -t is the complete list.
-  const args = ["-z", input, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify", "--usage-file", usageFile];
+  let streamed = Buffer.byteLength(input, "utf8") >= 64 * 1024;
+  const args = () => streamed
+    ? ["chat", "--query-file", "-", "--quiet", "--oneshot", "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify"]
+    : ["-z", input, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify", "--usage-file", usageFile];
   const env = { HERMES_HOME: home, ...(apiKey ? { CORA_ENDPOINT_KEY: apiKey } : {}), ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
   const steps = hermesSteps({ home, input, since: Date.now() / 1000 - 5, onStep });
   const poll = onStep ? setInterval(() => steps.read(), 1000) : null;
@@ -426,11 +439,25 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   // Hermes records the turn that calls a tool before running it: its thought comes before the tool.
   if (beforeTool) beforeTool.run = () => steps.read();
   try {
-    const out = await run(bin, args, { cwd: workDir, timeoutMs, env, signal });
+    const launch = () => run(bin, args(), { input: streamed ? input : undefined, cwd: workDir, timeoutMs, env, signal });
+    let out;
+    try { out = await launch(); }
+    catch (error) {
+      if (error.code !== "E2BIG" || streamed) throw error;
+      streamed = true;
+      onStep?.({ type: "note", text: "Hermes: argomenti troppo grandi; riparto passando il contesto su stdin." });
+      out = await launch();
+    }
+    if (!streamed && out.code === -1 && /^spawn E2BIG$/.test(out.stderr.trim())) {
+      streamed = true;
+      onStep?.({ type: "note", text: "Hermes: argomenti troppo grandi; riparto passando il contesto su stdin." });
+      out = await launch();
+    }
     clearInterval(poll);
     signal?.throwIfAborted();
     if (out.timedOut) throw cliFailure(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`, out);
-    const text = out.stdout.trim();
+    const sessionId = streamed ? out.stderr.match(/^session_id:\s*(\S+)\s*$/m)?.[1] || "" : "";
+    const text = streamed && out.code === 0 ? steps.answer(sessionId) : out.stdout.trim();
     if (out.code !== 0 || /^hermes -z: agent failed/m.test(text) || /^hermes -z: agent failed/m.test(out.stderr)) {
       throw cliFailure(`hermes: ${(out.stderr || text).trim().slice(-240) || `exit ${out.code}`}`, out);
     }
@@ -441,8 +468,8 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
     if (report.failed === true) throw new Error(`hermes: ${text.slice(-240) || `${model} failed`}`);
     // Hermes exits 0 and prints a banner when the model gave it nothing: that is a
     // failed turn, never something to say in the agent's name.
-    if (NO_REPLY.test(text)) throw new Error(`hermes: ${model} returned no content`);
-    steps.finish(report.session_id || "", text);
+    if (!text || NO_REPLY.test(text)) throw new Error(`hermes: ${model} returned no content`);
+    steps.finish(report.session_id || sessionId, text);
     return { text };
   } finally {
     clearInterval(poll);

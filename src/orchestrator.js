@@ -1066,7 +1066,7 @@ export class Orchestrator {
     // the conversation that person is having with it), called directly by another agent or bot. Nobody called,
     // nobody answers; agents calling each other stop when the turn budget is spent.
     if (last.kind === "agent" && state.budget <= 0) return { forced: [], optional: [] };
-    return { forced: pool.filter((agent) => (fromHuman ? last.addressed?.includes(agent.id) : tagged(last.content, agent.name))), optional: [] };
+    return { forced: pool.filter((agent) => (fromHuman ? last.addressed?.includes(agent.id) : (last.handoffResult ? last.addressed?.includes(agent.id) : tagged(last.content, agent.name)))), optional: [] };
   }
 
   async round(state) {
@@ -1162,6 +1162,7 @@ export class Orchestrator {
         });
         if (occupied.busy) return;
         result = occupied.value;
+        if (result.stopped) this.cancelColleagueReturns(state.id, agent.id);
       } catch (error) {
         this.log({ type: "error", agentId: agent.id, channelId: state.id, text: error.message });
         if (isForced) result = { text: error.userMessage || `(non riesco a rispondere: ${error.message.slice(0, 180)})` };
@@ -1171,6 +1172,7 @@ export class Orchestrator {
         if (computer) this.threadWork.delete(state.id, agent.id);
       }
       if (!result.text) {
+        this.returnSpokenResult(state, agent, queued, result, started);
         this.acknowledge(state, agent.id, result.handledMessageIds || []);
         this.log({ type: "pass", agentId: agent.id, channelId: state.id, ms: Date.now() - started, traceId: result.traceId });
         return;
@@ -1181,7 +1183,7 @@ export class Orchestrator {
         if (!isForced) postedOptional += 1;
         if (posted > 0) await sleep(700 + Math.random() * 1500);
         try {
-          await this.postAs(agent, state, result.text, undefined, result.traceId, { ...this.replyDelivery(result.replyTo || queued), delegationAuthorized });
+          await this.postAs(agent, state, result.text, undefined, result.traceId, { ...this.replyDelivery(result.replyTo || queued), delegationAuthorized, returnToAgentId: !result.stopped && !result.asked ? this.colleagueRequester(queued, state) : "" });
           this.acknowledge(state, agent.id, result.handledMessageIds || []);
           posted += 1;
         } catch (error) {
@@ -1401,7 +1403,8 @@ export class Orchestrator {
       }));
       if (occupied.busy) return;
       const result = occupied.value;
-      if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId, this.replyDelivery(result.replyTo || replyTo));
+      if (result.text) await this.postAs(agent, state, result.text, undefined, result.traceId, { ...this.replyDelivery(result.replyTo || replyTo), returnToAgentId: !result.stopped && !result.asked ? this.colleagueRequester(replyTo, state) : "", delegationAuthorized: Boolean(replyTo?.delegated) });
+      else this.returnSpokenResult(state, agent, replyTo, result, Date.parse(trace.startedAt));
       this.acknowledge(state, agent.id, result.handledMessageIds || []);
     } catch (error) {
       if (error.userMessage) await this.postAs(agent, state, error.userMessage, undefined, undefined, this.replyDelivery(replyTo)).catch(() => {});
@@ -1694,8 +1697,8 @@ export class Orchestrator {
     }
   }
 
-  async deliver(agent, state, text, file, traceId, { ping = "", request, passive = false, delegationAuthorized = false } = {}) {
-    if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request, passive, delegationAuthorized });
+  async deliver(agent, state, text, file, traceId, { ping = "", request, passive = false, delegationAuthorized = false, returnToAgentId = "" } = {}) {
+    if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request, passive, delegationAuthorized, returnToAgentId });
     const chatId = telegramChatId(state.id);
     const slack = slackIds(state.id);
     // The ping (a mention of the owner) goes out with the message but stays out of the archive and the agents' transcripts.
@@ -1720,12 +1723,12 @@ export class Orchestrator {
         }
       }
     }
-    if (text) this.recordReply(agent, state, text, file, traceId, sent, { request, passive, delegationAuthorized });
+    if (text) this.recordReply(agent, state, text, file, traceId, sent, { request, passive, delegationAuthorized, returnToAgentId });
     this.log({ type: "say", agentId: agent.id, channelId: state.id, text: (text || `[file ${file?.name}]`).slice(0, 500), file: file?.name, traceId });
     return sent;
   }
 
-  recordReply(agent, state, text, file, traceId, sent, { request, passive = false, delegationAuthorized = false, voiceOnly = false, continuation = false } = {}) {
+  recordReply(agent, state, text, file, traceId, sent, { request, passive = false, delegationAuthorized = false, voiceOnly = false, continuation = false, returnToAgentId = "" } = {}) {
     const last = sent.at(-1);
     const chatId = telegramChatId(state.id);
     const slack = slackIds(state.id);
@@ -1743,6 +1746,7 @@ export class Orchestrator {
         traceId,
         request,
         passive,
+        ...(returnToAgentId ? { returnToAgentId, handoffResult: true } : {}),
         ...(voiceOnly ? { voiceOnly: true } : {}),
       };
       this.push(state, item);
@@ -1754,9 +1758,30 @@ export class Orchestrator {
     }
   }
 
+  returnSpokenResult(state, agent, request, result, since) {
+    const returnToAgentId = !result.stopped && !result.asked && result.spoken ? this.colleagueRequester(request, state) : "";
+    if (!returnToAgentId) return;
+    const item = state.history.findLast((message) => message.agentId === agent.id && message.at >= since && !message.passive && !message.request);
+    if (!item || item.handoffResult) return;
+    Object.assign(item, { returnToAgentId, handoffResult: true });
+    this.queueColleagues(state, item, Boolean(request.delegated));
+  }
+
+  cancelColleagueReturns(channelId, agentId) {
+    const cancelled = this.store.value("cancelledColleagueReturns", {});
+    cancelled[channelId] = { ...cancelled[channelId], [agentId]: Date.now() };
+    this.store.setValue("cancelledColleagueReturns", cancelled);
+  }
+
+  colleagueRequester(item, state) {
+    if (item?.kind !== "agent" || !item.delegated || item.handoffResult) return "";
+    const cancelledAt = this.store.value("cancelledColleagueReturns", {})[state.id]?.[item.agentId] || 0;
+    return cancelledAt && Number(item.at) <= cancelledAt ? "" : item.agentId || "";
+  }
+
   queueColleagues(state, item, authorized = false) {
     if (state.budget <= 0 || !state.focus?.ids.includes(item.agentId)) return;
-    const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId && tagged(item.content, agent.name));
+    const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId && (tagged(item.content, agent.name) || (item.handoffResult && item.returnToAgentId === agent.id && state.focus.ids.includes(agent.id))));
     if (!called.length) return;
     item.addressed = called.map((agent) => agent.id);
     item.delegated = authorized;
@@ -1842,7 +1867,7 @@ export class Orchestrator {
   }
 
   /** A message in a panel room: archived like a Discord one and pushed live to the panel. */
-  postWeb(agent, state, text, file, traceId, { request, passive = false, silent = false, delegationAuthorized = false, voiceOnly = false, continuation = false } = {}) {
+  postWeb(agent, state, text, file, traceId, { request, passive = false, silent = false, delegationAuthorized = false, voiceOnly = false, continuation = false, returnToAgentId = "" } = {}) {
     const item = {
       id: `web_${randomBytes(8).toString("hex")}`,
       at: Date.now(),
@@ -1855,6 +1880,7 @@ export class Orchestrator {
       file: file ? this.saveWebFile(file, agent) : undefined,
       request,
       passive,
+      ...(returnToAgentId ? { returnToAgentId, handoffResult: true } : {}),
       ...(voiceOnly ? { voiceOnly: true } : {}),
     };
     this.push(state, item);
@@ -2243,6 +2269,7 @@ export class Orchestrator {
   }
 
   stopThread(id, agentId = "") {
+    for (const recipient of agentId ? [agentId] : this.states.get(id)?.focus?.ids || []) this.cancelColleagueReturns(id, recipient);
     const sessions = this.store.activeThreadSessions().filter((session) => session.channelId === id && (!agentId || session.agentId === agentId));
     for (const session of sessions) {
       this.sessions.stop(session.agentId, session.channelId);

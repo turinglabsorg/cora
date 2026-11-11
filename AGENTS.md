@@ -293,3 +293,12 @@ Activation is forward-only, including on spaces with retained plaintext. Existin
 `Brain.elsewhere()` exposes only a name/link/time pointer whenever the current or source conversation is a thread, independent of issue keys or matching titles. `Brain.threadChannel()` falls back to saved thread metadata when a live cache misses. Ordinary non-thread cross-platform continuity remains available. Fresh chat/routine prompts identify their current thread; `resumeTurn()` removes legacy elsewhere transcript blocks and restores that thread's tool/output guards. This is context isolation, not semantic classification of every model answer or of durable memories.
 
 The agent conversation budget counts accepted chat turns once, after the per-agent/thread session is acquired. Progress posts and intermediate `say` calls do not spend it. Harness recovery stays in the same counted turn; concurrent colleague calls recheck the remaining budget before starting. Coverage is `test/thread-topics.test.js` and the focused thread isolation, progress handoff and continuity cases in `test/cora.test.js`.
+
+
+## Delegated results and Hermes launch recovery
+
+An owner-authorized in-thread colleague call records its requester. The final report is queued back to that requester even without a textual mention, including a tool-delivered result followed by PASS. A returned report does not create another implicit return. Progress reports, passive cross-channel posts, departed requesters and exhausted turn budgets do not restart a worker. Access checks and the per-agent/thread session barrier still apply. `test/cora.test.js` covers these journeys and existing harness replacement/stop behavior.
+
+`runHermes()` uses `chat --query-file - --quiet --oneshot` for contexts of at least 64 KiB, retaining the complete owner instructions and current task. An argument-launch E2BIG switches once to the same stdin transport before tools start. The recorded final assistant message is authoritative because installed Hermes versions can print startup warnings to stdout even in quiet mode; missing final content and nonzero exits remain failures. The standard short-context oneshot transport and its usage report remain supported.
+
+Delegation origin is retained in the persisted reply-delivery trace note so a service restart can still return the result to its requester. `cancelledColleagueReturns` records per-agent/thread stop timestamps; a late result cannot reopen a task stopped from the panel, while a later explicit delegation remains eligible.

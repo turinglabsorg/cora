@@ -717,7 +717,7 @@ const handle = async () => {
       const add = (row) => db.prepare("INSERT INTO messages (session_id, role, content, tool_calls, tool_name, reasoning, reasoning_content) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(session, row.role, row.content ?? null, row.tool_calls ?? null, row.tool_name ?? null, row.reasoning ?? null, row.reasoning ?? null);
       db.prepare("INSERT INTO sessions (id, source, started_at) VALUES (?, 'cli', ?)").run(session, Date.now() / 1000);
-      add({ role: "user", content: argv[argv.indexOf("-z") + 1] });
+      add({ role: "user", content: argv.includes("--query-file") ? stdin : argv[argv.indexOf("-z") + 1] });
       if (control.tool) add({ role: "assistant", content: "Prima controllo.", reasoning: control.thinking || "Penso.", tool_calls: JSON.stringify([{ id: "call_1", type: "function", function: { name: "mcp__cora__" + control.tool, arguments: JSON.stringify(control.args || {}) } }]) });
       hermes = { db, session, add };
     }
@@ -819,6 +819,7 @@ const handle = async () => {
     if (control.hermesRefusal) {
       if (usageFile) fs.writeFileSync(usageFile, JSON.stringify({ session_id: null, completed: false, failed: true }));
       process.stdout.write(control.hermesRefusal + "\\n");
+      if (argv.includes("--query-file")) process.exitCode = 1;
       return;
     }
     if (control.tool) {
@@ -827,6 +828,8 @@ const handle = async () => {
     } else hermes.add({ role: "assistant", content: answer, reasoning: control.thinking || null });
     hermes.db.close();
     if (usageFile) fs.writeFileSync(usageFile, JSON.stringify({ session_id: hermes.session, completed: true, failed: false, input_tokens: 100, output_tokens: 20 }));
+    if (control.hermesWarning) process.stdout.write(control.hermesWarning + "\\n");
+    if (argv.includes("--query-file")) process.stderr.write("session_id: " + hermes.session + "\\n");
     process.stdout.write(answer + "\\n");
   } else if (flavor === "grok") {
     const session = "fixture-" + process.pid;
@@ -921,6 +924,7 @@ if (flavor === "gemini" && argv[0] === "acp") {
     }
   }).on("close", () => setTimeout(() => process.exit(0), 50));
 } else {
+  process.stdin.setEncoding("utf8");
   process.stdin.on("data", (d) => { stdin += d; });
   process.stdin.on("end", handle);
 }
