@@ -8697,6 +8697,37 @@ function renderSettings() {
     });
     return row;
   };
+  let idleMinutes = settings.conversationIdleMinutes ?? 30;
+  const idleInput = h("input", { type: "number", class: "num", min: 5, step: 1, value: idleMinutes, inputmode: "numeric", "aria-label": tr("Minuti senza messaggi") });
+  const unlimited = switchInput("conversationIdleUnlimited", "∞ Nessun avviso", settings.conversationIdleMinutes === null);
+  const unlimitedInput = unlimited.querySelector("input");
+  const idleRow = setRow("Avviso di inattività", "Dopo quanti minuti senza messaggi chiedere se restare in ascolto, in tutte le conversazioni. Minimo 5; ∞ disattiva la domanda. L’agente resta collegato fino al congedo.",
+    h("div", { class: "stack-sm" }, h("div", { class: "row" }, idleInput, h("span", { class: "muted" }, "minuti")), unlimited), { stack: true });
+  const syncIdle = () => {
+    const value = S.data.settings.conversationIdleMinutes;
+    if (value !== null) idleMinutes = value;
+    idleInput.value = idleMinutes;
+    idleInput.disabled = value === null;
+    unlimitedInput.checked = value === null;
+  };
+  const saveIdle = async (value) => {
+    idleInput.disabled = true;
+    unlimitedInput.disabled = true;
+    await saveSettings({ conversationIdleMinutes: value }, idleRow);
+    syncIdle();
+    unlimitedInput.disabled = false;
+  };
+  syncIdle();
+  idleInput.addEventListener("change", () => {
+    const value = Number(idleInput.value);
+    if (!Number.isSafeInteger(value) || value < 5 || value > Math.floor(Number.MAX_SAFE_INTEGER / 60000)) {
+      toast("Inserisci un numero intero di minuti, almeno 5, oppure scegli ∞ Nessun avviso.", true);
+      syncIdle();
+      return;
+    }
+    saveIdle(value);
+  });
+  unlimitedInput.addEventListener("change", () => saveIdle(unlimitedInput.checked ? null : idleMinutes));
   const goal = switchInput("goalMode", "", settings.goalMode);
   const goalRow = setRow("Obiettivi", "Ogni compito riceve un obiettivo, cioè cosa deve essere vero perché sia finito, e un altro modello controlla che lo sia davvero. Nel Ragionamento i turni si raggruppano per obiettivo.", goal);
   goal.querySelector("input").addEventListener("change", async (event) => {
@@ -8763,12 +8794,12 @@ function renderSettings() {
     drawBackups();
     return panel({ icon: "chip", title: "Decisore", hint: "Scelte brevi sulla conversazione, con una configurazione propria." }, setRows(modelRow, backupsRow));
   };
-  page("regia", panel({ icon: "sliders", title: "Regia", hint: "Quanto possono parlarsi tra loro prima di fermarsi ad aspettare un umano." },
+  page("regia", panel({ icon: "sliders", title: "Regia", hint: "I turni degli agenti e la continuità delle conversazioni." },
     setRows(
       numberRow("maxAgentTurns", "Messaggi tra agenti", "Quanti messaggi si scambiano dopo ogni messaggio umano, prima di fermarsi.", 0, 40),
       numberRow("maxRepliesPerRound", "Risposte per giro", "Quanti agenti parlano insieme.", 1, 6),
       numberRow("historySize", "Messaggi di contesto", "Quanta chat rileggono prima di rispondere.", 5, 100),
-      goalRow)), decisionPanel());
+      idleRow, goalRow)), decisionPanel());
 
   const model = modelPicker("defaultModel", settings.defaultModel, { allowDefault: false });
   const modelNote = () => {

@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS = {
   guildIds: [],
   ownerIds: [],
   maxAgentTurns: 8,
+  conversationIdleMinutes: 30,
   maxRepliesPerRound: 2,
   historySize: 30,
   defaultModel: "ollama/deepseek-v4.1-flash",
@@ -425,12 +426,21 @@ function cleanPermissions(list) {
   return grants.slice(0, 100);
 }
 
+function cleanIdleMinutes(value) {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 5 || value > Math.floor(Number.MAX_SAFE_INTEGER / 60000)) {
+    throw new ValidationError("Inserisci un numero intero di minuti, almeno 5, oppure scegli ∞ Nessun avviso.");
+  }
+  return value;
+}
+
 export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
   const merged = { ...DEFAULT_SETTINGS, ...previous, ...input };
   return {
     guildIds: cleanIds(merged.guildIds),
     ownerIds: cleanIds(merged.ownerIds),
     maxAgentTurns: Math.round(clampNumber(merged.maxAgentTurns, 0, 40, 8)),
+    conversationIdleMinutes: cleanIdleMinutes(merged.conversationIdleMinutes),
     maxRepliesPerRound: Math.round(clampNumber(merged.maxRepliesPerRound, 1, 6, 2)),
     historySize: Math.round(clampNumber(merged.historySize, 5, 100, 30)),
     defaultModel: checkModel(merged.defaultModel) || DEFAULT_SETTINGS.defaultModel,
