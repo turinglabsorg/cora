@@ -53,7 +53,7 @@ with os.fdopen(fd,'rb') as src:
   sys.stdout.buffer.write(data[start:None if end<0 else end+1])
 `;
 
-export const SEALED_NETWORK_POLICY = "sealed-v1";
+export const SEALED_NETWORK_POLICY = "sealed-v2";
 export const SEALED_FIREWALL = `set -eu
 iptables-restore <<'RULES'
 *filter
@@ -566,7 +566,7 @@ export class Boxes {
     const name = this.networkGuard(agent.id);
     await runProcess(this.docker, ["rm", "-f", name], { timeoutMs: 60000 });
     const made = await runProcess(this.docker, ["run", "-d", "--name", name, "--restart", "unless-stopped",
-      "--network", network, "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges",
+      "--network", network, "--dns", "1.1.1.1", "--dns", "9.9.9.9", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges",
       "--read-only", "--tmpfs", "/run:rw,noexec,nosuid,size=1m", "--memory", "64m", "--cpus", "0.1",
       "-p", "127.0.0.1::6080", ...(sshPort ? ["-p", `127.0.0.1:${sshPort}:22`] : []),
       "--label", `cora.networkPolicy=${SEALED_NETWORK_POLICY}`, "--label", `cora.agent=${agent.id}`,

@@ -40,6 +40,8 @@ test("sealed firewall resists root and blocks host, peers, LAN and tailnet while
   const probe = `import socket,sys\nfor host in ${JSON.stringify([gateway, "10.0.0.1", "192.168.1.1", "100.124.92.120", "169.254.169.254", "host.docker.internal"])}:\n try:\n  s=socket.create_connection((host,22),0.5);s.close();sys.exit('private destination reachable: '+host)\n except OSError: pass\nprint('all private destinations refused')`;
   const blocked = await runProcess(docker, boxes.execArgs(id, ["python3", "-c", probe]), { timeoutMs: 10000 });
   assert.equal(blocked.code, 0, blocked.stderr);
+  const dnsConfig = await shell("cat /etc/resolv.conf");
+  assert.doesNotMatch(dnsConfig.output, /ExtServers:.*172\.17\.0\.1/, "a private host resolver is not inherited");
   const publicInternet = await shell("curl --fail --silent --show-error --connect-timeout 8 https://example.com -o /dev/null");
   assert.equal(publicInternet.code, 0, publicInternet.output);
   assert.equal((await shell("mkdir -p ~/work; echo retained > ~/work/isolation-fixture.txt")).code, 0);
