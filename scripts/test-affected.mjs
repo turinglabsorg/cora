@@ -25,14 +25,14 @@ const NONE = [/^docs\//, /\.md$/, /^LICENSE$/, /^\.gitignore$/, /^deploy\//, /^b
 
 const PANEL = {
   files: ["connections", "key-connectors", "hermes-keys", "access", "permissions"],
-  cora: ["external configuration MCP", "shared owner controls", "panel auth", "routine workspaces", "subscription preparation", "manual subscription codes", "connector setup", "Claude OAuth", "device-code"],
+  cora: ["external configuration MCP", "shared owner controls", "panel auth", "routine workspaces", "subscription preparation", "manual subscription codes", "connector setup", "Linear workspace", "Claude OAuth", "device-code"],
 };
 
 // Each area: the paths it owns, the test files that cover it and the cora.test.js groups (name prefixes).
 const AREAS = [
   { name: "panel", paths: [/^web\/(app|i18n|index|sw)\.(js|html)$/, /^web\/styles\.css$/, /^src\/web\.js$/], ...PANEL },
   { name: "hermes keys", paths: [/^src\/(hermes-keys|credentials)\.js$/], files: ["hermes-keys", "deepseek", "connections"], cora: ["what runs the models"] },
-  { name: "connectors", paths: [/^src\/connectors\//, /^test\/google-connector-fixtures\.js$/], files: ["key-connectors", "connections"], cora: ["external configuration MCP returns a browser handoff"] },
+  { name: "connectors", paths: [/^src\/connectors\//, /^test\/google-connector-fixtures\.js$/], files: ["key-connectors", "connections"], cora: ["external configuration MCP returns a browser handoff", "Linear workspace"] },
   { name: "artifacts", paths: [/^src\/(artifacts|share-host|share-drive)\.js$/], files: ["artifacts", "artifact-shares", "cloud"], cora: ["artifact "] },
   { name: "vault", paths: [/^src\/(vault|secrets|send-pages)\.js$/, /^web\/send\.js$/], files: ["vault"], cora: [] },
   { name: "voice", paths: [/^src\/voice\.js$/], files: ["voice"], cora: ["voice "] },

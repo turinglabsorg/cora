@@ -451,20 +451,20 @@ export const linear = {
     params: { actor: "app", prompt: "consent" },
     clientAuth: "body",
     async identify({ access, request, api }) {
-      const { data } = await request(api.linear, { method: "POST", headers: { Authorization: `Bearer ${access}`, "Content-Type": "application/json" }, body: { query: "query { viewer { name } organization { name urlKey } }" } });
+      const { data } = await request(api.linear, { method: "POST", headers: { Authorization: `Bearer ${access}`, "Content-Type": "application/json" }, body: { query: "query { viewer { name } organization { id name urlKey } }" } });
       if (!data?.data?.organization?.urlKey) fail("Linear did not confirm the workspace");
-      return { workspace: String(data.data.organization.urlKey).slice(0, 80), account: String(data.data.viewer?.name || "").slice(0, 120) };
+      return { workspace: String(data.data.organization.urlKey).slice(0, 80), ...(data.data.organization.id ? { workspaceId: String(data.data.organization.id) } : {}), account: String(data.data.viewer?.name || "").slice(0, 120) };
     },
   },
   card: {
     icon: "list",
-    description: "Gli agenti leggono e creano issue nel workspace che colleghi.",
+    description: "Collega più workspace e scegli gli agenti autorizzati per ciascuno.",
     meta: "Linear · Issue e progetti",
     writes: {
       oauth: "Issue e commenti mostrano nome e avatar dell'agente che li scrive, tramite l'app.",
       key: "Issue e commenti risultano scritti dalla persona che ha creato la chiave.",
     },
-    intro: "Gli agenti leggono e creano issue nel workspace che colleghi. La chiave resta nella cassaforte, mai nel pannello.",
+    intro: "Collega più workspace e scegli gli agenti autorizzati per ciascuno. La chiave resta nella cassaforte, mai nel pannello.",
     modes: [{
       id: "key",
       label: "Chiave personale",
@@ -476,7 +476,7 @@ export const linear = {
         { title: "2. La chiave API", steps: [
           ["apri ", { href: "https://linear.app/settings/security", text: "linear.app/settings/security" }, " → Sicurezza → Chiavi API e crea una chiave personale;"],
           "copia la chiave;",
-          ["incollala qui: Cora la verifica su Linear e la salva nella cassaforte come ", { code: "CORA_LINEAR_KEY" }, ", senza mostrarla più."],
+          ["incollala qui: Cora la verifica su Linear e la salva separatamente nella cassaforte (prefisso ", { code: "CORA_LINEAR_KEY" }, "), senza mostrarla più."],
         ], field: { name: "token", type: "password", label: "Chiave API di Linear" }, submit: "Verifica e collega" },
         { title: "3. Gli agenti", hint: "Dopo il collegamento scegli quali agenti possono usare la chiave.", note: "Il passo si sblocca appena il workspace è collegato." },
       ],
@@ -485,13 +485,14 @@ export const linear = {
       label: "App OAuth",
       ready: "app",
       intro: "Con un'app OAuth Linear ogni issue e ogni commento mostra nome e avatar dell'agente che l'ha scritto (per esempio «Nico (via Cora)»), senza occupare posti nel workspace.",
-      notice: "Servono client ID e client secret di un'app OAuth creata in Linear; poi la autorizzi da qui come app del workspace e Cora salva i token nella cassaforte.",
+      notice: "Ogni collegamento ha la propria app OAuth, i propri token e agenti autorizzati. Puoi usare app diverse per workspace diversi.",
       body: { mode: "oauth" },
       rows: [
+        { title: "Il workspace (facoltativo)", hint: "Scrivi il nome in linear.app/<workspace> per riconoscere questo collegamento prima di autorizzarlo. Cora verifica che corrisponda.", field: { name: "workspace", type: "text", placeholder: "turinglabs", label: "Workspace atteso di Linear" } },
         { title: "L'app Linear", steps: [
           ["apri ", { href: "https://linear.app/settings/api/applications/new", text: "Linear → Settings → API → OAuth applications" }, " e crea una nuova app (nome e icona sono quelli dell'app, per esempio Cora);"],
           ["in Callback URLs aggiungi l'indirizzo di ritorno di Cora mostrato qui sotto, ", { code: "…/connectors/oauth/linear/callback" }, ";"],
-          ["copia client ID e client secret e incollali qui: finiscono nella cassaforte come ", { code: "CORA_LINEAR_CLIENT_ID" }, " e ", { code: "CORA_LINEAR_CLIENT_SECRET" }, ";"],
+          ["copia client ID e client secret e incollali qui: finiscono nella cassaforte con nomi separati per collegamento (prefissi ", { code: "CORA_LINEAR_CLIENT_ID" }, " e ", { code: "CORA_LINEAR_CLIENT_SECRET" }, ");"],
           "poi premi «Autorizza Linear»: serve un amministratore del workspace, perché l'app si installa come app del workspace.",
         ], fields: [
           { name: "clientId", type: "text", title: "Client ID", label: "Client ID dell'app Linear" },

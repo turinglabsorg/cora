@@ -1,6 +1,23 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "{count} workspace collegati": "{count} connected workspaces",
+  "Workspace da autorizzare": "Workspace awaiting authorization",
+  "App OAuth Linear": "Linear OAuth app",
+  "Autorizza questa app nel workspace desiderato. Poi scegli gli agenti che potranno usarlo.": "Authorize this app in the intended workspace. Then choose the agents allowed to use it.",
+  "Rimuovi collegamento": "Remove connection",
+  "Conferma rimozione": "Confirm removal",
+  "Modifica app": "Edit app",
+  "Collega un altro workspace": "Connect another workspace",
+  "Collega più workspace e scegli gli agenti autorizzati per ciascuno.": "Connect multiple workspaces and choose the agents authorized for each one.",
+  "Ogni collegamento ha la propria app OAuth, i propri token e agenti autorizzati. Puoi usare app diverse per workspace diversi.": "Each connection has its own OAuth app, tokens and authorized agents. You can use different apps for different workspaces.",
+  "Il workspace (facoltativo)": "Workspace (optional)",
+  "Scrivi il nome in linear.app/<workspace> per riconoscere questo collegamento prima di autorizzarlo. Cora verifica che corrisponda.": "Enter the name in linear.app/<workspace> to identify this connection before authorization. Cora checks that it matches.",
+  "Workspace atteso di Linear": "Expected Linear workspace",
+  "la salva separatamente nella cassaforte (prefisso ": "stores it separately in the vault (prefix ",
+  "), senza mostrarla più.": "), without showing it again.",
+  "finiscono nella cassaforte con nomi separati per collegamento (prefissi ": "they go into the vault under separate names for each connection (prefixes ",
+
   "sessione": "session",
   "sessioni": "sessions",
   "Tutte le sessioni": "All sessions",

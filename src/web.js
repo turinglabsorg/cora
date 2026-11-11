@@ -512,7 +512,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!keyConnectors || !KEY_SERVICES[oauthStart[1]]) throw new HttpError(404, "Connettore non disponibile.");
       if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega i connettori.");
       if (actingUser) return send(res, 409, { error: "OAuth sign-in requires your browser session. Open the returned Cora page and authorise the app there.", browserAction: { path: `/#/settings/connettori/${oauthStart[1]}`, identity: user.id } });
-      const started = keyConnectors.beginOAuth(oauthStart[1], user, `${connectorOrigin(req)}/connectors/oauth/${oauthStart[1]}/callback`);
+      const started = keyConnectors.beginOAuth(oauthStart[1], user, `${connectorOrigin(req)}/connectors/oauth/${oauthStart[1]}/callback`, url.searchParams.get("connection") || "");
       const name = config.insecureCookies ? "cora_oauth" : "__Host-cora_oauth";
       return send(res, 200, { url: started.url }, { "Set-Cookie": `${name}=${started.nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=900${config.insecureCookies ? "" : "; Secure"}` });
     }
@@ -522,14 +522,14 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const canManage = Boolean(knowledge?.ownerMemory || user.role === "owner");
       if (!canManage) throw new HttpError(403, "Solo il proprietario collega i connettori.");
       if (method === "POST") {
-        const record = await keyConnectors.connect(keyConnector[1], await readJson(req, 20000), user);
+        const record = await keyConnectors.connect(keyConnector[1], await readJson(req, 20000), user, url.searchParams.get("connection") || "");
         return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog({ origin: connectorOrigin(req) }), keyConnectors: keyConnectors.view(), canManage, record });
       }
       if (method === "PUT") {
-        const record = keyConnectors.updateAgents(keyConnector[1], (await readJson(req, 8000)).agents, user);
+        const record = keyConnectors.updateAgents(keyConnector[1], (await readJson(req, 8000)).agents, user, url.searchParams.get("connection") || "");
         return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog({ origin: connectorOrigin(req) }), keyConnectors: keyConnectors.view(), canManage, record });
       }
-      if (method === "DELETE") { keyConnectors.disconnect(keyConnector[1], user); return send(res, 200, { ok: true }); }
+      if (method === "DELETE") { keyConnectors.disconnect(keyConnector[1], user, url.searchParams.get("connection") || ""); return send(res, 200, { ok: true }); }
       throw new HttpError(405, "Metodo non supportato.");
     }
     if (path === "/api/connectors/google" && method === "POST") {

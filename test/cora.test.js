@@ -1764,6 +1764,53 @@ test("a managed default email domain keeps its real provider status and never by
   assert.equal((await f.call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: "default-agent", domain: domain.name } })).status, 200);
 });
 
+test("Linear workspace panel manages independent grants and keeps legacy connections", async (t) => {
+  const fixture = await subscriptionApp(t);
+  const firstAgent = fixture.app.store.createAgent({ name: "First workspace agent", tools: false });
+  const secondAgent = fixture.app.store.createAgent({ name: "Second workspace agent", tools: false });
+  fixture.app.keyConnectors.fetch = async (_url, options) => {
+    const second = String(options.headers.Authorization).includes("fixture_second");
+    return new Response(JSON.stringify({ data: { viewer: { name: "Fixture owner", organization: { id: second ? "second-org" : "first-org", urlKey: second ? "secondspace" : "firstspace" } } } }), { status: 200 });
+  };
+  const first = await fixture.request("/api/connectors/keys/linear", { method: "POST", body: { workspace: "firstspace", token: "lin_api_fixture_first" } });
+  assert.equal(first.status, 200);
+  const legacy = { ...first.data.record }; delete legacy.secretName;
+  fixture.app.store.setValue("keyConnectors", [legacy]);
+  const second = await fixture.request("/api/connectors/keys/linear", { method: "POST", body: { workspace: "secondspace", token: "lin_api_fixture_second" } });
+  assert.equal(second.status, 200);
+  const panel = panelHarness({ hash: "#/settings/connettori/linear", fetch: async (path, init = {}) => {
+    const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  await panel.run("boot()");
+  const pane = panel.run('document.querySelector(".connectors-pane")'); await pane.readyConnectors;
+  const cards = () => pane.querySelector(".connector-detail").querySelectorAll(".panel");
+  assert.equal(cards().length, 2);
+  assert.match(cards()[0].textContent, /firstspace/); assert.match(cards()[1].textContent, /secondspace/);
+  const check = (card, agentName) => card.querySelectorAll("input").find(input => input.getAttribute("aria-label") === `Autorizza ${agentName}`);
+  check(cards()[0], firstAgent.name).checked = true; check(cards()[0], firstAgent.name).dispatch("change");
+  await waitFor(() => fixture.app.keyConnectors.linearConnections().find(item => item.id === legacy.id).agents.includes(firstAgent.id));
+  await sleep(50);
+  check(cards()[1], secondAgent.name).checked = true; check(cards()[1], secondAgent.name).dispatch("change");
+  await waitFor(() => fixture.app.keyConnectors.linearConnections().find(item => item.id === second.data.record.id).agents.includes(secondAgent.id));
+  await sleep(50);
+  assert.deepEqual(fixture.app.store.vaultSecret("CORA_LINEAR_KEY").agents, [firstAgent.id]);
+  assert.deepEqual(fixture.app.store.vaultSecret(second.data.record.secretName).agents, [secondAgent.id]);
+  assert.equal(Boolean(check(cards()[0], secondAgent.name).checked), false);
+  assert.equal(Boolean(check(cards()[1], firstAgent.name).checked), false);
+  pane.querySelectorAll("button").find(button => button.textContent === "Collega un altro workspace").click();
+  const draft = pane.querySelector(".connector-detail").querySelectorAll("input").find(input => input.getAttribute("aria-label") === "Workspace di Linear");
+  draft.value = "thirdspace";
+  await panel.run('document.activeElement=null;document.hidden=false;document.listeners.visibilitychange[0]()');
+  assert.equal(draft.isConnected, true); assert.equal(draft.value, "thirdspace");
+  pane.querySelectorAll("button").find(button => button.textContent === "Annulla").click();
+  const remove = cards()[1].querySelectorAll("button").find(button => button.textContent === "Scollega");
+  remove.click(); assert.equal(fixture.app.keyConnectors.linearConnections().length, 2);
+  remove.click(); await waitFor(() => fixture.app.keyConnectors.linearConnections().length === 1);
+  assert.ok(fixture.app.store.vaultSecret("CORA_LINEAR_KEY"));
+  assert.deepEqual(fixture.app.keyConnectors.linearConnections()[0].agents, [firstAgent.id]);
+});
+
 test("connector setup preserves mounted forms and catalog across background updates", async (t) => {
   const fixture = await subscriptionApp(t);
   let stateReads = 0;
@@ -1777,12 +1824,13 @@ test("connector setup preserves mounted forms and catalog across background upda
   await pane.readyConnectors;
   const buttons = () => pane.querySelectorAll("button");
   buttons().find(button => button.textContent === "App OAuth").click();
-  const inputs = pane.querySelector(".connector-detail").querySelectorAll("input");
+  const appInputs = () => pane.querySelector(".connector-detail").querySelectorAll("input").filter(input => /Client ID|Client secret/.test(input.getAttribute("aria-label") || ""));
+  const inputs = appInputs();
   assert.equal(inputs.length, 2);
   inputs[0].value = "fixture-client-draft"; inputs[1].value = "fixture-secret-draft";
   const expectDraft = () => {
     assert.equal(panel.run('document.querySelector(".connectors-pane")'), pane);
-    assert.equal(pane.querySelector(".connector-detail").querySelectorAll("input")[0], inputs[0]);
+    assert.equal(appInputs()[0], inputs[0]);
     assert.equal(inputs[0].value, "fixture-client-draft");
     assert.equal(inputs[1].value, "fixture-secret-draft");
     assert.equal(buttons().find(button => button.textContent === "App OAuth").getAttribute("aria-pressed"), "true");

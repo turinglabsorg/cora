@@ -9,9 +9,11 @@ import { executeTool, summarizeArgs } from "../src/tools.js";
 const LINEAR_KEY = "lin_api_fixture_turinglabs";
 const ASANA_TOKEN = "asana_fixture_pat";
 const LINEAR_APP_TOKEN = "lin_oauth_fixture_app";
+const OTHER_APP_TOKEN = "lin_oauth_fixture_other_app";
 
 async function fakeServices(t) {
   const linear = [], asana = [], asanaQueries = [], linearTokens = [];
+  const state = { refuseOtherRefresh: false };
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -22,8 +24,9 @@ async function fakeServices(t) {
     if (req.url === "/linear") {
       linear.push({ authorization: req.headers.authorization, body });
       const token = String(req.headers.authorization || "").replace(/^Bearer /, "");
-      if (token === LINEAR_APP_TOKEN) {
-        if (/viewer \{ name \} organization/.test(body.query)) return send(200, { data: { viewer: { name: "Cora" }, organization: { name: "Turing Labs", urlKey: "turinglabs" } } });
+      if ([LINEAR_APP_TOKEN, OTHER_APP_TOKEN].includes(token)) {
+        const other = token === OTHER_APP_TOKEN;
+        if (/viewer \{ name \} organization/.test(body.query)) return send(200, { data: { viewer: { name: "Cora" }, organization: { id: other ? "org-second" : "org-first", name: other ? "Second space" : "Turing Labs", urlKey: other ? "secondspace" : "turinglabs" } } });
         if (/issue\(id: \$id\)/.test(body.query)) return send(200, { data: { issue: { id: "iss-7", identifier: "TL-7", team: { key: "TL" } } } });
         if (/commentCreate/.test(body.query)) return send(200, { data: { commentCreate: { success: true, comment: { id: "c-1", url: "https://linear.app/c", user: { name: "Cora" } } } } });
         return send(200, { data: null, errors: [{ message: "fixture: no answer" }] });
@@ -35,7 +38,14 @@ async function fakeServices(t) {
     }
     if (req.url === "/linear-oauth/token" && req.method === "POST") {
       linearTokens.push(body);
-      if (body.grant_type === "authorization_code" && body.code === "good-code") return send(200, { access_token: LINEAR_APP_TOKEN, refresh_token: "lin_refresh_fixture", expires_in: 86399, token_type: "Bearer" });
+      if (body.grant_type === "authorization_code" && body.code === "good-code") {
+        if (body.client_id === "second-client" && body.client_secret === "second-secret") return send(200, { access_token: OTHER_APP_TOKEN, refresh_token: "lin_second_refresh_fixture", expires_in: 86399 });
+        if (body.client_id === "lin-client" && body.client_secret === "lin-secret") return send(200, { access_token: LINEAR_APP_TOKEN, refresh_token: "lin_refresh_fixture", expires_in: 86399, token_type: "Bearer" });
+      }
+      if (body.grant_type === "refresh_token") {
+        if (body.client_id === "second-client" && body.client_secret === "second-secret" && body.refresh_token === "lin_second_refresh_fixture" && !state.refuseOtherRefresh) return send(200, { access_token: OTHER_APP_TOKEN, refresh_token: "lin_second_refresh_fixture", expires_in: 86399 });
+        if (body.client_id === "lin-client" && body.client_secret === "lin-secret" && body.refresh_token === "lin_refresh_fixture") return send(200, { access_token: LINEAR_APP_TOKEN, refresh_token: "lin_refresh_fixture", expires_in: 86399 });
+      }
       return send(400, { error: "invalid_grant" });
     }
     if (req.url === "/asana/users/me") {
@@ -62,7 +72,7 @@ async function fakeServices(t) {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
-  return { base: `http://127.0.0.1:${server.address().port}`, linear, asana, asanaQueries, linearTokens };
+  return { base: `http://127.0.0.1:${server.address().port}`, linear, asana, asanaQueries, linearTokens, state };
 }
 
 async function connectorWorld(t) {
@@ -350,4 +360,89 @@ test("Linear through an OAuth app installs as actor=app and signs each comment w
   await f.call("/api/connectors/keys/linear", { method: "DELETE" });
   assert.equal(f.app.store.vaultSecret("CORA_LINEAR_CLIENT_ID"), null, "disconnecting removes the app too");
   assert.equal(f.app.store.vaultSecret("CORA_LINEAR_KEY"), null);
+});
+
+
+test("Linear workspace connections isolate OAuth apps, grants, routing and token renewal", async (t) => {
+  const f = await connectorWorld(t), connectors = f.app.keyConnectors;
+  connectors.oauthUrls.linear = { token: `${f.services.base}/linear-oauth/token` };
+  const other = f.app.store.createAgent({ name: "Second agent", tools: false });
+  const create = async (workspace, clientId, clientSecret) => {
+    const reply = await f.call("/api/connectors/keys/linear", { method: "POST", body: { mode: "oauth", workspace, clientId, clientSecret } });
+    assert.equal(reply.status, 200);
+    return reply.data.record;
+  };
+  const [firstApp, secondApp] = await Promise.all([create("turinglabs", "lin-client", "lin-secret"), create("secondspace", "second-client", "second-secret")]);
+  assert.notEqual(firstApp.id, secondApp.id);
+  assert.notEqual(firstApp.secretName, secondApp.secretName);
+  assert.ok(firstApp.appSecrets.every(name => !secondApp.appSecrets.includes(name)));
+  const records = (await f.call("/api/connectors")).data.keyConnectors.filter(item => item.service === "linear");
+  assert.equal(records.length, 2);
+  assert.ok(records.every(item => item.appConfigured));
+  assert.doesNotMatch(JSON.stringify(records), /lin-secret|second-secret/);
+  assert.equal((await f.call("/api/connectors/keys/linear/authorize", { method: "POST" })).status, 400);
+  const finish = async (app, clientId) => {
+    const started = await f.call(`/api/connectors/keys/linear/authorize?connection=${app.id}`, { method: "POST" });
+    assert.equal(started.status, 200);
+    const url = new URL(started.data.url);
+    assert.equal(url.searchParams.get("client_id"), clientId);
+    const state = url.searchParams.get("state");
+    return connectors.finishOAuth("linear", { state, code: "good-code" }, state);
+  };
+  const [first, second] = await Promise.all([finish(firstApp, "lin-client"), finish(secondApp, "second-client")]);
+  assert.deepEqual([first.workspace, second.workspace], ["turinglabs", "secondspace"]);
+  const grant = (record, agents) => f.call(`/api/connectors/keys/linear?connection=${record.id}`, { method: "PUT", body: { agents } });
+  assert.equal((await grant(first, [f.agent.id])).status, 200);
+  assert.equal((await grant(second, [other.id])).status, 200);
+  assert.deepEqual(f.app.store.vaultSecret(first.secretName).agents, [f.agent.id]);
+  assert.deepEqual(f.app.store.vaultSecret(second.secretName).agents, [other.id]);
+  const firstTool = connectors.toolsFor(f.agent).find(tool => tool.name === "linear_comment");
+  assert.deepEqual(firstTool.parameters.properties.workspace.enum, ["turinglabs"]);
+  assert.doesNotMatch(JSON.stringify(firstTool), /secondspace/);
+  const calls = f.services.linear.length;
+  assert.match((await connectors.runTool(f.agent, "linear_comment", { workspace: "secondspace", issue: "TL-7", body: "Denied" })).text, /^error: you are not authorised/);
+  assert.equal(f.services.linear.length, calls);
+  await grant(second, [f.agent.id, other.id]);
+  const tools = connectors.toolsFor(f.agent);
+  assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length, "tools are not duplicated per workspace");
+  assert.ok(tools.every(tool => tool.parameters.required.includes("workspace")));
+  assert.match((await connectors.runTool(f.agent, "linear_comment", { issue: "TL-7", body: "Ambiguous" })).text, /^error: choose workspace explicitly/);
+  assert.match((await connectors.runTool(f.agent, "linear_comment", { workspace: "turinglabs", issue: "https://linear.app/secondspace/issue/TL-7", body: "Wrong URL" })).text, /^error: the Linear URL/);
+  assert.equal(f.services.linear.length, calls);
+  const comment = (workspace) => connectors.runTool(f.agent, "linear_comment", { workspace, issue: "TL-7", body: "Verified" });
+  assert.doesNotMatch((await comment("turinglabs")).text, /^error:/);
+  assert.equal(f.services.linear.at(-1).authorization, `Bearer ${LINEAR_APP_TOKEN}`);
+  assert.doesNotMatch((await comment("secondspace")).text, /^error:/);
+  assert.equal(f.services.linear.at(-1).authorization, `Bearer ${OTHER_APP_TOKEN}`);
+  const expire = async (record) => {
+    const secret = f.app.store.vaultSecret(record.secretName);
+    const bundle = JSON.parse(f.app.vault.value(secret).toString("utf8"));
+    bundle.expires_at = 0;
+    await f.app.vault.put({ name: record.secretName, value: JSON.stringify(bundle), agents: secret.agents, by: secret.createdBy });
+    connectors.access.delete(record.secretName);
+  };
+  await expire(first); await expire(second);
+  const tokenCalls = f.services.linearTokens.length;
+  const renewed = await Promise.all([comment("turinglabs"), comment("turinglabs"), comment("secondspace")]);
+  assert.ok(renewed.every(reply => !reply.text.startsWith("error:")));
+  const refreshes = f.services.linearTokens.slice(tokenCalls);
+  assert.equal(refreshes.length, 2, "concurrent calls share renewal within a connection");
+  assert.deepEqual(new Set(refreshes.map(body => body.client_id)), new Set(["lin-client", "second-client"]));
+  f.services.state.refuseOtherRefresh = true;
+  await expire(second);
+  assert.match((await comment("secondspace")).text, /did not renew/);
+  assert.doesNotMatch((await comment("turinglabs")).text, /^error:/, "a failed renewal is isolated");
+  assert.equal((await f.call("/api/connectors/keys/linear", { method: "PUT", body: { agents: [] } })).status, 400);
+  assert.equal((await f.call("/api/connectors/keys/linear", { method: "DELETE" })).status, 400);
+  assert.equal((await f.call(`/api/connectors/keys/linear?connection=${first.id}`, { method: "PUT", body: { agents: [] }, asMember: true })).status, 403);
+  await grant(first, []);
+  assert.match((await comment("turinglabs")).text, /^error: you are not authorised/);
+  assert.deepEqual(f.app.store.vaultSecret(second.secretName).agents, [f.agent.id, other.id]);
+  await grant(first, [f.agent.id]);
+  assert.equal((await f.call(`/api/connectors/keys/linear?connection=${second.id}`, { method: "DELETE" })).status, 200);
+  assert.ok(f.app.store.vaultSecret(first.secretName));
+  assert.ok(first.appSecrets.every(name => f.app.store.vaultSecret(name)));
+  assert.equal(f.app.store.vaultSecret(second.secretName), null);
+  assert.ok(second.appSecrets.every(name => !f.app.store.vaultSecret(name)));
+  assert.doesNotMatch((await connectors.runTool(f.agent, "linear_comment", { issue: "TL-7", body: "Single workspace" })).text, /^error:/);
 });

@@ -226,6 +226,8 @@ Opening a card shows its own detail at `#/settings/connettori/google`, with a lo
 
 Connector setup remains mounted across background chat discovery and visibility changes, even when a field has lost focus. Keep the selected connection mode, unsubmitted fields, catalog query, filters and confirmation state in the current view; only explicit navigation and completed connector actions rebuild it. Never persist draft credentials in browser storage.
 
+Linear detail lists one panel per workspace, titled with its verified name, with its own agent checkboxes and disconnect confirmation. An OAuth app awaiting approval has its own panel with the expected workspace name, authorization, edit and remove actions. Add another workspace opens a separate inline form; every connection owns its app credentials and token. Never reuse another workspace’s grants.
+
 ## External agents through MCP
 
 Settings → External agents (MCP), in the Connectors group, keeps personal access separate from the service catalog. Show the actual caller's name, endpoint, HTTP transport and Bearer header placeholder. Reuse setting rows, mono read-only fields and 44px copy controls. Explain that the client keeps the person's current permissions and private sharing boundaries.
