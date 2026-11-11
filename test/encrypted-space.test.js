@@ -259,3 +259,36 @@ test("general enforcement stops ordinary chat, memory, reasoning and transport i
   await f.app.orchestrator.onSlackDirect(agent.id, {});
   await assert.rejects(f.app.orchestrator.onWebMessage({ room: "synthetic", text: "private" }), (e) => e.status === 409);
 });
+
+test("passkey B persists its derivation, reopens without browser seed state and refuses weak or changed credentials", async (t) => {
+  const f = await knowledgeWorld(); t.after(() => f.close());
+  let storedSeed, uv = true, mismatched = false, creates = 0, hang = false;
+  const credentialId = randomBytes(32).toString("base64url");
+  const savedNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const savedLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { credentials: {
+    async create({ publicKey }) { creates++; storedSeed = Uint8Array.from(publicKey.user.id); assert.equal(publicKey.extensions, undefined); return { id: credentialId, response: { getAuthenticatorData() { const flags = new Uint8Array(37); flags[32] = uv ? 5 : 1; return flags.buffer; } } }; },
+    async get({ publicKey }) { if (hang) return new Promise(() => {}); assert.equal(publicKey.userVerification, "required"); const flags = new Uint8Array(37); flags[32] = uv ? 5 : 1; const seed = Uint8Array.from(storedSeed); if (mismatched) seed[0] ^= 1; return { response: { authenticatorData: flags, userHandle: seed.buffer } }; },
+  } } });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { PublicKeyCredential: true } });
+  Object.defineProperty(globalThis, "location", { configurable: true, value: { hostname: "localhost" } });
+  t.after(() => { for (const [key, descriptor] of [["navigator", savedNavigator], ["window", savedWindow], ["location", savedLocation]]) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } storedSeed?.fill(0); });
+  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "synthetic/passkey-b" } })).data;
+  const keys = await createFolderKeys(folder.id, "passkey", "", "Passkey B", "handle-v1");
+  const configured = await f.request(f.alice, `/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: keys });
+  assert.equal(configured.status, 201); const method = configured.data.methods[0];
+  assert.equal(method.derivation, "handle-v1"); assert.equal(method.userHandle, undefined);
+  const wire = JSON.stringify(keys); assert.ok(!wire.includes(Buffer.from(storedSeed).toString("base64url"))); assert.ok(!wire.includes(JSON.stringify(Array.from(storedSeed))));
+  const bundle = await unlockBundle(folder.id, method); assert.equal(creates, 1);
+  const doc = await encryptDocument(keys.publicKey, payload, `cora:${folder.id}:test:1`);
+  assert.equal(await decryptDocument(bundle, doc), payload);
+  uv = false; await assert.rejects(unlockBundle(folder.id, method)); uv = true;
+  mismatched = true; await assert.rejects(unlockBundle(folder.id, method)); mismatched = false;
+  assert.equal(await decryptDocument(await unlockBundle(folder.id, method), doc), payload);
+  const tampered = { ...method, ciphertext: method.ciphertext.slice(0, -2) + "AA" };
+  await assert.rejects(unlockBundle(folder.id, tampered));
+  hang = true; const controller = new AbortController(); const cancelled = unlockBundle(folder.id, method, "", controller.signal); controller.abort(); await assert.rejects(cancelled, /annullato/); hang = false;
+  const badFolder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "synthetic/bad-derivation" } })).data;
+  assert.equal((await f.request(f.alice, `/api/encrypted/folders/${badFolder.id}/configure`, { method: "POST", body: { ...keys, methods: [{ ...keys.methods[0], derivation: "unknown" }] } })).status, 400);
+});

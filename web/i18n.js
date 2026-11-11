@@ -1,6 +1,21 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Sblocco annullato. Puoi riprovare.": "Unlock cancelled. You can try again.",
+  "Creazione annullata. Puoi riprovare.": "Creation cancelled. You can try again.",
+  "Annulla sblocco": "Cancel unlock",
+
+  "Creazione della passkey annullata.": "Passkey creation cancelled.",
+  "La passkey non conferma la verifica dell’utente. Riprova sbloccando il gestore.": "The passkey did not confirm user verification. Unlock your password manager and try again.",
+  "Il gestore non restituisce il dato necessario alla passkey B. Usa un altro metodo.": "The manager did not return the data needed for passkey B. Use another method.",
+  "La passkey non restituisce PRF. Crea una passkey B per i gestori senza PRF.": "The passkey did not return PRF. Create a passkey B for managers without PRF.",
+  "Il gestore ha cambiato i dati della passkey. La cartella non è stata protetta.": "The manager changed the passkey data. The folder was not protected.",
+  "Crea passkey A · PRF": "Create passkey A · PRF",
+  "Crea passkey B": "Create passkey B",
+  "Aggiungi passkey A · PRF": "Add passkey A · PRF",
+  "Aggiungi passkey B": "Add passkey B",
+  "A usa PRF. B funziona senza PRF e dipende dalla protezione del gestore: non offre le stesse garanzie. Crea una nuova passkey dedicata; seme e chiavi non vengono inviati a Cora.": "A uses PRF. B works without PRF and depends on your password manager’s protection; it does not offer the same guarantees. Create a new dedicated passkey; the seed and keys are never sent to Cora.",
+
   "Nasce nel tuo account GitHub.": "It is created in your GitHub account.",
   "Intelligenza": "Intelligence",
   "{count} chiavi salvate": "{count} saved keys",

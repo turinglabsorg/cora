@@ -4,47 +4,71 @@ export const from64 = (value) => Uint8Array.from(atob(value.replaceAll("-", "+")
 const random = (n) => crypto.getRandomValues(new Uint8Array(n));
 const documentId = () => "ed_" + [...random(12)].map((n) => n.toString(16).padStart(2, "0")).join("");
 const wrapAad = (folder, item) => encoder.encode(`cora:${folder}:method:${item.kind}:${item.salt}`);
-async function wrappingKey(folder, item, password = "", create = false) {
+async function credentialRequest(operation, options, signal) {
+  if (signal?.aborted) throw new DOMException("", "AbortError");
+  const pending = navigator.credentials[operation]({ ...options, signal });
+  if (!signal) return pending;
+  let abort;
+  const cancelled = new Promise((resolve, reject) => { abort = () => reject(new DOMException("", "AbortError")); signal.addEventListener("abort", abort, { once: true }); });
+  try { return await Promise.race([pending, cancelled]); }
+  finally { signal.removeEventListener("abort", abort); }
+}
+async function wrappingKey(folder, item, password = "", create = false, signal) {
   if (item.kind === "password") {
     if (create && password.length < 14) throw Error("Usa almeno 14 caratteri per la password.");
     const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
     return crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", iterations: 600000, salt: from64(item.salt) }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
   }
   if (!navigator.credentials || !window.PublicKeyCredential) throw Error("Questo browser non supporta le passkey.");
-  if (create) {
-    const credential = await navigator.credentials.create({ publicKey: { challenge: random(32), rp: { name: "Cora · Spazio cifrato", id: location.hostname }, user: { id: random(32), name: folder, displayName: "Spazio cifrato · " + folder }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", userVerification: "required" }, attestation: "none", extensions: { prf: {} } } });
-    if (!credential?.getClientExtensionResults().prf?.enabled) throw Error("La passkey non supporta PRF. Usa una password o un autenticatore compatibile.");
-    item.credentialId = credential.id;
-  }
-  const assertion = await navigator.credentials.get({ publicKey: { challenge: random(32), rpId: location.hostname, allowCredentials: [{ type: "public-key", id: from64(item.credentialId) }], userVerification: "required", extensions: { prf: { eval: { first: from64(item.salt) } } } } });
-  const output = assertion?.getClientExtensionResults().prf?.results?.first;
-  if (!output) throw Error("La passkey non restituisce PRF. Scegli un altro metodo di sblocco.");
+  let seed, credential;
   try {
-    const material = await crypto.subtle.importKey("raw", output, "HKDF", false, ["deriveKey"]);
-    return await crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: encoder.encode("cora:encrypted-space:v1"), info: encoder.encode(folder) }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
-  } finally { new Uint8Array(output).fill(0); }
+    if (create) {
+      seed = random(32);
+      credential = await credentialRequest("create", { publicKey: { challenge: random(32), rp: { name: "Cora · Spazio cifrato", id: location.hostname }, user: { id: seed, name: folder, displayName: "Spazio cifrato · " + folder }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", userVerification: "required" }, attestation: "none", ...(item.derivation === "handle-v1" ? {} : { extensions: { prf: {} } }) } }, signal);
+      if (!credential) throw Error("Creazione della passkey annullata.");
+      item.credentialId = credential.id;
+    }
+    const compatible = item.derivation === "handle-v1";
+    let output, authenticatorData;
+    if (compatible && create) {
+      output = seed;
+      authenticatorData = credential.response.getAuthenticatorData();
+    } else {
+      const assertion = await credentialRequest("get", { publicKey: { challenge: random(32), rpId: location.hostname, allowCredentials: [{ type: "public-key", id: from64(item.credentialId) }], userVerification: "required", ...(compatible ? {} : { extensions: { prf: { eval: { first: from64(item.salt) } } } }) } }, signal);
+      authenticatorData = assertion?.response?.authenticatorData;
+      output = compatible ? assertion?.response?.userHandle : assertion?.getClientExtensionResults().prf?.results?.first;
+    }
+    const flags = new Uint8Array(authenticatorData || []);
+    if (flags.length < 37 || !(flags[32] & 1) || !(flags[32] & 4)) throw Error("La passkey non conferma la verifica dell’utente. Riprova sbloccando il gestore.");
+    if (!output || new Uint8Array(output).byteLength !== 32) throw Error(compatible ? "Il gestore non restituisce il dato necessario alla passkey B. Usa un altro metodo." : "La passkey non restituisce PRF. Crea una passkey B per i gestori senza PRF.");
+    try {
+      const material = await crypto.subtle.importKey("raw", output, "HKDF", false, ["deriveKey"]);
+      return await crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: compatible ? from64(item.salt) : encoder.encode("cora:encrypted-space:v1"), info: encoder.encode(compatible ? `cora:encrypted-space:handle-v1:${folder}` : folder) }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    } finally { new Uint8Array(output).fill(0); }
+  } finally { seed?.fill(0); }
 }
-export async function protectBundle(folder, bundle, kind, password = "", label = "") {
-  const method = { kind, label, salt: to64(random(32)), iv: to64(random(12)), ...(kind === "password" ? { iterations: 600000 } : {}) };
-  const key = await wrappingKey(folder, method, password, true);
+export async function protectBundle(folder, bundle, kind, password = "", label = "", derivation = "prf-v1", signal) {
+  const method = { kind, label, ...(kind === "passkey" ? { derivation } : {}), salt: to64(random(32)), iv: to64(random(12)), ...(kind === "password" ? { iterations: 600000 } : {}) };
+  const key = await wrappingKey(folder, method, password, true, signal);
   method.ciphertext = to64(await crypto.subtle.encrypt({ name: "AES-GCM", iv: from64(method.iv), additionalData: wrapAad(folder, method) }, key, encoder.encode(JSON.stringify(bundle))));
   return method;
 }
-export async function createFolderKeys(folder, kind, password, label = "") {
+export async function createFolderKeys(folder, kind, password, label = "", derivation = "prf-v1", signal) {
   const rsa = await crypto.subtle.generateKey({ name: "RSA-OAEP", modulusLength: 3072, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["encrypt", "decrypt"]);
   const signing = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
   const bundle = { v: 1, folder, privateKey: await crypto.subtle.exportKey("jwk", rsa.privateKey), signingKey: await crypto.subtle.exportKey("jwk", signing.privateKey) };
-  return { publicKey: await crypto.subtle.exportKey("jwk", rsa.publicKey), signingKey: await crypto.subtle.exportKey("jwk", signing.publicKey), methods: [await protectBundle(folder, bundle, kind, password, label)] };
+  return { publicKey: await crypto.subtle.exportKey("jwk", rsa.publicKey), signingKey: await crypto.subtle.exportKey("jwk", signing.publicKey), methods: [await protectBundle(folder, bundle, kind, password, label, derivation, signal)] };
 }
-export async function unlockBundle(folder, method, password = "") {
+export async function unlockBundle(folder, method, password = "", signal) {
   try {
-    const key = await wrappingKey(folder, method, password);
+    const key = await wrappingKey(folder, method, password, false, signal);
     const bytes = await crypto.subtle.decrypt({ name: "AES-GCM", iv: from64(method.iv), additionalData: wrapAad(folder, method) }, key, from64(method.ciphertext));
     const bundle = JSON.parse(decoder.decode(bytes)); new Uint8Array(bytes).fill(0);
     if (bundle.folder !== folder || bundle.v !== 1) throw Error("wrong folder");
     return bundle;
   } catch (error) {
-    if (["NotAllowedError", "AbortError"].includes(error.name) || error.message.includes("PRF")) throw error;
+    if (error.name === "AbortError") throw Error("Sblocco annullato. Puoi riprovare.");
+    if (error.name === "NotAllowedError" || error.message.includes("PRF")) throw error;
     throw Error("Sblocco non riuscito. Controlla password, passkey e cartella.");
   }
 }
@@ -96,25 +120,31 @@ export function encryptedSetup(ui, folder, reload) {
   const password = h("input", { type: "password", autocomplete: "new-password", minlength: 14, "aria-label": tr("Password della cartella"), placeholder: tr("Almeno 14 caratteri") });
   const again = h("input", { type: "password", autocomplete: "new-password", "aria-label": tr("Ripeti la password"), placeholder: tr("Ripeti la password") });
   const status = h("p", { role: "status", class: "muted" });
-  const create = async (kind) => {
+  let setupController = null;
+  const cancelSetup = h("button", { class: "btn ghost", hidden: true, onclick: () => setupController?.abort() }, "Annulla");
+  const create = async (kind, derivation = "prf-v1") => {
+    setupController = new AbortController(); cancelSetup.hidden = false;
     for (const b of root.querySelectorAll("button")) b.disabled = true;
+    cancelSetup.disabled = false;
     try {
       if (kind === "password" && password.value !== again.value) throw Error("Le password non coincidono.");
-      const payload = await createFolderKeys(folder.id, kind, password.value);
+      const payload = await createFolderKeys(folder.id, kind, password.value, kind === "passkey" ? (derivation === "handle-v1" ? "Passkey B" : "Passkey A · PRF") : "", derivation, setupController.signal);
+      if (setupController.signal.aborted) throw new DOMException("", "AbortError");
       password.value = ""; again.value = "";
       await api(`/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: payload }); reload();
-    } catch (error) { status.textContent = tr(error.message); }
-    finally { for (const b of root.querySelectorAll("button")) b.disabled = false; }
+    } catch (error) { status.textContent = tr(error.name === "AbortError" ? "Creazione annullata. Puoi riprovare." : error.message); }
+    finally { setupController = null; cancelSetup.hidden = true; for (const b of root.querySelectorAll("button")) b.disabled = false; }
   };
   const root = panel({ icon: "lock", title: "Spazio cifrato", hint: "Solo per cartelle vuote. Ogni cartella ha chiavi proprie; i file esistenti non vengono convertiti." },
     h("p", { class: "muted" }, "Se perdi tutti i metodi di sblocco, i documenti sono irrecuperabili."),
-    h("div", { class: "stack-sm" }, password, again, h("div", { class: "row" }, btn("Proteggi con password", { cls: "primary", icon: "lock", onclick: () => create("password") }), btn("Crea passkey", { icon: "key", onclick: () => create("passkey") }))), status);
+    h("div", { class: "stack-sm" }, password, again, h("p", { class: "muted" }, "A usa PRF. B funziona senza PRF e dipende dalla protezione del gestore: non offre le stesse garanzie. Crea una nuova passkey dedicata; seme e chiavi non vengono inviati a Cora."), h("div", { class: "row" }, btn("Proteggi con password", { cls: "primary", icon: "lock", onclick: () => create("password") }), btn("Crea passkey A · PRF", { icon: "key", onclick: () => create("passkey") }), btn("Crea passkey B", { icon: "key", onclick: () => create("passkey", "handle-v1") })), cancelSetup), status);
   return root;
 }
 
 export async function encryptedFolderPanel(ui, folder, current, agents, reload) {
   const { h, btn, api, panel, sectionWorkspace, tr, raw } = ui;
   const root = h("div", { class: "stack encrypted-space" });
+  let unlockController = null;
   let data = await api(`/api/encrypted/folders/${folder.id}`), bundle = null, chosenMethod = null, selected = null, text = "";
   const status = h("p", { role: "status", class: "muted" });
   const methodSelect = h("select", { "aria-label": tr("Metodo di sblocco") }, data.folder.methods.map((m) => h("option", { value: m.id }, raw(m.label + " · " + m.kind))));
@@ -122,7 +152,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const changeMethod = () => { password.hidden = data.folder.methods.find((m) => m.id === methodSelect.value)?.kind !== "password"; password.value = ""; };
   methodSelect.addEventListener("change", changeMethod); changeMethod();
   const files = h("div", { class: "stack-sm" }), methods = h("div", { class: "stack-sm" }), requests = h("div", { class: "stack-sm" }), sharing = h("div", { class: "stack-sm" });
-  const lock = () => { bundle = null; selected = null; text = ""; password.value = ""; content.value = ""; title.value = ""; files.replaceChildren(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
+  const lock = () => { unlockController?.abort(); bundle = null; selected = null; text = ""; password.value = ""; content.value = ""; title.value = ""; files.replaceChildren(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
   const run = async (fn) => { status.textContent = ""; try { await fn(); } catch (error) { status.textContent = tr(error.message); } };
   const proof = (intent) => proveAccess(api, folder.id, bundle, chosenMethod, intent);
   const refresh = async () => { data = await api(`/api/encrypted/folders/${folder.id}`); await draw(); };
@@ -134,13 +164,24 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     selected = await api(`/api/encrypted/folders/${folder.id}/documents`, { method: "POST", body: { id: docId, base: version, envelope: cipher, proof: await proof(`write:${docId}:${version}`) } });
     await refresh(); status.textContent = tr("Versione cifrata salvata.");
   };
-  const unlock = panel({ icon: "lock", title: "Sblocca la cartella", hint: "La chiave viene aperta solo in questo browser. Non viene inviata al server." }, methodSelect, password,
-    btn("Sblocca cartella", { cls: "primary", icon: "key", onclick: () => run(async () => {
+  const cancelUnlock = h("button", { class: "btn ghost", hidden: true, onclick: () => unlockController?.abort() }, "Annulla sblocco");
+  const unlockButton = btn("Sblocca cartella", { cls: "primary", icon: "key", onclick: () => run(async () => {
+    if (unlockController) return;
+    unlockController = new AbortController(); const signal = unlockController.signal;
+    unlockButton.disabled = true; methodSelect.disabled = true; cancelUnlock.hidden = false;
+    try {
       chosenMethod = data.folder.methods.find((m) => m.id === methodSelect.value);
-      bundle = await unlockBundle(folder.id, chosenMethod, password.value); password.value = "";
+      const opened = await unlockBundle(folder.id, chosenMethod, password.value, signal); password.value = "";
+      if (signal.aborted) throw Error("Sblocco annullato. Puoi riprovare.");
+      bundle = opened;
       await api(`/api/encrypted/folders/${folder.id}/read`, { method: "POST", body: { proof: await proof("read") } });
-      await refresh(); unlock.hidden = true; locked.hidden = false;
-    }) }));
+      if (signal.aborted) { bundle = null; throw Error("Sblocco annullato. Puoi riprovare."); }
+      await refresh();
+      if (signal.aborted) { lock(); throw Error("Sblocco annullato. Puoi riprovare."); }
+      unlock.hidden = true; locked.hidden = false;
+    } finally { unlockController = null; unlockButton.disabled = false; methodSelect.disabled = false; cancelUnlock.hidden = true; }
+  }) });
+  const unlock = panel({ icon: "lock", title: "Sblocca la cartella", hint: "La chiave viene aperta solo in questo browser. Non viene inviata al server." }, methodSelect, password, h("div", { class: "row" }, unlockButton, cancelUnlock));
   const locked = h("div", { class: "stack", hidden: true });
   const readDoc = async (doc) => {
     const plain = JSON.parse(await decryptDocument(bundle, doc.envelope, `cora:${folder.id}:${doc.id}:${doc.version}`));
@@ -165,16 +206,16 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
       }) }))));
     const addPassword = h("input", { type: "password", autocomplete: "new-password", placeholder: tr("Nuova password · almeno 14 caratteri"), "aria-label": tr("Nuova password") });
     const methodName = h("input", { type: "text", maxlength: 80, placeholder: tr("Nome, es. telefono personale"), "aria-label": tr("Nome del metodo") });
-    const addMethod = async (kind) => {
+    const addMethod = async (kind, derivation = "prf-v1") => {
       const label = methodName.value.trim() || (kind === "passkey" ? "Passkey" : "Password") + " " + (data.folder.methods.filter((m) => m.kind === kind).length + 1);
-      const item = await protectBundle(folder.id, bundle, kind, addPassword.value, label);
+      const item = await protectBundle(folder.id, bundle, kind, addPassword.value, label, derivation);
       addPassword.value = "";
       await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { add: item, proof: await proof("methods") } }); lock(); reload();
     };
     methods.replaceChildren(panel({ icon: "key", title: "Metodi di sblocco", hint: "Password e più passkey possono convivere. Aggiungi il metodo alternativo prima di rimuovere quello precedente." },
-      h("div", { class: "rows" }, data.folder.methods.map((item) => h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(item.label), h("small", { class: "muted" }, raw(" · " + item.kind))), btn("Rimuovi", { cls: "ghost danger", disabled: data.folder.methods.length === 1, onclick: () => run(async () => {
+      h("div", { class: "rows" }, data.folder.methods.map((item) => h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(item.label), h("small", { class: "muted" }, raw(" · " + (item.kind === "passkey" ? (item.derivation === "handle-v1" ? "B" : "A · PRF") : item.kind)))), btn("Rimuovi", { cls: "ghost danger", disabled: data.folder.methods.length === 1, onclick: () => run(async () => {
         await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { remove: item.id, proof: await proof("methods") } }); lock(); reload();
-      }) })))), methodName, addPassword, h("div", { class: "row" }, btn("Aggiungi password", { icon: "plus", onclick: () => run(() => addMethod("password")) }), btn("Aggiungi passkey", { icon: "key", onclick: () => run(() => addMethod("passkey")) }))));
+      }) })))), methodName, addPassword, h("p", { class: "muted" }, "A usa PRF. B funziona senza PRF e dipende dalla protezione del gestore: non offre le stesse garanzie. Crea una nuova passkey dedicata; seme e chiavi non vengono inviati a Cora."), h("div", { class: "row" }, btn("Aggiungi password", { icon: "plus", onclick: () => run(() => addMethod("password")) }), btn("Aggiungi passkey A · PRF", { icon: "key", onclick: () => run(() => addMethod("passkey")) }), btn("Aggiungi passkey B", { icon: "key", onclick: () => run(() => addMethod("passkey", "handle-v1")) }))));
     const agent = h("select", { "aria-label": tr("Agente") }, agents.map((a) => h("option", { value: a.id }, raw(a.name))));
     const operation = h("select", { "aria-label": tr("Operazione") }, h("option", { value: "read" }, "Lettura e analisi"), h("option", { value: "edit" }, "Proposta di modifica"));
     const instruction = h("textarea", { rows: 3, "aria-label": tr("Istruzione privata"), placeholder: tr("Istruzione privata per questa sessione…") });

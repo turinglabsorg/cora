@@ -32,7 +32,11 @@ function method(input) {
   if (!input || !["password", "passkey"].includes(input.kind)) fail(400, "Metodo di sblocco non valido.");
   const item = { id: id("em_"), kind: input.kind, label: String(input.label || (input.kind === "password" ? "Password" : "Passkey")).slice(0, 80), salt: b64(input.salt, 32), iv: b64(input.iv, 12), ciphertext: b64(input.ciphertext, 100, 32768) };
   if (item.kind === "password") { if (input.iterations !== 600000) fail(400, "Derivazione password non supportata."); item.iterations = 600000; }
-  else item.credentialId = b64(input.credentialId, 16, 1024);
+  else {
+    item.credentialId = b64(input.credentialId, 16, 1024);
+    if (input.derivation !== undefined && !["prf-v1", "handle-v1"].includes(input.derivation)) fail(400, "Derivazione passkey non supportata.");
+    item.derivation = input.derivation || "prf-v1";
+  }
   return item;
 }
 function publicKey(input, algorithm) {

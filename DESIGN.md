@@ -315,3 +315,7 @@ Settings → Regia has one autosaved Inactivity reminder row. A labelled integer
 Owner requirement, 11 November 2026: Settings must always preserve the same compact UX. Reuse the existing setting rows, input sizes, rocker and spacing. Scalar preferences keep title and explanation on the left and controls on the right on desktop and phones; shorten hints instead of creating oversized blocks. Do not introduce a bespoke layout for another numeric preference.
 
 Settings → Regia (including its Decisore panel) and Settings → Modelli e sonno are always visible section panels, never disclosures or accordions. They have no Details label, chevron or click-to-collapse header. Route changes, refreshes and saved previous disclosure state must not hide their controls. Preserve the Settings rail and its established mobile navigation.
+
+### Encryption passkey methods
+
+Keep **A · PRF** and **B** as separate, labelled enrollment/add-method actions. Show the B password-manager trust limitation before selection, using the existing muted text and wrapping button row. Never silently select B after A fails. Method rows distinguish A and B while preserving user-supplied labels; all fixed copy is translated. No new colors or components.
