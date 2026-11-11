@@ -1788,10 +1788,15 @@ test("Linear workspace panel manages independent grants and keeps legacy connect
   const cards = () => pane.querySelector(".connector-detail").querySelectorAll(".panel");
   assert.equal(cards().length, 2);
   assert.match(cards()[0].textContent, /firstspace/); assert.match(cards()[1].textContent, /secondspace/);
+  for (const card of cards()) { assert.equal(card.tagName, "details"); assert.equal(card.getAttribute("open"), null); }
+  cards()[0].open = true; cards()[0].dispatch("toggle");
+
   const check = (card, agentName) => card.querySelectorAll("input").find(input => input.getAttribute("aria-label") === `Autorizza ${agentName}`);
   check(cards()[0], firstAgent.name).checked = true; check(cards()[0], firstAgent.name).dispatch("change");
   await waitFor(() => fixture.app.keyConnectors.linearConnections().find(item => item.id === legacy.id).agents.includes(firstAgent.id));
   await sleep(50);
+  assert.equal(cards()[0].getAttribute("open"), "");
+  assert.equal(cards()[1].getAttribute("open"), null);
   check(cards()[1], secondAgent.name).checked = true; check(cards()[1], secondAgent.name).dispatch("change");
   await waitFor(() => fixture.app.keyConnectors.linearConnections().find(item => item.id === second.data.record.id).agents.includes(secondAgent.id));
   await sleep(50);
@@ -1851,6 +1856,27 @@ test("Linear app editing replaces only the selected card and cancels without wri
   assert.equal(records.length, 2);
   assert.equal(records.find(item => item.id === apps[0].id).appVersion, apps[0].appVersion);
   assert.equal(fixture.app.keyConnectors.appCredentials("linear", records.find(item => item.id === apps[1].id)).clientId, "fixture-new-client");
+});
+
+test("connector setup collapses completed Asana and Canva details without changing connections", async (t) => {
+  const f = await subscriptionApp(t);
+  const records = ["asana", "canva"].map(service => ({ service, status: "connected", mode: "oauth", account: "Fixture account", agents: [] }));
+  f.app.store.setValue("keyConnectors", records);
+  for (const service of ["asana", "canva"]) {
+    const panel = panelHarness({ hash: `#/settings/connettori/${service}`, fetch: async (path, init = {}) => {
+      assert.equal(init.method || "GET", "GET");
+      const response = await f.request(path);
+      return { ok: response.status < 400, status: response.status, json: async () => response.data };
+    } });
+    await panel.run("boot()");
+    const pane = panel.run('document.querySelector(".connectors-pane")'); await pane.readyConnectors;
+    const card = pane.querySelector(".connector-connected");
+    assert.ok(card); assert.equal(card.tagName, "details"); assert.equal(card.getAttribute("open"), null);
+    assert.match(card.querySelector("summary").textContent, /Collegato.*Dettagli/);
+    assert.ok(card.querySelector(".panel-body").querySelectorAll("button").some(button => button.textContent === "Scollega"));
+    card.open = true; card.dispatch("toggle");
+    assert.equal(f.app.keyConnectors.records().length, 2);
+  }
 });
 
 test("connector setup preserves mounted forms and catalog across background updates", async (t) => {
@@ -8277,6 +8303,10 @@ describe("email channel", () => {
     assert.equal(panel.run("location.hash"), "#/settings/connettori/google");
     assert.equal(node.querySelector(".connector-catalog").hidden, true);
     assert.equal(node.querySelectorAll("button").find(button => /Collega un altro/.test(button.textContent)).getAttribute("disabled"), "");
+    const connected = node.querySelectorAll(".connector-connected");
+    assert.equal(connected.length, 2);
+    for (const card of connected) assert.equal(card.getAttribute("open"), null);
+    connected[1].open = true; connected[1].dispatch("toggle");
     const input = node.querySelectorAll("input").find(input => input.getAttribute("type") === "checkbox");
     input.checked = true; input.dispatch("change");
     assert.equal(input.disabled, true);
@@ -8563,6 +8593,85 @@ describe("agent character sheet", () => {
   });
 });
 
+
+test("agent remote access is in Security and sealed agents never load tailnet controls", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  f.app.boxes.inspect = async () => ({ exists: true, running: false, outdated: false });
+  const created = await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Remote access fixture", tools: false, enabled: false } });
+  const agent = f.app.store.agent(created.data.id);
+  const calls = [];
+  const fetchAs = async (path, options = {}) => {
+    calls.push(path);
+    const response = await f.request(f.alice, path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  };
+  const panel = panelHarness({ fetch: fetchAs, hash: `#/agent/${agent.id}/impostazioni/sicurezza` });
+  panel.run(`S.data = ${JSON.stringify((await f.request(f.alice, "/api/state")).data)}`);
+  panel.run(`globalThis.fixtureAgent = S.data.agents.find(a => a.id === ${JSON.stringify(agent.id)})`);
+  const sealed = await panel.run("accessPanel({...fixtureAgent, sealed: true})");
+  assert.match(sealed.textContent, /Questo agente è sigillato, non può attivare la tailnet/);
+  assert.equal(sealed.querySelectorAll("button, a").length, 0);
+  assert.equal(calls.length, 0, "sealed agents do not request connection status or stale authorization URLs");
+  const open = await panel.run("accessPanel(fixtureAgent)");
+  assert.match(open.textContent, /Accendi il desktop/);
+  assert.ok(calls.includes(`/api/agents/${agent.id}/box/access`));
+  calls.length = 0;
+  const desktop = await panel.run("desktopTab(fixtureAgent)");
+  assert.equal(desktop.length, 1);
+  assert.doesNotMatch(desktop[0].textContent, /Accesso remoto|Collega a Tailscale/);
+  assert.ok(!calls.some(path => path.endsWith("/access")));
+  const settings = panel.run('agentForm(fixtureAgent, {only: "profile", knowledge: {sealed: false, canManage: true}})');
+  await Promise.all(settings.querySelectorAll("div").map(node => node.readyAccess));
+  assert.doesNotMatch(settings.textContent, /Salva sicurezza/);
+  assert.match(settings.textContent, /Accesso remoto/);
+  panel.run("fixtureAgent.sealed = true");
+  const sealedSettings = panel.run('agentForm(fixtureAgent, {only: "profile", knowledge: {sealed: true, canManage: true}})');
+  await Promise.all(sealedSettings.querySelectorAll("div").map(node => node.readyAccess));
+  assert.match(sealedSettings.textContent, /Questo agente è sigillato, non può attivare la tailnet/);
+  assert.doesNotMatch(sealedSettings.textContent, /Collega a Tailscale|Passando dalla macchina host/);
+});
+
+
+test("security seal autosaves, restores rejected changes and survives reload", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  f.app.boxes.inspect = async () => ({ exists: true, running: false, outdated: false });
+  f.app.knowledge.onSealChanged = async () => {};
+  const created = await f.request(f.alice, "/api/agents", { method: "POST", body: { name: "Autosave fixture", tools: false, enabled: false, sealed: true } });
+  const id = created.data.id;
+  let reject = true, writes = 0;
+  const panel = panelHarness({ hash: `#/agent/${id}/impostazioni/sicurezza`, fetch: async (path, options = {}) => {
+    if (path === `/api/agents/${id}/knowledge` && options.method === "PUT") {
+      writes++;
+      if (reject) return { ok: false, status: 503, json: async () => ({ error: "Expected save refusal" }) };
+    }
+    const response = await f.request(f.alice, path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  await panel.run("loadState()");
+  await panel.navigate(`#/agent/${id}/impostazioni/sicurezza`);
+  const seal = () => panel.app.querySelectorAll("input").find(node => node.getAttribute("name") === "sealed");
+  let input = seal();
+  assert.equal(input.checked, true);
+  assert.doesNotMatch(panel.app.textContent, /Salva sicurezza/);
+  input.checked = false; input.dispatch("change");
+  assert.equal(input.disabled, true);
+  await waitFor(() => panel.app.textContent.includes("Expected save refusal"));
+  assert.equal(input.checked, true);
+  assert.equal(input.disabled, false);
+  assert.equal(f.app.store.agent(id).sealed, true);
+  reject = false;
+  input.checked = false; input.dispatch("change");
+  await waitFor(() => f.app.store.agent(id).sealed === false);
+  await waitFor(() => seal() !== input && panel.app.textContent.includes("Accendi il desktop per collegarlo alla tailnet."));
+  await panel.navigate(`#/agent/${id}/impostazioni/sicurezza`);
+  assert.equal(Boolean(seal().checked), false);
+  input = seal(); input.checked = true; input.dispatch("change");
+  await waitFor(() => f.app.store.agent(id).sealed === true);
+  await waitFor(() => seal() !== input && panel.app.textContent.includes("Questo agente è sigillato, non può attivare la tailnet"));
+  assert.equal(writes, 3);
+  const readonly = panel.run(`agentSecurityPane(S.data.agents.find(a => a.id === ${JSON.stringify(id)}), {sealed: true, canManage: false})`);
+  assert.equal(readonly.querySelector("input").disabled, true);
+});
 
 test("encrypted access tools return only a scoped panel link and reject unverified or foreign callers", async (t) => {
   const f = await knowledgeWorld(); t.after(f.close);

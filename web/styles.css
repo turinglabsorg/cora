@@ -2136,6 +2136,22 @@ a.share-stats:hover { color: var(--amber); }
 .connector-pending .connector-actions .btn { height: 34px; padding: 0 10px; font-size: 10px; }
 .connector-pending .set-row { padding: 8px 0; }
 
+.connector-connected > summary { list-style: none; }
+.connector-connected > summary { cursor: pointer; }
+.connector-connected > summary::-webkit-details-marker { display: none; }
+.connector-connected > summary:hover { background: var(--well); border-radius: inherit; }
+.connector-connected > summary:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; border-radius: inherit; }
+.connector-disclosure-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font: 500 10px var(--mono); }
+.connector-disclosure-label .ico { width: 16px; height: 16px; flex: none; }
+.connector-connected[open] > summary .connector-disclosure-label .ico { transform: rotate(90deg); }
+@media (max-width: 600px) {
+  .connector-connected > summary { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; grid-template-areas: "icon title title" "icon status details"; gap: 8px 10px; }
+  .connector-connected > summary .panel-ico { grid-area: icon; }
+  .connector-connected > summary .panel-title { grid-area: title; }
+  .connector-connected > summary .panel-actions { grid-area: status; justify-content: flex-start; }
+  .connector-disclosure-label { grid-area: details; }
+}
+
 .connector-detail .panel-body > p { margin: 0; }
 .connector-detail .muted { color: var(--muted); }
 .connector-detail [role="status"]:empty { display: none; }
