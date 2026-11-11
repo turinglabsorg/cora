@@ -373,6 +373,15 @@ input.mono { font-family: var(--mono); font-size: 13px; }
 input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--well); border: 1px solid var(--line); border-radius: var(--r-md); }
 .input-row { display: flex; gap: 8px; align-items: center; }
 .input-row > input { flex: 1; }
+.paste-field { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.paste-field[hidden] { display: none; }
+.paste-field > input { flex: 1; min-width: 0; }
+.paste-field > .paste-btn { flex: none; }
+.input-row > .paste-field, .vault-inline > .paste-field, .vault-value > .paste-field { flex: 1; min-width: 0; }
+@media (max-width: 600px) {
+  .input-row:has(> .paste-field) { flex-wrap: wrap; }
+  .input-row > .paste-field { flex-basis: 100%; }
+}
 .search { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--well); color: var(--faint); }
 .search input { height: 100%; padding: 0; border: 0; background: transparent; }
 .search input:focus { box-shadow: none; }
@@ -432,7 +441,7 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 @media (max-width: 600px) {
   .segmented.hermes-places.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hermes-key-add, .hermes-typed { flex-direction: column; align-items: stretch; }
-  .hermes-key-add > input, .hermes-typed > input { flex: none; width: 100%; }
+  .hermes-key-add > input, .hermes-key-add > .paste-field, .hermes-typed > input { flex: none; width: 100%; }
   .hermes-key-form .row > .btn, .hermes-typed > .btn { width: 100%; justify-content: center; }
 }
 .notice { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); }
@@ -1129,7 +1138,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
 
   input[type=text], input[type=email], input[type=url], input[type=password], input[type=number], input[type=search], input[type=datetime-local], select, textarea, .chat-compose .chat-input { font-size: 16px; }
   .input-row.token { flex-direction: column; align-items: stretch; }
-  .input-row.token > input { flex: none; }
+  .input-row.token > input, .input-row.token > .paste-field { flex: none; }
   .agent-card .monitor { aspect-ratio: 16 / 8; }
   .row-item { flex-wrap: wrap; }
   .row-item > .row-actions { width: 100%; justify-content: flex-end; }

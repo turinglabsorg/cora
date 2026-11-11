@@ -2183,6 +2183,61 @@ test("manual subscription codes survive a failed request and show progress until
   }
 });
 
+test("manual subscription codes and pasted keys fill with one tap and are never sent empty", async (t) => {
+  const fixture = await subscriptionApp(t);
+  const created = (await fixture.request("/api/subscriptions", { method: "POST", body: { provider: "claude", label: "claude" } })).data;
+  await fixture.request(`/api/subscriptions/${created.id}/login`, { method: "POST" });
+  const panel = panelHarness({ language: "en", hash: "#/settings/claude", fetch: async (path, init = {}) => {
+    const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  panel.run(`globalThis.clip = "fixture-authorization-code";
+    navigator.clipboard = { readText: async () => { if (clip === null) throw new Error("denied"); return clip; } };
+    globalThis.Event = class { constructor(type) { this.type = type; } };`);
+  await panel.run("boot()");
+  const root = panel.app.querySelectorAll(".accounts").find((node) => node.getAttribute("data-provider") === "claude");
+  const code = root.querySelectorAll("input").find((node) => node.getAttribute("type") === "password");
+  const complete = () => root.querySelector(".subscription-complete");
+  const off = (button) => button.disabled === true || (button.disabled === undefined && button.getAttribute("disabled") !== null);
+  assert.ok(off(complete()), "an empty authorization code cannot be sent");
+  const paste = code.parent.querySelector(".paste-btn");
+  assert.ok(paste, "the code field has a paste button");
+  assert.match(paste.textContent, /^Paste$/);
+  paste.click();
+  await waitFor(() => code.value === "fixture-authorization-code");
+  assert.equal(off(complete()), false, "a pasted code can be sent");
+  assert.equal(code.focused || panel.run("document.activeElement") === code, true);
+
+  code.value = "";
+  code.dispatch("input");
+  assert.ok(off(complete()), "clearing the code turns the button off again");
+  panel.run("clip = null");
+  paste.click();
+  await waitFor(() => /I cannot read the clipboard: paste it by hand/.test(panel.run("document.body.textContent")));
+  assert.equal(code.value, "");
+  assert.ok(off(complete()));
+  panel.run(`clip = "   "`);
+  paste.click();
+  await waitFor(() => /The clipboard is empty/.test(panel.run("document.body.textContent")));
+  assert.equal(code.value, "");
+
+  await panel.navigate("#/settings/deepseek");
+  const key = panel.app.querySelectorAll("input").find((node) => node.getAttribute("aria-label") === "DeepSeek API key");
+  assert.ok(key, "the DeepSeek key page has its field");
+  const row = key.parent.parent;
+  const save = row.querySelectorAll("button").find((node) => /Save key|Update key/.test(node.textContent));
+  assert.ok(off(save), "an empty API key cannot be saved");
+  panel.run(`clip = "sk-fixture-deepseek"`);
+  key.parent.querySelector(".paste-btn").click();
+  await waitFor(() => key.value === "sk-fixture-deepseek");
+  assert.equal(off(save), false, "a pasted API key can be saved");
+
+  panel.run("delete navigator.clipboard");
+  await panel.navigate("#/settings/ollama");
+  const ollama = panel.app.querySelectorAll("input").find((node) => node.getAttribute("aria-label") === "Ollama API key");
+  assert.equal(ollama.parent.querySelector(".paste-btn"), null, "without clipboard reading the field stays as it was");
+});
+
 describe("per-agent subscription authentication", () => {
   test("connects both official login shapes, exposes metadata only and validates assignments", async (t) => {
     const fixture = await subscriptionApp(t);

@@ -57,6 +57,7 @@ class Element {
     return this;
   }
   click() { return this.dispatch("click"); }
+  dispatchEvent(event) { this.dispatch(event.type, event); return true; }
   /** Every named field below this one, the way form.elements and FormData see them. */
   get fields() {
     const out = [];

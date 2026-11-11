@@ -161,6 +161,7 @@ const ICONS = {
   github: '<path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/>',
   slack: '<path d="M3.5 9.8h6.3"/><path d="M14.2 3.5v6.3"/><path d="M20.5 14.2h-6.3"/><path d="M9.8 20.5v-6.3"/>',
   hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
+  paste: '<path d="M9 4.5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-12a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="3.5" rx="1"/><path d="M9 11h6M9 15h4"/>',
   key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M16 7l3 3M18.5 4.5l2 2"/>',
   link: '<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4l-1 1M14 10a4.5 4.5 0 0 0-6.4 0l-3.2 3.2a4.5 4.5 0 0 0 6.4 6.4l1-1"/>',
   back: '<path d="M15 18.5 8.5 12 15 5.5"/>',
@@ -272,6 +273,28 @@ function pageHead(title, subtitle, actions) {
 
 function field(label, control, hint, cls = "") {
   return h("label", { class: `field${cls ? ` ${cls}` : ""}` }, h("span", { class: "label" }, label), control, hint ? h("small", {}, hint) : null);
+}
+
+/**
+ * A field filled by pasting (a code, a key, a token) with «Incolla» beside it: one tap
+ * reads the clipboard instead of a long press on a password field. `confirm`, the
+ * button that sends the value, stays off while the field is empty (or `ready()` says no).
+ */
+function pasteField(input, { confirm = null, ready = () => true } = {}) {
+  if (!input.pasteSync) input.addEventListener("input", () => input.pasteSync());
+  input.pasteSync = () => { if (confirm) confirm.disabled = !ready() || !input.value.trim(); };
+  input.pasteSync();
+  if (!navigator.clipboard?.readText) return h("div", { class: "paste-field" }, input);
+  const paste = btn("Incolla", { icon: "paste", cls: "ghost paste-btn", disabled: input.disabled, onclick: async () => {
+    let text = "";
+    try { text = (await navigator.clipboard.readText()).trim(); }
+    catch { toast("Non riesco a leggere gli appunti: incolla a mano", true); input.focus(); return; }
+    if (!text) { toast("Gli appunti sono vuoti", true); input.focus(); return; }
+    input.value = text;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.focus();
+  } });
+  return h("div", { class: "paste-field" }, input, paste);
 }
 
 function switchInput(name, label, checked, hint) {
@@ -1703,7 +1726,7 @@ function brainPanel(agent) {
       remoteStamp[backend] = "";
       drawRight();
     } }) : null;
-    const form = h("div", { class: "stack-sm hermes-key-form" }, h("div", { class: "input-row hermes-key-add" }, secret, label), h("div", { class: "row" }, add));
+    const form = h("div", { class: "stack-sm hermes-key-form" }, h("div", { class: "input-row hermes-key-add" }, pasteField(secret, { confirm: add }), label), h("div", { class: "row" }, add));
     const hasKey = spaceOn || mine.length > 0;
     return h("div", { class: "stack-sm hermes-keys" },
       h("div", { class: "hermes-keys-head" }, h("span", { class: "label" }, "Chiave"), remove),
@@ -2023,12 +2046,14 @@ function subscriptionLoginSteps(record, name, { authCode, act, busy = false }) {
         : "Incolla il codice nella pagina ufficiale e autorizza il collegamento."), open));
     } else {
       steps.append(step("1", tr("Accedi a {provider}", { provider: name }), h("p", {}, "Apri la pagina ufficiale e autorizza il collegamento."), open));
-      if (record.login.manualCode) steps.append(step("2", "Torna qui con il codice", field("Codice di autorizzazione", authCode),
-        btn(verifying ? "Verifica dell'autorizzazione…" : "Completa collegamento", { icon: "check", cls: "subscription-complete", disabled: busy || verifying, onclick: () => {
+      if (record.login.manualCode) {
+        const complete = btn(verifying ? "Verifica dell'autorizzazione…" : "Completa collegamento", { icon: "check", cls: "subscription-complete", disabled: busy || verifying || !authCode.value.trim(), onclick: () => {
           if (!authCode.value.trim()) { authCode.focus(); return; }
           const code = authCode.value;
           act(() => api(`/api/subscriptions/${record.id}/code`, { method: "POST", body: { code } }), "Verifica dell'autorizzazione…");
-        } })));
+        } });
+        steps.append(step("2", "Torna qui con il codice", field("Codice di autorizzazione", pasteField(authCode, { confirm: complete, ready: () => !busy && !verifying })), complete));
+      }
     }
     out.push(steps);
   }
@@ -2810,7 +2835,7 @@ function tokenForm({ placeholder, path, ok }) {
     button.disabled = true;
     const saved = await guard(api(path, { method: "PUT", body: { token: input.value } }), ok);
     input.value = "";
-    button.disabled = false;
+    input.pasteSync();
     if (saved) {
       await loadState();
       render();
@@ -2823,7 +2848,7 @@ function tokenForm({ placeholder, path, ok }) {
       save();
     }
   });
-  return h("div", { class: "input-row token" }, input, button);
+  return h("div", { class: "input-row token" }, pasteField(input, { confirm: button }), button);
 }
 
 function slackTokenForm({ path, ok }) {
@@ -2839,7 +2864,7 @@ function slackTokenForm({ path, ok }) {
     const saved = await guard(api(path, { method: "PUT", body: { botToken: bot.value, appToken: level.value } }), ok);
     bot.value = "";
     level.value = "";
-    button.disabled = false;
+    bot.pasteSync();
     if (saved) {
       await loadState();
       render();
@@ -2854,7 +2879,8 @@ function slackTokenForm({ path, ok }) {
       }
     });
   }
-  return h("div", { class: "stack-sm" }, bot, level, h("div", { class: "row end" }, button));
+  const both = () => Boolean(bot.value.trim() && level.value.trim());
+  return h("div", { class: "stack-sm" }, pasteField(bot, { confirm: button, ready: both }), pasteField(level, { confirm: button, ready: both }), h("div", { class: "row end" }, button));
 }
 
 /** Slack takes a bot's name from its app, so the app is created from a manifest already filled in. */
@@ -3000,7 +3026,7 @@ function slackAppsField() {
       await loadState();
       renderSettings();
     }
-    save.disabled = false;
+    input.pasteSync();
   } });
   input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
   const now = apps.configured ? btn("Aggiorna tutte adesso", { icon: "refresh", cls: "ghost", onclick: async () => {
@@ -3016,7 +3042,7 @@ function slackAppsField() {
     apps.configured ? null : steps(
       h("span", {}, "apri ", h("a", { href: "https://api.slack.com/apps", target: "_blank", rel: "noopener" }, "api.slack.com/apps"), " e, in fondo alla pagina, in ", h("b", {}, "Your App Configuration Tokens"), " tocca Generate Token per il workspace;"),
       h("span", {}, "copia il ", h("b", {}, "Refresh Token"), " (xoxe-…) e incollalo qui: Cora lo rinnova da sola e lo tiene in hush.")),
-    h("div", { class: "input-row" }, input, save, now)), { stack: true }));
+    h("div", { class: "input-row" }, pasteField(input, { confirm: save }), save, now)), { stack: true }));
 }
 
 function steps(...items) {
@@ -3880,7 +3906,7 @@ function mailDomainsPane() {
         const key = h("input", { type: "password", required: true, autocomplete: "new-password", placeholder: "re_…", maxlength: 1024 });
         const submit = btn(account ? "Salva nuova chiave" : "Collega account", { icon: "link", cls: "primary", type: "submit" });
         return h("form", { class: "mail-account-form stack", onsubmit: (event) => { event.preventDefault(); act(submit, async () => { await api(account ? `/api/mail/accounts/${account.id}` : "/api/mail/accounts", { method: account ? "PUT" : "POST", body: { name: name.value, key: key.value } }); key.value = ""; }); } },
-          field("Nome account", name), field("API key Resend", key), h("p", { class: "muted" }, "Usa una chiave con accesso completo: Cora verifica domini e ricezione. La chiave non viene mostrata agli agenti."),
+          field("Nome account", name), field("API key Resend", pasteField(key, { confirm: submit })), h("p", { class: "muted" }, "Usa una chiave con accesso completo: Cora verifica domini e ricezione. La chiave non viene mostrata agli agenti."),
           h("div", { class: "row" }, btn("Apri Resend", { href: "https://resend.com/api-keys", target: "_blank", icon: "external", cls: "ghost" }), h("span", { class: "spacer" }), submit));
       };
       const accountRows = data.accounts.map((account) => h("article", { class: "mail-account" },
@@ -4116,7 +4142,7 @@ function agentKnowledgePane(agent, data) {
     h("option", { value: "internal", selected: data.source === "internal" }, "Brain interno"),
     h("option", { value: "external", selected: data.source === "external" }, "Brain esterno · sola lettura"));
   const link = h("input", { type: "password", autocomplete: "off", "aria-label": tr("Link al Brain esterno"), placeholder: "https://…", disabled: !data.canManage });
-  const external = h("div", { class: "stack-sm" }, link,
+  const external = h("div", { class: "stack-sm" }, pasteField(link),
     h("p", { class: "muted" }, data.external.configured ? tr("Link salvato: {host}", { host: data.external.host }) : tr("Collega un link HTTPS che espone le pagine in JSON o Markdown.")),
     h("p", { class: "muted" }, "Quando scegli questa fonte, l'agente usa solo il Brain esterno per memoria e knowledge. Se non risponde, segnala il problema."));
   const sourceRow = setRow("Fonte", null, source);
@@ -4125,9 +4151,9 @@ function agentKnowledgePane(agent, data) {
   const syncSeal = () => {
     source.disabled = !data.canManage || data.sealed;
     sourceRow.hidden = data.sealed;
-    check.hidden = data.sealed || source.value !== "external";
+    check.hidden = data.sealed || source.value !== "external" || !data.external.configured;
     externalRow.hidden = data.sealed || source.value !== "external";
-    check.disabled = !data.canManage || data.sealed || source.value !== "external";
+    check.disabled = !data.canManage || data.sealed || source.value !== "external" || !data.external.configured;
   };
   source.addEventListener("change", syncSeal);
   const owner = data.owners ? h("select", { "aria-label": tr("Proprietario del Brain") },
@@ -7601,11 +7627,11 @@ function renderSecrets() {
   function newForm() {
     const value = h("input", { type: "password", name: "value", required: true, autocomplete: "new-password", spellcheck: "false", "aria-label": tr("Valore") });
     const multi = h("textarea", { name: "multi", rows: 4, class: "mono vault-multi", hidden: true, spellcheck: "false", "aria-label": tr("Valore") });
-    const lines = h("button", { type: "button", class: "btn sm ghost", onclick: () => { const wide = multi.hidden; multi.hidden = !wide; value.hidden = wide; value.required = !wide; multi.required = wide; lines.lastChild.textContent = tr(wide ? "Una riga" : "Più righe"); } }, icon("list"), h("span", {}, "Più righe"));
+    const lines = h("button", { type: "button", class: "btn sm ghost", onclick: () => { const wide = multi.hidden; multi.hidden = !wide; value.hidden = wide; value.parentElement.hidden = wide; value.required = !wide; multi.required = wide; lines.lastChild.textContent = tr(wide ? "Una riga" : "Più righe"); } }, icon("list"), h("span", {}, "Più righe"));
     const agents = vaultAgents(["*"]);
     const el = h("form", { class: "stack" },
       h("div", { class: "grid2" }, field("Nome", secretName(), "maiuscole, cifre e trattini bassi: è il nome in hush"), field("Cosa è", h("input", { type: "text", name: "description", maxlength: 300, placeholder: tr("Chiave API di Stripe per Acme") }))),
-      field("Valore", h("div", { class: "vault-value" }, value, multi, lines), "lo vedi solo mentre lo scrivi: poi nessuno lo rilegge dal pannello"),
+      field("Valore", h("div", { class: "vault-value" }, pasteField(value), multi, lines), "lo vedi solo mentre lo scrivi: poi nessuno lo rilegge dal pannello"),
       setRows(setRow("Chi può usarlo", "Gli agenti che possono metterlo nel loro hush.", agents, { stack: true })),
       h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Annulla", { cls: "ghost", onclick: toggle("new") }), btn("Metti nella cassaforte", { icon: "check", cls: "primary", type: "submit" })));
     el.addEventListener("submit", async (event) => {
@@ -7641,9 +7667,11 @@ function renderSecrets() {
       extra.dataset.open = what;
       if (what === "replace") {
         const value = h("input", { type: "password", autocomplete: "new-password", spellcheck: "false", placeholder: tr("Il nuovo valore"), "aria-label": tr("Il nuovo valore") });
-        extra.replaceChildren(h("div", { class: "vault-inline" }, value, btn("Sostituisci", { icon: "check", cls: "sm primary", onclick: async () => {
+        const replace = btn("Sostituisci", { icon: "check", cls: "sm primary", onclick: async () => {
+          if (!value.value) { value.focus(); return; }
           if (await guard(api(`/api/secrets/${secret.name}`, { method: "PUT", body: { value: value.value } }), "Valore sostituito")) reload();
-        } })));
+        } });
+        extra.replaceChildren(h("div", { class: "vault-inline" }, pasteField(value, { confirm: replace }), replace));
       } else if (what === "agents") {
         const agents = vaultAgents(secret.agents);
         extra.replaceChildren(agents, h("div", { class: "row" }, h("span", { class: "spacer" }), btn("Salva", { icon: "check", cls: "sm primary", onclick: async () => {
@@ -8528,7 +8556,7 @@ function renderSettings() {
         key.placeholder = tr("Incolla una nuova chiave per sostituirla");
         save.lastChild.textContent = tr("Aggiorna chiave");
       }
-      save.disabled = false;
+      key.pasteSync();
     } });
     key.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); save.click(); } });
     const cloud = S.data.ollamaCloud || {};
@@ -8543,7 +8571,7 @@ function renderSettings() {
                   : h("p", { class: "muted" }, "In alternativa alla chiave, collega questa macchina al tuo account Ollama.",
                     cloud.signinUrl ? [" ", h("a", { href: cloud.signinUrl, target: "_blank", rel: "noopener" }, tr("Collega questa macchina"))] : null));
     page(provider, panel({ icon: mark, title: name, actions: status }, h("div", { class: "provider-key" }, about),
-      setRows(setRow("Chiave API", "Salvata in hush, non si rivede più.", h("div", { class: "input-row" }, key, save), { stack: true }))));
+      setRows(setRow("Chiave API", "Salvata in hush, non si rivede più.", h("div", { class: "input-row" }, pasteField(key, { confirm: save }), save), { stack: true }))));
   };
   for (const [provider, name, mark] of CONNECTION_KEYS) keyPage(provider, name, mark);
 
