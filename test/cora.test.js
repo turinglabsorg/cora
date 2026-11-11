@@ -1115,7 +1115,7 @@ test("Discord images reach Gemini through Cora attachment tools without a false 
   const f = await knowledgeWorld({ discordToken: "fixture-discord-vision", discordApi: network.url, geminiBin: native.gemini });
   t.after(async () => { await f.close(); await network.close(); });
   f.app.store.updateSettings({ transport: "discord", transports: ["discord"], guildIds: [GUILD], ownerIds: [OWNER] });
-  f.app.subscriptions.geminiModels = async () => [{ name: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }];
+  f.app.subscriptions.models = async (provider) => provider === "gemini" ? [{ name: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }] : [];
   const account = f.app.store.createSubscription({ provider: "gemini", label: "Vision", connectedBy: { id: f.alice.user.id, name: "Alice" } });
   f.app.store.updateSubscription(account.id, { status: "ready" });
   const agent = f.app.store.createAgent({ name: "GeminiPixel", model: "gemini/gemini-4-argon-high", subscriptionId: account.id, tools: false, brainOwnerId: f.alice.user.id, ownerId: "discord:" + OWNER, channelIds: [CHANNEL], chattiness: 0 });
