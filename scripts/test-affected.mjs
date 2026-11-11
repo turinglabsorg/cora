@@ -38,7 +38,7 @@ const AREAS = [
   { name: "voice", paths: [/^src\/voice\.js$/], files: ["voice"], cora: ["voice "] },
   { name: "character", paths: [/^src\/character\.js$/], files: ["character"], cora: ["agent character sheet"] },
   { name: "usage", paths: [/^src\/(usage|provider-usage|subscription-usage|subscription-usage-worker)\.js$/], files: ["usage", "deepseek"], cora: ["subscription usage"] },
-  { name: "subscriptions", paths: [/^src\/(subscriptions|subscription-browser|gemini-profile|gemini-quota)\.js$/, /^src\/subscription-terminal\.py$/, /^test\/subscription-fixtures\.js$/], files: ["connections"], cora: ["per-agent subscription", "subscription ", "manual subscription", "Claude OAuth", "device-code", "Gemini "] },
+  { name: "subscriptions", paths: [/^src\/(subscriptions|subscription-browser|gemini-profile|gemini-quota)\.js$/, /^src\/subscription-terminal\.py$/, /^test\/subscription-fixtures\.js$/], files: ["connections", "model-catalogs"], cora: ["per-agent subscription", "subscription ", "manual subscription", "Claude OAuth", "device-code", "Gemini "] },
   { name: "mail", paths: [/^src\/(mail-domains|email-channel|desktop-mail|desktop-mailbox)\.m?js$/, /^src\/mail\//, /^test\/mail-fixtures\.js$/], files: ["mail-domains", "key-connectors"], cora: ["a managed default email domain", "agent mailboxes", "email channel"] },
   { name: "discord", paths: [/^src\/(discord|agent-bots)\.js$/], files: ["units"], cora: ["agents in Discord", "Discord ", "listening without a dedicated bot", "shared listening", "direct messages"] },
   { name: "telegram", paths: [/^src\/(telegram|telegram-bots|telegram-setup)\.js$/], files: ["permissions"], cora: ["agents in Telegram", "Telegram "] },

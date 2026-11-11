@@ -133,6 +133,7 @@ const CLAUDE_MODELS = [
   { name: "claude-opus-5-5", label: "Opus 5.5" },
   { name: "claude-sonnet-5-5", label: "Sonnet 5.5" },
   { name: "claude-haiku-5-5", label: "Haiku 5.5" },
+  { name: "claude-fable-5-2", label: "Fable 5.2" },
   { name: "claude-fable-5-1", label: "Fable 5.1" },
 ];
 

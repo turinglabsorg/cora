@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fakeCli } from "./helpers.js";
@@ -19,12 +19,17 @@ test("subscription CLIs list the models their provider serves today through the 
     const account = f.app.store.createSubscription({ provider, label: provider, connectedBy: { id: f.alice.user.id, name: "Alice" } });
     f.app.store.updateSubscription(account.id, { status: "ready" });
   }
+  const claudeAccount = f.app.store.subscriptions().find((record) => record.provider === "claude");
+  writeFileSync(join(f.app.store.home, "model-catalogs.json"), JSON.stringify({
+    claude: { account: claudeAccount.id, at: Date.now(), models: [{ name: "claude-opus-5-5[1m]", label: "Opus alias" }] },
+  }));
+  assert.deepEqual(await f.app.subscriptions.models("claude", { fresh: true }), [], "a cached CLI alias cannot replace Claude's supported ids");
   const codex = await ids("codex");
   assert.deepEqual(codex.map((model) => [model.id, model.label]), [["codex/gpt-6.1-terra", "GPT-6.1 Terra"], ["codex/gpt-6-sol", "GPT-6-Sol"]], "a new model shows up, a hidden one does not");
   assert.ok(codex.every((model) => model.vision && model.thinking && model.tools));
   assert.deepEqual((await ids("grok")).map((model) => [model.id, model.label]), [["grok/grok-4.8", "Grok 4.8"], ["grok/grok-4.7-build-fast", "Grok 4.7 Build Fast"]]);
   assert.deepEqual((await ids("muse")).map((model) => [model.id, model.label, model.thinking]), [["muse/muse-wonder-1.1", "Muse Wonder 1.1", false]]);
-  assert.deepEqual((await ids("claude")).map((model) => model.id), ["claude/claude-opus-5-5", "claude/claude-sonnet-5-5", "claude/claude-haiku-5-5", "claude/claude-fable-5-1"], "Claude keeps the ids agents already run on");
+  assert.deepEqual((await ids("claude")).map((model) => model.id), ["claude/claude-opus-5-5", "claude/claude-sonnet-5-5", "claude/claude-haiku-5-5", "claude/claude-fable-5-2", "claude/claude-fable-5-1"], "Claude keeps the ids agents already run on");
   const catalog = cli.calls().find((call) => call.flavor === "codex-catalog");
   assert.ok(catalog.home && catalog.home !== process.env.CODEX_HOME, "the catalog is read through the connected account's own home");
 

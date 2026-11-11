@@ -595,6 +595,7 @@ export class Subscriptions {
    * on disk too, so a slow or failed check never empties the list.
    */
   async models(provider, { fresh = false } = {}) {
+    if (provider === "claude") return [];
     const record = this.catalogAccount(provider);
     if (!record || !this.installed(provider)) return [];
     if (!this.catalogs) {
