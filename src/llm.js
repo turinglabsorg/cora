@@ -149,6 +149,14 @@ const MUSE_MODELS = [
   { name: "muse-spark-1.3", label: "Muse Spark 1.3" },
 ];
 
+/** What each subscription CLI can do with a model; which models it runs, its provider says. */
+const CLI_TRAITS = {
+  claude: { vision: true, thinking: true },
+  codex: { vision: true, thinking: true },
+  grok: { vision: false, thinking: true },
+  muse: { vision: false, thinking: false },
+};
+
 function callId() {
   return `call_${randomBytes(6).toString("hex")}`;
 }
@@ -503,27 +511,33 @@ export class LLM {
 
   async listModels({ fresh = false, host = "" } = {}) {
     if (host && host !== this.ollamaUrl) return this.hostModels(host, { fresh });
-    const geminiAccounts = JSON.stringify(this.subscriptions?.list().filter((record) => record.provider === "gemini").map(({ id, status }) => [id, status]) || []);
-    if (!fresh && this.cache.geminiAccounts === geminiAccounts && Date.now() - this.cache.at < 5 * 60 * 1000 && this.cache.models.length) return this.cache.models;
+    // A connected or dropped account changes what the providers answer, so the list is asked again.
+    const accounts = JSON.stringify(this.subscriptions?.list().map(({ id, status }) => [id, status]) || []);
+    if (!fresh && this.cache.accounts === accounts && Date.now() - this.cache.at < 5 * 60 * 1000 && this.cache.models.length) return this.cache.models;
     const available = this.providers();
     const models = [];
-    if (available.claude) {
-      for (const model of CLAUDE_MODELS) models.push({ id: `claude/${model.name}`, provider: "claude", label: model.label, tools: true, vision: true, thinking: true });
-    }
-    if (available.codex) {
-      for (const slug of this.codexModels()) models.push({ id: `codex/${slug}`, provider: "codex", label: slug, tools: true, vision: true, thinking: true });
-    }
-    if (available.grok) {
-      for (const model of this.grokModels()) models.push({ id: `grok/${model.id}`, provider: "grok", label: model.label, tools: true, vision: false, thinking: true });
+    // The subscription CLIs list what their provider serves today, through the account connected here;
+    // what this machine knew before stays as the fallback while no account has answered.
+    const fallback = {
+      claude: () => CLAUDE_MODELS,
+      codex: () => this.codexModels().map((slug) => ({ name: slug, label: slug })),
+      grok: () => this.grokModels().map((model) => ({ name: model.id, label: model.label })),
+      muse: () => MUSE_MODELS,
+      gemini: () => [],
+    };
+    const catalogs = await Promise.all(Object.keys(fallback).map(async (provider) => {
+      if (!available[provider]) return [provider, []];
+      const live = await this.subscriptions?.models(provider, { fresh }).catch(() => []) || [];
+      return [provider, live.length ? live : fallback[provider]()];
+    }));
+    for (const [provider, listed] of catalogs) {
+      for (const model of listed) {
+        const traits = CLI_TRAITS[provider] || { vision: !/^gpt-oss-/i.test(model.name), thinking: true };
+        models.push({ ...(provider === "gemini" ? model : {}), id: `${provider}/${model.name}`, provider, label: model.label, tools: true, ...traits });
+      }
     }
     if (available.deepseek) {
       for (const model of DEEPSEEK_MODELS) models.push({ id: `deepseek/${model.name}`, provider: "deepseek", label: model.label, tools: true, vision: false, thinking: true });
-    }
-    if (available.muse) {
-      for (const model of MUSE_MODELS) models.push({ id: `muse/${model.name}`, provider: "muse", label: model.label, tools: true, vision: false, thinking: false });
-    }
-    if (available.gemini) {
-      for (const model of await this.subscriptions?.geminiModels() || []) models.push({ ...model, id: `gemini/${model.name}`, provider: "gemini", tools: true, vision: !/^gpt-oss-/i.test(model.name), thinking: true });
     }
     if (available.ollama) {
       // One place decides what a model is and what it can do, asking the model when the
@@ -613,7 +627,7 @@ export class LLM {
         models.push({ id, provider: "hermes", label: model.label, via: ROUTERS[model.provider].label, local: false, tools: model.tools, vision: false, thinking: false });
       }
     }
-    this.cache = { at: Date.now(), models, geminiAccounts };
+    this.cache = { at: Date.now(), models, accounts };
     return models;
   }
 
