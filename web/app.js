@@ -8616,6 +8616,37 @@ function threadWhen(iso) {
   return fmtTime(iso, true);
 }
 
+/** RAM and CPU of a live CLI with the processes it started: CPU as top shows it, 100% is one core. */
+function threadUsageText(usage) {
+  return `${fmtBytes(usage.rss)} · ${Number(usage.cpu || 0).toLocaleString(LANG === "en" ? "en-GB" : "it-IT", { maximumFractionDigits: 1 })}%`;
+}
+
+function threadUsageTitle(usage) {
+  return tr("RAM {ram} · CPU {cpu}% di un core · {count} processi", { ram: fmtBytes(usage.rss), cpu: Number(usage.cpu || 0).toLocaleString(LANG === "en" ? "en-GB" : "it-IT", { maximumFractionDigits: 1 }), count: usage.processes || 1 });
+}
+
+/** Usage changes at every refresh: it is written where it stands, never by redrawing the card. */
+function threadUsageSlot(flow) {
+  const node = h("span", { class: "thread-usage", "data-usage": flow.id });
+  node.hidden = !flow.usage;
+  if (flow.usage) {
+    node.textContent = threadUsageText(flow.usage);
+    node.setAttribute("title", threadUsageTitle(flow.usage));
+  }
+  return node;
+}
+
+function threadUsagePaint(root, threads) {
+  const usage = new Map(threads.flatMap((thread) => thread.flows).map((flow) => [flow.id, flow.usage]));
+  for (const node of root.querySelectorAll("[data-usage]")) {
+    const value = usage.get(node.dataset.usage);
+    node.hidden = !value;
+    if (!value) continue;
+    node.textContent = threadUsageText(value);
+    node.setAttribute("title", threadUsageTitle(value));
+  }
+}
+
 function threadFlow(flow) {
   const live = flow.status === "active";
   const reasoning = flow.reasoning || "";
@@ -8626,7 +8657,8 @@ function threadFlow(flow) {
       h("div", { class: "thread-flow-line" },
         h("b", {}, raw(flow.agentName)),
         h("i", { class: `led${live ? " on" : flow.status === "error" ? " warn" : ""}`, title: tr(THREAD_STATUS[flow.status] || flow.status) }),
-        h("span", { class: "thread-meta" }, raw([tr(THREAD_STATUS[flow.status] || flow.status), threadWhen(flow.startedAt), tokens].filter(Boolean).join(" · ")))),
+        h("span", { class: "thread-meta" }, raw([tr(THREAD_STATUS[flow.status] || flow.status), threadWhen(flow.startedAt), tokens].filter(Boolean).join(" · "))),
+        live ? threadUsageSlot(flow) : null),
       flow.error && flow.status === "error" ? h("p", { class: "thread-error" }, raw(flow.error)) : reasoning ? h("p", { class: "thread-reason", title: reasoning }, raw(reasoning)) : null),
     h("div", { class: "thread-flow-actions" },
       flow.traceId ? btn("", { icon: "bulb", cls: "sm ghost", title: "Ragionamento", href: `#/agent/${flow.agentId}/ragionamento/${flow.traceId}` }) : null,
@@ -8695,7 +8727,7 @@ function threadsRefresh() {
 
 /** A signature of what a thread shows: the heartbeat changes every few seconds and shows nothing. */
 function threadSig(value) {
-  return JSON.stringify(value, (key, item) => key === "heartbeatAt" ? undefined : item);
+  return JSON.stringify(value, (key, item) => key === "heartbeatAt" || key === "usage" ? undefined : item);
 }
 
 /** A node someone is using: typing in it, a name edited and not saved, a control with the focus. */
@@ -8718,6 +8750,84 @@ function keyedChildren(container, items, keep = threadBusy) {
   const wanted = new Set(nodes);
   for (const node of [...container.children]) if (!wanted.has(node)) node.remove();
   nodes.forEach((node, index) => { if (container.children[index] !== node) container.insertBefore(node, container.children[index] || null); });
+}
+
+/** New thread: the channel is searched and filtered, then named; every field takes the whole width. */
+function threadCreator() {
+  let parents = [];
+  let kind = "";
+  let chosen = "";
+  const fold = (text) => String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const search = h("input", { type: "search", placeholder: "Cerca un canale", "aria-label": "Cerca un canale", autocomplete: "off", maxlength: "100" });
+  const kinds = h("div", { class: "chips thread-kinds", role: "group", "aria-label": tr("Piattaforma") });
+  const list = h("div", { class: "thread-channels", role: "listbox", "aria-label": tr("Canale") });
+  const none = h("p", { class: "thread-meta thread-channels-none" });
+  const nameInput = h("input", { type: "text", placeholder: "Nome del thread", "aria-label": "Nome del thread", maxlength: "100" });
+  const submit = btn("Crea il thread", { icon: "plus", cls: "primary", type: "submit" });
+  const cancel = btn("Annulla", { cls: "ghost", onclick: () => { node.hidden = true; node.dispatchEvent(new CustomEvent("thread-cancel")); } });
+  const form = h("form", { class: "thread-create", onsubmit: async (event) => {
+    event.preventDefault();
+    const name = nameInput.value.trim();
+    if (!chosen) return search.focus();
+    if (!name) return nameInput.focus();
+    submit.disabled = true;
+    const made = await guard(api("/api/threads", { method: "POST", body: { parentId: chosen, name } }), "Thread aperto");
+    submit.disabled = false;
+    if (!made) return;
+    nameInput.value = "";
+    node.dispatchEvent(new CustomEvent("thread-created"));
+  } },
+  field("Canale", h("div", { class: "thread-picker" }, search, kinds, list, none)),
+  field("Nome", nameInput),
+  h("div", { class: "thread-create-foot" }, cancel, submit));
+  const node = panel({ icon: "plus", title: "Nuovo thread", hint: "Si apre sul canale e resta abbinato 1:1.", cls: "thread-new" }, form);
+  const paint = () => {
+    const platforms = [...new Set(parents.map((parent) => parent.kind))];
+    if (!platforms.includes(kind)) kind = "";
+    kinds.hidden = platforms.length < 2;
+    kinds.replaceChildren(...[["", "Tutti"], ["discord", "Discord"], ["slack", "Slack"]].filter(([id]) => !id || platforms.includes(id))
+      .map(([id, label]) => h("button", { type: "button", class: `chip${id === kind ? " on" : ""}`, "aria-pressed": String(id === kind), onclick: () => { kind = id; paint(); } }, label)));
+    const words = fold(search.value).split(/\s+/).filter(Boolean);
+    const shown = parents.filter((parent) => (!kind || parent.kind === kind) && words.every((word) => fold(parent.name).includes(word)));
+    list.replaceChildren(...shown.map((parent) => h("button", { type: "button", class: `thread-channel${parent.id === chosen ? " on" : ""}`, role: "option", "aria-selected": String(parent.id === chosen), onclick: () => {
+      chosen = parent.id;
+      paint();
+      nameInput.focus();
+    } }, h("span", { class: "thread-channel-mark" }, icon(parent.kind === "slack" ? "slack" : "hash")), h("b", {}, raw(parent.name)), h("small", {}, parent.kind === "slack" ? "Slack" : "Discord"))));
+    list.hidden = !shown.length;
+    none.hidden = Boolean(shown.length);
+    none.textContent = tr(parents.length ? "Nessun canale con questo nome." : "Nessun canale Discord o Slack acceso.");
+    submit.disabled = !parents.length;
+  };
+  search.addEventListener("input", paint);
+  search.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    const first = list.querySelector(".thread-channel");
+    if (first) first.click();
+  });
+  node.setParents = (next) => {
+    parents = next;
+    if (chosen && !parents.some((parent) => parent.id === chosen)) chosen = "";
+    paint();
+  };
+  paint();
+  return node;
+}
+
+/** What the live sessions weigh on the machine together, measured on the server. */
+function threadLoad(node, board) {
+  const measured = (board.threads || []).flatMap((thread) => thread.flows).filter((flow) => flow.status === "active" && flow.usage);
+  node.hidden = !measured.length;
+  if (!measured.length) return node.replaceChildren();
+  const rss = measured.reduce((total, flow) => total + Number(flow.usage.rss || 0), 0);
+  const cpu = measured.reduce((total, flow) => total + Number(flow.usage.cpu || 0), 0);
+  const machine = board.machine || {};
+  node.replaceChildren(
+    h("span", {}, h("b", {}, raw(String(measured.length))), tr(measured.length === 1 ? "sessione attiva" : "sessioni attive")),
+    h("span", {}, h("b", {}, raw(fmtBytes(rss))), "RAM"),
+    h("span", {}, h("b", {}, raw(`${Math.round(cpu).toLocaleString(LANG === "en" ? "en-GB" : "it-IT")}%`)), "CPU"),
+    machine.cores ? h("span", { class: "thread-load-of" }, raw(tr("su {cores} core e {memory}", { cores: machine.cores, memory: fmtBytes(machine.memory) }))) : null);
 }
 
 function threadCard(thread) {
@@ -8782,22 +8892,10 @@ async function renderThreads() {
   // A click elsewhere while the list was loading wins: an old answer never covers the page just opened.
   if (!listing()) return;
   const manage = S.data?.currentUser?.role === "owner" || S.data?.access?.canManage;
-  const parentSelect = h("select", { "aria-label": tr("Canale") });
-  const nameInput = h("input", { type: "text", placeholder: tr("Nome del thread"), "aria-label": tr("Nome del thread"), maxlength: "100" });
-  const createForm = h("form", { class: "thread-create", onsubmit: (event) => {
-    event.preventDefault();
-    const parentId = parentSelect.value;
-    const name = nameInput.value.trim();
-    if (!parentId || !name) return;
-    guard(api("/api/threads", { method: "POST", body: { parentId, name } }), "Thread aperto").then((made) => { if (made) nameInput.value = ""; threadsRefresh(); });
-  } },
-  field("Canale", parentSelect),
-  field("Nome", nameInput),
-  btn("Crea", { icon: "plus", cls: "primary", type: "submit" }));
-  const noParents = h("p", { class: "thread-meta" }, "Nessun canale Discord o Slack acceso.");
-  const createBody = h("div", {});
-  const create = manage ? panel({ icon: "plus", title: "Nuovo thread", hint: "Si apre sul canale e resta abbinato 1:1." }, createBody) : null;
+  const create = manage ? threadCreator() : null;
+  if (create) create.hidden = true;
   const liveList = h("div", { class: "thread-list" });
+  const load = h("div", { class: "thread-sum thread-load", "aria-live": "off" });
   const pastList = h("div", { class: "thread-list" });
   const liveEmpty = empty("hash", "Nessun thread attivo.");
   const pastEmpty = empty("clock", "Nessuna sessione passata.");
@@ -8807,21 +8905,26 @@ async function renderThreads() {
   const draw = (next, error) => {
     banner.replaceChildren(...(error ? [h("p", { class: "banner err" }, raw(error))] : []));
     if (error) return;
-    const parents = next.parents || [];
-    const nextParents = JSON.stringify(parents);
-    if (nextParents !== parentsSig && document.activeElement !== parentSelect) {
-      const chosen = parentSelect.value;
-      parentSelect.replaceChildren(...parents.map((parent) => h("option", { value: parent.id, selected: parent.id === chosen }, raw(`${parent.kind === "slack" ? "Slack" : "Discord"} · ${parent.name}`))));
-      createBody.replaceChildren(parents.length ? createForm : noParents);
+    const nextParents = JSON.stringify(next.parents || []);
+    if (create && nextParents !== parentsSig) {
+      create.setParents(next.parents || []);
       parentsSig = nextParents;
     }
+    S.threadNames = new Map((next.threads || []).map((thread) => [thread.id, thread]));
     const nextBoard = threadSig(next.threads || []);
-    if (nextBoard === boardSig) return;
+    if (nextBoard !== boardSig) drawBoard(next, nextBoard);
+    threadUsagePaint(liveList, next.threads || []);
+    threadUsagePaint(pastList, next.threads || []);
+    threadLoad(load, next);
+  };
+  const drawBoard = (next, nextBoard) => {
     boardSig = nextBoard;
     const recent = (a, b) => String(b.lastAt || "").localeCompare(String(a.lastAt || ""));
     const threads = [...(next.threads || [])].sort(recent);
+    const working = (thread) => thread.flows.some((flow) => flow.status === "active");
     S.threadOpen ||= new Set();
-    const live = threads.filter((thread) => threadCard(thread))
+    // Whoever is working comes first, a whole channel included: an idle thread never buries a live session.
+    const live = [...threads.filter(working), ...threads.filter((thread) => !working(thread))].filter((thread) => threadCard(thread))
       .map((thread) => ({ key: thread.id, sig: threadSig([thread, manage]), build: () => threadCard(thread) }));
     const past = threads.filter((thread) => thread.flows.some((flow) => flow.status !== "active"))
       .map((thread) => ({ key: thread.id, sig: threadSig([thread, manage]), build: (old) => threadPast(thread, old ? old.open : S.threadOpen.has(thread.id)) }));
@@ -8833,13 +8936,23 @@ async function renderThreads() {
     pastEmpty.hidden = Boolean(past.length);
   };
   const entries = [
-    ["attivi", "Attivi", "hash", "Chi sta lavorando adesso", [create, liveList, liveEmpty].filter(Boolean)],
+    ["attivi", "Attivi", "hash", "Chi sta lavorando adesso", [create, load, liveList, liveEmpty].filter(Boolean)],
     ["storico", "Storico", "clock", "Un thread per riga: aprilo per le sessioni", [pastList, pastEmpty]],
   ];
-  const workspace = sectionWorkspace({ title: "Thread", base: "#/thread", current: section, entries });
+  S.threadBack = `#/thread/${section || "attivi"}`;
+  const workspace = sectionWorkspace({ title: "Thread", base: "#/thread", current: section, entries, onSelect: (id) => { S.threadBack = `#/thread/${id || "attivi"}`; } });
   draw(board, failed);
+  const plus = create ? btn("", { icon: "plus", cls: "primary thread-plus", title: "Nuovo thread", onclick: () => {
+    const opening = create.hidden;
+    if (opening) workspace.selectSection("attivi");
+    create.hidden = !opening;
+    plus.setAttribute("aria-expanded", String(opening));
+    if (opening) create.querySelector("input[type=search]")?.focus();
+  } }) : null;
+  plus?.setAttribute("aria-expanded", "false");
+  create?.addEventListener("thread-created", () => { create.hidden = true; plus.setAttribute("aria-expanded", "false"); threadsRefresh(); });
   shell([
-    pageHead("Thread", "Una sessione per agente, legata al thread Discord o Slack."),
+    pageHead("Thread", "Una sessione per agente, legata al thread Discord o Slack.", plus),
     banner,
     workspace,
   ], { title: "Thread" });
@@ -8904,6 +9017,15 @@ function turnSig(trace) {
 
 async function renderThreadPage(id) {
   const key = location.hash;
+  const back = S.threadBack || "#/thread/attivi";
+  const known = S.threadNames?.get(id);
+  shell([
+    btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link" }),
+    h("div", { class: "page-head" }, h("div", { class: "page-title" }, known ? h("h1", {}, raw(known.name)) : skeletonLine("sk-thread-title"), known ? h("p", {}, raw(threadPlace(known))) : skeletonLine("sk-caption"))),
+    h("div", { class: "thread-sum" }, skeletonLine("sk-thread-sum")),
+    h("div", { class: "loading-skeleton thread-skeleton", "aria-busy": "true", "aria-label": tr("Caricamento") },
+      Array.from({ length: 3 }, () => h("div", { class: "thread-turn sk-turn" }, skeletonLine("sk-avatar"), h("span", { class: "stack-sm grow" }, skeletonLine("sk-label"), skeletonLine("sk-caption"))))),
+  ], { title: known?.name || "Thread", back });
   let detail = null;
   let failed = "";
   try { detail = await api(`/api/threads/${encodeURIComponent(id)}`); }
@@ -8911,9 +9033,9 @@ async function renderThreadPage(id) {
   if (location.hash !== key) return;
   if (!detail) {
     shell([
-      btn("Thread", { icon: "back", href: "#/thread", cls: "ghost sm back-link" }),
+      btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link" }),
       panel({ icon: "alert", title: "Thread non trovato", hint: failed || "" }),
-    ], { title: "Thread", back: "#/thread" });
+    ], { title: "Thread", back });
     return;
   }
   const manage = S.data?.currentUser?.role === "owner" || S.data?.access?.canManage;
@@ -8971,6 +9093,7 @@ async function renderThreadPage(id) {
       sigs.flows = flows;
       flowsSlot.replaceChildren(...(live.length ? [panel({ icon: "spark", title: "Al lavoro adesso" }, h("div", { class: "thread-flows" }, live.map((flow) => threadFlow({ ...flow, channelId: thread.id }))))] : []));
     }
+    threadUsagePaint(flowsSlot, [thread]);
     const team = JSON.stringify(agents);
     if (team !== sigs.agents) {
       sigs.agents = team;
@@ -8995,12 +9118,12 @@ async function renderThreadPage(id) {
   };
   draw(detail);
   shell([
-    btn("Thread", { icon: "back", href: "#/thread", cls: "ghost sm back-link" }),
+    btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link" }),
     h("div", { class: "page-head" }, h("div", { class: "page-title" }, title, place), linkSlot),
     sum,
     flowsSlot,
     reasoning,
-  ], { title: thread.name, back: "#/thread" });
+  ], { title: thread.name, back });
   let loading = false;
   let again = false;
   const refresh = async () => {

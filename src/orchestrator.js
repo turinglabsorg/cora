@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ThreadState } from "./thread-state.js";
 import { ThreadSessions, killPid, noteChildPid, sessionFailure } from "./thread-sessions.js";
+import { ProcessUsage } from "./process-usage.js";
 import { TRANSPORT_LABELS, isSlackChannel, isTelegramChannel, slackChannel, slackIds, telegramBotAgent, telegramChannel, telegramChatId, transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, isSalotto, ownerRoom, privateRoom, roomAgentId } from "./rooms.js";
 import { MEMORY_TOOLS } from "./tools.js";
@@ -208,6 +209,7 @@ export class Orchestrator {
     // One worker per agent and conversation; colleagues keep independent tasks.
     this.threadWork = new ThreadState();
     this.sessions = new ThreadSessions(this.store);
+    this.processUsage = new ProcessUsage();
     this.sessions.reap();
     if (!this.store.value("threadBackfill", 0)) {
       const added = this.store.backfillThreadSessions();
@@ -2044,6 +2046,7 @@ export class Orchestrator {
     };
     for (const channel of known.values()) if (channel.thread || channel.parentId) ensure(channel.id);
     for (const id of Object.keys(labels)) ensure(id);
+    const measured = [];
     for (const session of sessions) {
       const group = ensure(session.channelId);
       group.total = Math.max(group.total, session.total || 0);
@@ -2054,7 +2057,7 @@ export class Orchestrator {
       const liveFull = live?.full?.() || null;
       const brief = !liveFull && session.traceId ? this.store.traceBrief(session.traceId) : null;
       const step = liveFull ? [...(liveFull.steps || [])].reverse().find((item) => ["thinking", "text", "tool", "note"].includes(item.type)) : null;
-      group.flows.push({
+      const flow = {
         id: session.id,
         agentId: session.agentId,
         agentName: agent?.name || session.agentId,
@@ -2069,11 +2072,15 @@ export class Orchestrator {
         tokensIn: liveFull?.tokensIn || brief?.tokensIn || session.tokensIn || 0,
         tokensOut: liveFull?.tokensOut || brief?.tokensOut || session.tokensOut || 0,
         reasoning: step ? (step.type === "tool" ? step.name : String(step.text || "").slice(0, 280)) : String(liveFull?.output || brief?.output || "").slice(0, 280),
-      });
+      };
+      group.flows.push(flow);
+      if (session.status === "active" && this.sessions.ownPid(session)) measured.push([flow, session.pid]);
     }
+    const usage = await this.processUsage.sample(measured.map(([, pid]) => pid)).catch(() => new Map());
+    for (const [flow, pid] of measured) if (usage.has(pid)) flow.usage = usage.get(pid);
     const parents = [...known.values()].filter((channel) => !channel.thread && !channel.parentId && (channel.kind === "discord" || channel.kind === "slack"))
       .map((channel) => ({ id: channel.id, name: channel.name, kind: channel.kind }));
-    return { threads: [...groups.values()], parents };
+    return { threads: [...groups.values()], parents, machine: this.processUsage.machine() };
   }
 
   /** One thread whole: its flows and every turn the agents took in it, with their steps. */

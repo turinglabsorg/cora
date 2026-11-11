@@ -127,8 +127,11 @@ test("the thread board shows one flow per agent and stop ends only that flow", a
   const nico = app.store.createAgent({ name: "Nico" });
   const vera = app.store.createAgent({ name: "Vera" });
   const channelId = "155500000000000099";
-  app.orchestrator.sessions.begin({ agentId: nico.id, channelId, kind: "chat" });
+  const nicoSession = app.orchestrator.sessions.begin({ agentId: nico.id, channelId, kind: "chat" });
   app.orchestrator.sessions.begin({ agentId: vera.id, channelId, kind: "routine" });
+  const cli = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore", detached: true });
+  t.after(() => { try { process.kill(cli.pid, "SIGKILL"); } catch { /* stopped */ } });
+  app.orchestrator.sessions.notePid(nicoSession.id, cli.pid);
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const login = await fetch(base + "/api/login", { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ password: "fixture-password" }) });
   assert.equal(login.status, 200);
@@ -143,6 +146,10 @@ test("the thread board shows one flow per agent and stop ends only that flow", a
   assert.ok(row);
   assert.deepEqual(row.flows.map((flow) => flow.agentName).sort(), ["Nico", "Vera"]);
   assert.equal(row.flows.every((flow) => flow.status === "active"), true);
+  const measured = row.flows.find((flow) => flow.agentId === nico.id).usage;
+  assert.ok(measured.rss > 1024 * 1024 && measured.processes >= 1 && Number.isFinite(measured.cpu), "the live CLI shows its RAM and CPU");
+  assert.equal(row.flows.find((flow) => flow.agentId === vera.id).usage, undefined, "a session without a CLI process has no figures");
+  assert.ok(open.body.machine.cores > 0 && open.body.machine.memory > 0);
   const stopped = await call("/api/threads/stop", { id: channelId, agentId: nico.id });
   assert.equal(stopped.status, 200);
   assert.equal(stopped.body.stopped, 1);

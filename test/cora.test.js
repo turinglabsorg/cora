@@ -3306,7 +3306,7 @@ describe("agents in Discord", () => {
     assert.equal(run.argv[run.argv.indexOf("--model") + 1], "claude-sonnet-5-5");
     assert.equal(run.argv[run.argv.indexOf("--tools") + 1], "", "Claude Code's own tools are off");
     assert.ok(run.argv.includes("--no-session-persistence"));
-    assert.deepEqual(JSON.parse(run.argv[run.argv.indexOf("--settings") + 1]), { disableAllHooks: true }, "the owner's hooks stay out: the Cora harness runs doc");
+    assert.deepEqual(JSON.parse(run.argv[run.argv.indexOf("--settings") + 1]), { disableAllHooks: true, showThinkingSummaries: true }, "the owner's hooks stay out and the thinking arrives readable: the Cora harness runs doc");
     assert.deepEqual(run.secretEnv, [], "no bot token reaches the CLI");
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
