@@ -17,6 +17,7 @@ const HUMAN_DEBOUNCE_MS = 1200;
 const INACTIVITY_MS = 30 * 60 * 1000;
 // After a restart, unanswered human messages this recent are picked up again.
 const CATCH_UP_MS = 15 * 60 * 1000;
+const SLACK_THREAD_CATCH_UP_MS = 24 * 60 * 60 * 1000;
 /** How long a round holds its channel before the agents still working carry on in the background. */
 const RELEASE_AFTER_MS = 20000;
 const IMAGE_LIMIT_BYTES = 5 * 1024 * 1024;
@@ -955,31 +956,45 @@ export class Orchestrator {
     await this.ingest(state, item);
   }
 
-  /** Slack delivers only what happens while the socket is open: on connect, pick up what was missed. */
+  /**
+   * Slack delivers only what happens while the socket is open: on connect, pick
+   * up what was missed, in the channels and in the threads that moved meanwhile.
+   */
   async catchUpSlack() {
     await this.channels.refreshSlackCatalog().catch(() => {});
+    const client = this.slack?.user ? this.slack : this.skBots?.client(this.store.agents()[0]?.id) || this.slack;
     for (const channel of this.channels.list()) {
       const info = this.channels.info(channel.id);
-      const state = this.state(channel.id);
-      if (state.running || state.nextRoundAt) continue;
-      const client = this.slack?.user ? this.slack : null;
+      if (!info?.channelId || info.threadTs) continue;
       const messages = await this.slackHistory(info.channelId, this.store.settings.historySize);
       if (!messages?.length) continue;
-      await this.ensureHistory(state);
-      const missed = [];
-      for (const event of messages) {
-        if (event.thread_ts && event.thread_ts !== event.ts) continue;
-        if (event.subtype && !SLACK_SUBTYPES.has(event.subtype)) continue;
-        if (this.skBots?.isOwnMessage(event) || this.slack?.isOwnMessage(event) || this.skBots?.agentIdForBot(event.bot_id)) continue;
-        const item = await this.slackItem({ ...event, channel: info.channelId }, client || this.skBots?.client(this.store.agents()[0]?.id) || this.slack);
-        if (this.store.hasMessage(item.id) || !this.push(state, item)) continue;
-        this.store.appendArchive(state.id, item);
-        missed.push(item);
+      await this.catchUpSlackConversation(channel.id, info.channelId, messages.filter((event) => !event.thread_ts || event.thread_ts === event.ts), client);
+      const since = Date.now() - SLACK_THREAD_CATCH_UP_MS;
+      const moved = messages.filter((event) => event.reply_count && Number(event.latest_reply) * 1000 > since);
+      for (const parent of moved) {
+        const replies = await this.slackHistory(info.channelId, this.store.settings.historySize, parent.ts);
+        const missed = (replies || []).filter((event) => event.ts !== parent.ts && event.thread_ts === parent.ts);
+        if (missed.length) await this.catchUpSlackConversation(slackChannel(info.channelId, parent.ts), info.channelId, missed, client);
       }
-      if (!missed.length) continue;
-      state.history.sort((a, b) => a.at - b.at);
-      await this.wakeIfMissed(state, missed);
     }
+  }
+
+  async catchUpSlackConversation(id, channelId, events, client) {
+    const state = this.state(id);
+    if (state.running || state.nextRoundAt) return;
+    await this.ensureHistory(state);
+    const missed = [];
+    for (const event of events) {
+      if (event.subtype && !SLACK_SUBTYPES.has(event.subtype)) continue;
+      if (this.skBots?.isOwnMessage(event) || this.slack?.isOwnMessage(event) || this.skBots?.agentIdForBot(event.bot_id)) continue;
+      const item = await this.slackItem({ ...event, channel: channelId }, client);
+      if (state.seen.has(item.id) || this.store.hasMessage(item.id) || !this.push(state, item)) continue;
+      this.store.appendArchive(state.id, item);
+      missed.push(item);
+    }
+    if (!missed.length) return;
+    state.history.sort((a, b) => a.at - b.at);
+    await this.wakeIfMissed(state, missed);
   }
 
   /** Recent messages of a Slack conversation, read by any app that is in it. */
@@ -1189,7 +1204,7 @@ export class Orchestrator {
     if (chatId) return (this.telegramClientFor(channelId) || this.telegram).say(chatId, { content, name: "Cora" });
     if (slackIds(channelId)) {
       const info = this.channels.info(channelId);
-      return this.slack.say(info.channelId, { content, name: "Cora", threadTs: info.threadTs });
+      return this.slackSay(info.channelId, { content, name: "Cora", threadTs: info.threadTs });
     }
     return this.discord.post(channelId, { username: "Cora", content });
   }
@@ -1287,7 +1302,7 @@ export class Orchestrator {
     this.log({ type: "settings", channelId: channel?.id, text: text.replace(/\*\*/g, "") });
     if (!channel) return;
     if (channel.kind === "slack") {
-      await this.slack.say(this.channels.info(channel.id).channelId, { content: text, name: "Cora" });
+      await this.slackSay(this.channels.info(channel.id).channelId, { content: text, name: "Cora" });
       return;
     }
     await this.discord.post(channel.id, { username: "Cora", content: text });
@@ -1753,8 +1768,21 @@ export class Orchestrator {
         this.log({ type: "warning", agentId: agent.id, channelId: state.id, text: `app Slack sua: ${error.message}; scrivo con l'app principale` });
       }
     }
-    if (!this.slack?.user) throw new Error("no Slack app in this conversation");
-    return this.slack.say(info.channelId, { ...payload, name: agent.name, avatarUrl: agent.avatarUrl });
+    return this.slackSay(info.channelId, { ...payload, name: agent.name, avatarUrl: agent.avatarUrl }, agent.id);
+  }
+
+  /**
+   * Words for a Slack conversation through the main app when it is in there,
+   * otherwise through another agent's app that is: the main app is often in no channel at all.
+   */
+  async slackSay(channelId, payload, except = "") {
+    if (this.slack?.user) {
+      try { return await this.slack.say(channelId, payload); }
+      catch (error) { if (error.sentCount || !["channel_not_found", "not_in_channel"].includes(error.slack)) throw error; }
+    }
+    const other = await this.skBots?.clientIn(channelId, except);
+    if (!other) throw new Error("no Slack app in this conversation");
+    return other.say(channelId, payload);
   }
 
   /** As the agent's own Telegram bot when it is in the chat, otherwise through the main bot with its name on top. */
@@ -2115,8 +2143,8 @@ export class Orchestrator {
     }
     if (parent.kind === "slack") {
       const ids = slackIds(parent.id);
-      if (!this.slack || !ids) throw Object.assign(new Error("Slack non è collegato"), { status: 409 });
-      const sent = await this.slack.say(ids.channelId, { content: clean, name: "Cora" });
+      if (!ids || (!this.slack?.user && !this.skBots)) throw Object.assign(new Error("Slack non è collegato"), { status: 409 });
+      const sent = await this.slackSay(ids.channelId, { content: clean, name: "Cora" });
       const ts = sent?.[0]?.ts;
       if (!ts) throw Object.assign(new Error("Slack non ha aperto il thread"), { status: 502 });
       const id = slackChannel(ids.channelId, ts);

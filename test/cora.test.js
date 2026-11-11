@@ -6230,6 +6230,62 @@ describe("agents in Slack", () => {
     await quiet();
   });
 
+  test("a reply written in a Slack thread while Cora was away is picked up on reconnect and answered in that thread", async () => {
+    slack.state.posts.length = 0;
+    replies.set("*", () => ({ content: "Rispondo io." }));
+    const asked = slack.say({ text: "apro un thread per voi" });
+    await waitFor(() => slack.postsIn(SLACK_CHANNEL).length, { what: "the answer in the channel" });
+    await quiet();
+    slack.state.posts.length = 0;
+    const missed = slack.archive({ text: "@Nadia, ci sei?", threadTs: asked.ts });
+    await app.orchestrator.catchUpSlack();
+    const thread = `sl:${SLACK_CHANNEL}:${asked.ts}`;
+    assert.ok(app.store.hasMessage(`sl_${SLACK_CHANNEL}_${missed.ts}`), "the missed reply is archived");
+    assert.ok(app.orchestrator.state(thread).history.some((item) => item.content.includes("ci sei?")), "it lands in the thread, not in the channel");
+    assert.ok(!app.orchestrator.state(`sl:${SLACK_CHANNEL}`).history.some((item) => item.id === `sl_${SLACK_CHANNEL}_${missed.ts}`));
+    const reply = await waitFor(() => slack.state.posts[0], { what: "Nadia in the thread" });
+    assert.equal(reply.app, "nadia");
+    assert.equal(reply.thread_ts, asked.ts, "the answer stays in the thread");
+    await quiet();
+    slack.state.posts.length = 0;
+    await app.orchestrator.catchUpSlack();
+    await sleep(1500);
+    assert.equal(slack.state.posts.length, 0, "a second reconnect does not answer again");
+  });
+
+  test("in a channel only an agent's app is in, a thread opened from the panel and Cora's own words go through that app", async () => {
+    const ALONE = "C0ALONE0001";
+    slack.state.channels.set(ALONE, { id: ALONE, name: "testnew", is_private: true });
+    slack.invite(SILVIA_BOT, ALONE);
+    await waitFor(async () => (await call("/api/state")).data.channels.some((channel) => channel.id === `sl:${ALONE}`), { what: "the channel only Silvia's app is in, on" });
+    slack.state.posts.length = 0;
+    const opened = await call("/api/threads", { method: "POST", body: { parentId: `sl:${ALONE}`, name: "Debug dei thread" } });
+    assert.equal(opened.status, 201, JSON.stringify(opened.data));
+    const parent = slack.postsIn(ALONE)[0];
+    assert.equal(parent.app, "silvia", "the main app is not in the channel: Silvia's app opens the thread");
+    assert.equal(parent.username, "Cora");
+    assert.equal(opened.data.id, `sl:${ALONE}:${parent.ts}`);
+    assert.ok((await call("/api/threads")).data.threads.some((thread) => thread.id === opened.data.id && thread.name === "Debug dei thread" && thread.thread));
+
+    slack.state.posts.length = 0;
+    replies.set("Silvia", () => ({ content: "Ci sono, nel thread." }));
+    slack.say({ text: "@Silvia, ci sei?", channel: ALONE, threadTs: parent.ts });
+    const reply = await waitFor(() => slack.postsIn(ALONE)[0], { what: "Silvia in the thread" });
+    assert.equal(reply.app, "silvia");
+    assert.equal(reply.thread_ts, parent.ts, "the answer stays in the thread");
+    await quiet();
+
+    slack.state.posts.length = 0;
+    await app.orchestrator.notice(opened.data.id, "Artefatto proposto.");
+    const notice = slack.postsIn(ALONE)[0];
+    assert.equal(notice?.app, "silvia");
+    assert.equal(notice.thread_ts, parent.ts);
+    slack.leave(SILVIA_BOT, ALONE);
+    await waitFor(async () => !((await call("/api/state")).data.slack.channels.some((channel) => channel.id === ALONE)), { what: "the channel gone" });
+    await call("/api/settings", { method: "PUT", body: { slackChannelIds: [SLACK_CHANNEL] } });
+    await quiet();
+  });
+
   test("while it works it marks the message, and takes the mark back when it answers", async () => {
     slack.state.reactions.length = 0;
     slack.state.posts.length = 0;

@@ -262,6 +262,15 @@ export class SlackBots {
     this.membership.delete(agentId);
   }
 
+  /** An app that is in the conversation, to speak there for Cora or for an agent whose own app is not. */
+  async clientIn(channelId, except = "") {
+    for (const [agentId, { client }] of this.clients) {
+      if (agentId === except || !client.user) continue;
+      if (await this.inChannel(agentId, channelId)) return client;
+    }
+    return null;
+  }
+
   /** Read a channel's recent messages with any app that is in it. */
   async fetchMessages(channelId, limit, threadTs = "") {
     for (const [agentId, { client }] of this.clients) {

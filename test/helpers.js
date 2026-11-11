@@ -1174,6 +1174,14 @@ export async function fakeSlack() {
 
   const port = await listen(server);
   let envelope = 0;
+  /** Like Slack, a thread's first message tells how many replies it has and when the last one came. */
+  const markReply = (channel, threadTs, replyTs) => {
+    const parent = (state.history.get(channel) || []).find((item) => item.ts === threadTs);
+    if (!parent) return;
+    parent.reply_count = (parent.reply_count || 0) + 1;
+    parent.latest_reply = replyTs;
+  };
+
   return {
     state,
     url: `http://127.0.0.1:${port}/api`,
@@ -1224,7 +1232,10 @@ export async function fakeSlack() {
         type: "message", channel, user: botId ? undefined : user, text, ts: ts(),
         channel_type: channel.startsWith("D") ? "im" : "channel",
       };
-      if (threadTs) event.thread_ts = threadTs;
+      if (threadTs) {
+        event.thread_ts = threadTs;
+        markReply(channel, threadTs, event.ts);
+      }
       if (files) {
         event.files = files;
         event.subtype = "file_share";
@@ -1246,8 +1257,12 @@ export async function fakeSlack() {
       return event;
     },
     /** A message written while Cora was down: in the archive, never delivered. */
-    archive({ text, channel = SLACK_CHANNEL, user = SLACK_OWNER, at = null }) {
+    archive({ text, channel = SLACK_CHANNEL, user = SLACK_OWNER, at = null, threadTs = "" }) {
       const event = { type: "message", channel, user, text, ts: at || ts(), channel_type: "channel" };
+      if (threadTs) {
+        event.thread_ts = threadTs;
+        markReply(channel, threadTs, event.ts);
+      }
       const archive = state.history.get(channel) || [];
       archive.push(event);
       state.history.set(channel, archive);
