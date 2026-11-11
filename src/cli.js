@@ -81,17 +81,21 @@ function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, sign
       signal?.removeEventListener("abort", terminate);
       resolve({ code: -1, stdout: "", stderr: error.message, timedOut });
     });
-    child.on("close", (code) => {
+    child.on("close", (code, exitSignal) => {
       clearTimeout(timer);
       clearTimeout(killTimer);
       signal?.removeEventListener("abort", terminate);
       lines("", true);
-      resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), timedOut });
+      resolve({ code, signal: exitSignal, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), timedOut });
     });
     child.stdin.on("error", () => {});
     if (interactive) interactive(io);
     else child.stdin.end(input);
   });
+}
+
+function cliFailure(message, out) {
+  return Object.assign(new Error(message), { code: "HARNESS_FAILURE", exitCode: out.code, signal: out.signal || "", timedOut: out.timedOut });
 }
 
 function tomlString(value) {
@@ -215,7 +219,7 @@ export async function runGemini({ bin, model, system, prompt, mcp, toolNames, wo
   try {
     const out = await run(bin, args, { cwd: directory, timeoutMs, onLine, authEnv, signal, interactive: start });
     signal?.throwIfAborted();
-    if (out.timedOut) throw new Error(`gemini: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (out.timedOut) throw cliFailure(`gemini: no answer within ${Math.round(timeoutMs / 1000)}s`, out);
     flushThought();
     const answer = fragment.trim();
     const warning = /^\u26a0\ufe0f?\s*/.test(answer) ? answer.replace(/^\u26a0\ufe0f?\s*/, "") : "";
@@ -260,7 +264,7 @@ export async function runClaude({ bin, model, system, prompt, mcp, toolNames, wo
   try {
     const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine: stream.onLine, authEnv, signal });
     signal?.throwIfAborted();
-    if (out.timedOut) throw new Error(`claude: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (out.timedOut) throw cliFailure(`claude: no answer within ${Math.round(timeoutMs / 1000)}s`, out);
     return stream.answer("claude", out);
   } finally {
     rmSync(mcpFile, { force: true });
@@ -291,7 +295,7 @@ function messageStream(onStep) {
       }
     },
     answer(name, out) {
-      if (!data) throw new Error(`${name}: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`);
+      if (!data) throw cliFailure(`${name}: ${(out.stderr || out.stdout).trim().slice(-240) || `exit ${out.code}`}`, out);
       if (data.is_error) throw new Error(`${name}: ${String(data.result || data.subtype || "error").slice(0, 240)}`);
       texts.finish(data.result);
       const used = data.usage || {};
@@ -425,10 +429,10 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
     const out = await run(bin, args, { cwd: workDir, timeoutMs, env, signal });
     clearInterval(poll);
     signal?.throwIfAborted();
-    if (out.timedOut) throw new Error(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (out.timedOut) throw cliFailure(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`, out);
     const text = out.stdout.trim();
     if (out.code !== 0 || /^hermes -z: agent failed/m.test(text) || /^hermes -z: agent failed/m.test(out.stderr)) {
-      throw new Error(`hermes: ${(out.stderr || text).trim().slice(-240) || `exit ${out.code}`}`);
+      throw cliFailure(`hermes: ${(out.stderr || text).trim().slice(-240) || `exit ${out.code}`}`, out);
     }
     let report = {};
     try { report = JSON.parse(readFileSync(usageFile, "utf8")); } catch {}
@@ -562,9 +566,9 @@ export async function runDeepSeek({ bin, model, system, prompt, mcp, toolNames, 
   try {
     const out = await run(process.execPath, [script, "--profile", "headless", "--patch", patchFile, "--json", "-"], { input, cwd: workDir, timeoutMs, onLine, env, signal });
     signal?.throwIfAborted();
-    if (out.timedOut) throw new Error(`deepseek: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (out.timedOut) throw cliFailure(`deepseek: no answer within ${Math.round(timeoutMs / 1000)}s`, out);
     const text = String(final?.text || "");
-    if (out.code !== 0 || !final) throw new Error(`deepseek: ${(failure || out.stderr.replace(/^dsh: /gm, "") || `exit ${out.code}`).trim().slice(-240)}`);
+    if (out.code !== 0 || !final) throw cliFailure(`deepseek: ${(failure || out.stderr.replace(/^dsh: /gm, "") || `exit ${out.code}`).trim().slice(-240)}`, out);
     if (!text.trim()) throw new Error(`deepseek: ${model} returned no content`);
     texts.finish(text);
     return { text, usage: used, usageStreamed: Boolean(onUsage) };
@@ -625,13 +629,13 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
   try {
     const out = await run(bin, args, { input, cwd: workDir, timeoutMs, onLine, authEnv, signal });
     signal?.throwIfAborted();
-    if (out.timedOut) throw new Error(`codex: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (out.timedOut) throw cliFailure(`codex: no answer within ${Math.round(timeoutMs / 1000)}s`, out);
     let text = "";
     try { text = readFileSync(outFile, "utf8"); } catch {}
     // A CLI that exits badly after the agent has answered still has an answer to give.
     if (out.code !== 0 && !text.trim() && said.trim()) text = said;
     // stdout is the event stream: dumping its last lines reports JSON, not a reason.
-    if (out.code !== 0 && !text.trim()) throw new Error(`codex: ${(failure || out.stderr).trim().split("\n").slice(-3).join(" ").slice(0, 240) || `exited with ${out.code} and said nothing`}`);
+    if (out.code !== 0 && !text.trim()) throw cliFailure(`codex: ${(failure || out.stderr).trim().split("\n").slice(-3).join(" ").slice(0, 240) || `exited with ${out.code} and said nothing`}`, out);
     texts.finish(text);
     return { text, usage: used };
   } finally {
@@ -709,7 +713,7 @@ export async function runGrok({ bin, model, system, prompt, mcp, toolNames, work
   try {
     const out = await run(bin, args, { cwd: workDir, timeoutMs, onLine: stream.onLine, env, authEnv, signal });
     signal?.throwIfAborted();
-    if (out.timedOut) throw new Error(`grok: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (out.timedOut) throw cliFailure(`grok: no answer within ${Math.round(timeoutMs / 1000)}s`, out);
     return stream.answer("grok", out);
   } finally {
     if (home) {
@@ -780,9 +784,9 @@ export async function runMuse({ bin, model, system, prompt, mcp, toolNames, work
   try {
     const out = await run(bin, args, { cwd: workDir, timeoutMs, onLine, env, authEnv, signal });
     signal?.throwIfAborted();
-    if (out.timedOut) throw new Error(`muse: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    if (out.timedOut) throw cliFailure(`muse: no answer within ${Math.round(timeoutMs / 1000)}s`, out);
     // stdout is the event stream; the reason a run stopped is its last line on stderr.
-    if (answer === null) throw new Error(`muse: ${(failure || out.stderr.trim().split("\n").pop() || "").slice(0, 240) || `exit ${out.code}`}`);
+    if (answer === null) throw cliFailure(`muse: ${(failure || out.stderr.trim().split("\n").pop() || "").slice(0, 240) || `exit ${out.code}`}`, out);
     texts.finish(answer);
     return { text: answer, usage: used };
   } finally {

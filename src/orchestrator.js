@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ThreadState } from "./thread-state.js";
-import { ThreadSessions, killPid, noteChildPid, sessionFailure } from "./thread-sessions.js";
+import { ThreadSessions, killPid, noteChildPid, pidAlive, recoverHarness, sessionFailure } from "./thread-sessions.js";
 import { ProcessUsage } from "./process-usage.js";
 import { TRANSPORT_LABELS, isSlackChannel, isTelegramChannel, slackChannel, slackIds, telegramBotAgent, telegramChannel, telegramChatId, transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, isSalotto, ownerRoom, privateRoom, roomAgentId } from "./rooms.js";
@@ -1953,7 +1953,28 @@ export class Orchestrator {
     const closed = this.store.value("closedThreads", []);
     if (closed.includes(channelId)) this.store.setValue("closedThreads", closed.filter((id) => id !== channelId));
     let failed = null;
-    const once = () => noteChildPid.run((pid) => this.sessions.notePid(holder.session.id, pid), fn);
+    let replacements = 0;
+    const replace = async (error, decision, trace) => {
+      let row = this.store.threadSession(holder.session.id);
+      if (!decision.restart || replacements || row?.status !== "active") return false;
+      if (trace?.id) remember({ traceId: trace.id });
+      if (row.pid) {
+        killPid(row.pid);
+        const until = Date.now() + 2500;
+        while (pidAlive(row.pid) && Date.now() < until) await sleep(50);
+        if (pidAlive(row.pid)) return false;
+      }
+      row = this.store.threadSession(holder.session.id);
+      if (row?.status !== "active") return false;
+      this.sessions.finish(holder.session, { status: "error", error: String(error.message || error).slice(0, 500) });
+      const next = this.sessions.begin({ agentId: agent.id, channelId, kind, replaces: row.id });
+      if (!next) return false;
+      holder.session = next;
+      replacements += 1;
+      this.log({ type: "warning", agentId: agent.id, channelId, text: `recupero harness: nuova istanza autorizzata: ${decision.reason}` });
+      return true;
+    };
+    const once = () => recoverHarness.run(replace, () => noteChildPid.run((pid) => this.sessions.notePid(holder.session.id, pid), fn));
     const remember = (value) => {
       if (!value?.traceId) return;
       const brief = this.store.traceBrief(value.traceId);
@@ -1966,7 +1987,8 @@ export class Orchestrator {
         return { busy: false, value };
       } catch (error) {
         const row = this.store.threadSession(holder.session.id);
-        if (row?.status === "stopped" || !sessionFailure(error)) {
+        if (error.traceId) remember({ traceId: error.traceId });
+        if (row?.status === "stopped" || error.harnessRecoveryChecked || !sessionFailure(error)) {
           failed = error;
           throw error;
         }
@@ -1979,6 +2001,7 @@ export class Orchestrator {
           failed = error;
           throw error;
         }
+        replacements += 1;
         try {
           const value = await once();
           remember(value);
