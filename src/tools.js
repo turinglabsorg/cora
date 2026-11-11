@@ -9,7 +9,7 @@ import { summarizeTool, toolFor } from "./connectors/index.js";
 const XDOTOOL_BUTTON = { click: "1", double_click: "1", right_click: "3", middle_click: "2" };
 
 /** Tools every agent has, also without its computer. */
-export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget", "recall", "update_core", "notify", "ask_owner", "brain_search", "brain_page", "brain_note"]);
+export const MEMORY_TOOLS = new Set(["say", "list_channels", "list_agents", "remember", "forget", "recall", "update_core", "notify", "ask_owner", "brain_search", "brain_page", "brain_note"]);
 
 /**
  * What an agent may do about its own life without the owner's computer: speak,
@@ -20,6 +20,7 @@ export const MEMORY_TOOLS = new Set(["say", "list_channels", "remember", "forget
 export const OWN_TOOLS = new Set(["encrypted_request", ...MEMORY_TOOLS, "read_attachment", "thread_open", "list_routines", "set_routine", "set_reminder", "delete_routine", "routine_history", "artifact_folders", "artifact_log", "secret_list", "secret_request", "email_inbox", "email_read", "email_draft", "email_send", "email_settings"]);
 
 export const TOOL_DEFS = [
+  { name: "list_agents", description: "Read the current directory of agents visible to you: id, name, description, configured email, enabled status and desktop setting. Look up a colleague's registered details here instead of asking them or the owner. No credentials, inbox content or permission to send, create accounts or access another desktop is granted.", parameters: { type: "object", properties: {} } },
   { name: "encrypted_request", description: "Request temporary access to a specific encrypted document/version. Only a link and request metadata are returned. The owner unlocks it in the panel; the separate tool-free worker saves encrypted results there. Never ask for passwords, keys or document plaintext in chat.", parameters: { type: "object", properties: { folder: { type: "string" }, document: { type: "string" }, version: { type: "integer" }, operation: { type: "string", enum: ["read", "edit"] } }, required: ["folder", "document", "version", "operation"] } },
   {
     name: "read_attachment",
@@ -709,6 +710,7 @@ export async function executeTool(call, ctx) {
         const view = await ctx.email.update({ reportChannelId: args.channel_id }, agent);
         return { text: JSON.stringify({ saved: true, channel_id: view.destination.id, channel_name: view.destination.name }) };
       }
+      case "list_agents": return { text: JSON.stringify(ctx.agentDirectory?.() || []) };
       case "list_channels": return { text: JSON.stringify(ctx.postingChannels || []) };
       case "brain_search": {
         if (!selectedBrain?.enabled) return { text: "error: this instance has no company brain" };

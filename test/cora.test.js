@@ -4260,6 +4260,47 @@ async function fakePhone() {
   };
 }
 
+test("agent directory exposes current registered contacts without credentials or foreign owners", async (t) => {
+  const reader = app.store.createAgent({ name: "Directory reader", model: "ollama/test-model", tools: false, brainOwnerId: "directory-owner", channelIds: [CHANNEL] });
+  const colleague = app.store.createAgent({ name: "Directory colleague", model: "ollama/test-model", tools: true, brainOwnerId: "directory-owner", channelIds: [CHANNEL] });
+  const foreign = app.store.createAgent({ name: "Foreign contact", brainOwnerId: "foreign-owner", channelIds: [CHANNEL] });
+  const hidden = app.store.createAgent({ name: "Sealed contact", brainOwnerId: "directory-owner", sealed: true, channelIds: [OTHER_CHANNEL] });
+  const previousKnowledge = app.brain.knowledge;
+  app.brain.knowledge = { ownerMemory: true, assertCurrent() {}, ownerId: (agent) => agent.brainOwnerId, isSealed: (agent) => agent.sealed, proprietorIds: () => [] };
+  const ids = [reader.id, colleague.id, foreign.id, hidden.id];
+  t.after(() => {
+    app.brain.knowledge = previousKnowledge;
+    for (const id of ids) app.store.deleteAgent(id);
+  });
+  app.store.setValue(`agentMailbox:${colleague.id}`, { status: "ready", email: "registered@example.test", token: "PRIVATE_DIRECTORY_CANARY", previousEmails: ["old@example.test"] });
+  const result = await executeTool({ name: "list_agents", arguments: {} }, { agent: reader, store: app.store, agentDirectory: () => app.brain.agentDirectory(reader) });
+  const directory = JSON.parse(result.text);
+  assert.deepEqual(directory.map((item) => item.id), [reader.id, colleague.id]);
+  assert.equal(directory[1].email, "registered@example.test");
+  assert.equal(directory[1].desktopEnabled, true);
+  assert.ok(!result.text.includes("PRIVATE_DIRECTORY_CANARY"));
+  assert.ok(!result.text.includes("old@example.test"));
+  app.store.setValue(`agentMailbox:${colleague.id}`, { status: "ready", email: "updated@example.test" });
+  assert.equal(app.brain.agentDirectory(reader)[1].email, "updated@example.test", "lookups read the current registry");
+  const prompt = app.brain.systemPrompt(reader, { place: "test", computer: false });
+  assert.match(prompt, /Directory colleague.*updated@example\.test/);
+  assert.ok(!prompt.includes("Foreign contact"));
+  assert.ok(!prompt.includes("Sealed contact"));
+  app.store.setValue(`agentMailbox:${colleague.id}`, { status: "pending", email: "unverified@example.test" });
+  assert.equal(app.brain.agentDirectory(reader)[1].email, null, "an unready address is not offered as a configured contact");
+  app.brain.knowledge = previousKnowledge;
+  let received;
+  replies.set(reader.name, (body) => {
+    assert.ok(body.tools.some((tool) => tool.function.name === "list_agents"), "the directory is available without desktop access");
+    if (body.messages.at(-1).role !== "tool") return { tool_calls: [{ function: { name: "list_agents", arguments: {} } }] };
+    received = JSON.parse(body.messages.at(-1).content);
+    return { content: "Directory checked." };
+  });
+  const outcome = await app.brain.loop({ agent: reader, channel: { id: `web-${reader.id}`, name: "Directory" }, mode: "chat", user: "Look up the colleague's configured email.", computer: false, task: false, maxSteps: 4, deadline: Date.now() + 15000, images: [] });
+  assert.equal(outcome.text, "Directory checked.");
+  assert.ok(received.some((item) => item.id === colleague.id));
+});
+
 describe("talking with the agents", () => {
   const posts = (name) => discord.state.webhookPosts.filter((item) => item.username === name).map((item) => item.content);
   let olga;
@@ -5078,6 +5119,93 @@ describe("talking with the agents", () => {
     release();
     await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === BUSY && item.content === "Fatto altrove."), { what: "Olga's result elsewhere" });
     await quiet();
+  });
+
+  test("resumed work restores typing and clears it on success or failure", async (t) => {
+    const agent = app.store.createAgent({ name: "Recovered worker", model: "ollama/test-model", tools: true, chattiness: 0 });
+    const channelId = `web-${agent.id}`;
+    const originalResume = app.brain.resumeTurn;
+    const originalTyping = app.orchestrator.typing;
+    const originalWorking = app.orchestrator.showWorking;
+    const beats = [];
+    let stops = 0;
+    app.orchestrator.typing = (channel, agents) => { if (channel === channelId) beats.push(agents.map((item) => item.id)); };
+    app.orchestrator.showWorking = function (...args) {
+      const working = originalWorking.apply(this, args);
+      return { stop() { stops += 1; working.stop(); } };
+    };
+    t.after(() => {
+      app.brain.resumeTurn = originalResume;
+      app.orchestrator.typing = originalTyping;
+      app.orchestrator.showWorking = originalWorking;
+      app.store.deleteAgent(agent.id);
+    });
+    for (const fails of [false, true]) {
+      const before = beats.length;
+      const stopBefore = stops;
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      app.brain.resumeTurn = async () => {
+        await gate;
+        if (fails) throw new Error("resume fixture failure");
+        return { text: "Recovered task finished." };
+      };
+      const trace = { id: `tr_typing_resume_${fails}`, agentId: agent.id, channelId, kind: "chat", startedAt: new Date().toISOString(), steps: [] };
+      const pending = app.orchestrator.resumeTask(agent, trace);
+      const settled = pending.then(() => null, (error) => error);
+      try {
+        await waitFor(() => app.orchestrator.sessions.blocking(agent.id, channelId), { what: "resumed session" });
+        assert.equal(beats.length, before + 1, "recovery immediately restores the agent's indicator");
+        assert.deepEqual(beats.at(-1), [agent.id]);
+        if (!fails) {
+          await sleep(7200);
+          assert.ok(beats.length >= before + 2, "long recovered work refreshes the indicator");
+        }
+      } finally { release(); }
+      const error = await settled;
+      if (fails) assert.match(error?.message || "", /resume fixture failure/);
+      else assert.equal(error, null);
+      assert.equal(stops, stopBefore + 1, "success and failure both stop the indicator");
+      assert.ok(!app.orchestrator.threadWork.has(channelId, agent.id));
+      assert.ok(!app.orchestrator.state(channelId).working.has(agent.id));
+    }
+    const finished = beats.length;
+    await sleep(7200);
+    assert.equal(beats.length, finished, "finished recovered tasks leave no typing timer behind");
+  });
+
+  test("resumed owner work preserves computer authorization when calling a colleague", async (t) => {
+    const originalResume = app.brain.resumeTurn;
+    const originalSchedule = app.orchestrator.schedule;
+    const state = app.orchestrator.state(CHANNEL);
+    const originalFocus = state.focus;
+    state.focus = { ids: [olga.id, pino.id], at: Date.now() };
+    state.budget = 10;
+    app.orchestrator.schedule = () => {};
+    t.after(() => {
+      app.brain.resumeTurn = originalResume;
+      app.orchestrator.schedule = originalSchedule;
+      state.focus = originalFocus;
+    });
+    for (const origin of [
+      { kind: "owner", authorId: OWNER, authorName: "Seb" },
+      { kind: "agent", authorId: null, authorName: "Requester", agentId: "ag_requester", delegated: true },
+      { kind: "human", authorId: STRANGER, authorName: "Guest" },
+    ]) {
+      state.humanQueue.clear();
+      const replyTo = { ...origin, id: `resume-origin-${origin.kind}`, at: Date.now(), content: "Check the document." };
+      app.brain.resumeTurn = async ({ say, postFile }) => {
+        await say("@Pino, verifica il documento sul tuo computer.");
+        const queued = [...state.humanQueue.values()].at(-1);
+        assert.equal(queued?.delegated, origin.kind !== "human", "only the original authorized request grants the colleague's computer");
+        return { text: "@Pino, controlla anche il risultato finale." };
+      };
+      const trace = { id: `tr_resume_delegate_${origin.kind}`, agentId: olga.id, channelId: CHANNEL, kind: "chat", startedAt: new Date().toISOString(), steps: [{ type: "note", replyTo }] };
+      await app.orchestrator.resumeTask(olga, trace);
+      const queued = [...state.humanQueue.values()].at(-1);
+      assert.equal(queued?.delegated, origin.kind !== "human", "final reports preserve the same authorization");
+      state.humanQueue.clear();
+    }
   });
 
   test("an agent at work shows it the way a person does, without a line in the channel", async () => {
