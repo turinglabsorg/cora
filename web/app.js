@@ -3420,11 +3420,17 @@ function connectorsPane() {
     try { const result = await api(connectorPath(service.id, record, "/authorize"), { method: "POST" }); window.location.assign(result.url); }
     catch (error) { toast(error.message, true); button.disabled = !data.canManage; }
   } });
-  const redirectRow = (service) => setRow("Indirizzo di ritorno", "Aggiungilo tra gli indirizzi di ritorno (redirect URL) dell'app sul servizio.",
-    service.redirect ? h("code", { class: "connector-redirect" }, raw(service.redirect)) : h("span", { class: "muted" }, "Cora non ha ancora un indirizzo pubblico."));
+  const redirectValue = (service) => service.redirect
+    ? h("span", { class: "connector-redirect-value" }, h("code", {}, raw(service.redirect)), btn("", { icon: "copy", cls: "sm ghost", title: "Copia indirizzo", onclick: async () => {
+      try { await navigator.clipboard.writeText(service.redirect); toast("Copiato"); }
+      catch { toast("Non riesco a copiare: selezionalo a mano", true); }
+    } }))
+    : h("span", { class: "muted" }, "Cora non ha ancora un indirizzo pubblico.");
+  const redirectRow = (service) => setRow("Indirizzo di ritorno", "Aggiungilo tra gli indirizzi di ritorno (redirect URL) dell'app sul servizio.", redirectValue(service));
 
-  const stepParts = (parts) => (Array.isArray(parts) ? parts : [parts]).map((part) => typeof part === "string" ? part
-    : part.href ? h("a", { href: part.href, target: "_blank", rel: "noopener" }, part.text) : h("code", {}, part.code));
+  const stepParts = (parts, service) => (Array.isArray(parts) ? parts : [parts]).map((part) => typeof part === "string" ? part
+    : part.href ? h("a", { href: part.href, target: "_blank", rel: "noopener" }, part.text)
+      : part.redirect ? redirectValue(service) : h("code", {}, part.code));
 
   // One form for every key connector, drawn from the modes its module declares.
   const keyForm = (service, selected = undefined) => {
@@ -3467,7 +3473,7 @@ function connectorsPane() {
     }
     const rows = (mode.rows || []).map((row) => {
       const parts = [];
-      if (row.steps) parts.push(steps(...row.steps.map(stepParts)));
+      if (row.steps) parts.push(steps(...row.steps.map((parts) => stepParts(parts, service))));
       if (row.field) { const node = input(row.field); parts.push(row.submit ? h("div", { class: "input-row token" }, node, submit(row.submit, send)) : node); }
       if (row.fields) parts.push(h("div", { class: "stack-sm" }, row.fields.map((spec) => field(spec.title, input(spec))), row.submit ? h("div", { class: "row end" }, submit(row.submit, send)) : null));
       if (row.note) parts.push(h("p", { class: "muted" }, row.note));
@@ -3476,7 +3482,6 @@ function connectorsPane() {
     });
     const appReady = Boolean(mode.ready && record?.status === mode.ready);
     if (service.oauth && mode.ready) {
-      rows.push(redirectRow(service));
       if (appReady) rows.push(setRow("Autorizzazione", tr("App salvata: autorizzala con il tuo account {name}. Cora salva i token nella cassaforte come {secret}.", { name: service.name, secret: service.secret }), authorizeButton(service, tr("Autorizza {name}", { name: service.name }), record)));
     }
     return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: appReady ? tag("App pronta", "warn") : tag("Da collegare", "agent") },

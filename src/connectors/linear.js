@@ -491,7 +491,7 @@ export const linear = {
         { title: "Il workspace (facoltativo)", hint: "Scrivi il nome in linear.app/<workspace> per riconoscere questo collegamento prima di autorizzarlo. Cora verifica che corrisponda.", field: { name: "workspace", type: "text", placeholder: "turinglabs", label: "Workspace atteso di Linear" } },
         { title: "L'app Linear", steps: [
           ["apri ", { href: "https://linear.app/settings/api/applications/new", text: "Linear → Settings → API → OAuth applications" }, " e crea una nuova app (nome e icona sono quelli dell'app, per esempio Cora);"],
-          ["in Callback URLs aggiungi l'indirizzo di ritorno di Cora mostrato qui sotto, ", { code: "…/connectors/oauth/linear/callback" }, ";"],
+          ["in Callback URLs aggiungi l'indirizzo di ritorno di Cora, ", { redirect: true }, ";"],
           ["copia client ID e client secret e incollali qui: finiscono nella cassaforte con nomi separati per collegamento (prefissi ", { code: "CORA_LINEAR_CLIENT_ID" }, " e ", { code: "CORA_LINEAR_CLIENT_SECRET" }, ");"],
           "poi premi «Autorizza Linear»: serve un amministratore del workspace, perché l'app si installa come app del workspace.",
         ], fields: [
