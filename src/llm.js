@@ -660,13 +660,16 @@ export class LLM {
     // turn that already used a tool would do its side effects twice.
     let used = 0;
     const once = async () => {
+      // A runner that reads the CLI's steps from its own records syncs them before each tool runs.
+      const beforeTool = { run: null };
       const watched = async (toolName, args) => {
+        beforeTool.run?.();
         used += 1;
         return execute(toolName, args);
       };
       const run = tools.length ? this.bridge.register({ tools, execute: watched, ttlMs: timeoutMs + 60000 }) : null;
       const options = {
-        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, onUsage, effort, goal, signal: runSignal,
+        model: name, system, prompt, mcp: run, toolNames: tools.map((tool) => tool.name), workDir: this.cliWorkDir, timeoutMs, onStep, onUsage, effort, goal, signal: runSignal, beforeTool,
       };
       try {
         if (isSubscriptionProvider(provider)) {

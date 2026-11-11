@@ -4849,7 +4849,7 @@ describe("talking with the agents", () => {
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/test-model" } });
     t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
     const before = cli.calls().length;
-    cli.set({ reply: "Routine controllate con Hermes.", tool: "list_routines" });
+    cli.set({ reply: "Routine controllate con Hermes.", tool: "list_routines", thinking: "Guardo le routine di Olga.", hermesFinalThought: "Le routine ci sono: rispondo." });
     discord.say({ content: "@Olga, controlla le routine con Hermes" });
     await waitFor(() => posts("Olga").some((text) => text.startsWith("Routine controllate con Hermes.")), { what: "Olga's answer through Hermes" });
     await quiet();
@@ -4862,6 +4862,17 @@ describe("talking with the agents", () => {
     assert.match(run.output, /Buongiorno|Nessuna routine/, "the tool really ran through Cora's bridge");
     assert.match(run.hermesConfig, /CORA_BRIDGE_TOKEN: "\$\{CORA_BRIDGE_TOKEN\}"/, "the session token never lands in the file");
     assert.deepEqual(run.secretEnv, []);
+    assert.ok(run.argv.includes("--usage-file"), "Hermes reports the session it recorded");
+    const [summary] = (await call(`/api/agents/${olga.id}/traces`)).data;
+    const steps = (await call(`/api/traces/${summary.id}`)).data.steps;
+    const first = steps.slice(0, steps.findIndex((step) => step.type === "note"));
+    assert.deepEqual(first.map((step) => [step.type, step.name || step.text]), [
+      ["thinking", "Guardo le routine di Olga."], ["text", "Prima controllo."], ["tool", "list_routines"], ["thinking", "Le routine ci sono: rispondo."],
+    ], "Hermes' thoughts arrive readable from the session it records, each before the tool it led to");
+    assert.ok(steps.some((step) => step.type === "text" && step.text === "Prima controllo."), "the text between tool calls is a step");
+    assert.ok(!steps.some((step) => step.type === "text" && step.text.startsWith("Routine controllate con Hermes.")), "the answer is not repeated as a step");
+    assert.equal(steps.find((step) => step.type === "tool").name, "list_routines");
+
     await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } });
   });
 
@@ -4969,6 +4980,20 @@ describe("talking with the agents", () => {
     assert.ok(!run.hermesConfig.includes("sk-orca-test"), "the key value never lands in Hermes' config");
     assert.equal(run.endpointKey, "set", "the run itself is handed the key");
     assert.match(run.hermesHome, /-orcarouter$/, "a router's turns keep their own Hermes home, so parallel turns never rewrite each other's config");
+  });
+
+  test("when a provider refuses Hermes and Hermes still exits 0, the refusal is a failed turn and never the agent's words", async (t) => {
+    await call("/api/state");
+    assert.equal((await call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "hermes/test-model" } })).status, 200);
+    t.after(() => call(`/api/agents/${olga.id}`, { method: "PUT", body: { model: "ollama/test-model" } }));
+    cli.set({ reply: "Mai detto.", hermesRefusal: "Billing or credits exhausted: HTTP 429: you have reached your monthly usage limit" });
+    discord.say({ content: "@Olga, ci sei?" });
+    await waitFor(() => posts("Olga").some((text) => text.includes("non riesco a rispondere")), { what: "Olga reporting the failure" });
+    await quiet();
+    assert.ok(posts("Olga").filter((text) => /Billing or credits/i.test(text)).every((text) => text.startsWith("(non riesco a rispondere")),
+      "the provider's refusal only appears as Cora's failure notice, never as the agent's own words");
+    const trace = (await call(`/api/agents/${olga.id}/traces`)).data.find((item) => item.status === "error");
+    assert.match(trace.error, /Billing or credits exhausted/);
   });
 
   test("when Hermes answers that the model gave it no content, the agent fails openly instead of saying that banner", async (t) => {
