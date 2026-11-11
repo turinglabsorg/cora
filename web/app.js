@@ -8461,7 +8461,7 @@ function renderSettings() {
   const back = () => btn("Impostazioni", { icon: "back", cls: "sm ghost rail-back", onclick: () => show("") });
   const page = (id, ...content) => {
     const root = h("div", { class: "stack" }, back(), content);
-    const unchanged = ["connettori", "mcp", "email", "server", "spazio", "accesso", "ssh", "controlli", "preferenze", ...SUBSCRIPTION_HARNESSES].includes(id);
+    const unchanged = ["regia", "modelli", "connettori", "mcp", "email", "server", "spazio", "accesso", "ssh", "controlli", "preferenze", ...SUBSCRIPTION_HARNESSES].includes(id);
     const configured = ["discord", "telegram", "slack"].includes(id) ? transportInfo(id).state !== "missing-token" || S.data.agents.some((agent) => id === "discord" ? agent.bot?.user : id === "telegram" ? agent.telegramBot?.user : agent.slackBot?.user)
       : true;
     pages.set(id, unchanged ? root : settingsDisclosures(root, id, expanded, configured));
@@ -8699,10 +8699,12 @@ function renderSettings() {
   };
   let idleMinutes = settings.conversationIdleMinutes ?? 30;
   const idleInput = h("input", { type: "number", class: "num", min: 5, step: 1, value: idleMinutes, inputmode: "numeric", "aria-label": tr("Minuti senza messaggi") });
-  const unlimited = switchInput("conversationIdleUnlimited", "∞ Nessun avviso", settings.conversationIdleMinutes === null);
+  const unlimited = switchInput("conversationIdleUnlimited", "∞", settings.conversationIdleMinutes === null);
   const unlimitedInput = unlimited.querySelector("input");
-  const idleRow = setRow("Avviso di inattività", "Dopo quanti minuti senza messaggi chiedere se restare in ascolto, in tutte le conversazioni. Minimo 5; ∞ disattiva la domanda. L’agente resta collegato fino al congedo.",
-    h("div", { class: "stack-sm" }, h("div", { class: "row" }, idleInput, h("span", { class: "muted" }, "minuti")), unlimited), { stack: true });
+  unlimitedInput.setAttribute("aria-label", tr("∞ Nessun avviso"));
+  unlimited.title = tr("∞ Nessun avviso");
+  const idleRow = setRow("Avviso di inattività", "Minuti senza messaggi prima di chiedere se restare in ascolto. Minimo 5; ∞ toglie l’avviso e mantiene l’ascolto.",
+    h("div", { class: "inactivity-control" }, idleInput, unlimited));
   const syncIdle = () => {
     const value = S.data.settings.conversationIdleMinutes;
     if (value !== null) idleMinutes = value;

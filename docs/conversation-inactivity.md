@@ -1,6 +1,6 @@
 # Conversation inactivity reminder
 
-Open **Settings → Regia** and expand **Regia**. Under **Inactivity reminder**, enter a whole number of minutes, at least **5**, or enable **∞ No reminder**. Changes save automatically. Existing installations start at **30 minutes**.
+Open **Settings → Regia**. Its panels and **Settings → Models and sleep** are always open, without collapsible headers. Under **Inactivity reminder**, enter a whole number of minutes, at least **5**, or enable **∞ No reminder**. Changes save automatically. Existing installations start at **30 minutes**.
 
 The setting applies to all conversations on the instance. A finite interval asks once whether the agent should keep listening after no conversation messages arrive for that interval. Messages from the agent also restart the count. An agent working in the same conversation is not asked while it works. A failed delivery is not retried every minute.
 

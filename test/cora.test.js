@@ -4635,6 +4635,7 @@ describe("talking with the agents", () => {
     const minutes = panel.app.querySelectorAll("input").find((field) => field.attributes["aria-label"] === "Minuti senza messaggi");
     const unlimited = panel.app.querySelectorAll("input").find((field) => field.attributes.name === "conversationIdleUnlimited");
     assert.ok(minutes); assert.ok(unlimited);
+    assert.equal(panel.app.querySelectorAll(".set-row").find((row) => row.querySelectorAll("input").includes(minutes)).classList.contains("stack"), false, "inactivity uses the compact settings row");
     assert.equal(String(minutes.attributes.min), "5");
     minutes.value = "7";
     minutes.dispatch("change");
