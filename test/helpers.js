@@ -668,8 +668,8 @@ const control = JSON.parse(fs.readFileSync(${JSON.stringify(control)}, "utf8"));
 // control.runs: one { reply, tool, args } per run of this CLI, counting from control.from runs.
 if (control.runs) Object.assign(control, { tool: null, args: null }, control.runs[Math.min(countCalls(${JSON.stringify(log)}, flavor) - (control.from || 0), control.runs.length - 1)]);
 let stdin = "";
-process.stdin.on("data", (d) => { stdin += d; });
-process.stdin.on("end", async () => {
+let acp = null;
+const handle = async () => {
   let server = null;
   let hermesConfig = null;
   let grokConfig = null;
@@ -710,10 +710,11 @@ process.stdin.on("end", async () => {
         env: { CORA_BRIDGE_URL: process.env.CORA_BRIDGE_URL || "", CORA_BRIDGE_TOKEN: process.env.CORA_BRIDGE_TOKEN || "" } };
     }
   } else if (flavor === "gemini") {
-    geminiSettings = JSON.parse(argv[argv.indexOf("--settings") + 1]);
-    geminiMcp = JSON.parse(fs.readFileSync(path.join(process.cwd(), ".agents", "mcp_config.json"), "utf8"));
+    // Antigravity over ACP reads its settings and MCP servers from the --gemini-dir of this run.
+    const dir = argv[argv.indexOf("--gemini-dir") + 1];
+    geminiSettings = JSON.parse(fs.readFileSync(path.join(dir, "antigravity-cli", "settings.json"), "utf8"));
+    geminiMcp = JSON.parse(fs.readFileSync(path.join(dir, "config", "mcp_config.json"), "utf8"));
     server = geminiMcp.mcpServers.cora;
-    stdin = JSON.parse(stdin).message.content;
   } else if (flavor === "muse") {
     // Muse takes the server for this run in -c and fills \${...} in its env from its own environment.
     const item = argv.find((arg) => arg.startsWith("mcpServers.cora="));
@@ -741,7 +742,7 @@ process.stdin.on("end", async () => {
   const env = Object.fromEntries(["HOME", "GROK_HOME", "GROK_AUTH_PATH", "GROK_CLAUDE_MCPS_ENABLED", "GROK_CLAUDE_HOOKS_ENABLED", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TBH_CREDENTIAL_BACKEND", "MISE_DATA_DIR"].map((key) => [key, process.env[key] || ""]));
   if (flavor === "dsh") Object.assign(env, { DSH_HOME: process.env.DSH_HOME || "", DSH_TELEMETRY_MODE: process.env.DSH_TELEMETRY_MODE || "", DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY ? "set" : "" });
   const providerKeyLast4 = flavor === "dsh" ? String(process.env.DEEPSEEK_API_KEY || "").slice(-4) : "";
-  const record = { flavor, argv, stdin, env, cwd: process.cwd(), geminiSettings, geminiMcp, scope: process.env.ANTIGRAVITY_CREDENTIAL_SCOPE, tools: null, output: null, hermesConfig, grokConfig, dshPatch, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", endpointKeyLast4: String(process.env.CORA_ENDPOINT_KEY || "").slice(-4), providerKeyLast4, secretEnv: Object.keys(process.env).filter((key) => /^COR[AO]_(BOT|KNOWLEDGE|GH_KEY)_/.test(key) || key === "GEMINI_API_KEY" || key === "GOOGLE_API_KEY" || key === "BRAIN_DATABASE_URL" || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
+  const record = { flavor, argv, stdin, env, cwd: process.cwd(), geminiSettings, geminiMcp, acp: acp && { model: acp.model, thoughtLevel: acp.thoughtLevel }, scope: process.env.ANTIGRAVITY_CREDENTIAL_SCOPE, tools: null, output: null, hermesConfig, grokConfig, dshPatch, hermesHome: process.env.HERMES_HOME || "", endpointKey: process.env.CORA_ENDPOINT_KEY ? "set" : "", endpointKeyLast4: String(process.env.CORA_ENDPOINT_KEY || "").slice(-4), providerKeyLast4, secretEnv: Object.keys(process.env).filter((key) => /^COR[AO]_(BOT|KNOWLEDGE|GH_KEY)_/.test(key) || key === "GEMINI_API_KEY" || key === "GOOGLE_API_KEY" || key === "BRAIN_DATABASE_URL" || key === "DISCORD_BOT_TOKEN" || key === "ORCAROUTER_API_KEY" || key === "OLLAMA_API_KEY") };
   if (control.hang) {
     fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ ...record, pid: process.pid }) + "\\n");
     setInterval(() => {}, 1000);
@@ -817,15 +818,19 @@ process.stdin.on("end", async () => {
     event("run.usage", { models: [{ model: "muse-wonder-1.0", input_tokens: 80, cached_tokens: 20, output_tokens: 9, reasoning_tokens: 3 }] });
     event("run.terminal.completed", { terminal: "completed", text: answer, reason: null });
   } else if (flavor === "gemini") {
-    line({ event: "init", conversation_id: "fixture-gemini" });
+    const update = (value) => line({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "fixture-gemini", update: value } });
+    const say = (text) => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+    if (control.thinking) for (const part of [control.thinking.slice(0, 5), control.thinking.slice(5)]) update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: part } });
     if (control.tool) {
-      line({ event: "step_update", step_update: { step_type: "agent_response", state: "DONE", text_delta: "Prima controllo." } });
-      line({ event: "step_update", step_update: { step_type: "tool", state: "DONE", tool_info: { name: control.tool } } });
+      say("Prima controllo.");
+      update({ sessionUpdate: "tool_call", toolCallId: "call_1", name: "mcp_cora_" + control.tool, status: "in_progress" });
+      update({ sessionUpdate: "tool_call_update", toolCallId: "call_1", name: "mcp_cora_" + control.tool, status: "completed" });
     }
-    line({ event: "step_update", step_update: { step_type: "agent_response", state: "ACTIVE", text_delta: answer.slice(0, 4) } });
-    line({ event: "step_update", step_update: { step_type: "agent_response", state: "DONE", text_delta: answer.slice(4) } });
-    if (!control.missingFinal) line({ event: "result", result: { status: control.error ? "ERROR" : "SUCCESS", response: answer, error: control.error || "", usage: { input_tokens: 70, cache_read_tokens: 30, output_tokens: 12, thinking_tokens: 8 } } });
-    if (control.exitCode) process.exit(control.exitCode);
+    // Antigravity reports a failed turn, a spent quota included, as a warning line in the answer.
+    if (control.error) say("\\n\u26a0 " + control.error + "\\n");
+    else { say(answer.slice(0, 4)); say(answer.slice(4)); }
+    if (control.missingFinal || control.exitCode) process.exit(control.exitCode || 0);
+    line({ jsonrpc: "2.0", id: acp.id, result: { stopReason: "end_turn", usage: { inputTokens: 70, cachedReadTokens: 30, outputTokens: 12, thoughtTokens: 8 } } });
   } else if (flavor === "claude") {
     line({ type: "system", subtype: "init" });
     line({ type: "assistant", message: { content: [{ type: "thinking", thinking: control.thinking || "" }] } });
@@ -844,7 +849,27 @@ process.stdin.on("end", async () => {
     if (control.crash) process.exit(1);
     fs.writeFileSync(argv[argv.indexOf("-o") + 1], answer);
   }
-});
+};
+if (flavor === "gemini" && argv[0] === "acp") {
+  // Antigravity's ACP server: answer the handshake, then run the turn when the prompt arrives.
+  const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+  acp = {};
+  require("node:readline").createInterface({ input: process.stdin }).on("line", (text) => {
+    const message = JSON.parse(text);
+    if (message.method === "initialize") reply(message.id, { protocolVersion: 1, agentCapabilities: {} });
+    else if (message.method === "session/new") reply(message.id, { sessionId: "fixture-gemini" });
+    else if (message.method === "session/set_model") { acp.model = message.params.modelId; reply(message.id, {}); }
+    else if (message.method === "session/set_config_option") { acp.thoughtLevel = message.params.value; reply(message.id, {}); }
+    else if (message.method === "session/prompt") {
+      acp.id = message.id;
+      stdin = message.params.prompt.map((part) => part.text || "").join("");
+      handle();
+    }
+  }).on("close", () => setTimeout(() => process.exit(0), 50));
+} else {
+  process.stdin.on("data", (d) => { stdin += d; });
+  process.stdin.on("end", handle);
+}
 `;
   for (const name of ["claude", "codex", "grok", "muse", "gemini", "hermes", "dsh"]) {
     writeFileSync(join(dir, name), source);

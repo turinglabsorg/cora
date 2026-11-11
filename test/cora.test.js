@@ -3433,15 +3433,16 @@ describe("agents in Discord", () => {
     cookie = login.headers.get("set-cookie").split(";")[0];
     const created = await call("/api/agents", { method: "POST", body: { name: "Gema", model: "gemini/gemini-4-argon-high", subscriptionId: subscriptionIds.gemini, effort: "high", chattiness: 0, tools: false } });
     assert.equal(created.status, 201);
-    cli.set({ tool: "remember", args: { fact: "La consegna delle sedie è venerdì" }, reply: "Segnato." });
+    cli.set({ tool: "remember", args: { fact: "La consegna delle sedie è venerdì" }, reply: "Segnato.", thinking: "Devo salvare la consegna delle sedie." });
     discord.say({ content: "@Gema, ricordati che la consegna delle sedie è venerdì" });
     const post = await waitFor(() => discord.state.webhookPosts.find((item) => item.username === "Gema"), { what: "Gemini's answer" });
     assert.match(post.content, /^Segnato\. \[saved \[mem_/);
     const run = cli.calls().find((item) => item.flavor === "gemini" && item.stdin.includes("Sei Gema."));
     assert.match(run.stdin, /^<istruzioni_di_sistema>\nSei Gema\./);
     assert.ok(run.stdin.includes("ISTRUZIONI DI PROVA"), "shared owner instructions reach Gemini too");
-    assert.equal(run.argv[run.argv.indexOf("--model") + 1], "gemini-4-argon-high");
-    assert.equal(run.argv[run.argv.indexOf("--effort") + 1], "high");
+    assert.equal(run.argv[0], "acp", "Antigravity runs over ACP, the mode that streams its thoughts");
+    assert.ok(run.argv[run.argv.indexOf("--gemini-dir") + 1].endsWith(`${run.cwd.split("/").pop()}/.gemini`), "each run has its own Antigravity configuration");
+    assert.deepEqual(run.acp, { model: "gemini-4-argon-high", thoughtLevel: "high" });
     assert.equal(run.env.HOME, join(home, "subscriptions", subscriptionIds.gemini));
     assert.match(run.scope, /^cora-[a-f0-9]{32}$/);
     assert.deepEqual(run.geminiSettings.permissions.deny, ["command(*)", "read_file(*)", "write_file(*)", "read_url(*)", "execute_url(*)"]);
@@ -3456,6 +3457,7 @@ describe("agents in Discord", () => {
     const [summary] = (await call(`/api/agents/${created.data.id}/traces`)).data;
     const trace = (await call(`/api/traces/${summary.id}`)).data;
     assert.ok(trace.steps.some((step) => step.type === "text" && step.text === "Prima controllo."));
+    assert.ok(trace.steps.some((step) => step.type === "thinking" && step.text === "Devo salvare la consegna delle sedie."), "Gemini's thought chunks arrive readable and whole");
     assert.equal(trace.steps.find((step) => step.type === "tool").name, "remember");
     assert.equal(summary.tokensIn, 100);
     assert.equal(summary.tokensOut, 12);
