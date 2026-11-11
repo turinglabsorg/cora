@@ -3390,6 +3390,7 @@ function connectorsPane() {
         record.mode === "oauth"
           ? setRow("Autorizzazione", h("span", {}, "Token OAuth nella cassaforte come ", h("code", {}, service.secret), ". Cora lo rinnova da solo quando scade."), authorizeButton(service, "Autorizza di nuovo"))
           : setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, service.secret), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
+        service.writes ? setRow("Chi firma", tr(record.mode === "oauth" ? service.writes.oauth : service.writes.key)) : null,
         service.tools?.length ? setRow("Strumenti degli agenti", h("span", { class: "connector-tools" }, "Gli agenti autorizzati hanno uno strumento di Cora per ogni azione, e Cora aggiunge la chiave a ogni chiamata: ", ...service.tools.flatMap((name, index) => [index ? ", " : "", h("code", {}, name)]), ".")) : null,
         setRow("Agenti autorizzati", "Solo gli agenti spuntati possono usare questo connettore.", agentChoices(record, service.id), { stack: true }),
         setRow("Scollega", "Toglie la chiave dalla cassaforte e l'accesso agli agenti.", disconnect)),

@@ -8,22 +8,35 @@ import { executeTool, summarizeArgs } from "../src/tools.js";
 
 const LINEAR_KEY = "lin_api_fixture_turinglabs";
 const ASANA_TOKEN = "asana_fixture_pat";
+const LINEAR_APP_TOKEN = "lin_oauth_fixture_app";
 
 async function fakeServices(t) {
-  const linear = [], asana = [], asanaQueries = [];
+  const linear = [], asana = [], asanaQueries = [], linearTokens = [];
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const text = Buffer.concat(chunks).toString("utf8");
-    const body = text ? JSON.parse(text) : {};
+    let body = {};
+    try { body = text ? JSON.parse(text) : {}; } catch { body = Object.fromEntries(new URLSearchParams(text)); }
     const send = (status, value) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     if (req.url === "/linear") {
       linear.push({ authorization: req.headers.authorization, body });
       const token = String(req.headers.authorization || "").replace(/^Bearer /, "");
+      if (token === LINEAR_APP_TOKEN) {
+        if (/viewer \{ name \} organization/.test(body.query)) return send(200, { data: { viewer: { name: "Cora" }, organization: { name: "Turing Labs", urlKey: "turinglabs" } } });
+        if (/issue\(id: \$id\)/.test(body.query)) return send(200, { data: { issue: { id: "iss-7", identifier: "TL-7", team: { key: "TL" } } } });
+        if (/commentCreate/.test(body.query)) return send(200, { data: { commentCreate: { success: true, comment: { id: "c-1", url: "https://linear.app/c", user: { name: "Cora" } } } } });
+        return send(200, { data: null, errors: [{ message: "fixture: no answer" }] });
+      }
       if (token !== LINEAR_KEY) return send(401, { errors: [{ message: "Authentication required" }] });
       if (/issueCreate/.test(body.query)) return send(200, { data: { issueCreate: { success: true, issue: { identifier: "TL-7", title: body.variables?.input?.title } } } });
       if (/broken/.test(body.query)) return send(400, { errors: [{ message: "Cannot query field broken" }] });
       return send(200, { data: { viewer: { name: "Sebastiano", email: "seb@example.test", organization: { name: "Turing Labs", urlKey: "turinglabs" } } } });
+    }
+    if (req.url === "/linear-oauth/token" && req.method === "POST") {
+      linearTokens.push(body);
+      if (body.grant_type === "authorization_code" && body.code === "good-code") return send(200, { access_token: LINEAR_APP_TOKEN, refresh_token: "lin_refresh_fixture", expires_in: 86399, token_type: "Bearer" });
+      return send(400, { error: "invalid_grant" });
     }
     if (req.url === "/asana/users/me") {
       if (req.headers.authorization !== `Bearer ${ASANA_TOKEN}`) return send(401, {});
@@ -49,7 +62,7 @@ async function fakeServices(t) {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
-  return { base: `http://127.0.0.1:${server.address().port}`, linear, asana, asanaQueries };
+  return { base: `http://127.0.0.1:${server.address().port}`, linear, asana, asanaQueries, linearTokens };
 }
 
 async function connectorWorld(t) {
@@ -287,4 +300,54 @@ test("the panel draws the catalogue and the forms from src/connectors, so a new 
   node.querySelectorAll("button").find((button) => /Verifica e collega/.test(button.textContent)).click();
   await waitFor(() => /Chiave di prova rifiutata/.test(detail.textContent));
   assert.deepEqual(posted, [{ token: "acme-key" }]);
+});
+
+test("Linear through an OAuth app installs as actor=app and signs each comment with the agent's name and avatar", async (t) => {
+  const f = await connectorWorld(t);
+  const connectors = f.app.keyConnectors;
+  connectors.oauthUrls.linear = { token: `${f.services.base}/linear-oauth/token` };
+  f.app.store.setAvatarBase("https://space.example");
+
+  const saved = await f.call("/api/connectors/keys/linear", { method: "POST", body: { mode: "oauth", clientId: "lin-client", clientSecret: "lin-secret" } });
+  assert.equal(saved.status, 200);
+  assert.deepEqual([saved.data.record.status, saved.data.record.mode], ["app", "oauth"]);
+  assert.ok(f.app.store.vaultSecret("CORA_LINEAR_CLIENT_ID") && f.app.store.vaultSecret("CORA_LINEAR_CLIENT_SECRET"), "the app's credentials sit in the vault");
+  assert.doesNotMatch(JSON.stringify(saved.data), /lin-secret/);
+  const card = saved.data.catalog.find((item) => item.id === "linear");
+  assert.deepEqual(card.modes.map((mode) => mode.id), ["key", "oauth"]);
+  assert.match(card.redirect, /\/connectors\/oauth\/linear\/callback$/);
+
+  const started = await f.call("/api/connectors/keys/linear/authorize", { method: "POST" });
+  assert.equal(started.status, 200);
+  const url = new URL(started.data.url);
+  assert.equal(`${url.origin}${url.pathname}`, "https://linear.app/oauth/authorize");
+  assert.equal(url.searchParams.get("actor"), "app", "the app writes as itself, so Linear accepts createAsUser");
+  assert.equal(url.searchParams.get("scope"), "read,write", "Linear takes scopes separated by commas");
+  assert.equal(url.searchParams.get("prompt"), "consent");
+  assert.equal(url.searchParams.get("client_id"), "lin-client");
+  assert.equal(url.searchParams.get("code_challenge_method"), "S256");
+  assert.match(url.searchParams.get("redirect_uri"), /\/connectors\/oauth\/linear\/callback$/);
+
+  const state = url.searchParams.get("state");
+  const record = await connectors.finishOAuth("linear", { state, code: "good-code" }, state);
+  assert.deepEqual([record.status, record.mode, record.workspace, record.account], ["connected", "oauth", "turinglabs", "Cora"]);
+  const exchange = f.services.linearTokens.at(-1);
+  assert.equal(exchange.client_secret, "lin-secret");
+  assert.ok(exchange.code_verifier, "PKCE verifier sent with the code");
+
+  await f.call("/api/connectors/keys/linear", { method: "PUT", body: { agents: [f.agent.id] } });
+  const tools = connectors.toolsFor(f.agent);
+  assert.match(tools.find((tool) => tool.name === "linear_teams").description, /through the app Cora: issues and comments you create show your own name and avatar/);
+  assert.match(tools.find((tool) => tool.name === "linear_comment").description, /your name and avatar/);
+
+  const comment = JSON.parse((await connectors.runTool(f.agent, "linear_comment", { issue: "TL-7", body: "Verificato" })).text);
+  assert.equal(comment.issue, "TL-7");
+  const sent = f.services.linear.at(-1);
+  assert.equal(sent.authorization, `Bearer ${LINEAR_APP_TOKEN}`);
+  assert.equal(sent.body.variables.input.createAsUser, "Connector agent");
+  assert.match(sent.body.variables.input.displayIconUrl, new RegExp(`^https://space\\.example/avatars/${f.agent.id}\\.png`));
+
+  await f.call("/api/connectors/keys/linear", { method: "DELETE" });
+  assert.equal(f.app.store.vaultSecret("CORA_LINEAR_CLIENT_ID"), null, "disconnecting removes the app too");
+  assert.equal(f.app.store.vaultSecret("CORA_LINEAR_KEY"), null);
 });
