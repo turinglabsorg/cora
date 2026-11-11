@@ -264,4 +264,4 @@ Token counts and the reasoning line show up only after the turn has produced the
 
 ## Sealed agents
 
-Use the existing amber rocker in Memory → Source and in New agent. Keep the explanation next to the control, name the retained explicit grants, and explain that changing isolation restarts the desktop. A neutral lock badge identifies a sealed agent in the roster and detail header. Hide shared Brain and external-source controls while sealed; personal memories have no sharing actions. Reuse the section rail and existing tokens on desktop and phone.
+Use the existing amber rocker in Agent → Settings → Security and in New agent. Security has its own section rail entry and independent save action. Memory → Source links to Security while sealed; it does not edit isolation. Keep the explanation next to the control, name the retained explicit grants, and explain that changing isolation restarts the desktop. A neutral lock badge identifies a sealed agent in the roster and detail header. Hide shared Brain and external-source controls while sealed; personal memories have no sharing actions. Reuse the section rail and existing tokens on desktop and phone.
