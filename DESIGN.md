@@ -228,7 +228,7 @@ OAuth setup instructions show the complete instance callback URL directly in the
 
 Connector setup remains mounted across background chat discovery and visibility changes, even when a field has lost focus. Keep the selected connection mode, unsubmitted fields, catalog query, filters and confirmation state in the current view; only explicit navigation and completed connector actions rebuild it. Never persist draft credentials in browser storage.
 
-Linear detail lists one panel per workspace, titled with its verified name, with its own agent checkboxes and disconnect confirmation. An OAuth app awaiting approval has its own panel with the expected workspace name, authorization, edit and remove actions. Add another workspace opens a separate inline form; every connection owns its app credentials and token. Never reuse another workspace’s grants.
+Linear detail lists one panel per workspace, titled with its verified name, with its own agent checkboxes and disconnect confirmation. An OAuth app awaiting approval has its own compact panel with the expected workspace name, authorization, edit and remove actions on a wrapping horizontal row. Connector action rows never use the page-level `wrap` class. Use 12px/16px panel padding, 10px body gaps and 34px pending-app actions. Edit replaces that exact app panel in place, focuses its form and keeps the expected workspace; Cancel restores the card without writes. The editor shows the callback and credential fields, keeping the first-time setup guide and authorization action on their appropriate views. Add another workspace opens a separate inline form; every connection owns its app credentials and token. Never reuse another workspace’s grants.
 
 ## External agents through MCP
 

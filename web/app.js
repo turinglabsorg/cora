@@ -3427,7 +3427,7 @@ function connectorsPane() {
       catch { toast("Non riesco a copiare: selezionalo a mano", true); }
     } }))
     : h("span", { class: "muted" }, "Cora non ha ancora un indirizzo pubblico.");
-  const redirectRow = (service) => setRow("Indirizzo di ritorno", "Aggiungilo tra gli indirizzi di ritorno (redirect URL) dell'app sul servizio.", redirectValue(service));
+  const redirectRow = (service) => setRow("Indirizzo di ritorno", null, redirectValue(service), { stack: true });
 
   const stepParts = (parts, service) => (Array.isArray(parts) ? parts : [parts]).map((part) => typeof part === "string" ? part
     : part.href ? h("a", { href: part.href, target: "_blank", rel: "noopener" }, part.text)
@@ -3436,6 +3436,7 @@ function connectorsPane() {
   // One form for every key connector, drawn from the modes its module declares.
   const keyForm = (service, selected = undefined) => {
     const record = selected === undefined ? keyRecord(service.id) : selected;
+    const editing = service.id === "linear" && record?.id === linearEditingId;
     const feedback = h("p", { class: "connector-feedback", role: "status" });
     const submit = (label, run) => {
       const button = btn(label, { icon: "check", cls: "primary", disabled: !data.canManage, onclick: async () => {
@@ -3450,7 +3451,7 @@ function connectorsPane() {
         h("p", {}, optional.intro),
         h("p", { role: "status", class: "notice warn" }, optional.notice),
         record?.status === "later" ? h("p", { class: "muted" }, optional.off) : null,
-        h("div", { class: "row wrap" }, btn(record?.status === "later" ? optional.restart : optional.start, { icon: "plus", cls: "primary", onclick: () => { optionalOpen.add(service.id); draw(); } }),
+        h("div", { class: "row connector-actions" }, btn(record?.status === "later" ? optional.restart : optional.start, { icon: "plus", cls: "primary", onclick: () => { optionalOpen.add(service.id); draw(); } }),
           btn(optional.later, { cls: "ghost", onclick: async () => {
             try { await api(`/api/connectors/keys/${service.id}`, { method: "POST", body: { decision: "later" } }); optionalOpen.delete(service.id); await load(); toast(optional.done); }
             catch (error) { toast(error.message, true); }
@@ -3462,19 +3463,20 @@ function connectorsPane() {
     const inputs = new Map();
     const input = (spec) => {
       const node = h("input", { type: spec.type || "text", placeholder: spec.placeholder, autocomplete: "off", autocapitalize: "none", spellcheck: "false", disabled: !data.canManage, "aria-label": spec.label });
+      if (editing && spec.name === "workspace") node.value = record.workspaceHint || record.workspace || "";
       inputs.set(spec.name, node);
       return node;
     };
     const send = () => api(connectorPath(service.id, record), { method: "POST", body: { ...(mode.body || {}), ...Object.fromEntries([...inputs].map(([name, node]) => [name, node.value.trim()])) } });
     let toggle = null;
-    if (modes.length > 1) {
+    if (modes.length > 1 && !editing) {
       toggle = h("div", { class: "segmented", role: "group", "aria-label": tr("Come collegare {name}", { name: service.name }) },
         modes.map((item) => btn(item.label, { onclick: () => { modeChoice.set(service.id, item.id); draw(); } })));
       [...toggle.children].forEach((button, index) => { const on = modes[index] === mode; button.classList.toggle("on", on); button.setAttribute("aria-pressed", String(on)); });
     }
     const rows = (mode.rows || []).map((row) => {
       const parts = [];
-      if (row.steps) parts.push(steps(...row.steps.map((parts) => stepParts(parts, service))));
+      if (row.steps && !editing) parts.push(steps(...row.steps.map((parts) => stepParts(parts, service))));
       if (row.field) { const node = input(row.field); parts.push(row.submit ? h("div", { class: "input-row token" }, node, submit(row.submit, send)) : node); }
       if (row.fields) parts.push(h("div", { class: "stack-sm" }, row.fields.map((spec) => field(spec.title, input(spec))), row.submit ? h("div", { class: "row end" }, submit(row.submit, send)) : null));
       if (row.note) parts.push(h("p", { class: "muted" }, row.note));
@@ -3483,12 +3485,12 @@ function connectorsPane() {
     });
     const appReady = Boolean(mode.ready && record?.status === mode.ready);
     if (service.oauth && mode.ready) {
-      if (appReady) rows.push(setRow("Autorizzazione", tr("App salvata: autorizzala con il tuo account {name}. Cora salva i token nella cassaforte come {secret}.", { name: service.name, secret: service.secret }), authorizeButton(service, tr("Autorizza {name}", { name: service.name }), record)));
+      if (appReady && !editing) rows.push(setRow("Autorizzazione", tr("App salvata: autorizzala con il tuo account {name}. Cora salva i token nella cassaforte come {secret}.", { name: service.name, secret: service.secret }), authorizeButton(service, tr("Autorizza {name}", { name: service.name }), record)));
     }
-    return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: appReady ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
-      h("p", {}, mode.intro || service.intro),
+    return panel({ icon: service.icon, title: editing ? "Modifica app" : service.name, hint: tr(service.meta), cls: editing ? "connector-edit" : "", actions: editing ? btn("Annulla", { cls: "ghost sm", onclick: () => { linearSetupOpen = false; linearEditingId = ""; draw(); } }) : appReady ? tag("App pronta", "warn") : tag("Da collegare", "agent") },
+      editing ? redirectValue(service) : h("p", {}, mode.intro || service.intro),
       toggle,
-      mode.notice ? h("p", { role: "status", class: "notice warn" }, mode.notice) : null,
+      mode.notice && !editing ? h("p", { role: "status", class: "notice warn" }, mode.notice) : null,
       setRows(...rows),
       feedback);
   };
@@ -3500,20 +3502,19 @@ function connectorsPane() {
       const records = (data.keyConnectors || []).filter((item) => item.service === id && item.id && ["connected", "app"].includes(item.status));
       if (!records.length) return [back(), keyForm(service, null)];
       const nodes = records.map((item) => {
+        if (item.id === linearEditingId) return keyForm(service, item);
         if (item.status === "connected") return connectedPanel(service, item);
         const remove = armedButton("Rimuovi collegamento", "Conferma rimozione", { icon: "power", cls: "ghost danger", disabled: !data.canManage, onconfirm: async () => {
           remove.disabled = true;
           try { await api(connectorPath(id, item), { method: "DELETE" }); if (linearEditingId === item.id) { linearSetupOpen = false; linearEditingId = ""; } await load(); }
           catch (error) { toast(error.message, true); remove.disabled = !data.canManage; }
         } });
-        return panel({ icon: service.icon, title: raw(item.workspaceHint || tr("Workspace da autorizzare")), hint: "App OAuth Linear", actions: tag("App pronta", "warn") },
-          h("p", {}, "Autorizza questa app nel workspace desiderato. Poi scegli gli agenti che potranno usarlo."),
+        return panel({ icon: service.icon, title: raw(item.workspaceHint || tr("Workspace da autorizzare")), hint: "App OAuth Linear", cls: "connector-pending", actions: tag("App pronta", "warn") },
           redirectRow(service),
-          h("div", { class: "row wrap" }, authorizeButton(service, "Autorizza Linear", item), btn("Modifica app", { cls: "ghost", disabled: !data.canManage, onclick: () => { linearEditingId = item.id; linearSetupOpen = true; modeChoice.set(id, "oauth"); draw(); } }), remove));
+          h("div", { class: "row connector-actions" }, authorizeButton(service, "Autorizza Linear", item), btn("Modifica app", { cls: "ghost", disabled: !data.canManage, onclick: () => { linearEditingId = item.id; linearSetupOpen = false; modeChoice.set(id, "oauth"); draw(); const editor = detail.querySelector(".connector-edit"); editor?.scrollIntoView({ block: "nearest" }); editor?.querySelector("input")?.focus({ preventScroll: true }); } }), remove));
       });
-      const edit = records.find((item) => item.id === linearEditingId);
       return [back(), ...nodes, linearSetupOpen
-        ? h("div", { class: "stack" }, h("div", { class: "row end" }, btn("Annulla", { cls: "ghost", onclick: () => { linearSetupOpen = false; linearEditingId = ""; draw(); } })), keyForm(service, edit || null))
+        ? h("div", { class: "stack" }, h("div", { class: "row end" }, btn("Annulla", { cls: "ghost", onclick: () => { linearSetupOpen = false; linearEditingId = ""; draw(); } })), keyForm(service, null))
         : h("div", { class: "row end" }, btn("Collega un altro workspace", { icon: "plus", cls: "primary", disabled: !data.canManage, onclick: () => { linearSetupOpen = true; linearEditingId = ""; draw(); } }))];
     }
     return [back(), record?.status === "connected" ? connectedPanel(service, record) : keyForm(service)];
@@ -3536,7 +3537,7 @@ function connectorsPane() {
         const selected = choices.filter((item) => item.input.checked);
         senders.replaceChildren(h("p", { class: "label" }, "3. Scegli il mittente"),
           h("p", { class: "muted" }, "Nella pagina Email dell'agente scegli questo account come mittente."),
-          selected.length ? h("div", { class: "row wrap" }, selected.map((item) => btn(raw(tr("Email di {name}", { name: data.agents.find((agent) => agent.id === item.id).name })), { icon: "mail", cls: "ghost sm", href: `#/agent/${item.id}/email/invio` }))) : h("p", { class: "muted" }, "Autorizza almeno un agente per scegliere il mittente."));
+          selected.length ? h("div", { class: "row connector-actions" }, selected.map((item) => btn(raw(tr("Email di {name}", { name: data.agents.find((agent) => agent.id === item.id).name })), { icon: "mail", cls: "ghost sm", href: `#/agent/${item.id}/email/invio` }))) : h("p", { class: "muted" }, "Autorizza almeno un agente per scegliere il mittente."));
       };
       drawSenders();
       for (const item of choices) item.input.addEventListener("change", async () => {

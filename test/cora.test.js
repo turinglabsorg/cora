@@ -1812,6 +1812,47 @@ test("Linear workspace panel manages independent grants and keeps legacy connect
   assert.deepEqual(fixture.app.keyConnectors.linearConnections()[0].agents, [firstAgent.id]);
 });
 
+test("Linear app editing replaces only the selected card and cancels without writes", async (t) => {
+  const fixture = await subscriptionApp(t);
+  const apps = [];
+  for (const workspace of ["firstspace", "secondspace"]) {
+    const result = await fixture.request("/api/connectors/keys/linear", { method: "POST", body: { mode: "oauth", workspace, clientId: `fixture-${workspace}`, clientSecret: "fixture-only" } });
+    assert.equal(result.status, 200);
+    apps.push(result.data.record);
+  }
+  const panel = panelHarness({ hash: "#/settings/connettori/linear", fetch: async (path, init = {}) => {
+    const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  await panel.run("boot()");
+  const pane = panel.run('document.querySelector(".connectors-pane")'); await pane.readyConnectors;
+  const cards = () => pane.querySelector(".connector-detail").querySelectorAll(".panel");
+  cards()[0].querySelectorAll("button").find(button => button.textContent === "Modifica app").click();
+  assert.equal(cards().length, 2);
+  assert.ok(cards()[0].classList.contains("connector-edit"));
+  assert.match(cards()[1].textContent, /secondspace/);
+  const inputs = cards()[0].querySelectorAll("input");
+  assert.equal(inputs.find(input => input.getAttribute("aria-label") === "Workspace atteso di Linear").value, "firstspace");
+  assert.equal(inputs.find(input => input.getAttribute("aria-label") === "Client secret dell'app Linear").value, "");
+  inputs[1].value = "fixture-new-client"; inputs[2].value = "fixture-new-secret";
+  await panel.run('document.activeElement=null;document.hidden=false;document.listeners.visibilitychange[0]()');
+  assert.equal(inputs[1].isConnected, true); assert.equal(inputs[1].value, "fixture-new-client");
+  cards()[0].querySelectorAll("button").find(button => button.textContent === "Annulla").click();
+  assert.equal(cards().length, 2); assert.ok(!cards()[0].classList.contains("connector-edit"));
+  assert.deepEqual(fixture.app.keyConnectors.records().map(item => item.appVersion), apps.map(item => item.appVersion));
+  cards()[1].querySelectorAll("button").find(button => button.textContent === "Modifica app").click();
+  assert.ok(cards()[1].classList.contains("connector-edit"));
+  const fields = cards()[1].querySelectorAll("input");
+  fields[1].value = "fixture-new-client"; fields[2].value = "fixture-new-secret";
+  cards()[1].querySelectorAll("button").find(button => button.textContent === "Salva l'app").click();
+  await waitFor(() => fixture.app.keyConnectors.records().find(item => item.id === apps[1].id).appVersion !== apps[1].appVersion);
+  await waitFor(() => !pane.querySelector(".connector-edit"));
+  const records = fixture.app.keyConnectors.records();
+  assert.equal(records.length, 2);
+  assert.equal(records.find(item => item.id === apps[0].id).appVersion, apps[0].appVersion);
+  assert.equal(fixture.app.keyConnectors.appCredentials("linear", records.find(item => item.id === apps[1].id)).clientId, "fixture-new-client");
+});
+
 test("connector setup preserves mounted forms and catalog across background updates", async (t) => {
   const fixture = await subscriptionApp(t);
   let stateReads = 0;
