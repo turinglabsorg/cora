@@ -8390,7 +8390,7 @@ function settingsDisclosures(root, id, expanded, configured = true) {
   if (typeof MutationObserver === "undefined") return root;
   const convert = () => {
     for (const card of root.querySelectorAll("section.panel")) {
-      if (card.parentElement.closest(".panel") || card.closest('[aria-busy="true"]')) continue;
+      if (card.classList.contains("settings-always-open") || card.parentElement.closest(".panel") || card.closest('[aria-busy="true"]')) continue;
       const head = card.querySelector(":scope > .panel-head");
       if (!head) continue;
       const title = head.querySelector("h2")?.textContent || "";
@@ -8427,10 +8427,9 @@ function renderSettings() {
   const back = () => btn("Impostazioni", { icon: "back", cls: "sm ghost rail-back", onclick: () => show("") });
   const page = (id, ...content) => {
     const root = h("div", { class: "stack" }, back(), content);
-    const unchanged = ["connettori", "mcp", "server", ...SUBSCRIPTION_HARNESSES].includes(id);
+    const unchanged = ["connettori", "mcp", "email", "server", "spazio", "accesso", "ssh", "controlli", "preferenze", ...SUBSCRIPTION_HARNESSES].includes(id);
     const configured = ["discord", "telegram", "slack"].includes(id) ? transportInfo(id).state !== "missing-token" || S.data.agents.some((agent) => id === "discord" ? agent.bot?.user : id === "telegram" ? agent.telegramBot?.user : agent.slackBot?.user)
-      : CONNECTION_KEYS.some(([provider]) => provider === id) ? keyState(id)[0] !== "off"
-        : id === "github" ? Boolean(settings.githubOrg) : id === "ssh" ? Boolean(settings.sshKeys.length) : true;
+      : id === "github" ? Boolean(settings.githubOrg) : true;
     pages.set(id, unchanged ? root : settingsDisclosures(root, id, expanded, configured));
   };
 
@@ -8466,7 +8465,7 @@ function renderSettings() {
             ? setRow("Bot che ascolta", "Nessun bot ascolta. Cora usa il bot di un agente che può leggere i messaggi:",
               steps(h("span", {}, "apri ", h("a", { href: "https://discord.com/developers/applications", target: "_blank", rel: "noopener" }, "discord.com/developers"), " e scegli l'app di un agente (es. Primo);"), "sezione Bot → Privileged Gateway Intents → accendi «Message Content Intent» → Save;", "entro un minuto Cora lo usa per ascoltare."), { stack: true })
             : setRow("Bot che ascolta", h("span", {}, tr("Stato: {state}", { state: tr(STATE_LABEL[discord.state] || discord.state) }), discord.error ? raw(` (${discord.error})`) : "")))),
-    panel({ icon: "radio", title: "Ascolto", hint: "I server accesi, e chi può far usare il computer agli agenti." },
+    panel({ icon: "radio", title: "Ascolto", cls: "settings-always-open", hint: "I server accesi, e chi può far usare il computer agli agenti." },
       setRows(
         guildRow = setRow("Server", guilds.length ? "Gli altri server vengono ignorati." : "Discord non è collegato adesso: i server compaiono quando lo è.",
           guilds.length ? switchList(guilds.map((guild) => ({ id: guild.id, name: guild.name, sub: guild.id, mono: true })), settings.guildIds, "guildIds", () => guildRow) : null, { stack: true }),
@@ -8489,7 +8488,7 @@ function renderSettings() {
               "incolla qui il token: lo controllo e lo salvo in hush;",
               "aggiungi il bot al gruppo e accendi la chat qui sotto."),
             tokenForm({ placeholder: telegram.user ? "Nuovo token (solo per cambiarlo)" : "Token di BotFather (123456:ABC…)", path: "/api/telegram/token", ok: "Bot Telegram collegato" })), { stack: true }))),
-    panel({ icon: "radio", title: "Ascolto", hint: "Le chat accese, e chi può far usare il computer agli agenti." },
+    panel({ icon: "radio", title: "Ascolto", cls: "settings-always-open", hint: "Le chat accese, e chi può far usare il computer agli agenti." },
       setRows(
         chatRow = setRow("Chat", telegram.chats.length ? "Le chat spente vengono ignorate." : "Aggiungi il bot a un gruppo (o scrivigli in privato): la chat compare qui e la accendi.",
           telegram.chats.length ? switchList(telegram.chats.map((chat) => ({ id: chat.id, name: chat.title, sub: `${tr(chat.type === "private" ? "chat privata" : chat.type === "channel" ? "canale" : "gruppo")}${chat.member === false ? tr(" · il bot non c'è più") : ""}` })), settings.telegramChatIds, "telegramChatIds", () => chatRow) : null, { stack: true }),
@@ -8520,7 +8519,7 @@ function renderSettings() {
               h("span", {}, "in Basic Information → App-Level Tokens crea un token con ", h("code", {}, "connections:write"), " e copia l'xapp-;"),
               "incolla qui i due token: li controllo e li salvo in hush."),
             slackTokenForm({ path: "/api/slack/token", ok: "App Slack collegata" })), { stack: true }))),
-    panel({ icon: "radio", title: "Ascolto", hint: "I canali accesi, e chi può far usare il computer agli agenti.", actions: refreshChannels },
+    panel({ icon: "radio", title: "Ascolto", cls: "settings-always-open", hint: "I canali accesi, e chi può far usare il computer agli agenti.", actions: refreshChannels },
       setRows(
         slackRow = setRow("Canali", slack.channels?.length ? "Un canale in cui entra un'app parte acceso; resta spento solo quello che spegni." : "Invita un'app in un canale: compare qui, già acceso.",
           slack.channels?.length ? switchList(slack.channels.map((channel) => ({ id: channel.id, name: `#${channel.name}`, sub: tr(channel.private ? "canale privato" : "canale pubblico") })), settings.slackChannelIds, "slackChannelIds", () => slackRow) : null, { stack: true }),
@@ -8647,10 +8646,12 @@ function renderSettings() {
                 : cloud.signedIn ? h("p", { class: "muted" }, "Non serve: questa macchina è già collegata a Ollama Cloud.")
                   : h("p", { class: "muted" }, "In alternativa alla chiave, collega questa macchina al tuo account Ollama.",
                     cloud.signinUrl ? [" ", h("a", { href: cloud.signinUrl, target: "_blank", rel: "noopener" }, tr("Collega questa macchina"))] : null));
-    page(provider, panel({ icon: mark, title: name, actions: [hint, status] }, h("div", { class: "provider-key" }, about),
-      setRows(setRow("Chiave API", "Salvata in hush, non si rivede più.", h("div", { class: "input-row" }, pasteField(key, { confirm: save }), save), { stack: true }))));
+    const card = panel({ icon: mark, title: name, actions: [hint, status] }, h("div", { class: "provider-key" }, about),
+      setRows(setRow("Chiave API", "Salvata in hush, non si rivede più.", h("div", { class: "input-row" }, pasteField(key, { confirm: save }), save), { stack: true })));
+    card.setAttribute("data-settings-unconfigured", String(keyState(provider)[0] === "off"));
+    return card;
   };
-  for (const [provider, name, mark] of CONNECTION_KEYS) keyPage(provider, name, mark);
+  page("chiavi-api", ...CONNECTION_KEYS.map(([provider, name, mark]) => keyPage(provider, name, mark)));
 
   /* ---------- Agenti ---------- */
   const numberRow = (key, label, hint, min, max) => {
@@ -8789,9 +8790,9 @@ function renderSettings() {
     { id: "email", group: "Canali", label: "E-mail", mark: "mail", state: () => [null, tr("Ricezione e regole")] },
     { id: "connettori", group: "Connettori", label: "Connettori", mark: "link", state: () => [null, tr("Google e account esterni")] },
     { id: "mcp", group: "Connettori", label: "Agenti esterni (MCP)", mark: "terminal", state: () => [null, tr("Configura Cora da un altro agente")] },
-    { id: "server", group: "Abbonamenti", label: "Account del server", mark: "monitor", state: () => [null, settings.useResidentSubscriptions ? tr("in uso per chi non sceglie") : tr("non usati")] },
-    ...providers.map((provider) => ({ id: provider, group: "Abbonamenti", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
-    ...CONNECTION_KEYS.map(([provider, name, mark]) => ({ id: provider, group: "Chiavi API", label: name, mark, state: () => keyState(provider) })),
+    { id: "server", group: "Intelligenza", label: "Account del server", mark: "monitor", state: () => [null, settings.useResidentSubscriptions ? tr("in uso per chi non sceglie") : tr("non usati")] },
+    ...providers.map((provider) => ({ id: provider, group: "Intelligenza", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
+    { id: "chiavi-api", group: "Intelligenza", label: "Chiavi API", mark: "key", state: () => [null, tr("{count} chiavi salvate", { count: CONNECTION_KEYS.filter(([provider]) => S.data.keys?.[provider]).length })] },
     { id: "regia", group: "Agenti", label: "Regia", mark: "sliders", state: () => [null, tr("{turns} messaggi · obiettivi {goals}", { turns: S.data.settings.maxAgentTurns, goals: tr(S.data.settings.goalMode ? "accesi" : "spenti") })] },
     { id: "modelli", group: "Agenti", label: "Modelli e sonno", mark: "chip", state: () => {
       const known = S.data.models.find((item) => item.id === S.data.settings.defaultModel);
@@ -8843,7 +8844,9 @@ function renderSettings() {
   const [, first = "", second = ""] = route();
   const legacy = { collegamenti: second && second !== "panoramica" ? second : "server", canali: S.data.transport, agenti: "regia" };
   drawResidents();
-  show(legacy[first] || first, { updateRoute: false });
+  const requested = legacy[first] || first;
+  const keyRoute = CONNECTION_KEYS.some(([provider]) => provider === requested);
+  show(keyRoute ? "chiavi-api" : requested, { updateRoute: keyRoute });
   shell([pageHead("Impostazioni", "Canali, account e preferenze della tua Cora."), root], { title: "Impostazioni", mode: "rail" });
 }
 

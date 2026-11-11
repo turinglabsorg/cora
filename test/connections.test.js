@@ -261,18 +261,21 @@ test("an account says whose it is, and a member's new agent starts on the accoun
       const open = () => root.querySelectorAll(".rail-page").filter((page) => !page.hidden).map((page) => page.attributes["data-page"]);
       const groups = root.querySelectorAll(".rail-group").map((group) => group.textContent);
       const before = { ids: items().map((item) => item.attributes["data-page"]), groups, codex: items().find((item) => item.attributes["data-page"] === "codex").textContent, open: open(), className: root.className };
-      items().find((item) => item.attributes["data-page"] === "soniox").click();
-      return { ...before, after: open(), active: items().filter((item) => item.className.includes("active")).map((item) => item.attributes["data-page"]) };
+      items().find((item) => item.attributes["data-page"] === "chiavi-api").click();
+      const keys = root.querySelectorAll(".rail-page").find((page) => page.attributes["data-page"] === "chiavi-api").querySelectorAll("h2").map((heading) => heading.textContent);
+      return { ...before, keys, after: open(), active: items().filter((item) => item.className.includes("active")).map((item) => item.attributes["data-page"]) };
     })()`);
   })();
-  assert.deepEqual(connections.groups, ["Context", "Channels", "Connectors", "Subscriptions", "API keys", "Agents", "People", "General"], "the agents' context opens Settings");
+  assert.deepEqual(connections.groups, ["Context", "Channels", "Connectors", "Intelligence", "Agents", "People", "General"], "the agents' context opens Settings");
   assert.deepEqual(connections.ids.slice(0, 10), ["contesto", "discord", "telegram", "slack", "email", "connettori", "mcp", "server", "claude", "codex"]);
-  const firstKey = connections.ids.indexOf("ollama");
-  assert.deepEqual(connections.ids.slice(firstKey, firstKey + 5), ["ollama", "orcarouter", "deepseek", "typesafe", "soniox"]);
-  assert.deepEqual(connections.ids.slice(firstKey + 5), ["regia", "modelli", "github", "domini", "accesso", "ssh", "spazio", "controlli", "preferenze"], "agent permissions live inside each agent; GitHub and Domains stay with the agents, Spazio with general settings");
+  const firstKey = connections.ids.indexOf("chiavi-api");
+  assert.ok(firstKey > connections.ids.indexOf("codex"));
+  assert.equal(connections.ids.filter((id) => ["ollama", "orcarouter", "deepseek", "typesafe", "soniox"].includes(id)).length, 0);
+  assert.deepEqual(connections.ids.slice(firstKey + 1), ["regia", "modelli", "github", "domini", "accesso", "ssh", "spazio", "controlli", "preferenze"], "agent permissions live inside each agent; GitHub and Domains stay with the agents, Spazio with general settings");
   assert.match(connections.codex, /ChatGPT \/ Codex2 accounts/, "the server's account and Sara's, both ready");
   assert.deepEqual([connections.open, connections.className], [["codex"], "rail open"]);
-  assert.deepEqual([connections.after, connections.active], [["soniox"], ["soniox"]]);
+  assert.deepEqual([connections.after, connections.active], [["chiavi-api"], ["chiavi-api"]]);
+  assert.deepEqual(connections.keys, ["Ollama", "OrcaRouter", "DeepSeek", "TypeSafe", "Soniox"]);
 
   // A harness's page lists every account it has, and "Add account" connects one more.
   const accounts = await (async () => {

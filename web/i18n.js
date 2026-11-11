@@ -1,6 +1,8 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Intelligenza": "Intelligence",
+  "{count} chiavi salvate": "{count} saved keys",
   "Prima il dominio, poi il suo account Resend.": "First the domain, then its Resend account.",
   "Collega un nuovo account": "Connect a new account",
   "Collega dominio": "Connect domain",
