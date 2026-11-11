@@ -311,3 +311,10 @@ Settings → Regia stores `conversationIdleMinutes`: the default is 30, finite v
 `resumeTask()` restores the working indicator and always clears its timer when the recovered turn exits, including failures and busy-session refusals. Its `say`, file captions and final report retain the original owner/delegation authorization, so a colleague summoned by resumed work receives the same computer gate as a new turn. Untrusted human origins do not acquire this authorization. Coverage is the focused recovery tests in `test/cora.test.js`.
 
 `Brain.agentDirectory()` is the shared source for the system roster and the read-only `list_agents` own tool. It returns current configured contact metadata (id, name, description, enabled/desktop flags, verified mailbox address/status), never mailbox credentials, historical addresses or message content. Owner namespaces and sealed-agent shared-channel visibility match the existing roster. Desktop enablement is configuration, not evidence of runtime availability or permission for a new action.
+
+
+## Restarted colleague coordination
+
+Conversation turn budgets are persisted after each human reset and accepted chat turn. Recovery restores the remaining allowance without spending or replenishing it. On the first upgrade from an unrecorded allowance, `restoreTurnBudget()` conservatively subtracts recorded chat sessions since the latest human message; missing history grants no turns. Exhausted allowances stay exhausted. `Store.chatTurnsAfterLastHuman()` is only this legacy recovery fallback.
+
+An addressed colleague report reaches a busy agent through its existing inbox, once, without starting a second session. It is delivered as colleague evidence, never evaluated as a human stop, replacement objective or new authorization. Other agents, passive reports and reports outside the admitted queue are excluded. The affected integration cases in `test/cora.test.js` include a separate Node process opening the same store, repeated restart, exhaustion and a report arriving during a blocked real tool call.
