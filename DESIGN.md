@@ -228,7 +228,7 @@ OAuth setup instructions show the complete instance callback URL directly in the
 
 Connector setup remains mounted across background chat discovery and visibility changes, even when a field has lost focus. Keep the selected connection mode, unsubmitted fields, catalog query, filters and confirmation state in the current view; only explicit navigation and completed connector actions rebuild it. Never persist draft credentials in browser storage.
 
-Linear detail lists one panel per workspace, titled with its verified name, with its own agent checkboxes and disconnect confirmation. An OAuth app awaiting approval has its own panel with the expected workspace name, authorization, edit and remove actions. Add another workspace opens a separate inline form; every connection owns its app credentials and token. Never reuse another workspace’s grants.
+Linear detail lists one panel per workspace, titled with its verified name, with its own agent checkboxes and disconnect confirmation. An OAuth app awaiting approval has its own compact panel with the expected workspace name, authorization, edit and remove actions on a wrapping horizontal row. Connector action rows never use the page-level `wrap` class. Use 12px/16px panel padding, 10px body gaps and 34px pending-app actions. Edit replaces that exact app panel in place, focuses its form and keeps the expected workspace; Cancel restores the card without writes. The editor shows the callback and credential fields, keeping the first-time setup guide and authorization action on their appropriate views. Add another workspace opens a separate inline form; every connection owns its app credentials and token. Never reuse another workspace’s grants.
 
 ## External agents through MCP
 
@@ -274,3 +274,10 @@ Use the existing amber rocker in Agent → Settings → Security and in New agen
 ## Decision model in Settings
 
 Settings → Regia keeps the conversation decision model in its own panel below the orchestration controls. Use the existing Settings rows, model picker, account selector and numbered backup rows. Every change saves in place. The primary model, account and ordered backups belong to the decision model; they never read or edit the librarian's configuration. Give every primary and backup picker an accessible name. Keep the mounted Settings rail and the existing mobile layout.
+
+
+## Encrypted space
+
+Settings > Space contains the default-off Encrypted space switch below the existing storage meter. Agent Settings > Security contains its independent encrypted-only switch next to Sealed. Both reuse settings rows and existing switches.
+
+Encrypted folders use `sectionWorkspace()` with Documents, Access, Sharing, Unlock and Audit; never tabs appended to a file editor. A compact locked card precedes the workspace. Unlocking changes only this mounted view; Lock clears the document, private bundle and derived results from the view. Password fields have explicit autocomplete, labels and a fourteen-character enrollment minimum. Multiple independently removable password/passkey wrappers coexist; removing the last wrapper is disabled and rejected by the server. Error and save status remain visible beside the controls. The worker disclosure is displayed before approval. Narrow layouts wrap actions and retain full-width text areas; content is rendered as text, never HTML.

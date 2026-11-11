@@ -1,3 +1,4 @@
+import { createFolderKeys, encryptDocument } from "../web/encrypted-space.js";
 import { googleConnectorFixture } from "./google-connector-fixtures.js";
 import { EmailChannel } from "../src/email-channel.js";
 import { mailWorld } from "./mail-fixtures.js";
@@ -1811,6 +1812,47 @@ test("Linear workspace panel manages independent grants and keeps legacy connect
   assert.deepEqual(fixture.app.keyConnectors.linearConnections()[0].agents, [firstAgent.id]);
 });
 
+test("Linear app editing replaces only the selected card and cancels without writes", async (t) => {
+  const fixture = await subscriptionApp(t);
+  const apps = [];
+  for (const workspace of ["firstspace", "secondspace"]) {
+    const result = await fixture.request("/api/connectors/keys/linear", { method: "POST", body: { mode: "oauth", workspace, clientId: `fixture-${workspace}`, clientSecret: "fixture-only" } });
+    assert.equal(result.status, 200);
+    apps.push(result.data.record);
+  }
+  const panel = panelHarness({ hash: "#/settings/connettori/linear", fetch: async (path, init = {}) => {
+    const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  await panel.run("boot()");
+  const pane = panel.run('document.querySelector(".connectors-pane")'); await pane.readyConnectors;
+  const cards = () => pane.querySelector(".connector-detail").querySelectorAll(".panel");
+  cards()[0].querySelectorAll("button").find(button => button.textContent === "Modifica app").click();
+  assert.equal(cards().length, 2);
+  assert.ok(cards()[0].classList.contains("connector-edit"));
+  assert.match(cards()[1].textContent, /secondspace/);
+  const inputs = cards()[0].querySelectorAll("input");
+  assert.equal(inputs.find(input => input.getAttribute("aria-label") === "Workspace atteso di Linear").value, "firstspace");
+  assert.equal(inputs.find(input => input.getAttribute("aria-label") === "Client secret dell'app Linear").value, "");
+  inputs[1].value = "fixture-new-client"; inputs[2].value = "fixture-new-secret";
+  await panel.run('document.activeElement=null;document.hidden=false;document.listeners.visibilitychange[0]()');
+  assert.equal(inputs[1].isConnected, true); assert.equal(inputs[1].value, "fixture-new-client");
+  cards()[0].querySelectorAll("button").find(button => button.textContent === "Annulla").click();
+  assert.equal(cards().length, 2); assert.ok(!cards()[0].classList.contains("connector-edit"));
+  assert.deepEqual(fixture.app.keyConnectors.records().map(item => item.appVersion), apps.map(item => item.appVersion));
+  cards()[1].querySelectorAll("button").find(button => button.textContent === "Modifica app").click();
+  assert.ok(cards()[1].classList.contains("connector-edit"));
+  const fields = cards()[1].querySelectorAll("input");
+  fields[1].value = "fixture-new-client"; fields[2].value = "fixture-new-secret";
+  cards()[1].querySelectorAll("button").find(button => button.textContent === "Salva l'app").click();
+  await waitFor(() => fixture.app.keyConnectors.records().find(item => item.id === apps[1].id).appVersion !== apps[1].appVersion);
+  await waitFor(() => !pane.querySelector(".connector-edit"));
+  const records = fixture.app.keyConnectors.records();
+  assert.equal(records.length, 2);
+  assert.equal(records.find(item => item.id === apps[0].id).appVersion, apps[0].appVersion);
+  assert.equal(fixture.app.keyConnectors.appCredentials("linear", records.find(item => item.id === apps[1].id)).clientId, "fixture-new-client");
+});
+
 test("connector setup preserves mounted forms and catalog across background updates", async (t) => {
   const fixture = await subscriptionApp(t);
   let stateReads = 0;
@@ -3409,7 +3451,7 @@ describe("agents in Discord", () => {
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
     // Its own routines travel with it: they are the agent's own, not the owner's computer.
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__read_attachment", "mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__email_inbox", "mcp__cora__email_read", "mcp__cora__email_settings", "mcp__cora__email_draft", "mcp__cora__email_send", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__encrypted_request", "mcp__cora__read_attachment", "mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__email_inbox", "mcp__cora__email_read", "mcp__cora__email_settings", "mcp__cora__email_draft", "mcp__cora__email_send", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);
@@ -8599,4 +8641,29 @@ test("security seal autosaves, restores rejected changes and survives reload", a
   assert.equal(writes, 3);
   const readonly = panel.run(`agentSecurityPane(S.data.agents.find(a => a.id === ${JSON.stringify(id)}), {sealed: true, canManage: false})`);
   assert.equal(readonly.querySelector("input").disabled, true);
+});
+
+test("encrypted access tools return only a scoped panel link and reject unverified or foreign callers", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: true } });
+  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "synthetic/tool-handoff", title: "Private archive" } })).data;
+  const keys = await createFolderKeys(folder.id, "password", "synthetic verification password");
+  const configured = await f.request(f.alice, `/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: keys });
+  assert.equal(configured.status, 201);
+  const document = "ed_" + randomBytes(12).toString("hex"), plaintext = "PRIVATE_HANDOFF_NEVER_IN_TOOL_OUTPUT";
+  const envelope = await encryptDocument(keys.publicKey, plaintext, `cora:${folder.id}:${document}:1`);
+  f.app.store.db.prepare("INSERT INTO encrypted_documents(id, folder, version, data) VALUES (?, ?, ?, ?)").run(document, folder.id, 1, JSON.stringify({ id: document, folder: folder.id, version: 1, kind: "artifact", envelope }));
+  const agent = f.app.store.createAgent({ name: "Private handoff", model: "ollama/fixture", brainOwnerId: f.alice.user.id, enabled: false, tools: false });
+  const ctx = { agent, store: f.app.store, knowledge: f.app.knowledge, requester: { kind: "owner", id: f.alice.user.id } };
+  const call = { name: "encrypted_request", args: { folder: folder.id, document, version: 1, operation: "read" } };
+  const result = await executeTool(call, ctx);
+  assert.match(result.text, /NOT UNLOCKED/);
+  assert.match(result.text, new RegExp(`/#/artefatti/${folder.id}/accessi`));
+  assert.doesNotMatch(result.text, /PRIVATE_HANDOFF|ciphertext|privateKey|signingKey/);
+  assert.equal(f.app.store.db.prepare("SELECT COUNT(*) AS n FROM encrypted_requests WHERE state = 'pending'").get().n, 1);
+  for (const requester of [{ kind: "human", id: f.alice.user.id }, { kind: "owner", id: f.bob.user.id }]) {
+    assert.match((await executeTool(call, { ...ctx, requester })).text, /error:/);
+  }
+  assert.equal(f.app.store.db.prepare("SELECT COUNT(*) AS n FROM encrypted_requests").get().n, 1);
+  assert.doesNotMatch(f.app.brain.systemPrompt(agent, {}), /PRIVATE_HANDOFF_NEVER_IN_TOOL_OUTPUT/);
 });

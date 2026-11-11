@@ -1,3 +1,4 @@
+import { encryptedFolder } from "./encrypted-space.js";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
@@ -621,6 +622,7 @@ export class Artifacts {
    * where the folder says so.
    */
   async push({ agent, folder: folderRef, path, to = "", message = "", mirror = false, create = null, requester = null, memberUserId = "", channelId = "", traceId = "" }) {
+    if (encryptedFolder(this.store, this.findFolder(folderRef)?.id)) throw Object.assign(new Error("Encrypted folder: plaintext pushes are disabled."), { status: 409 });
     if (!this.boxes) throw new ArtifactError("there are no desktops here");
     const wanted = String(folderRef || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
     if (!validFolderPath(wanted)) throw new ArtifactError("folder must be a path like clienti/acme/report-q3: lowercase words and dashes, up to six levels");
@@ -765,6 +767,7 @@ export class Artifacts {
    * written, kept under its hash, and remembered as theirs for this folder.
    */
   async receive(folderId, user, body, size) {
+    if (encryptedFolder(this.store, folderId)) throw Object.assign(new Error("Encrypted folder: use the encrypted-space controls."), { status: 409 });
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
     if (!this.canUpload(folder, user)) throw new ArtifactError("non puoi caricare o modificare file in questa cartella", 403);
@@ -808,6 +811,7 @@ export class Artifacts {
    * looking at. A reviewer of the folder publishes it at once; anyone else proposes it.
    */
   async commitUpload(folderId, { user, dir = "", base, files, message = "" }) {
+    if (encryptedFolder(this.store, folderId)) throw Object.assign(new Error("Encrypted folder: use the encrypted-space controls."), { status: 409 });
     const folder = this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
     if (!this.canUpload(folder, user)) throw new ArtifactError("non puoi caricare o modificare file in questa cartella", 403);
@@ -1225,6 +1229,7 @@ export class Artifacts {
   }
 
   createShare(folderId, { label, view, access, commit = "", expiresAt = 0, status = "active", createdBy, requestedBy = null, reason = "", root = "" }) {
+    if (encryptedFolder(this.store, folderId)) throw Object.assign(new Error("Encrypted folder: use the encrypted-space controls."), { status: 409 });
     if (!this.shareSuffix) throw new ArtifactError("i link di condivisione esistono solo per gli spazi su usecora.space", 409);
     const group = String(folderId || "").startsWith("ag:") ? this.cleanGroup(String(folderId).slice(3)) : "";
     const folder = group ? this.groupFolder(group) : this.store.artifactFolder(folderId);

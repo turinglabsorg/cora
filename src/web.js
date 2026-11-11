@@ -1,3 +1,4 @@
+import { encryptedSpaceFor, encryptedFolder } from "./encrypted-space.js";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import http from "node:http";
@@ -52,6 +53,7 @@ const STATIC = {
   "/assets/apple-touch-icon.png": ["apple-touch-icon.png", "image/png"],
   "/sw.js": ["sw.js", "text/javascript; charset=utf-8"],
   "/assets/send.js": ["send.js", "text/javascript; charset=utf-8"],
+  "/assets/encrypted-space.js": ["encrypted-space.js", "text/javascript; charset=utf-8"],
 };
 const CSP = [
   "default-src 'self'",
@@ -187,6 +189,7 @@ async function readJson(req, limit = 256 * 1024) {
 export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, credentials = null, github = null, mailDomains = null, email = null, googleConnector = null, keyConnectors = null, knowledge = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
+  const encrypted = encryptedSpaceFor(store, { llm, knowledge, artifacts, publicOrigin: config.publicHost ? `https://${config.publicHost}` : "" });
   const sessionKey = config.sessionKey || config.adminPassword;
   const failures = [];
   // On usecora.space the cloud signs people in; this panel only checks the pass it hands over.
@@ -495,6 +498,46 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     const scopedAgent = /^\/api\/agents\/([\w-]+)(?:\/|$)/.exec(path);
     if (scopedAgent && (knowledge?.isSealed(store.agent(scopedAgent[1])) || (knowledge?.ownerMemory && !ownerTransport(user, path)))) checkAgentMemory(scopedAgent[1], user);
+    if (path.startsWith("/api/encrypted")) {
+      if (actingUser) throw new HttpError(403, "Lo sblocco richiede la sessione personale del browser.");
+      const body = method === "GET" || method === "DELETE" ? {} : await readJson(req, 4 * 1024 * 1024);
+      if (path === "/api/encrypted/settings" && ["GET", "PUT"].includes(method)) return send(res, 200, encrypted.settings(user, method === "PUT" ? body : null));
+      if (path === "/api/encrypted/recipients" && method === "GET") return send(res, 200, encrypted.recipients(user));
+      const agentMatch = /^\/api\/encrypted\/agents\/([\w-]+)$/.exec(path);
+      if (agentMatch && ["GET", "PUT"].includes(method)) return send(res, 200, encrypted.agentSettings(agentMatch[1], user, method === "PUT" ? body : null));
+      const folderMatch = /^\/api\/encrypted\/folders\/(af_[a-f0-9]{12})(?:\/(configure|challenge|methods|documents|requests|read|share|receive|export))?$/.exec(path);
+      if (folderMatch) {
+        const [, folderId, action] = folderMatch;
+        if (!action && method === "GET") return send(res, 200, encrypted.documents(folderId, user));
+        if (action === "documents" && method === "GET") {
+          encrypted.folder(folderId, user); return send(res, 200, encrypted.document(folderId, url.searchParams.get("document"), Number(url.searchParams.get("version"))));
+        }
+        if (action === "share" && method === "POST") return send(res, 201, encrypted.share(folderId, user, body));
+        if (action === "receive" && method === "POST") return send(res, 200, encrypted.receive(folderId, user, body));
+        if (action === "export" && method === "POST") return send(res, 200, encrypted.export(folderId, user, body));
+        if (action === "configure" && method === "POST") return send(res, 201, encrypted.configure(folderId, user, body));
+        if (action === "challenge" && method === "POST") return send(res, 201, encrypted.challenge(folderId, user, body));
+        if (action === "methods" && method === "PUT") return send(res, 200, encrypted.methods(folderId, user, body));
+        if (action === "documents" && method === "POST") return send(res, 201, encrypted.saveDocument(folderId, user, body));
+        if (action === "read" && method === "POST") {
+          const folder = encrypted.folder(folderId, user);
+          encrypted.prove(folder, user, body.proof, "read"); encrypted.audit(user.id, "read", folder);
+          return send(res, 200, { ok: true });
+        }
+        if (action === "requests" && method === "POST") {
+          const agent = store.agent(body.agent); if (!agent) throw new HttpError(404, "Agente non disponibile.");
+          return send(res, 201, encrypted.request(agent, { ...body, folder: folderId }, user.id));
+        }
+      }
+      const requestMatch = /^\/api\/encrypted\/requests\/(er_[a-f0-9]{24})(?:\/(approve))?$/.exec(path);
+      if (requestMatch) {
+        const request = encrypted.getRequest(requestMatch[1], user);
+        if (method === "GET" && !requestMatch[2]) return send(res, 200, request);
+        if (method === "DELETE" && !requestMatch[2]) return send(res, 200, encrypted.cancel(request, "revoked"));
+        if (method === "POST" && requestMatch[2]) return send(res, 200, await encrypted.approve(request.id, user, body));
+      }
+      throw new HttpError(404, "Operazione cifrata non disponibile.");
+    }
     if (path === "/api/mcp/tokens") {
       if (method === "GET") return send(res, 200, panelMcp.view(user, req));
       if (method === "POST") return send(res, 201, panelMcp.create(user, await readJson(req, 4096)));
@@ -1738,6 +1781,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const folder = store.artifactFolder(match[1]);
       if (!folder) throw new HttpError(404, "cartella non trovata");
       if (!artifacts.canReadMember(folder, user)) throw new HttpError(403, "non hai accesso a questa cartella");
+      if (encryptedFolder(store, folder.id) && method !== "GET") throw new HttpError(409, "Questa cartella usa lo Spazio cifrato: usa i suoi controlli di sblocco.");
       // Uploads from the panel: each file on its own as raw bytes, then one commit that places them.
       if (match[2] === "blobs" && method === "POST") {
         const length = req.headers["content-length"] === undefined ? NaN : Number(req.headers["content-length"]);
@@ -1772,6 +1816,9 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         const head = folder.head ? artifacts.store.artifactCommit(folder.head) : null;
         return send(res, 200, {
           folder: artifacts.folderView(folder),
+          encrypted: encryptedFolder(store, folder.id),
+          encryptedEnabled: encrypted.enabled,
+          canEncrypt: (folder.ownerId || (folder.createdBy?.kind === "user" ? folder.createdBy.id : "")) === user.id,
           canReview: artifacts.canReview(folder, user),
           canUpload: artifacts.canUpload(folder, user),
           canManage: artifacts.canManage(folder, user),

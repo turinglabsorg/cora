@@ -2125,6 +2125,17 @@ a.share-stats:hover { color: var(--amber); }
 .connector-senders { padding-top: 18px; border-top: 1px solid var(--line); }
 .connector-senders p { margin: 0; }
 .connector-detail .panel-title { overflow-wrap: anywhere; }
+.connector-detail .panel-head { padding: 12px 16px; }
+.connector-detail .panel-body { padding: 12px 16px; gap: 10px; }
+.connector-detail .panel-ico { width: 30px; height: 30px; }
+.connector-detail .panel-title h2 { font-size: 17px; }
+.connector-detail .set-row { padding: 12px 0; gap: 8px 20px; }
+.connector-detail .stack-sm { gap: 10px; }
+.connector-detail .connector-actions { display: flex; flex-direction: row; flex-wrap: wrap; justify-content: flex-start; gap: 6px; margin: 0; padding: 0; }
+.connector-detail .connector-actions > .btn:last-child { margin-left: 0; }
+.connector-pending .connector-actions .btn { height: 34px; padding: 0 10px; font-size: 10px; }
+.connector-pending .set-row { padding: 8px 0; }
+
 .connector-detail .panel-body > p { margin: 0; }
 .connector-detail .muted { color: var(--muted); }
 .connector-detail [role="status"]:empty { display: none; }
@@ -2461,3 +2472,17 @@ input.thread-search { height: 38px; }
 .thread-flow .led.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
 
 .agent-knowledge .set-row[hidden] { display: none; }
+
+
+/* The encrypted workspace uses the desk's own controls and section rail. */
+.encrypted-space .row > select { flex: 1 1 160px; width: auto; }
+.encrypted-space .encrypted-request { flex-wrap: wrap; }
+.encrypted-space .encrypted-request > .grow { flex: 1 1 220px; overflow-wrap: anywhere; }
+.encrypted-space .row > .btn:last-child { margin-left: 0; }
+.encrypted-space .row.end > .btn:last-child { margin-left: auto; }
+@media (max-width: 600px) {
+  .encrypted-space .row > select { flex-basis: 100%; }
+  .encrypted-space .row > .btn { flex: 1 1 auto; }
+}
+
+.encrypted-space [hidden] { display: none; }

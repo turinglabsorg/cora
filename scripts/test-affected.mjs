@@ -30,6 +30,7 @@ const PANEL = {
 
 // Each area: the paths it owns, the test files that cover it and the cora.test.js groups (name prefixes).
 const AREAS = [
+  { name: "encrypted space", paths: [/^src\/encrypted-space\.js$/, /^web\/encrypted-space\.js$/], files: ["encrypted-space", "artifacts", "sealed", "context"], cora: ["encrypted access tools"] },
   { name: "sealed agents", paths: [/^test\/sealed(?:-box|-artifacts|-network)?\.test\.js$/], files: ["sealed", "sealed-box", "sealed-artifacts", "sealed-network"], cora: [] },
   { name: "panel", paths: [/^web\/(app|i18n|index|sw)\.(js|html)$/, /^web\/styles\.css$/, /^src\/web\.js$/], ...PANEL },
   { name: "hermes keys", paths: [/^src\/(hermes-keys|credentials)\.js$/], files: ["hermes-keys", "deepseek", "connections"], cora: ["what runs the models"] },
