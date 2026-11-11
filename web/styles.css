@@ -498,6 +498,8 @@ input[type=color] { width: 64px; height: 44px; padding: 4px; background: var(--w
 .switch input:focus-visible + .rocker { box-shadow: 0 0 0 3px var(--amber-glow); }
 .switch-text { display: flex; flex-direction: column; min-width: 0; font-size: 14px; }
 .switch-text small { color: var(--faint); font-size: 12px; line-height: 1.35; }
+.agent-security [role="status"]:empty { display: none; }
+.agent-security [role="status"] { margin: 0; font-size: 12px; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip {

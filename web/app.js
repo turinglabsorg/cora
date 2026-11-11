@@ -4113,7 +4113,8 @@ function agentSecurityPane(agent, data) {
     "Ricordi personali e canali assegnati. Nessun accesso al Brain condiviso. Computer isolato; artefatti nel suo volume.");
   const input = seal.querySelector("input");
   input.disabled = !data.canManage;
-  const feedback = h("p", { role: "status", class: "muted" });
+  const feedback = h("span", { role: "status", class: "muted security-save-status" });
+  seal.querySelector(".switch-text").append(feedback);
   input.addEventListener("change", async () => {
     if (!data.canManage || input.disabled) return;
     const view = location.hash;
@@ -4133,8 +4134,8 @@ function agentSecurityPane(agent, data) {
       feedback.classList.add("err-text");
     } finally { input.disabled = !data.canManage; }
   });
-  return panel({ icon: "lock", title: "Sicurezza", hint: "Isolamento dell’agente, del computer e dei suoi artefatti." },
-    setRows(setRow("Agente sigillato", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true })), feedback, encryptedSetting(encryptedUI(), agent));
+  return panel({ icon: "lock", title: "Sicurezza", cls: "agent-security", hint: "Isolamento dell’agente, del computer e dei suoi artefatti." },
+    setRows(setRow("Agente sigillato", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true })), encryptedSetting(encryptedUI(), agent));
 }
 
 function agentKnowledgePane(agent, data) {
