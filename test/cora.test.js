@@ -1764,6 +1764,55 @@ test("a managed default email domain keeps its real provider status and never by
   assert.equal((await f.call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: "default-agent", domain: domain.name } })).status, 200);
 });
 
+test("connector setup preserves mounted forms and catalog across background updates", async (t) => {
+  const fixture = await subscriptionApp(t);
+  let stateReads = 0;
+  const panel = panelHarness({ hash: "#/settings/connettori/linear", fetch: async (path, init = {}) => {
+    if (path === "/api/state") stateReads++;
+    const response = await fixture.request(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  await panel.run("boot()");
+  const pane = panel.run('document.querySelector(".connectors-pane")');
+  await pane.readyConnectors;
+  const buttons = () => pane.querySelectorAll("button");
+  buttons().find(button => button.textContent === "App OAuth").click();
+  const inputs = pane.querySelector(".connector-detail").querySelectorAll("input");
+  assert.equal(inputs.length, 2);
+  inputs[0].value = "fixture-client-draft"; inputs[1].value = "fixture-secret-draft";
+  const expectDraft = () => {
+    assert.equal(panel.run('document.querySelector(".connectors-pane")'), pane);
+    assert.equal(pane.querySelector(".connector-detail").querySelectorAll("input")[0], inputs[0]);
+    assert.equal(inputs[0].value, "fixture-client-draft");
+    assert.equal(inputs[1].value, "fixture-secret-draft");
+    assert.equal(buttons().find(button => button.textContent === "App OAuth").getAttribute("aria-pressed"), "true");
+  };
+  for (let index = 0; index < 3; index++) {
+    const reads = stateReads;
+    panel.run('document.activeElement=null;S.events.onmessage({data:JSON.stringify({type:"telegram-chats"})})');
+    await waitFor(() => stateReads > reads);
+    await sleep(50);
+    expectDraft();
+    await panel.run('document.hidden=true;document.listeners.visibilitychange[0]()');
+    await panel.run('document.hidden=false;document.listeners.visibilitychange[0]()');
+    expectDraft();
+  }
+  pane.querySelector(".connector-back").click();
+  const search = pane.querySelector("input");
+  search.value = "Linear"; search.dispatch("input");
+  buttons().find(button => button.textContent === "Collegati").click();
+  await panel.run('document.activeElement=null;document.listeners.visibilitychange[0]()');
+  assert.equal(panel.run('document.querySelector(".connectors-pane")'), pane);
+  assert.equal(search.value, "Linear");
+  assert.equal(buttons().find(button => button.textContent === "Collegati").getAttribute("aria-pressed"), "true");
+  panel.run('location.hash="#/settings/telegram";renderSettings()');
+  const channelPage = panel.run('document.querySelector(".rail")');
+  const reads = stateReads;
+  panel.run('S.events.onmessage({data:JSON.stringify({type:"telegram-chats"})})');
+  await waitFor(() => stateReads > reads);
+  await waitFor(() => panel.run('document.querySelector(".rail")') !== channelPage);
+});
+
 test("Claude OAuth keeps the current authorization form when returning from the provider page", async (t) => {
   const fixture = await subscriptionApp(t);
   const created = await fixture.request("/api/subscriptions", { method: "POST", body: { provider: "claude", label: "Claude OAuth" } });

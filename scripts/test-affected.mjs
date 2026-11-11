@@ -25,7 +25,7 @@ const NONE = [/^docs\//, /\.md$/, /^LICENSE$/, /^\.gitignore$/, /^deploy\//, /^b
 
 const PANEL = {
   files: ["connections", "key-connectors", "hermes-keys", "access", "permissions"],
-  cora: ["external configuration MCP", "shared owner controls", "panel auth", "routine workspaces", "subscription preparation", "manual subscription codes", "Claude OAuth", "device-code"],
+  cora: ["external configuration MCP", "shared owner controls", "panel auth", "routine workspaces", "subscription preparation", "manual subscription codes", "connector setup", "Claude OAuth", "device-code"],
 };
 
 // Each area: the paths it owns, the test files that cover it and the cora.test.js groups (name prefixes).
