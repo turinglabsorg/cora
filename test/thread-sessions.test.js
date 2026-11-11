@@ -308,3 +308,41 @@ test("past turns fill the history once, each thread keeps its count, and an id-o
   assert.equal(thread.total, 2);
   assert.equal(board.threads.some((item) => item.id.startsWith("web-")), false);
 });
+
+test("a Slack thread stays live while an agent is engaged in it and goes to the history when they leave", async (t) => {
+  const ollama = await fakeOllama(() => ({ content: "PASS" }));
+  const app = startCora({
+    home: tempHome(), host: "127.0.0.1", port: 0, adminPassword: "fixture-password", sessionKey: "fixture-session", insecureCookies: true,
+    useResidentSubscriptions: false, cloudUrl: "", cloudKey: "", cloudSpace: "", discordToken: "", telegramToken: "", botTokenFor: () => "",
+    ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
+    ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
+  });
+  t.after(async () => { await app.stop(); await ollama.close(); });
+  await app.ready;
+  const { store, orchestrator } = app;
+  const neo = store.createAgent({ name: "Neo" });
+  const engaged = "sl:C0FIXTURE1:1794388421.182389";
+  const left = "sl:C0FIXTURE1:1794388155.333589";
+  const fresh = "sl:C0FIXTURE1:1794388500.000001";
+  const closed = "sl:C0FIXTURE1:1794388600.000001";
+  for (const id of [engaged, left, closed]) orchestrator.sessions.finish(orchestrator.sessions.begin({ agentId: neo.id, channelId: id, kind: "chat" }));
+  store.setValue("threadLabels", { [fresh]: "appena aperto", [engaged]: "test-nuovo-thread" });
+  store.setValue("closedThreads", [closed]);
+  const focus = { ids: [neo.id], turn: [neo.id], at: Date.now(), remindedAt: 0, owner: true };
+  orchestrator.engagements[engaged] = focus;
+  orchestrator.engagements[closed] = focus;
+  orchestrator.engagements[left] = null;
+  const board = await orchestrator.threadBoard();
+  const find = (id) => board.threads.find((thread) => thread.id === id);
+  assert.equal(find(engaged).open, true);
+  assert.deepEqual(find(engaged).listening.map((agent) => agent.name), ["Neo"]);
+  assert.equal(find(engaged).flows.every((flow) => flow.status !== "active"), true);
+  assert.equal(find(fresh).open, true);
+  assert.equal(find(left).open, false);
+  assert.deepEqual(find(left).listening, []);
+  assert.equal(find(closed).open, false);
+  assert.deepEqual(find(closed).listening, []);
+  await orchestrator.closePlatformThread(engaged).catch(() => {});
+  orchestrator.engagements[engaged] = null;
+  assert.equal((await orchestrator.threadBoard()).threads.find((thread) => thread.id === engaged).open, false);
+});

@@ -2077,6 +2077,8 @@ export class Orchestrator {
     };
     for (const channel of known.values()) if (channel.thread || channel.parentId) ensure(channel.id);
     for (const id of Object.keys(labels)) ensure(id);
+    const engagements = this.engagements || {};
+    for (const [id, focus] of Object.entries(engagements)) if (focus?.ids?.length && !closed.has(id) && slackIds(id)?.threadTs) ensure(id);
     const measured = [];
     for (const session of sessions) {
       const group = ensure(session.channelId);
@@ -2106,6 +2108,12 @@ export class Orchestrator {
       };
       group.flows.push(flow);
       if (session.status === "active" && this.sessions.ownPid(session)) measured.push([flow, session.pid]);
+    }
+    // A thread stays live while an agent is engaged in it, as on Discord: it leaves the live list only when they disengage.
+    for (const group of groups.values()) {
+      const ids = group.closed ? [] : (engagements[group.id]?.ids || []);
+      group.listening = ids.map((id) => this.store.agent(id)).filter(Boolean).map((agent) => ({ id: agent.id, name: agent.name, color: agent.color || "#f2a93b" }));
+      if (group.thread && !group.closed && (group.listening.length || (group.kind === "slack" && !group.flows.length))) group.open = true;
     }
     const usage = await this.processUsage.sample(measured.map(([, pid]) => pid)).catch(() => new Map());
     for (const [flow, pid] of measured) if (usage.has(pid)) flow.usage = usage.get(pid);

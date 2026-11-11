@@ -8854,7 +8854,7 @@ function threadCard(thread) {
         btn("", { icon: "next", cls: "sm ghost", href: threadHref(thread.id), title: "Tutto il ragionamento" }))),
     flows.length
       ? h("div", { class: "thread-flows" }, flows.map((flow) => threadFlow({ ...flow, channelId: thread.id })))
-      : h("p", { class: "thread-meta thread-idle" }, tr("Nessuna sessione attiva")));
+      : h("p", { class: "thread-meta thread-idle" }, thread.listening?.length ? tr("In ascolto: {names}", { names: thread.listening.map((agent) => agent.name).join(", ") }) : tr("Nessuna sessione attiva")));
 }
 
 /** One finished thread on one row: who worked there, when, and the last thing said. Opening it lists its sessions. */
@@ -8934,7 +8934,7 @@ async function renderThreads() {
     // Whoever is working comes first, a whole channel included: an idle thread never buries a live session.
     const live = [...threads.filter(working), ...threads.filter((thread) => !working(thread))].filter((thread) => threadCard(thread))
       .map((thread) => ({ key: thread.id, sig: threadSig([thread, manage]), build: () => threadCard(thread) }));
-    const past = threads.filter((thread) => thread.flows.some((flow) => flow.status !== "active"))
+    const past = threads.filter((thread) => !thread.listening?.length && thread.flows.some((flow) => flow.status !== "active"))
       .map((thread) => ({ key: thread.id, sig: threadSig([thread, manage]), build: (old) => threadPast(thread, old ? old.open : S.threadOpen.has(thread.id)) }));
     keyedChildren(liveList, live);
     keyedChildren(pastList, past);
