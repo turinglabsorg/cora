@@ -8097,6 +8097,7 @@ const DOC_TARGETS = [["reply", "Messaggi in chat", "Quello che gli agenti scrivo
 
 /** The checks doc runs for the agents: doc's own, switched on or off, and the owner's, tried on every harness before they are saved. */
 function docChecksPane() {
+  if (!S.data.doc?.installed) return panel({ icon: "shield", title: "Controlli di doc" }, h("p", { class: "muted" }, "doc non è installato su questa macchina: per ora non controlla niente."));
   const root = h("div", { class: "stack" });
   let data = null;
   const save = async (off, added, okText = "Controlli aggiornati") => {
