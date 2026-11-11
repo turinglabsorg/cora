@@ -1,3 +1,5 @@
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { createFolderKeys, encryptDocument } from "../web/encrypted-space.js";
 import { googleConnectorFixture } from "./google-connector-fixtures.js";
 import { EmailChannel } from "../src/email-channel.js";
@@ -22,7 +24,7 @@ import { subscriptionEnvironment } from "../src/subscriptions.js";
 import { SubscriptionUsage, parseSubscriptionUsage, parseSubscriptionBalances } from "../src/subscription-usage.js";
 import { readNativeUsage } from "../src/subscription-usage-worker.js";
 import { LLM, graphicsCards } from "../src/llm.js";
-import { runClaude, runCodex } from "../src/cli.js";
+import { runClaude, runCodex, runHermes } from "../src/cli.js";
 import { Doc } from "../src/doc.js";
 import { Boxes } from "../src/box.js";
 import { Voice } from "../src/voice.js";
@@ -4422,6 +4424,83 @@ describe("talking with the agents", () => {
     }
   });
 
+  test("a delegated final result returns to its requester without a tag, once and in its own thread", async () => {
+    const THREAD = "1599000000000000835";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Delegated result continuation" });
+    await sleep(150);
+    let calls = 0, checks = 0, continuationPrompt = "";
+    replies.set("Olga", (body) => {
+      if (calls) continuationPrompt = lastUserText(body);
+      return { content: ++calls === 1 ? "@Pino verifica il candidato, poi riprendo il lavoro." : "Esito ricevuto, candidato integrato." };
+    });
+    replies.set("Pino", () => ++checks === 1
+      ? { tool_calls: [{ function: { name: "say", arguments: { text: "Verifica in corso." } } }] }
+      : { content: "Candidato verificato. Nessun blocco." });
+    discord.say({ content: "@Olga, prepara il candidato e fallo verificare.", channel: THREAD });
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && item.content === "Candidato verificato. Nessun blocco."));
+    await quiet();
+    const messages = discord.state.webhookPosts.filter((item) => item.channelId === THREAD);
+    assert.equal(calls, 2, "the requester continues when the final report has no mention");
+    assert.match(continuationPrompt, /\[Cora: risultato del collega\]/);
+    assert.match(continuationPrompt, /Riprendi il lavoro ancora aperto sulla richiesta della persona/);
+    assert.equal(messages.filter((item) => item.username === "Pino").length, 2, "one progress post and one final report, with no return loop");
+    assert.equal(app.store.threadSessions().filter((item) => item.channelId === THREAD).length, 3);
+    assert.equal(messages.filter((item) => item.content === "Esito ricevuto, candidato integrato.").length, 1);
+  });
+
+  test("a final result delivered with say returns once after PASS, without reposting it", async () => {
+    const THREAD = "1599000000000000836";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Tool-only delegated result" });
+    await sleep(150);
+    let calls = 0, checks = 0;
+    replies.set("Olga", () => ({ content: ++calls === 1 ? "@Pino verifica questo candidato." : "Ricevuta verifica tool-only." }));
+    replies.set("Pino", () => ++checks === 1
+      ? { tool_calls: [{ function: { name: "say", arguments: { text: "Verifica tool-only conclusa." } } }] }
+      : { content: "PASS" });
+    discord.say({ content: "@Olga, delega il controllo e riprendi al risultato.", channel: THREAD });
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && item.content === "Verifica tool-only conclusa."));
+    await quiet();
+    assert.equal(calls, 2);
+    assert.equal(discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.content === "Verifica tool-only conclusa.").length, 1);
+    assert.equal(app.store.threadSessions().filter((item) => item.channelId === THREAD).length, 3);
+  });
+
+  test("a returned result cannot reengage a requester who left the conversation", async () => {
+    const THREAD = "1599000000000000837";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Departed requester" });
+    await sleep(150);
+    let calls = 0, checking = false, finish;
+    const gate = new Promise((resolve) => { finish = resolve; });
+    replies.set("Olga", () => ({ content: ++calls === 1 ? "@Pino verifica il candidato." : "UNEXPECTED_RESTART" }));
+    replies.set("Pino", async () => { checking = true; await gate; return { content: "Verifica conclusa dopo uscita." }; });
+    discord.say({ content: "@Olga, delega la verifica.", channel: THREAD });
+    await waitFor(() => checking);
+    app.orchestrator.endListening(app.orchestrator.state(THREAD), olga.id);
+    finish();
+    await quiet();
+    assert.equal(calls, 1);
+    assert.ok(!app.orchestrator.state(THREAD).focus.ids.includes(olga.id));
+    assert.ok(!discord.state.webhookPosts.some((item) => item.content === "UNEXPECTED_RESTART"));
+  });
+
+  test("a late colleague result cannot restart a requester stopped from the panel", async () => {
+    const THREAD = "1599000000000000838";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Stopped requester" });
+    await sleep(150);
+    let calls = 0, checking = false, finish;
+    const gate = new Promise((resolve) => { finish = resolve; });
+    replies.set("Olga", () => ({ content: ++calls === 1 ? "@Pino verifica il candidato." : "UNEXPECTED_STOP_RESTART" }));
+    replies.set("Pino", async () => { checking = true; await gate; return { content: "Verifica conclusa dopo stop." }; });
+    discord.say({ content: "@Olga, delega la verifica.", channel: THREAD });
+    await waitFor(() => checking);
+    app.orchestrator.stopThread(THREAD, olga.id);
+    assert.ok(app.orchestrator.state(THREAD).focus.ids.includes(olga.id), "stopping a task does not end listening");
+    finish();
+    await quiet();
+    assert.equal(calls, 1);
+    assert.ok(!discord.state.webhookPosts.some((item) => item.content === "UNEXPECTED_STOP_RESTART"));
+  });
+
   test("colleague fanout rechecks the remaining turn budget before starting each session", async () => {
     const THREAD = "1599000000000000834";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Bounded colleague fanout" });
@@ -5877,7 +5956,7 @@ describe("hosted on usecora.space", () => {
 });
 
 describe("harness recovery", () => {
-  async function fixture(t, { restart = true, twice = false, startup = false, pendingDecision = null } = {}) {
+  async function fixture(t, { restart = true, twice = false, startup = false, pendingDecision = null, delegated = false } = {}) {
     const settings = app.store.settings;
     app.store.updateSettings({ goalMode: true, decisionModel: "ollama/test-model", decisionBackups: [] });
     goals = () => "Il record di prova è aggiornato e verificato.";
@@ -5906,7 +5985,9 @@ describe("harness recovery", () => {
       app.boxes.shell = original; app.store.deleteAgent(agent.id); cli.set({ reply: "ok" });
       app.store.updateSettings({ goalMode: settings.goalMode, decisionModel: settings.decisionModel, decisionBackups: settings.decisionBackups });
     });
-    const history = [{ id: "recovery-owner", at: Date.now(), kind: "owner", authorId: OWNER, authorName: "Seb", content: "Aggiorna il record di prova e verifica." }];
+    const history = [{ id: "recovery-owner", at: Date.now(), kind: "owner", authorId: OWNER, authorName: "Seb", content: "Aggiorna il record di prova e verifica.",
+      ...(delegated ? { kind: "agent", authorId: null, authorName: "Requester", agentId: "ag_requester", delegated: true } : {}),
+    }];
     const notices = [];
     const run = () => app.orchestrator.withSession(agent, channelId, "chat", () => app.brain.chatTurn({ agent, channel: { id: channelId, name: "Recovery" }, history, replyTo: history[0], computer: true, forced: true, say: async (text) => notices.push(text) }));
     return { agent, channelId, run, notices, calls: () => cli.calls().filter((item) => item.flavor === "codex").slice(from), evidence: () => ({ writes, decisions, decisionInput }) };
@@ -5930,6 +6011,19 @@ describe("harness recovery", () => {
     assert.equal(app.store.activeThreadSession(f.agent.id, f.channelId), null);
     assert.equal(f.notices.length, 1);
     assert.equal(app.store.trace(result.value.traceId).steps.find((step) => step.harnessFailure)?.harnessFailure.signal, "SIGTERM");
+  });
+
+  test("a recovered delegation retains its requester in the persisted resume instructions", async (t) => {
+    const f = await fixture(t, { delegated: true });
+    const result = await f.run();
+    const saved = app.store.trace(result.value.traceId).steps.findLast((step) => step.replyTo)?.replyTo;
+    assert.equal(saved.kind, "agent");
+    assert.equal(saved.agentId, "ag_requester");
+    assert.equal(saved.delegated, true);
+    assert.equal(saved.handoffResult, false);
+    assert.equal(saved.content, "Aggiorna il record di prova e verifica.");
+    assert.equal(f.evidence().writes, 1);
+    assert.equal(f.calls().length, 2);
   });
 
   test("a numeric startup exit reaches the decider without hidden CLI retries", async (t) => {
@@ -5997,6 +6091,46 @@ test("thread privacy enforces ownership for live traces, full history and a revo
   f.app.orchestrator.sessions.finish(session);
   assert.equal((await f.request(f.bob, `/api/threads/${id}`)).data.traces[0].output, "PRIVATE_RESULT_SENTINEL");
   assert.equal((await f.request(f.alice, `/api/threads/${id}`)).status, 404);
+});
+
+test("Hermes automatically restarts a failed argument launch through stdin before any tool runs", async () => {
+  const native = fakeCli(), root = tempHome(), notes = [];
+  native.set({ reply: "Ripresa riuscita." });
+  const original = childProcess.spawn;
+  childProcess.spawn = (...args) => {
+    childProcess.spawn = original;
+    syncBuiltinESMExports();
+    throw Object.assign(new Error("spawn E2BIG"), { code: "E2BIG" });
+  };
+  syncBuiltinESMExports();
+  try {
+    const result = await runHermes({ bin: native.hermes, model: "fixture", system: "Owner instructions", prompt: "Continue the current task.",
+      toolNames: [], workDir: join(root, "work"), home: join(root, "hermes"),
+      baseUrl: "http://127.0.0.1:1/v1", timeoutMs: 10000, onStep: (step) => notes.push(step) });
+    assert.equal(result.text, "Ripresa riuscita.");
+    assert.equal(native.calls().length, 1, "the failed launch never started the CLI or a tool");
+    assert.ok(native.calls()[0].argv.includes("--query-file"));
+    assert.ok(notes.some((step) => step.type === "note" && /riparto/.test(step.text)));
+  } finally {
+    childProcess.spawn = original;
+    syncBuiltinESMExports();
+  }
+});
+
+test("Hermes carries oversized Unicode context intact without placing it in argv", async () => {
+  const native = fakeCli(), root = tempHome();
+  native.set({ reply: "Contesto ricevuto.", thinking: "Controllo il contesto completo.", hermesWarning: "Runtime warning that is not the assistant answer." });
+  const system = "Owner instructions: keep every character.\n";
+  const prompt = "à雪🙂\n".repeat(100000) + "FINAL_CONTEXT_MARKER";
+  const steps = [];
+  const result = await runHermes({ bin: native.hermes, model: "fixture", system, prompt,
+    toolNames: [], workDir: join(root, "work"), home: join(root, "hermes"),
+    baseUrl: "http://127.0.0.1:1/v1", timeoutMs: 10000, onStep: (step) => steps.push(step) });
+  assert.equal(result.text, "Contesto ricevuto.");
+  const run = native.calls().find((item) => item.flavor === "hermes");
+  assert.ok(run.stdin === system + "\n\n---\n\n" + prompt, "the full Unicode prompt arrives unchanged");
+  assert.ok(run.argv.every((arg) => Buffer.byteLength(arg) < 65536));
+  assert.ok(steps.some((step) => step.type === "thinking" && step.text === "Controllo il contesto completo."));
 });
 
 describe("what runs the models", () => {
