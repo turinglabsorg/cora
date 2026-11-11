@@ -305,3 +305,9 @@ Delegation origin is retained in the persisted reply-delivery trace note so a se
 
 
 Settings → Regia stores `conversationIdleMinutes`: the default is 30, finite values are whole minutes >= 5, and `null` disables inactivity questions without changing engagement. `Orchestrator.checkEngagements()` reads the current setting on every check and uses the selected duration in Italian/English delivery. Changing the value affects existing unasked conversations without resetting their last-message time or repeating an already asked question. The stacked autosave control restores accepted values on failure. Integration coverage follows API validation, persistence, mounted controls, live timing, infinity and one-question semantics in `test/cora.test.js`.
+
+## Recovery activity and colleague directory
+
+`resumeTask()` restores the working indicator and always clears its timer when the recovered turn exits, including failures and busy-session refusals. Its `say`, file captions and final report retain the original owner/delegation authorization, so a colleague summoned by resumed work receives the same computer gate as a new turn. Untrusted human origins do not acquire this authorization. Coverage is the focused recovery tests in `test/cora.test.js`.
+
+`Brain.agentDirectory()` is the shared source for the system roster and the read-only `list_agents` own tool. It returns current configured contact metadata (id, name, description, enabled/desktop flags, verified mailbox address/status), never mailbox credentials, historical addresses or message content. Owner namespaces and sealed-agent shared-channel visibility match the existing roster. Desktop enablement is configuration, not evidence of runtime availability or permission for a new action.
