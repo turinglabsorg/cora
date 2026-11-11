@@ -4274,6 +4274,29 @@ describe("talking with the agents", () => {
     assert.equal(reminders().length, 2);
   });
 
+  test("a thirty-minute question that cannot be delivered is not retried every minute", async () => {
+    const THREAD = "1599000000000000797";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle undeliverable" });
+    await sleep(100);
+    replies.set("Olga", () => ({ content: "Resto qui." }));
+    discord.say({ content: "@Olga, ascolta qui", channel: THREAD });
+    await waitFor(() => posts("Olga").filter((text) => text === "Resto qui.").length >= 1);
+    await quiet();
+    const focus = app.orchestrator.engagements[THREAD];
+    const original = app.orchestrator.postAs;
+    let attempts = 0;
+    app.orchestrator.postAs = async (...args) => { if (args[1]?.id === THREAD) { attempts += 1; throw new Error("Slack chat.postMessage -> channel_not_found"); } return original.apply(app.orchestrator, args); };
+    try {
+      await app.orchestrator.checkEngagements(focus.at + 30 * 60000);
+      await app.orchestrator.checkEngagements(focus.at + 31 * 60000);
+      await app.orchestrator.checkEngagements(focus.at + 32 * 60000);
+    } finally {
+      app.orchestrator.postAs = original;
+    }
+    assert.equal(attempts, 1, "one failed delivery, then it waits");
+    assert.ok(app.store.value("conversationEngagements")[THREAD].remindedAt > 0, "the failed question is saved as asked");
+  });
+
   test("a no or a goodbye to the thirty-minute question ends the listening, and the farewell does not restart the count", async () => {
     const THREAD = "1599000000000000796";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "idle goodbye" });

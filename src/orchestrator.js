@@ -685,10 +685,13 @@ export class Orchestrator {
           if (transportOf(channelId) === "discord" && !this.dmAgentId(channelId) && this.bots && !await this.bots.canRead(agent, channelId)) continue;
           if (this.engagements[channelId] !== focus) break;
           const text = this.store.settings.language === "en" ? "It has been 30 minutes since the last message. Should I keep listening to this conversation? I will stay connected until you explicitly ask me to leave." : "Sono passati 30 minuti dall'ultimo messaggio. Devo rimanere in ascolto di questa conversazione? Resto collegato finché non mi chiedi esplicitamente di uscire.";
-          await this.postAs(agent, this.state(channelId), text, undefined, undefined, { passive: true });
-          if (this.engagements[channelId] === focus) {
-            focus.remindedAt = now;
-            this.store.setValue("conversationEngagements", this.engagements);
+          try { await this.postAs(agent, this.state(channelId), text, undefined, undefined, { passive: true }); }
+          finally {
+            // A question that cannot be delivered counts as asked: it waits for the next message instead of retrying every minute.
+            if (this.engagements[channelId] === focus) {
+              focus.remindedAt = now;
+              this.store.setValue("conversationEngagements", this.engagements);
+            }
           }
           break;
         }
