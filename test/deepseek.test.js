@@ -83,6 +83,9 @@ test("an agent on DeepSeek Harness runs on the instance's own DeepSeek key, with
   assert.equal(trace.tokensIn, 2000, "cached input is included exactly once, alongside uncached input");
   assert.equal(trace.tokensOut, 20);
   assert.equal(trace.meter.modelSteps, 2, "one Cora execution contains two native model steps");
+  const thoughts = (await call(`/api/traces/${trace.id}`)).data.steps.filter((step) => step.type === "thinking");
+  assert.deepEqual(thoughts, [thoughts[0]], "an empty thinking block after a tool is no thought, not a hidden one");
+  assert.equal(thoughts[0].text, "Lo salvo in memoria.");
   assert.equal(trace.meter.costs[0].estimated, true);
   assert.ok(trace.meter.costs[0].amount > 0);
 

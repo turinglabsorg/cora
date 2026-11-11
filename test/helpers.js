@@ -672,6 +672,7 @@ let acp = null;
 const handle = async () => {
   let server = null;
   let hermesConfig = null;
+  let hermes = null;
   let grokConfig = null;
   let dshPatch = null;
   let geminiSettings = null;
@@ -684,6 +685,19 @@ const handle = async () => {
     hermesConfig = fs.readFileSync(path.join(process.env.HERMES_HOME, "config.yaml"), "utf8");
     const fill = (value) => value.replace(/\\$\\{(\\w+)\\}/g, (_, key) => process.env[key] || "");
     const pick = (pattern) => JSON.parse(hermesConfig.match(pattern)[1]);
+    // Like Hermes, the session and the assistant's tool-call turn are recorded before the tool runs.
+    if (!control.hermesRefusal) {
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(path.join(process.env.HERMES_HOME, "state.db"));
+      db.exec("PRAGMA journal_mode = WAL; CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL); CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, tool_name TEXT, reasoning TEXT, reasoning_content TEXT)");
+      const session = "fixture_" + process.pid + "_" + Date.now();
+      const add = (row) => db.prepare("INSERT INTO messages (session_id, role, content, tool_calls, tool_name, reasoning, reasoning_content) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(session, row.role, row.content ?? null, row.tool_calls ?? null, row.tool_name ?? null, row.reasoning ?? null, row.reasoning ?? null);
+      db.prepare("INSERT INTO sessions (id, source, started_at) VALUES (?, 'cli', ?)").run(session, Date.now() / 1000);
+      add({ role: "user", content: argv[argv.indexOf("-z") + 1] });
+      if (control.tool) add({ role: "assistant", content: "Prima controllo.", reasoning: control.thinking || "Penso.", tool_calls: JSON.stringify([{ id: "call_1", type: "function", function: { name: "mcp__cora__" + control.tool, arguments: JSON.stringify(control.args || {}) } }]) });
+      hermes = { db, session, add };
+    }
     if ((argv[argv.indexOf("-t") + 1] || "").split(",").includes("cora")) {
       server = {
         command: pick(/^    command: (.*)$/m), args: [pick(/^      - (.*)$/m)],
@@ -775,6 +789,19 @@ const handle = async () => {
   const answer = control.reply + (record.output ? " [" + record.output + "]" : "");
   const line = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
   if (flavor === "hermes") {
+    // Hermes records the session in HERMES_HOME/state.db as it goes and, with --usage-file, reports its id.
+    const usageFile = argv.includes("--usage-file") ? argv[argv.indexOf("--usage-file") + 1] : "";
+    if (control.hermesRefusal) {
+      if (usageFile) fs.writeFileSync(usageFile, JSON.stringify({ session_id: null, completed: false, failed: true }));
+      process.stdout.write(control.hermesRefusal + "\\n");
+      return;
+    }
+    if (control.tool) {
+      hermes.add({ role: "tool", content: record.output, tool_name: "mcp__cora__" + control.tool });
+      hermes.add({ role: "assistant", content: answer, reasoning: control.hermesFinalThought || null });
+    } else hermes.add({ role: "assistant", content: answer, reasoning: control.thinking || null });
+    hermes.db.close();
+    if (usageFile) fs.writeFileSync(usageFile, JSON.stringify({ session_id: hermes.session, completed: true, failed: false, input_tokens: 100, output_tokens: 20 }));
     process.stdout.write(answer + "\\n");
   } else if (flavor === "grok") {
     const session = "fixture-" + process.pid;
@@ -795,6 +822,8 @@ const handle = async () => {
       line({ type: "text", text: "Prima controllo." });
       line({ type: "tool_call", callId: "toolu_1", tool: "mcp__cora__" + control.tool, input: control.args || {} });
       line({ type: "tool_result", callId: "toolu_1", status: "completed", result: record.output });
+      // DeepSeek often answers a plain step after a tool with an empty thinking block.
+      if (control.thinking) line({ type: "thinking", text: "" });
     }
     line({ type: "text", text: answer });
     const usages = control.dshUsages || [{ inputTokens: 90, outputTokens: 11, totalTokens: 101 }];

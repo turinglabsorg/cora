@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { geminiSettings } from "./gemini-profile.js";
 import { deepSeekUsage, emptyMeter, mergeMeter } from "./usage.js";
@@ -342,11 +343,64 @@ export function hermesConfig({ baseUrl, model, keyed = false }) {
 const NO_REPLY = /^\s*\W{0,4}No reply\b/i;
 
 /**
+ * Hermes keeps each step of a session in its state.db as it goes: the thoughts, the
+ * text between tool calls and the calls. One-shot mode prints only the answer, so Cora
+ * follows the session there: found by the prompt it was given, then by the id Hermes
+ * reports at the end.
+ */
+function hermesSteps({ home, input, since, onStep }) {
+  const texts = textSteps(onStep);
+  let db = null;
+  let sessionId = "";
+  let lastId = 0;
+  const open = () => {
+    if (db) return db;
+    const file = join(home, "state.db");
+    if (!existsSync(file)) return null;
+    try { db = new DatabaseSync(file, { readOnly: true }); } catch { db = null; }
+    return db;
+  };
+  const read = (id = "") => {
+    if (!onStep) return;
+    const handle = open();
+    if (!handle) return;
+    try {
+      if (!sessionId) {
+        sessionId = id || handle.prepare("SELECT m.session_id AS id FROM sessions s JOIN messages m ON m.session_id = s.id WHERE s.started_at >= ? AND m.role = 'user' AND m.content = ? ORDER BY s.started_at DESC LIMIT 1").get(since, input)?.id || "";
+      }
+      if (!sessionId) return;
+      const rows = handle.prepare("SELECT id, role, content, reasoning, reasoning_content, tool_calls FROM messages WHERE session_id = ? AND id > ? ORDER BY id").all(sessionId, lastId);
+      for (const row of rows) {
+        lastId = row.id;
+        if (row.role !== "assistant") continue;
+        const thought = String(row.reasoning || row.reasoning_content || "").trim();
+        if (thought) {
+          texts.flush();
+          onStep({ type: "thinking", text: thought });
+        }
+        if (String(row.content || "").trim()) texts.text(String(row.content));
+        if (row.tool_calls && row.tool_calls !== "[]") texts.flush();
+      }
+    } catch {}
+  };
+  return {
+    read,
+    finish(id, answer) {
+      read(id);
+      texts.finish(answer);
+      try { db?.close(); } catch {}
+      db = null;
+    },
+  };
+}
+
+/**
  * One agent turn on Hermes Agent, one-shot: only Cora's tools (the cora
  * toolset: no terminal, files or computer use on the host), no personal rules
- * or memory of the owner's Hermes, the answer on stdout.
+ * or memory of the owner's Hermes, the answer on stdout. Its thoughts and steps
+ * come from the session it records.
  */
-export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl, apiKey = "", signal }) {
+export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl, apiKey = "", onStep, beforeTool, signal }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const configFile = join(home, "config.yaml");
@@ -357,20 +411,41 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   const settled = (text) => text.replace(/^\s+default(_model)?:.*$/gm, "");
   if (settled(current) !== settled(config)) writeFileSync(configFile, config, { mode: 0o600 });
   const tools = mcp && toolNames.length;
+  const input = `${system}\n\n---\n\n${prompt}`;
+  const usageFile = join(workDir, `hermes-usage-${randomBytes(6).toString("hex")}.json`);
   // In one-shot mode an MCP server's toolset is named after the server, and -t is the complete list.
-  const args = ["-z", `${system}\n\n---\n\n${prompt}`, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify"];
+  const args = ["-z", input, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify", "--usage-file", usageFile];
   const env = { HERMES_HOME: home, ...(apiKey ? { CORA_ENDPOINT_KEY: apiKey } : {}), ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
-  const out = await run(bin, args, { cwd: workDir, timeoutMs, env, signal });
-  signal?.throwIfAborted();
-  if (out.timedOut) throw new Error(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`);
-  const text = out.stdout.trim();
-  if (out.code !== 0 || /^hermes -z: agent failed/m.test(text) || /^hermes -z: agent failed/m.test(out.stderr)) {
-    throw new Error(`hermes: ${(out.stderr || text).trim().slice(-240) || `exit ${out.code}`}`);
+  const steps = hermesSteps({ home, input, since: Date.now() / 1000 - 5, onStep });
+  const poll = onStep ? setInterval(() => steps.read(), 1000) : null;
+  poll?.unref?.();
+  // Hermes records the turn that calls a tool before running it: its thought comes before the tool.
+  if (beforeTool) beforeTool.run = () => steps.read();
+  try {
+    const out = await run(bin, args, { cwd: workDir, timeoutMs, env, signal });
+    clearInterval(poll);
+    signal?.throwIfAborted();
+    if (out.timedOut) throw new Error(`hermes: no answer within ${Math.round(timeoutMs / 1000)}s`);
+    const text = out.stdout.trim();
+    if (out.code !== 0 || /^hermes -z: agent failed/m.test(text) || /^hermes -z: agent failed/m.test(out.stderr)) {
+      throw new Error(`hermes: ${(out.stderr || text).trim().slice(-240) || `exit ${out.code}`}`);
+    }
+    let report = {};
+    try { report = JSON.parse(readFileSync(usageFile, "utf8")); } catch {}
+    // A provider's refusal (no credits, a bad key) comes back as the answer with exit 0:
+    // the report says the run failed, and that text is never said in the agent's name.
+    if (report.failed === true) throw new Error(`hermes: ${text.slice(-240) || `${model} failed`}`);
+    // Hermes exits 0 and prints a banner when the model gave it nothing: that is a
+    // failed turn, never something to say in the agent's name.
+    if (NO_REPLY.test(text)) throw new Error(`hermes: ${model} returned no content`);
+    steps.finish(report.session_id || "", text);
+    return { text };
+  } finally {
+    clearInterval(poll);
+    if (beforeTool) beforeTool.run = null;
+    steps.finish("", "");
+    rmSync(usageFile, { force: true });
   }
-  // Hermes exits 0 and prints a banner when the model gave it nothing: that is a
-  // failed turn, never something to say in the agent's name.
-  if (NO_REPLY.test(text)) throw new Error(`hermes: ${model} returned no content`);
-  return { text };
 }
 
 /**
@@ -462,9 +537,12 @@ export async function runDeepSeek({ bin, model, system, prompt, mcp, toolNames, 
   let failure = "";
   const onLine = (line) => {
     const event = JSON.parse(line);
+    // DeepSeek often skips thinking on a plain step after a tool: the block arrives with no
+    // text at all, which is no thought rather than a hidden one.
     if (event.type === "thinking") {
+      if (!String(event.text || "").trim()) return;
       texts.flush();
-      onStep?.(String(event.text || "").trim() ? { type: "thinking", text: event.text } : { type: "thinking", hidden: true });
+      onStep?.({ type: "thinking", text: event.text });
     } else if (event.type === "text" && String(event.text || "").trim()) texts.text(event.text);
     else if (event.type === "tool_call") texts.flush();
     else if (event.type === "status" && event.phase === "step_start") started.set(`${event.turn}:${event.step}`, Date.now());
