@@ -2457,3 +2457,17 @@ input.thread-search { height: 38px; }
 .thread-flow .led.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
 
 .agent-knowledge .set-row[hidden] { display: none; }
+
+
+/* The encrypted workspace uses the desk's own controls and section rail. */
+.encrypted-space .row > select { flex: 1 1 160px; width: auto; }
+.encrypted-space .encrypted-request { flex-wrap: wrap; }
+.encrypted-space .encrypted-request > .grow { flex: 1 1 220px; overflow-wrap: anywhere; }
+.encrypted-space .row > .btn:last-child { margin-left: 0; }
+.encrypted-space .row.end > .btn:last-child { margin-left: auto; }
+@media (max-width: 600px) {
+  .encrypted-space .row > select { flex-basis: 100%; }
+  .encrypted-space .row > .btn { flex: 1 1 auto; }
+}
+
+.encrypted-space [hidden] { display: none; }

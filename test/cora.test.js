@@ -1,3 +1,4 @@
+import { createFolderKeys, encryptDocument } from "../web/encrypted-space.js";
 import { googleConnectorFixture } from "./google-connector-fixtures.js";
 import { EmailChannel } from "../src/email-channel.js";
 import { mailWorld } from "./mail-fixtures.js";
@@ -3409,7 +3410,7 @@ describe("agents in Discord", () => {
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /^Sei Clara\./);
     assert.match(run.argv[run.argv.indexOf("--system-prompt") + 1], /<istruzioni_personali>\n# Global Agent Instructions\nISTRUZIONI DI PROVA/);
     // Its own routines travel with it: they are the agent's own, not the owner's computer.
-    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__read_attachment", "mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__email_inbox", "mcp__cora__email_read", "mcp__cora__email_settings", "mcp__cora__email_draft", "mcp__cora__email_send", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
+    assert.deepEqual(run.argv[run.argv.indexOf("--allowedTools") + 1].split(","), ["mcp__cora__encrypted_request", "mcp__cora__read_attachment", "mcp__cora__say", "mcp__cora__thread_open", "mcp__cora__email_inbox", "mcp__cora__email_read", "mcp__cora__email_settings", "mcp__cora__email_draft", "mcp__cora__email_send", "mcp__cora__list_channels", "mcp__cora__remember", "mcp__cora__forget", "mcp__cora__recall", "mcp__cora__update_core", "mcp__cora__list_routines", "mcp__cora__set_routine", "mcp__cora__set_reminder", "mcp__cora__routine_history", "mcp__cora__delete_routine", "mcp__cora__notify", "mcp__cora__ask_owner", "mcp__cora__artifact_folders", "mcp__cora__artifact_log", "mcp__cora__secret_list", "mcp__cora__secret_request"]);
     assert.ok(run.tools.includes("recall") && !run.tools.includes("shell"));
     assert.match(run.stdin, /Clara, il mio colore preferito è il verde/);
     const memories = await call(`/api/agents/${created.data.id}/memories`);
@@ -8396,4 +8397,30 @@ describe("agent character sheet", () => {
     assert.doesNotMatch(prompt, /Scheda del carattere/);
     app.store.deleteAgent(agent.id);
   });
+});
+
+
+test("encrypted access tools return only a scoped panel link and reject unverified or foreign callers", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  await f.request(f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: true } });
+  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "synthetic/tool-handoff", title: "Private archive" } })).data;
+  const keys = await createFolderKeys(folder.id, "password", "synthetic verification password");
+  const configured = await f.request(f.alice, `/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: keys });
+  assert.equal(configured.status, 201);
+  const document = "ed_" + randomBytes(12).toString("hex"), plaintext = "PRIVATE_HANDOFF_NEVER_IN_TOOL_OUTPUT";
+  const envelope = await encryptDocument(keys.publicKey, plaintext, `cora:${folder.id}:${document}:1`);
+  f.app.store.db.prepare("INSERT INTO encrypted_documents(id, folder, version, data) VALUES (?, ?, ?, ?)").run(document, folder.id, 1, JSON.stringify({ id: document, folder: folder.id, version: 1, kind: "artifact", envelope }));
+  const agent = f.app.store.createAgent({ name: "Private handoff", model: "ollama/fixture", brainOwnerId: f.alice.user.id, enabled: false, tools: false });
+  const ctx = { agent, store: f.app.store, knowledge: f.app.knowledge, requester: { kind: "owner", id: f.alice.user.id } };
+  const call = { name: "encrypted_request", args: { folder: folder.id, document, version: 1, operation: "read" } };
+  const result = await executeTool(call, ctx);
+  assert.match(result.text, /NOT UNLOCKED/);
+  assert.match(result.text, new RegExp(`/#/artefatti/${folder.id}/accessi`));
+  assert.doesNotMatch(result.text, /PRIVATE_HANDOFF|ciphertext|privateKey|signingKey/);
+  assert.equal(f.app.store.db.prepare("SELECT COUNT(*) AS n FROM encrypted_requests WHERE state = 'pending'").get().n, 1);
+  for (const requester of [{ kind: "human", id: f.alice.user.id }, { kind: "owner", id: f.bob.user.id }]) {
+    assert.match((await executeTool(call, { ...ctx, requester })).text, /error:/);
+  }
+  assert.equal(f.app.store.db.prepare("SELECT COUNT(*) AS n FROM encrypted_requests").get().n, 1);
+  assert.doesNotMatch(f.app.brain.systemPrompt(agent, {}), /PRIVATE_HANDOFF_NEVER_IN_TOOL_OUTPUT/);
 });

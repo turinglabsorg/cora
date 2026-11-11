@@ -1,3 +1,4 @@
+import { encryptedSetting, encryptedSetup, encryptedFolderPanel } from "./encrypted-space.js";
 import { EN } from "./i18n.js";
 import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, characterType, shouldWriteCharacter } from "./character.js";
 
@@ -4045,6 +4046,8 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
+const encryptedUI = () => ({ h, btn, api, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace });
+
 function agentSecurityPane(agent, data) {
   if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));
   const seal = switchInput("sealed", "Sigillato", data.sealed,
@@ -4062,7 +4065,7 @@ function agentSecurityPane(agent, data) {
   } });
   return panel({ icon: "lock", title: "Sicurezza", hint: "Isolamento dell’agente, del computer e dei suoi artefatti." },
     setRows(setRow("Agente sigillato", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true })),
-    h("div", { class: "row end" }, save), feedback);
+    h("div", { class: "row end" }, save), feedback, encryptedSetting(encryptedUI(), agent));
 }
 
 function agentKnowledgePane(agent, data) {
@@ -6663,6 +6666,14 @@ async function renderArtifactFolder(id, tab, dir = "") {
   catch (error) { slot.replaceChildren(empty("archive", error.message, btn("Torna agli artefatti", { icon: "back", href: "#/artefatti" }))); return; }
   if (location.hash !== view) return;
   const { folder } = data;
+  if (data.encrypted) {
+    try {
+      const workspace = await encryptedFolderPanel(encryptedUI(), folder, tab, S.data.agents, () => renderArtifactFolder(id, tab, dir));
+      if (location.hash !== view) return;
+      shell([pageHead(raw(folder.title), "Spazio cifrato"), workspace], { title: folder.title, back: "#/artefatti", mode: "artifacts" });
+    } catch (error) { slot.replaceChildren(empty("lock", error.message, btn("Riprova", { onclick: () => renderArtifactFolder(id, tab, dir) }))); }
+    return;
+  }
   const head = data.commits.find((commit) => commit.id === folder.head) || null;
   const pending = data.commits.filter((commit) => commit.status === "proposed" || commit.status === "conflict");
   const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"], ["impostazioni", "Impostazioni", "sliders"]];
@@ -6693,7 +6704,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   ], { title: folder.title, back: dir ? artifactDirHref(folder.id, parent) : artifactLevelHref(folder.path.split("/").slice(0, -1).join("/")), mode: "artifacts" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
   const shown = tab === "commit" ? artifactTakes(data) : ["permessi", "impostazioni"].includes(tab) ? artifactPermissions(data, { settings: tab === "impostazioni" }) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
-  content.replaceChildren(...[shown].flat().filter(Boolean));
+  content.replaceChildren(...[shown].flat().filter(Boolean), ...(tab === "impostazioni" && data.encryptedEnabled && data.canEncrypt && !data.commits.length ? [encryptedSetup(encryptedUI(), folder, () => renderArtifactFolder(id, tab, dir))] : []));
 }
 
 /**
@@ -8130,7 +8141,7 @@ function artifactSpacePanel() {
     } }, raw(label))));
   amount.addEventListener("change", () => { const value = Math.round(Number(amount.value)); if (value >= 1) save(value); });
   const row = setRow("Tetto per gli artefatti", "Quanto possono occupare i file caricati dagli agenti e dal pannello. Di base è metà del disco; in ogni caso un caricamento si ferma se lascerebbe meno di 5 GB liberi.", h("div", { class: "stack-sm" }, modes, custom), { stack: true });
-  return panel({ icon: "layers", title: "Spazio", hint: "Lo spazio che usano gli artefatti su questa macchina." }, box, setRows(row));
+  return h("div", { class: "stack" }, panel({ icon: "layers", title: "Spazio", hint: "Lo spazio che usano gli artefatti su questa macchina." }, box, setRows(row)), encryptedSetting(encryptedUI()));
 }
 
 async function saveSettings(changes, row = null) {
