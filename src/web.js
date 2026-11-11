@@ -805,55 +805,73 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       throw new HttpError(404, "not found");
     }
-    const canStopFlow = (agentId) => user.role === "owner" || Boolean(knowledge?.canManage(store.agent(agentId), user));
+    const canStopFlow = (agentId) => knowledge ? knowledge.canManage(store.agent(agentId), user) : user.role === "owner";
+    const privateThreads = Boolean(knowledge?.ownerMemory || store.agents().some((agent) => agent.sealed));
+    const visibleThreadAgents = knowledge?.agentsFor(user) || store.agents();
+    const threadScope = privateThreads ? {
+      agentIds: visibleThreadAgents.map((agent) => agent.id),
+      emptyThreadIds: Object.entries(store.value("threadCreators", {})).filter(([, id]) => id === user.id).map(([id]) => id),
+    } : {};
+    const requireThreadManagement = async (id) => {
+      if (!privateThreads) return;
+      const own = await orchestrator.threadDetail(id, threadScope);
+      if (!own) throw new HttpError(404, "thread non trovato");
+      const all = (await orchestrator.threadBoard()).threads.find((thread) => thread.id === id);
+      const participants = [...store.threadParticipantIds(id), ...(all?.listening || []).map((agent) => agent.id)];
+      if (participants.some((id) => !canStopFlow(id))) throw new HttpError(403, "Il thread contiene agenti di altri proprietari");
+    };
     if (path === "/api/threads" && method === "GET") {
-      const board = await orchestrator.threadBoard();
-      if (knowledge?.ownerMemory && user.role !== "owner") {
-        const allowed = new Set(knowledge.agentsFor(user).map((agent) => agent.id));
-        board.threads = board.threads.map((thread) => ({ ...thread, flows: thread.flows.filter((flow) => allowed.has(flow.agentId)) }));
-        board.parents = [];
+      const board = await orchestrator.threadBoard(threadScope);
+      if (privateThreads) {
+        const parents = new Set(visibleThreadAgents.flatMap((agent) => orchestrator.channels.listFor(agent).map((channel) => channel.parentId || channel.id)));
+        board.parents = user.role === "owner" ? board.parents.filter((parent) => parents.has(parent.id)) : [];
       }
       board.threads = board.threads.map((thread) => ({ ...thread, flows: thread.flows.map((flow) => ({ ...flow, canStop: canStopFlow(flow.agentId) })) }));
       return send(res, 200, board);
     }
     const threadPage = /^\/api\/threads\/([\w:.%-]{3,160})$/.exec(path);
     if (threadPage && !["rename", "stop", "close"].includes(threadPage[1]) && method === "GET") {
-      const detail = await orchestrator.threadDetail(decodeURIComponent(threadPage[1]));
+      const detail = await orchestrator.threadDetail(decodeURIComponent(threadPage[1]), threadScope);
       if (!detail) throw new HttpError(404, "thread non trovato");
-      if (knowledge?.ownerMemory && user.role !== "owner") {
-        const allowed = new Set(knowledge.agentsFor(user).map((agent) => agent.id));
-        detail.thread.flows = detail.thread.flows.filter((flow) => allowed.has(flow.agentId));
-        detail.traces = detail.traces.filter((trace) => allowed.has(trace.agentId));
-      }
-      if (knowledge?.ownerMemory) detail.traces = detail.traces.filter((trace) => ownsEntry(trace, user));
+      if (knowledge) detail.traces = detail.traces.filter((trace) => ownsEntry(trace, user));
       detail.thread.flows = detail.thread.flows.map((flow) => ({ ...flow, canStop: canStopFlow(flow.agentId) }));
       return send(res, 200, detail);
-    }
-    if (path === "/api/threads/stop" && method === "POST" && user.role !== "owner") {
-      // A co-owner stops the session of an agent they manage, nothing else.
-      const body = await readJson(req, 4000);
-      if (!body.agentId || !canStopFlow(String(body.agentId))) throw new HttpError(403, "Solo il proprietario");
-      return send(res, 200, orchestrator.stopThread(String(body.id || ""), String(body.agentId)));
     }
     if (["/api/threads", "/api/threads/rename", "/api/threads/close"].includes(path) && method === "POST" && user.role !== "owner") {
       throw new HttpError(403, "Solo il proprietario");
     }
     if (path === "/api/threads" && method === "POST") {
       const body = await readJson(req, 4000);
-      try { return send(res, 201, await orchestrator.createPlatformThread(body)); }
-      catch (error) { throw new HttpError(error.status || 400, error.message); }
+      if (privateThreads) {
+        const parents = new Set(visibleThreadAgents.flatMap((agent) => orchestrator.channels.listFor(agent).map((channel) => channel.parentId || channel.id)));
+        if (!parents.has(body.parentId)) throw new HttpError(403, "canale non autorizzato");
+      }
+      try {
+        const created = await orchestrator.createPlatformThread(body);
+        store.setValue("threadCreators", { ...store.value("threadCreators", {}), [created.id]: user.id });
+        return send(res, 201, created);
+      } catch (error) { throw new HttpError(error.status || 400, error.message); }
     }
     if (path === "/api/threads/rename" && method === "POST") {
       const body = await readJson(req, 4000);
+      await requireThreadManagement(String(body.id || ""));
       try { return send(res, 200, await orchestrator.renamePlatformThread(body.id, body.name)); }
       catch (error) { throw new HttpError(error.status || 400, error.message); }
     }
     if (path === "/api/threads/stop" && method === "POST") {
       const body = await readJson(req, 4000);
-      return send(res, 200, orchestrator.stopThread(String(body.id || ""), String(body.agentId || "")));
+      const id = String(body.id || ""), agentId = String(body.agentId || "");
+      if (agentId) {
+        if (!canStopFlow(agentId)) throw new HttpError(403, "Solo il proprietario dell’agente");
+        return send(res, 200, orchestrator.stopThread(id, agentId));
+      }
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario");
+      const own = store.activeThreadSessions().filter((session) => session.channelId === id && canStopFlow(session.agentId));
+      return send(res, 200, { stopped: own.reduce((count, session) => count + orchestrator.stopThread(id, session.agentId).stopped, 0) });
     }
     if (path === "/api/threads/close" && method === "POST") {
       const body = await readJson(req, 4000);
+      await requireThreadManagement(String(body.id || ""));
       try { return send(res, 200, await orchestrator.closePlatformThread(String(body.id || ""))); }
       catch (error) { throw new HttpError(error.status || 400, error.message); }
     }

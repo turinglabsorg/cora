@@ -122,7 +122,7 @@ test("the thread board shows one flow per agent and stop ends only that flow", a
     ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
     ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
   });
-  t.after(async () => { await app.stop(); await ollama.close(); });
+  t.after(async () => { for (const session of app.store.activeThreadSessions()) app.orchestrator.sessions.finish(session); await app.stop(); await ollama.close(); });
   await app.ready;
   const nico = app.store.createAgent({ name: "Nico" });
   const vera = app.store.createAgent({ name: "Vera" });
@@ -169,7 +169,7 @@ test("the thread page keeps names, refuses channels, reopens closed threads and 
     ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
     ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
   });
-  t.after(async () => { await app.stop(); await ollama.close(); });
+  t.after(async () => { for (const session of app.store.activeThreadSessions()) app.orchestrator.sessions.finish(session); await app.stop(); await ollama.close(); });
   await app.ready;
   const nico = app.store.createAgent({ name: "Nico" });
   const vera = app.store.createAgent({ name: "Vera" });
@@ -235,7 +235,7 @@ test("the thread page keeps names, refuses channels, reopens closed threads and 
 });
 
 test("a co-owner stops only the sessions of agents they manage and sees only their turns", async (t) => {
-  const f = await knowledgeWorld(); t.after(f.close);
+  const f = await knowledgeWorld(); t.after(async () => { for (const session of f.app.store.activeThreadSessions()) f.app.orchestrator.sessions.finish(session); await f.close(); });
   const mine = f.app.store.createAgent({ name: "Clara", brainOwnerId: f.alice.user.id, tools: false });
   const other = f.app.store.createAgent({ name: "Milo", brainOwnerId: f.bob.user.id, tools: false });
   const channelId = "155500000000000321";
@@ -265,7 +265,7 @@ test("past turns fill the history once, each thread keeps its count, and an id-o
     ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
     ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
   });
-  t.after(async () => { await app.stop(); await ollama.close(); });
+  t.after(async () => { for (const session of app.store.activeThreadSessions()) app.orchestrator.sessions.finish(session); await app.stop(); await ollama.close(); });
   await app.ready;
   const { store, orchestrator } = app;
   const vera = store.createAgent({ name: "Vera" });
@@ -317,7 +317,7 @@ test("a Slack thread stays live while an agent is engaged in it and goes to the 
     ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
     ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
   });
-  t.after(async () => { await app.stop(); await ollama.close(); });
+  t.after(async () => { for (const session of app.store.activeThreadSessions()) app.orchestrator.sessions.finish(session); await app.stop(); await ollama.close(); });
   await app.ready;
   const { store, orchestrator } = app;
   const neo = store.createAgent({ name: "Neo" });
@@ -355,7 +355,7 @@ test("a Telegram chat stays live while an agent is engaged in it and goes to the
     ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
     ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
   });
-  t.after(async () => { await app.stop(); await ollama.close(); });
+  t.after(async () => { for (const session of app.store.activeThreadSessions()) app.orchestrator.sessions.finish(session); await app.stop(); await ollama.close(); });
   await app.ready;
   const { store, orchestrator } = app;
   const nico = store.createAgent({ name: "Nico" });
@@ -379,4 +379,64 @@ test("a Telegram chat stays live while an agent is engaged in it and goes to the
   assert.deepEqual(find(left).listening, []);
   orchestrator.engagements[group] = null;
   assert.equal((await orchestrator.threadBoard()).threads.find((thread) => thread.id === group).open, false);
+});
+
+
+test("thread privacy hides other owners' archived rows, listeners and details from members and the space admin", async (t) => {
+  const f = await knowledgeWorld(); t.after(async () => { for (const session of f.app.store.activeThreadSessions()) f.app.orchestrator.sessions.finish(session); await f.close(); });
+  const { store, orchestrator: orch } = f.app;
+  const alice = store.createAgent({ name: "ALICE_AGENT", brainOwnerId: f.alice.user.id });
+  const bob = store.createAgent({ name: "BOB_PRIVATE_AGENT", brainOwnerId: f.bob.user.id });
+  const shared = "155500000000000701", secret = "155500000000000702", orphan = "155500000000000703";
+  store.setValue("threadLabels", { [secret]: "BOB_PRIVATE_TITLE", [shared]: "Shared conversation", [orphan]: "ORPHAN_PRIVATE_TITLE" });
+  const finished = (agent, channelId) => orch.sessions.finish(orch.sessions.begin({ agentId: agent.id, channelId, kind: "chat" }));
+  finished(alice, shared); finished(bob, secret);
+  store.setValue("threadCreators", { [secret]: f.alice.user.id });
+  for (let i = 0; i < 15; i++) finished(bob, shared);
+  const trace = f.app.brain.traces.start({ agentId: bob.id, kind: "chat", channelId: secret });
+  trace.finish({ status: "done", output: "BOB_PRIVATE_OUTPUT" });
+  orch.engagements[secret] = { ids: [bob.id] };
+  orch.engagements[shared] = { ids: [alice.id, bob.id] };
+  for (const actor of [f.alice, f.admin]) {
+    const board = await f.request(actor, "/api/threads");
+    const serialized = JSON.stringify(board.data);
+    assert.doesNotMatch(serialized, /BOB_PRIVATE|ORPHAN_PRIVATE/);
+    assert.equal(board.data.threads.some((row) => row.id === secret), false);
+    const detail = await f.request(actor, `/api/threads/${secret}`);
+    assert.equal(detail.status, 404);
+    assert.doesNotMatch(JSON.stringify(detail.data), /BOB_PRIVATE/);
+    assert.equal((await f.request(actor, "/api/threads/stop", { method: "POST", body: { id: secret, agentId: bob.id } })).status, 403);
+  }
+  const board = (await f.request(f.alice, "/api/threads")).data;
+  const row = board.threads.find((row) => row.id === shared);
+  assert.ok(row, "foreign recent sessions cannot evict an owner's older session");
+  assert.equal(row.total, 1);
+  assert.equal(row.flows.length, 1);
+  assert.deepEqual(row.listening.map((agent) => agent.id), [alice.id]);
+  const own = (await f.request(f.bob, "/api/threads")).data;
+  assert.ok(own.threads.some((row) => row.id === secret));
+  store.updateAgent(bob.id, { coOwnerIds: [f.alice.user.id] });
+  assert.equal((await f.request(f.alice, `/api/threads/${secret}`)).status, 200);
+  store.updateAgent(bob.id, { coOwnerIds: [] });
+  assert.equal((await f.request(f.alice, `/api/threads/${secret}`)).status, 404);
+});
+
+
+test("an admin's batch stop leaves foreign sessions alive and cannot rename or close their threads", async (t) => {
+  const f = await knowledgeWorld(); t.after(async () => { for (const session of f.app.store.activeThreadSessions()) f.app.orchestrator.sessions.finish(session); await f.close(); });
+  const adminId = (await f.request(f.admin, "/api/state")).data.currentUser.id;
+  const own = f.app.store.createAgent({ name: "Admin owned", brainOwnerId: adminId });
+  const foreign = f.app.store.createAgent({ name: "Bob owned", brainOwnerId: f.bob.user.id });
+  const id = "155500000000000704", mixed = "155500000000000705";
+  const orch = f.app.orchestrator;
+  orch.sessions.begin({ agentId: foreign.id, channelId: id, kind: "chat" });
+  orch.sessions.begin({ agentId: foreign.id, channelId: mixed, kind: "chat" });
+  orch.sessions.begin({ agentId: own.id, channelId: mixed, kind: "chat" });
+  const stopped = await f.request(f.admin, "/api/threads/stop", { method: "POST", body: { id: mixed } });
+  assert.equal(stopped.status, 200); assert.equal(stopped.data.stopped, 1);
+  assert.equal(f.app.store.activeThreadSession(foreign.id, mixed).status, "active");
+  for (const target of [id, mixed]) for (const action of ["rename", "close"]) {
+    const response = await f.request(f.admin, `/api/threads/${action}`, { method: "POST", body: { id: target, name: "changed" } });
+    assert.equal(response.status, target === id ? 404 : 403);
+  }
 });

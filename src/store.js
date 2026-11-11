@@ -1589,12 +1589,19 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
     return this.stmt("SELECT * FROM thread_sessions ORDER BY started_at DESC LIMIT ?").all(Math.max(1, Math.min(1000, Number(limit) || 400))).map(threadSessionRow);
   }
 
+  threadParticipantIds(channelId) {
+    return this.stmt("SELECT agent_id FROM thread_sessions WHERE channel_id = ? UNION SELECT agent_id FROM traces WHERE channel_id = ?")
+      .all(String(channelId), String(channelId)).map((row) => row.agent_id);
+  }
+
   /** Every thread with its newest sessions (live ones always) and how many it had in all. */
-  threadSessionsByChannel(perChannel = 12) {
+  threadSessionsByChannel(perChannel = 12, agentIds = null) {
+    if (agentIds && !agentIds.length) return [];
+    const scope = agentIds ? ` WHERE agent_id IN (${agentIds.map(() => "?").join(",")})` : "";
     return this.stmt(`SELECT * FROM (
       SELECT *, ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY started_at DESC) AS rank, COUNT(*) OVER (PARTITION BY channel_id) AS total
-      FROM thread_sessions) WHERE rank <= ? OR status = 'active' ORDER BY started_at DESC`)
-      .all(Math.max(1, Math.min(200, Number(perChannel) || 12)))
+      FROM thread_sessions${scope}) WHERE rank <= ? OR status = 'active' ORDER BY started_at DESC`)
+      .all(...(agentIds || []), Math.max(1, Math.min(200, Number(perChannel) || 12)))
       .map((row) => ({ ...threadSessionRow(row), total: row.total || 0 }));
   }
 
@@ -1634,9 +1641,11 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
   }
 
   /** The turns of every agent in one channel, newest first, with their steps but not the prompt. */
-  channelTraces(channelId, limit = 60) {
-    return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal, meter, steps FROM traces WHERE channel_id = ? ORDER BY started_at DESC LIMIT ?")
-      .all(String(channelId), Math.max(1, Math.min(200, Number(limit) || 60)))
+  channelTraces(channelId, limit = 60, agentIds = null) {
+    if (agentIds && !agentIds.length) return [];
+    const scope = agentIds ? ` AND agent_id IN (${agentIds.map(() => "?").join(",")})` : "";
+    return this.stmt(`SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal, meter, steps FROM traces WHERE channel_id = ?${scope} ORDER BY started_at DESC LIMIT ?`)
+      .all(String(channelId), ...(agentIds || []), Math.max(1, Math.min(200, Number(limit) || 60)))
       .map((row) => ({ ...traceRow(row, false), output: row.output || "", steps: JSON.parse(row.steps || "[]") }));
   }
 

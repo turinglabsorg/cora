@@ -9312,7 +9312,8 @@ async function renderThreadPage(id) {
       build: (old) => threadTurn(trace, old ? old.open : first ? index < 2 : true),
     })), () => false);
     for (const card of list.children) card.hidden = Boolean(only) && card.dataset.agent !== only;
-    listEmpty.hidden = Boolean(traces.length);
+    if (traces.length) listEmpty.remove();
+    else list.after(listEmpty);
     toggleAll.hidden = traces.length <= 2;
     if (hint) hint.textContent = tr(traces.length >= 60 ? "Gli ultimi 60 turni, dal più recente." : "Ogni turno, dal più recente.");
   };

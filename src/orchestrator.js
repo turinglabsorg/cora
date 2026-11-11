@@ -2077,11 +2077,14 @@ export class Orchestrator {
     return guilds.length === 1 ? guilds[0] : "";
   }
 
-  async threadBoard() {
+  async threadBoard({ agentIds = null, emptyThreadIds = [] } = {}) {
+    const allowed = agentIds ? new Set(agentIds) : null;
+    const visibleAgent = (id) => !allowed || allowed.has(id);
+    const emptyVisible = new Set(emptyThreadIds.filter((id) => !this.store.threadParticipantIds(id).length && !this.engagements?.[id]?.ids?.length));
     const labels = this.store.value("threadLabels", {});
     const closed = new Set(this.store.value("closedThreads", []));
     const known = new Map((this.channels?.list?.() || []).map((channel) => [channel.id, channel]));
-    const sessions = this.store.threadSessionsByChannel(12);
+    const sessions = this.store.threadSessionsByChannel(12, agentIds);
     const ids = [...new Set([...Object.keys(labels), ...sessions.map((session) => session.channelId)])];
     const names = this.threadNames(ids, known);
     const groups = new Map();
@@ -2149,26 +2152,27 @@ export class Orchestrator {
     }
     // A thread stays live while an agent is engaged in it, as on Discord: it leaves the live list only when they disengage.
     for (const group of groups.values()) {
-      const ids = group.closed ? [] : (engagements[group.id]?.ids || []);
+      const ids = group.closed ? [] : (engagements[group.id]?.ids || []).filter(visibleAgent);
       group.listening = ids.map((id) => this.store.agent(id)).filter(Boolean).map((agent) => ({ id: agent.id, name: agent.name, color: agent.color || "#f2a93b" }));
       if (group.thread && !group.closed && (group.listening.length || (group.kind === "slack" && !group.flows.length))) group.open = true;
       // A Telegram chat has no threads of its own: the chat is the conversation, live while an agent is engaged in it.
       if (group.kind === "telegram") group.open = !group.closed && group.listening.length > 0;
+      if (allowed) group.open = !group.closed && Boolean(group.listening.length || group.flows.some((flow) => flow.status === "active") || (emptyVisible.has(group.id) && group.open));
     }
     const usage = await this.processUsage.sample(measured.map(([, pid]) => pid)).catch(() => new Map());
     for (const [flow, pid] of measured) if (usage.has(pid)) flow.usage = usage.get(pid);
     const parents = [...known.values()].filter((channel) => !channel.thread && !channel.parentId && (channel.kind === "discord" || channel.kind === "slack"))
       .map((channel) => ({ id: channel.id, name: channel.name, kind: channel.kind }));
-    return { threads: [...groups.values()], parents, machine: this.processUsage.machine() };
+    return { threads: [...groups.values()].filter((group) => !allowed || group.flows.length || group.listening.length || emptyVisible.has(group.id)), parents, machine: this.processUsage.machine() };
   }
 
   /** One thread whole: its flows and every turn the agents took in it, with their steps. */
-  async threadDetail(id) {
-    const board = await this.threadBoard();
+  async threadDetail(id, scope = {}) {
+    const board = await this.threadBoard(scope);
     const thread = board.threads.find((item) => item.id === id);
     if (!thread) return null;
-    const live = [...(this.brain?.traces?.live?.values?.() || [])].filter((trace) => trace.channelId === id).map((trace) => trace.full());
-    const stored = this.store.channelTraces(id, 60).filter((trace) => !live.some((item) => item.id === trace.id));
+    const live = [...(this.brain?.traces?.live?.values?.() || [])].filter((trace) => trace.channelId === id && (!scope.agentIds || scope.agentIds.includes(trace.agentId))).map((trace) => trace.full());
+    const stored = this.store.channelTraces(id, 60, scope.agentIds).filter((trace) => !live.some((item) => item.id === trace.id));
     const traces = [...live.map(({ prompt, system, ...trace }) => trace), ...stored]
       .sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
       .map((trace) => {

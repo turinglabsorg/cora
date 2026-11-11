@@ -5729,6 +5729,25 @@ describe("harness recovery", () => {
   });
 });
 
+test("thread privacy enforces ownership for live traces, full history and a revoked co-owner", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const agent = f.app.store.createAgent({ name: "Private history", brainOwnerId: f.bob.user.id, coOwnerIds: [f.alice.user.id] });
+  const id = "155500000000000711";
+  const trace = f.app.brain.traces.start({ agentId: agent.id, kind: "chat", channelId: id });
+  trace.add({ type: "thinking", text: "PRIVATE_REASONING_SENTINEL" });
+  const session = f.app.orchestrator.sessions.begin({ agentId: agent.id, channelId: id, kind: "chat" });
+  assert.equal((await f.request(f.alice, `/api/threads/${id}`)).data.traces[0].steps[0].text, "PRIVATE_REASONING_SENTINEL");
+  f.app.store.updateAgent(agent.id, { coOwnerIds: [] });
+  for (const actor of [f.alice, f.admin]) {
+    assert.equal((await f.request(actor, `/api/threads/${id}`)).status, 404);
+    assert.doesNotMatch(JSON.stringify((await f.request(actor, "/api/threads")).data), /Private history|PRIVATE_REASONING_SENTINEL/);
+  }
+  trace.finish({ status: "done", output: "PRIVATE_RESULT_SENTINEL" });
+  f.app.orchestrator.sessions.finish(session);
+  assert.equal((await f.request(f.bob, `/api/threads/${id}`)).data.traces[0].output, "PRIVATE_RESULT_SENTINEL");
+  assert.equal((await f.request(f.alice, `/api/threads/${id}`)).status, 404);
+});
+
 describe("what runs the models", () => {
   test("a model on this machine is told apart from one in the cloud, and the panel can see the cards", async () => {
     const state = (await call("/api/state")).data;
