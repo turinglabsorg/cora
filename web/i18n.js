@@ -1,6 +1,7 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Questo agente è sigillato, non può attivare la tailnet": "This agent is sealed and cannot enable the tailnet",
   "{count} workspace collegati": "{count} connected workspaces",
   "Workspace da autorizzare": "Workspace awaiting authorization",
   "App OAuth Linear": "Linear OAuth app",
@@ -30,7 +31,6 @@ export const EN = {
 
   "Sicurezza": "Security",
   "Sicurezza non disponibile": "Security unavailable",
-  "Salva sicurezza": "Save security",
   "Isolamento e protezione": "Isolation and protection",
   "Isolamento dell’agente, del computer e dei suoi artefatti.": "Isolation of the agent, its desktop and its artifacts.",
   "L’isolamento si gestisce in Impostazioni → Sicurezza.": "Manage isolation in Settings → Security.",

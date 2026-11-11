@@ -2709,7 +2709,7 @@ function agentForm(agent, { only = "", knowledge = null } = {}) {
     ["carattere", "Carattere", "spark", "Personalità e modo di parlare", [characterPane.node]],
     ["ascolto", "Ascolto", "radio", "Canali e presenza", [listening]],
     ["voce", "Voce", "mic", "Lingua e risposte vocali", [voice]],
-    ["sicurezza", "Sicurezza", "lock", "Isolamento e protezione", [agentSecurityPane(agent, knowledge)]],
+    ["sicurezza", "Sicurezza", "lock", "Isolamento e protezione", [agentSecurityPane(agent, knowledge), agentRemoteAccessPane(agent)]],
     ["autorizzazioni", "Autorizzazioni", "shield", "Chi può farlo lavorare", [agentPermissionsPane(agent), owner].filter(Boolean)],
     ...platformsOn().map((kind) => [kind, TRANSPORTS[kind].label, TRANSPORTS[kind].icon, "Account e collegamento", [kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)]]),
     ["github", "GitHub", "github", "App e repository", [githubAccount(agent)]],
@@ -4057,17 +4057,27 @@ function agentSecurityPane(agent, data) {
   const input = seal.querySelector("input");
   input.disabled = !data.canManage;
   const feedback = h("p", { role: "status", class: "muted" });
-  const save = btn("Salva sicurezza", { icon: "check", cls: "primary", disabled: !data.canManage, onclick: async () => {
-    save.disabled = true;
+  input.addEventListener("change", async () => {
+    if (!data.canManage || input.disabled) return;
+    const view = location.hash;
+    input.disabled = true;
+    feedback.classList.remove("err-text");
+    feedback.textContent = tr("Salvataggio…");
     try {
       await api(`/api/agents/${agent.id}/knowledge`, { method: "PUT", body: { sealed: input.checked } });
+      data.sealed = agent.sealed = input.checked;
+      feedback.textContent = tr("Salvato");
       await loadState();
-      renderAgent();
-    } catch (error) { feedback.textContent = tr(error.message); save.disabled = false; }
-  } });
+      if (location.hash === view) await renderAgent();
+      toast("Salvato");
+    } catch (error) {
+      input.checked = data.sealed;
+      feedback.textContent = tr(error.message);
+      feedback.classList.add("err-text");
+    } finally { input.disabled = !data.canManage; }
+  });
   return panel({ icon: "lock", title: "Sicurezza", hint: "Isolamento dell’agente, del computer e dei suoi artefatti." },
-    setRows(setRow("Agente sigillato", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true })),
-    h("div", { class: "row end" }, save), feedback);
+    setRows(setRow("Agente sigillato", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true })), feedback);
 }
 
 function agentKnowledgePane(agent, data) {
@@ -4375,10 +4385,21 @@ async function desktopTab(agent) {
     actions: running ? [btn("", { icon: "maximize", href: viewer, target: "_blank", cls: "sm", title: "Schermo intero" }), action("restart", "", "refresh"), action("stop", "", "stop", "sm danger")] : null },
   outdated && agent.box?.exists ? h("div", { class: "banner" }, icon("upgrade"), h("span", { class: "grow" }, h("b", {}, "C'è una versione nuova del desktop. "), "Aggiornandolo si riavvia; la home, Tailscale e le chiavi restano."), action("upgrade", "Aggiorna", "upgrade", "sm primary")) : null,
   h("div", { class: "monitor-frame" }, screen));
-  return [desktop, agent.box?.exists ? await accessPanel(agent) : null];
+  return [desktop];
+}
+
+function agentRemoteAccessPane(agent) {
+  const root = h("div", { "aria-busy": "true" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  root.readyAccess = accessPanel(agent).then((content) => {
+    root.replaceChildren(...(content ? [content] : []));
+    root.setAttribute("aria-busy", "false");
+  });
+  return root;
 }
 
 async function accessPanel(agent) {
+  if (agent.sealed) return panel({ icon: "lock", title: "Accesso remoto" },
+    h("p", { class: "lead", role: "status" }, "Questo agente è sigillato, non può attivare la tailnet"));
   const data = await guard(api(`/api/agents/${agent.id}/box/access`));
   if (!data) return null;
   const tailscale = h("div", { class: "stack-sm" });
