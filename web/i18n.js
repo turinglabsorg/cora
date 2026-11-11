@@ -1,6 +1,13 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Cifratura": "Encryption",
+  "Scrittura": "Write",
+  "Accesso effettivo: {access}": "Effective access: {access}",
+  "Solo il proprietario della cartella può attivare la cifratura.": "Only the folder owner can enable encryption.",
+  "Abilita Spazio cifrato nelle impostazioni dello spazio, poi proteggi questa cartella.": "Enable Encrypted space in the space settings, then protect this folder.",
+  "Impostazioni dello spazio": "Space settings",
+  "La cifratura si attiva su una cartella nuova e vuota, senza commit o link di condivisione. I file esistenti non vengono convertiti.": "Encryption starts on a new empty folder without commits or sharing links. Existing files are not converted.",
   "{count} workspace collegati": "{count} connected workspaces",
   "Workspace da autorizzare": "Workspace awaiting authorization",
   "App OAuth Linear": "Linear OAuth app",

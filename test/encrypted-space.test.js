@@ -159,3 +159,26 @@ test("folder-method and person revocation invalidate pending/running access; int
   release({ text: "SYNTHETIC_RESULT_AFTER_PERSON_REVOCATION", thinking: "" });
   await assert.rejects(running);
 });
+
+test("folder managers see effective none/read/write including inherited grants without exposing the roster to members", async (t) => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const owner = (await f.request(f.admin, "/api/me")).data.user;
+  const folder = (await f.request(f.admin, "/api/artifacts/folders", { method: "POST", body: { path: "synthetic/effective", memberAccess: { default: "none", users: {} } } })).data;
+  const endpoint = `/api/artifacts/folders/${folder.id}`;
+  const detail = async () => (await f.request(f.admin, endpoint)).data;
+  assert.equal((await detail()).effectiveAccess[f.alice.user.id], "none");
+  f.app.store.setValue("artifactLevelAccess", { synthetic: { [owner.id]: { default: "none", users: { [f.alice.user.id]: "read", [f.bob.user.id]: "write" } } } });
+  let data = await detail();
+  assert.equal(data.effectiveAccess[f.alice.user.id], "read");
+  assert.equal(data.effectiveAccess[f.bob.user.id], "write");
+  assert.equal(data.inherited[f.alice.user.id].level, "synthetic");
+  assert.equal((await f.request(f.alice, endpoint)).data.canUpload, false);
+  assert.deepEqual((await f.request(f.alice, endpoint)).data.effectiveAccess, {});
+  assert.equal((await f.request(f.bob, endpoint)).data.canUpload, true);
+  await f.request(f.admin, endpoint, { method: "PUT", body: { memberAccess: { default: "none", users: { [f.alice.user.id]: "write", [f.bob.user.id]: "none" } } } });
+  data = await detail();
+  assert.equal(data.effectiveAccess[f.alice.user.id], "write");
+  assert.equal(data.effectiveAccess[f.bob.user.id], "write", "an explicit none cannot cancel an inherited write grant");
+  f.app.store.setValue("artifactLevelAccess", {});
+  assert.equal((await detail()).effectiveAccess[f.bob.user.id], "none");
+});

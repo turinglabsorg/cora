@@ -1823,6 +1823,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
           canUpload: artifacts.canUpload(folder, user),
           canManage: artifacts.canManage(folder, user),
           people: artifacts.canManage(folder, user) ? store.sharingPeople(user) : [],
+          effectiveAccess: artifacts.canManage(folder, user) ? Object.fromEntries(store.sharingPeople(user).map((person) => [person.id, artifacts.memberPermission(folder, person)])) : {},
           inherited: artifacts.canManage(folder, user) ? Object.fromEntries(store.sharingPeople(user).map((person) => [person.id, artifacts.levelGrant(folder, person.id)]).filter(([, grant]) => grant.permission !== "none")) : {},
           shareHosting: Boolean(artifacts.shareSuffix),
           shareSuffix: artifacts.shareSuffix,

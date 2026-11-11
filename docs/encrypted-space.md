@@ -73,4 +73,8 @@ The encrypted-space panel was exercised with the installed Hush release and adap
 
 This establishes **Hush software-provider compatibility through the explicit adapter**, not native Chromium credential-manager, hardware, biometric, Bitwarden or synchronized-passkey compatibility. The adapter is opt-in and does not alter normal browser authenticators. Hush's UP/UV flags describe the authorized PIN-verified software session; they do not prove physical human presence. A release using hardware/native authenticators still needs that provider's actual PRF enrollment/restart/unlock evidence. The Hush PIN and credential share the local encrypted vault and do not create an independent security boundary against compromise of that vault or the OS account.
 
-Hush is released; Cora's encrypted-space implementation remains on its separate review branch. No Cora production rollout is part of these test fixtures.
+Hush and Cora have independent release lifecycles. Fixture verification does not establish an instance's deployed version; verify that instance separately.
+
+## Folder navigation
+
+Every folder owner opens **Cifratura** (`#/artefatti/:id/cifratura`) to initialize encryption. When space encryption is off, this tab links to Settings > Spazio; folders with commits or sharing links explain why they cannot be converted. In an encrypted folder the same tab manages password and passkey wrappers. The previous `impostazioni` route remains a compatibility alias. Ordinary folder settings no longer contain the enrollment form. Team permission rows display the authoritative effective none/read/write grant, independently of inheritance.

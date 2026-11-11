@@ -225,7 +225,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   function drawAudit() { audit.replaceChildren(panel({ icon: "clock", title: "Registro degli accessi", hint: "Persona, metodo, agente, operazione ed esito. Nessun contenuto o chiave." }, h("div", { class: "rows" }, data.audit.map((entry) => h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(`${entry.event} · ${entry.outcome}`), h("small", { class: "muted" }, raw(`${new Date(entry.at).toLocaleString()} · ${entry.actor} · ${entry.method || "—"} · ${entry.agent || "—"}`)))))))); }
   drawAudit();
   locked.append(h("div", { class: "row end" }, btn("Blocca cartella", { icon: "lock", onclick: lock })), sectionWorkspace({ title: "Spazio cifrato", base: `#/artefatti/${folder.id}`, current, entries: [
-    ["file", "Documenti", "file", "File e versioni cifrate", [files]], ["accessi", "Accessi", "shield", "Autorizzazioni temporanee", [requests]], ["condivisione", "Condivisione", "link", "Copie per i destinatari", [sharing]], ["impostazioni", "Sblocco", "key", "Password e passkey", [methods]], ["registro", "Registro", "clock", "Accessi e operazioni", [audit]],
+    ["file", "Documenti", "file", "File e versioni cifrate", [files]], ["accessi", "Accessi", "shield", "Autorizzazioni temporanee", [requests]], ["condivisione", "Condivisione", "link", "Copie per i destinatari", [sharing]], ["cifratura", "Cifratura", "key", "Password e passkey", [methods]], ["registro", "Registro", "clock", "Accessi e operazioni", [audit]],
   ] }));
   let idle = null;
   const touch = () => { clearTimeout(idle); idle = setTimeout(lock, 5 * 60000); };

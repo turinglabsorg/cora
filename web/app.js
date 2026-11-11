@@ -6689,7 +6689,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   const { folder } = data;
   if (data.encrypted) {
     try {
-      const workspace = await encryptedFolderPanel(encryptedUI(), folder, tab, S.data.agents, () => renderArtifactFolder(id, tab, dir));
+      const workspace = await encryptedFolderPanel(encryptedUI(), folder, tab === "impostazioni" ? "cifratura" : tab, S.data.agents, () => renderArtifactFolder(id, tab, dir));
       if (location.hash !== view) return;
       shell([pageHead(raw(folder.title), "Spazio cifrato"), workspace], { title: folder.title, back: "#/artefatti", mode: "artifacts" });
     } catch (error) { slot.replaceChildren(empty("lock", error.message, btn("Riprova", { onclick: () => renderArtifactFolder(id, tab, dir) }))); }
@@ -6697,7 +6697,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   }
   const head = data.commits.find((commit) => commit.id === folder.head) || null;
   const pending = data.commits.filter((commit) => commit.status === "proposed" || commit.status === "conflict");
-  const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"], ["impostazioni", "Impostazioni", "sliders"]];
+  const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"], ...(data.canEncrypt ? [["cifratura", "Cifratura", "lock"]] : []), ["impostazioni", "Impostazioni", "sliders"]];
   const content = h("div", { class: "stack" });
   // Inside a subfolder the page is that subfolder's: its name, its path, the way up one level.
   const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
@@ -6724,8 +6724,15 @@ async function renderArtifactFolder(id, tab, dir = "") {
     content,
   ], { title: folder.title, back: dir ? artifactDirHref(folder.id, parent) : artifactLevelHref(folder.path.split("/").slice(0, -1).join("/")), mode: "artifacts" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
-  const shown = tab === "commit" ? artifactTakes(data) : ["permessi", "impostazioni"].includes(tab) ? artifactPermissions(data, { settings: tab === "impostazioni" }) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
-  content.replaceChildren(...[shown].flat().filter(Boolean), ...(tab === "impostazioni" && data.encryptedEnabled && data.canEncrypt && !data.commits.length ? [encryptedSetup(encryptedUI(), folder, () => renderArtifactFolder(id, tab, dir))] : []));
+  const shown = tab === "cifratura" ? artifactEncryption(data, () => renderArtifactFolder(id, tab, dir)) : tab === "commit" ? artifactTakes(data) : ["permessi", "impostazioni"].includes(tab) ? artifactPermissions(data, { settings: tab === "impostazioni" }) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
+  content.replaceChildren(...[shown].flat().filter(Boolean));
+}
+
+function artifactEncryption(data, reload) {
+  if (!data.canEncrypt) return panel({ icon: "lock", title: "Spazio cifrato" }, h("p", {}, "Solo il proprietario della cartella può attivare la cifratura."));
+  if (!data.encryptedEnabled) return panel({ icon: "lock", title: "Spazio cifrato" }, h("p", {}, "Abilita Spazio cifrato nelle impostazioni dello spazio, poi proteggi questa cartella."), btn("Impostazioni dello spazio", { icon: "sliders", href: "#/settings/spazio" }));
+  if (data.commits.length || data.shares.length) return panel({ icon: "lock", title: "Spazio cifrato" }, h("p", {}, "La cifratura si attiva su una cartella nuova e vuota, senza commit o link di condivisione. I file esistenti non vengono convertiti."));
+  return encryptedSetup(encryptedUI(), data.folder, reload);
 }
 
 /**
@@ -7210,6 +7217,11 @@ function artifactPermissions(data, { settings = false } = {}) {
   const save = async (changes, row) => {
     try {
       Object.assign(folder, await api(`/api/artifacts/folders/${folder.id}`, { method: "PUT", body: changes }));
+      if (changes.memberAccess || changes.reviewers) {
+        const fresh = await api(`/api/artifacts/folders/${folder.id}`);
+        data.effectiveAccess = fresh.effectiveAccess;
+        data.inherited = fresh.inherited;
+      }
     } catch (error) { toast(error.message, true); return false; }
     const mark = row?.querySelector(".set-saved");
     if (mark) {
@@ -7264,7 +7276,7 @@ function artifactPermissions(data, { settings = false } = {}) {
           if (control.value === "inherit") delete users[person.id]; else users[person.id] = control.value;
           choose({ ...policy, users });
         });
-        return h("div", { class: "artifact-team-person" }, userMark(person), h("div", { class: "artifact-team-identity" }, h("b", {}, raw(person.name)), h("small", { class: "muted" }, raw(person.email || "")), reviewer ? h("small", { class: "artifact-team-reviewer" }, "Revisore: può anche approvare i commit.") : null,
+        return h("div", { class: "artifact-team-person" }, userMark(person), h("div", { class: "artifact-team-identity" }, h("b", {}, raw(person.name)), h("small", { class: "muted" }, raw(person.email || "")), h("small", { class: "artifact-team-effective" }, tr("Accesso effettivo: {access}", { access: tr(data.effectiveAccess?.[person.id] === "write" ? "Scrittura" : data.effectiveAccess?.[person.id] === "read" ? "Lettura" : "Nessun accesso") })), reviewer ? h("small", { class: "artifact-team-reviewer" }, "Revisore: può anche approvare i commit.") : null,
           data.inherited?.[person.id] && !reviewer ? h("small", { class: "artifact-team-inherited" }, tr("Dal livello {level}: {access}", { level: `${data.inherited[person.id].level}/`, access: tr(data.inherited[person.id].permission === "write" ? "caricamento e modifica" : "lettura") })) : null), control);
       })) : h("p", { class: "muted small" }, "Nessun altro membro del team è ancora entrato."));
   };
