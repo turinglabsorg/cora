@@ -8815,6 +8815,42 @@ function threadCreator() {
   return node;
 }
 
+const THREAD_PLATFORMS = [["", "Tutti"], ["discord", "Discord"], ["slack", "Slack"], ["telegram", "Telegram"]];
+
+function threadPlatform(thread) {
+  return ["slack", "telegram", "web"].includes(thread.kind) ? thread.kind : "discord";
+}
+
+function threadMatches(thread, words) {
+  if (!words.length) return true;
+  const text = plainText([thread.name, thread.parentName, threadPlace(thread), thread.id, ...thread.flows.map((flow) => flow.agentName), ...(thread.listening || []).map((agent) => agent.name)].join(" "));
+  return words.every((word) => text.includes(word));
+}
+
+/** The platform tabs with how many threads each holds, and the search under them; one choice for Attivi and Storico. */
+function threadFilter(onchange) {
+  S.threadFilter ||= { kind: "", q: "" };
+  const state = S.threadFilter;
+  const tabs = THREAD_PLATFORMS.map(([id, label]) => {
+    const count = h("em", { class: "count" }, "0");
+    const tab = h("button", { type: "button", role: "tab", class: "thread-tab", onclick: () => { state.kind = id; onchange(); } }, h("span", {}, tr(label)), count);
+    return { id, tab, count };
+  });
+  const search = h("input", { type: "search", class: "thread-search", placeholder: tr("Cerca per nome, canale o agente"), "aria-label": tr("Cerca nei thread"), autocomplete: "off", maxlength: "100" });
+  search.value = state.q;
+  search.addEventListener("input", () => { state.q = search.value; onchange(); });
+  const node = h("div", { class: "thread-filter" }, h("div", { class: "thread-tabs", role: "tablist", "aria-label": tr("Piattaforma") }, tabs.map((item) => item.tab)), search);
+  node.paint = (counts) => {
+    if (search.value !== state.q) search.value = state.q;
+    for (const { id, tab, count } of tabs) {
+      tab.classList.toggle("on", state.kind === id);
+      tab.setAttribute("aria-selected", String(state.kind === id));
+      count.textContent = String(counts[id] || 0);
+    }
+  };
+  return node;
+}
+
 /** What the live sessions weigh on the machine together, measured on the server. */
 function threadLoad(node, board) {
   const measured = (board.threads || []).flatMap((thread) => thread.flows).filter((flow) => flow.status === "active" && flow.usage);
@@ -8907,6 +8943,12 @@ async function renderThreads() {
   const pastList = h("div", { class: "thread-list" });
   const liveEmpty = empty("hash", "Nessun thread attivo.");
   const pastEmpty = empty("clock", "Nessuna sessione passata.");
+  const liveNone = empty("search", "Nessun thread con questi filtri.");
+  const pastNone = empty("search", "Nessun thread con questi filtri.");
+  let shownBoard = null;
+  const refilter = () => { if (shownBoard) drawBoard(shownBoard, boardSig); };
+  const liveFilter = threadFilter(refilter);
+  const pastFilter = threadFilter(refilter);
   const banner = h("div", {});
   let parentsSig = "";
   let boardSig = "";
@@ -8927,25 +8969,41 @@ async function renderThreads() {
   };
   const drawBoard = (next, nextBoard) => {
     boardSig = nextBoard;
+    shownBoard = next;
     const recent = (a, b) => String(b.lastAt || "").localeCompare(String(a.lastAt || ""));
     const threads = [...(next.threads || [])].sort(recent);
     const working = (thread) => thread.flows.some((flow) => flow.status === "active");
     S.threadOpen ||= new Set();
     // Whoever is working comes first, a whole channel included: an idle thread never buries a live session.
-    const live = [...threads.filter(working), ...threads.filter((thread) => !working(thread))].filter((thread) => threadCard(thread))
+    const words = plainText(S.threadFilter.q).split(/\s+/).filter(Boolean);
+    const kind = S.threadFilter.kind;
+    // Every tab counts what the search leaves of its platform; the list shows the chosen tab.
+    const narrow = (all, filter) => {
+      const matched = all.filter((thread) => threadMatches(thread, words));
+      const counts = { "": matched.length };
+      for (const thread of matched) counts[threadPlatform(thread)] = (counts[threadPlatform(thread)] || 0) + 1;
+      filter.paint(counts);
+      filter.hidden = !all.length;
+      return matched.filter((thread) => !kind || threadPlatform(thread) === kind);
+    };
+    const liveAll = [...threads.filter(working), ...threads.filter((thread) => !working(thread))].filter((thread) => threadCard(thread));
+    const pastAll = threads.filter((thread) => !thread.listening?.length && thread.flows.some((flow) => flow.status !== "active"));
+    const live = narrow(liveAll, liveFilter)
       .map((thread) => ({ key: thread.id, sig: threadSig([thread, manage]), build: () => threadCard(thread) }));
-    const past = threads.filter((thread) => !thread.listening?.length && thread.flows.some((flow) => flow.status !== "active"))
+    const past = narrow(pastAll, pastFilter)
       .map((thread) => ({ key: thread.id, sig: threadSig([thread, manage]), build: (old) => threadPast(thread, old ? old.open : S.threadOpen.has(thread.id)) }));
     keyedChildren(liveList, live);
     keyedChildren(pastList, past);
     liveList.hidden = !live.length;
     pastList.hidden = !past.length;
-    liveEmpty.hidden = Boolean(live.length);
-    pastEmpty.hidden = Boolean(past.length);
+    liveEmpty.hidden = Boolean(liveAll.length);
+    pastEmpty.hidden = Boolean(pastAll.length);
+    liveNone.hidden = !liveAll.length || Boolean(live.length);
+    pastNone.hidden = !pastAll.length || Boolean(past.length);
   };
   const entries = [
-    ["attivi", "Attivi", "hash", "Chi sta lavorando adesso", [create, load, liveList, liveEmpty].filter(Boolean)],
-    ["storico", "Storico", "clock", "Un thread per riga: aprilo per le sessioni", [pastList, pastEmpty]],
+    ["attivi", "Attivi", "hash", "Chi sta lavorando adesso", [create, load, liveFilter, liveList, liveEmpty, liveNone].filter(Boolean)],
+    ["storico", "Storico", "clock", "Un thread per riga: aprilo per le sessioni", [pastFilter, pastList, pastEmpty, pastNone]],
   ];
   S.threadBack = `#/thread/${section || "attivi"}`;
   const workspace = sectionWorkspace({ title: "Thread", base: "#/thread", current: section, entries, phoneSwitch: true, onSelect: (id) => { S.threadBack = `#/thread/${id || "attivi"}`; } });
