@@ -2547,6 +2547,7 @@ export const EN = {
   "Ferma": "Stop",
   "Apri": "Open",
   "Nessuna sessione attiva": "No live session",
+  "In ascolto: {names}": "Listening: {names}",
   "RAM {ram} · CPU {cpu}% di un core · {count} processi": "RAM {ram} · CPU {cpu}% of one core · {count} processes",
   "sessione attiva": "live session",
   "Cerca un canale": "Search a channel",
