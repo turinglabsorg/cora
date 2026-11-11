@@ -3970,12 +3970,12 @@ async function memoryTab(agent) {
   ] });
 }
 
-function sectionWorkspace({ title, base, current = "", entries, onSelect = () => {} }) {
+function sectionWorkspace({ title, base, current = "", entries, onSelect = () => {}, phoneSwitch = false }) {
   const first = entries[0][0], panes = new Map(), tabs = new Map();
   const back = btn(title, { icon: "back", cls: "sm ghost email-section-back", onclick: () => show("") });
   const detail = h("div", { class: "email-workspace-detail" }, back);
   const nav = h("nav", { class: "email-workspace-nav rail-nav", role: "tablist", "aria-label": tr("Sezioni di {title}", { title: tr(title) }), "aria-orientation": "vertical" }, h("span", { class: "rail-group" }, title));
-  const root = h("div", { class: "email-workspace" }, nav, detail);
+  const root = h("div", { class: `email-workspace${phoneSwitch ? " phone-switch" : ""}` }, nav, detail);
   for (const [id, label, mark, hint, content] of entries) {
     const tabId = `section-tab-${id}`, paneId = `section-pane-${id}`;
     const pane = h("section", { class: "email-section stack", role: "tabpanel", id: paneId, "aria-labelledby": tabId }, content);
@@ -8823,11 +8823,19 @@ function threadLoad(node, board) {
   const rss = measured.reduce((total, flow) => total + Number(flow.usage.rss || 0), 0);
   const cpu = measured.reduce((total, flow) => total + Number(flow.usage.cpu || 0), 0);
   const machine = board.machine || {};
+  const [ram, unit] = fmtBytes(rss).split(" ");
+  const share = (part, whole) => whole > 0 ? `${Math.min(100, Math.max(0, (part / whole) * 100)).toFixed(1)}%` : "0%";
+  const gauge = (label, value, small, caption, fill) => h("div", { class: "thread-gauge" },
+    h("span", { class: "thread-gauge-label" }, label),
+    h("span", { class: "thread-gauge-value" }, h("b", {}, raw(value)), small ? h("small", {}, raw(small)) : null),
+    fill,
+    h("span", { class: "thread-gauge-of" }, caption));
+  const meter = (part, whole) => h("span", { class: "thread-meter", vars: { "--fill": share(part, whole) } }, h("i", {}));
+  const leds = h("span", { class: "thread-leds" }, Array.from({ length: Math.min(measured.length, 12) }, () => h("i", {})));
   node.replaceChildren(
-    h("span", {}, h("b", {}, raw(String(measured.length))), tr(measured.length === 1 ? "sessione attiva" : "sessioni attive")),
-    h("span", {}, h("b", {}, raw(fmtBytes(rss))), "RAM"),
-    h("span", {}, h("b", {}, raw(`${Math.round(cpu).toLocaleString(LANG === "en" ? "en-GB" : "it-IT")}%`)), "CPU"),
-    machine.cores ? h("span", { class: "thread-load-of" }, raw(tr("su {cores} core e {memory}", { cores: machine.cores, memory: fmtBytes(machine.memory) }))) : null);
+    gauge("Sessioni", String(measured.length), "", "in corso", leds),
+    gauge("RAM", ram, unit, machine.memory ? raw(tr("di {memory}", { memory: fmtBytes(machine.memory) })) : "", meter(rss, machine.memory)),
+    gauge("CPU", Math.round(cpu).toLocaleString(LANG === "en" ? "en-GB" : "it-IT"), "%", machine.cores ? raw(tr("di {cores} core", { cores: machine.cores })) : "", meter(cpu, (machine.cores || 0) * 100)));
 }
 
 function threadCard(thread) {
@@ -8895,7 +8903,7 @@ async function renderThreads() {
   const create = manage ? threadCreator() : null;
   if (create) create.hidden = true;
   const liveList = h("div", { class: "thread-list" });
-  const load = h("div", { class: "thread-sum thread-load", "aria-live": "off" });
+  const load = h("div", { class: "thread-load", "aria-live": "off" });
   const pastList = h("div", { class: "thread-list" });
   const liveEmpty = empty("hash", "Nessun thread attivo.");
   const pastEmpty = empty("clock", "Nessuna sessione passata.");
@@ -8940,9 +8948,9 @@ async function renderThreads() {
     ["storico", "Storico", "clock", "Un thread per riga: aprilo per le sessioni", [pastList, pastEmpty]],
   ];
   S.threadBack = `#/thread/${section || "attivi"}`;
-  const workspace = sectionWorkspace({ title: "Thread", base: "#/thread", current: section, entries, onSelect: (id) => { S.threadBack = `#/thread/${id || "attivi"}`; } });
+  const workspace = sectionWorkspace({ title: "Thread", base: "#/thread", current: section, entries, phoneSwitch: true, onSelect: (id) => { S.threadBack = `#/thread/${id || "attivi"}`; } });
   draw(board, failed);
-  const plus = create ? btn("", { icon: "plus", cls: "primary thread-plus", title: "Nuovo thread", onclick: () => {
+  const plus = create ? btn("Nuovo thread", { icon: "plus", cls: "primary thread-plus", title: "Nuovo thread", onclick: () => {
     const opening = create.hidden;
     if (opening) workspace.selectSection("attivi");
     create.hidden = !opening;
@@ -8951,8 +8959,10 @@ async function renderThreads() {
   } }) : null;
   plus?.setAttribute("aria-expanded", "false");
   create?.addEventListener("thread-created", () => { create.hidden = true; plus.setAttribute("aria-expanded", "false"); threadsRefresh(); });
+  const heading = pageHead("Thread", "Una sessione per agente, legata al thread Discord o Slack.", plus);
+  heading.classList.add("thread-list-head");
   shell([
-    pageHead("Thread", "Una sessione per agente, legata al thread Discord o Slack.", plus),
+    heading,
     banner,
     workspace,
   ], { title: "Thread" });
@@ -9020,7 +9030,7 @@ async function renderThreadPage(id) {
   const back = S.threadBack || "#/thread/attivi";
   const known = S.threadNames?.get(id);
   shell([
-    btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link" }),
+    btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link thread-back" }),
     h("div", { class: "page-head" }, h("div", { class: "page-title" }, known ? h("h1", {}, raw(known.name)) : skeletonLine("sk-thread-title"), known ? h("p", {}, raw(threadPlace(known))) : skeletonLine("sk-caption"))),
     h("div", { class: "thread-sum" }, skeletonLine("sk-thread-sum")),
     h("div", { class: "loading-skeleton thread-skeleton", "aria-busy": "true", "aria-label": tr("Caricamento") },
@@ -9033,7 +9043,7 @@ async function renderThreadPage(id) {
   if (location.hash !== key) return;
   if (!detail) {
     shell([
-      btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link" }),
+      btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link thread-back" }),
       panel({ icon: "alert", title: "Thread non trovato", hint: failed || "" }),
     ], { title: "Thread", back });
     return;
@@ -9083,7 +9093,7 @@ async function renderThreadPage(id) {
     const tokensIn = traces.reduce((total, trace) => total + Number(trace.tokensIn || 0), 0);
     const tokensOut = traces.reduce((total, trace) => total + Number(trace.tokensOut || 0), 0);
     sum.replaceChildren(
-      h("span", {}, h("b", {}, raw(String(traces.length))), tr("turni")),
+      h("span", {}, h("b", {}, raw(String(traces.length))), tr(traces.length === 1 ? "turno" : "turni")),
       h("span", {}, h("b", {}, raw(String(agents.length))), tr(agents.length === 1 ? "agente" : "agenti")),
       h("span", {}, h("b", {}, raw(shortTokens(tokensIn))), tr("in")),
       h("span", {}, h("b", {}, raw(shortTokens(tokensOut))), tr("out")),
@@ -9118,7 +9128,7 @@ async function renderThreadPage(id) {
   };
   draw(detail);
   shell([
-    btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link" }),
+    btn("Thread", { icon: "back", href: back, cls: "ghost sm back-link thread-back" }),
     h("div", { class: "page-head" }, h("div", { class: "page-title" }, title, place), linkSlot),
     sum,
     flowsSlot,
