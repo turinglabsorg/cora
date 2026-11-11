@@ -8715,7 +8715,7 @@ function threadHref(id) {
 function threadPlace(thread) {
   const where = thread.kind === "slack" ? "Slack" : thread.kind === "web" ? tr("Pannello") : thread.kind === "telegram" ? "Telegram" : "Discord";
   if (thread.direct) return `${where} · ${tr("privato")}`;
-  if (!thread.thread) return `${where} · ${tr("canale")}`;
+  if (!thread.thread) return `${where} · ${tr(thread.kind === "telegram" ? "gruppo" : "canale")}`;
   return thread.parentName ? `${where} · #${thread.parentName}` : where;
 }
 
@@ -8840,11 +8840,11 @@ function threadLoad(node, board) {
 
 function threadCard(thread) {
   const flows = thread.flows.filter((flow) => flow.status === "active");
-  if (!flows.length && !(thread.thread && thread.open)) return null;
+  if (!flows.length && !((thread.thread || thread.kind === "telegram") && thread.open)) return null;
   const manage = S.data?.currentUser?.role === "owner" || S.data?.access?.canManage;
   return h("article", { class: `thread-card${thread.closed ? " closed" : ""}` },
     h("header", {},
-      h("span", { class: "thread-ico" }, icon(thread.kind === "slack" ? "slack" : "hash")),
+      h("span", { class: "thread-ico" }, icon(thread.kind === "slack" ? "slack" : thread.kind === "telegram" ? "send" : "hash")),
       h("div", { class: "thread-head" },
         threadName(thread),
         h("p", { class: "thread-meta" }, raw(threadPlace(thread)))),
@@ -8867,7 +8867,7 @@ function threadPast(thread, open) {
   const line = last.status === "error" && last.error ? last.error : last.reasoning;
   const details = h("details", { class: `thread-past${thread.closed ? " closed" : ""}`, open },
     h("summary", {},
-      h("span", { class: "thread-ico" }, icon(thread.kind === "slack" ? "slack" : "hash")),
+      h("span", { class: "thread-ico" }, icon(thread.kind === "slack" ? "slack" : thread.kind === "telegram" ? "send" : "hash")),
       h("div", { class: "thread-head" },
         threadName(thread),
         h("p", { class: "thread-meta" }, raw([threadPlace(thread), `${total} ${tr(total === 1 ? "sessione" : "sessioni")}`, threadWhen(last.endedAt || last.startedAt)].join(" · "))),
