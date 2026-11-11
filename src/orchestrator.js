@@ -255,7 +255,7 @@ export class Orchestrator {
   agentsFor(channelId) {
     if (isWebRoom(channelId)) {
       const only = roomAgentId(channelId);
-      return this.store.agents().filter((agent) => agent.enabled && (!only || agent.id === only) && (!this.brain.knowledge?.ownerMemory || only || channelId === ownerRoom(this.brain.knowledge.ownerId(agent))));
+      return this.store.agents().filter((agent) => agent.enabled && (!only || agent.id === only) && (only || !agent.sealed) && (!this.brain.knowledge?.ownerMemory || only || channelId === ownerRoom(this.brain.knowledge.ownerId(agent))));
     }
     const dm = this.dmAgentId(channelId);
     if (dm) {
@@ -267,7 +267,9 @@ export class Orchestrator {
     return this.store.agents().filter((agent) => {
       if (!agent.enabled || !this.channels.agentOn(agent, transport)) return false;
       const chosen = agent.channelIds.filter((id) => transportOf(id) === transport);
-      return !chosen.length || chosen.includes(channelId) || Boolean(info?.parentId && chosen.includes(info.parentId));
+      // Listening everywhere stops at a channel a sealed agent was put in alone.
+      if (!chosen.length) return !agent.sealed && !this.brain.knowledge?.sealedChannel(channelId, info?.parentId ?? undefined);
+      return chosen.includes(channelId) || Boolean(info?.parentId && chosen.includes(info.parentId));
     });
   }
 
@@ -1462,7 +1464,7 @@ export class Orchestrator {
     let info = this.channels.listFor(agent).find((channel) => channel.id === target);
     // A thread under a channel it may write to counts too, even one opened since the list was made.
     if (!info && transportOf(target) === "discord") info = await this.threadFor(agent, target);
-    const allowed = target === (this.brain.knowledge?.ownerMemory ? ownerRoom(this.brain.knowledge.ownerId(agent)) : SALOTTO) || target === privateRoom(agent.id) || telegramBotAgent(target) === agent.id || Boolean(info);
+    const allowed = (!agent.sealed && target === (this.brain.knowledge?.ownerMemory ? ownerRoom(this.brain.knowledge.ownerId(agent)) : SALOTTO)) || target === privateRoom(agent.id) || telegramBotAgent(target) === agent.id || Boolean(info);
     if (!allowed || !this.channels.isActive(target)) throw new Error("destination not authorized; use list_channels");
     const state = this.state(target);
     if (transportOf(target) === "discord") {

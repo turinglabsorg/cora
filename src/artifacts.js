@@ -62,10 +62,10 @@ export function cleanTreePath(path) {
 }
 
 const sha256 = (data) => createHash("sha256").update(data).digest("hex");
-const same = (a, b) => (a?.sha || null) === (b?.sha || null);
+const same = (a, b) => (a?.sha || null) === (b?.sha || null) && (a?.storage || "") === (b?.storage || "");
 
 export function serializeTree(tree) {
-  return JSON.stringify([...tree.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([path, file]) => [path, file.sha, file.size]));
+  return JSON.stringify([...tree.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([path, file]) => file.storage ? [path, file.sha, file.size, file.storage] : [path, file.sha, file.size]));
 }
 
 /** What changed from one tree to the next, path by path. */
@@ -246,7 +246,7 @@ export class Artifacts {
     if (!sha) return new Map();
     if (this.trees.has(sha)) return new Map(this.trees.get(sha));
     const entries = JSON.parse(readFileSync(this.objectPath(sha), "utf8"));
-    const tree = new Map(entries.map(([path, file, size]) => [path, { sha: file, size }]));
+    const tree = new Map(entries.map(([path, file, size, storage]) => [path, { sha: file, size, ...(storage ? { storage } : {}) }]));
     if (this.trees.size > 200) this.trees.delete(this.trees.keys().next().value);
     this.trees.set(sha, tree);
     return new Map(tree);
@@ -265,8 +265,13 @@ export class Artifacts {
   }
 
   /** The bytes of one stored file. */
-  stream(sha, range) {
+  stream(sha, range, storage = "") {
+    if (storage) return this.boxes.artifactStream(storage, sha, range);
     return createReadStream(this.objectPath(sha), range || {});
+  }
+
+  async readFile(file, max = SCAN_BYTES) {
+    return file.storage ? this.boxes.artifactRead(file.storage, file.sha, max) : this.readObject(file.sha, max);
   }
 
   readObject(sha, max = SCAN_BYTES) {
@@ -292,6 +297,8 @@ export class Artifacts {
   /* ---------- folders ---------- */
 
   canWrite(folder, agent) {
+    // A sealed agent pushes only where it is named: "all agents" does not include it.
+    if (this.knowledge?.isSealed(agent)) return Boolean(agent.enabled !== false && (folder.writers || []).includes(agent.id));
     if (this.knowledge?.ownerMemory && folder.writers?.includes("*") && this.folderOwner(folder) !== this.knowledge.ownerId(agent)) return false;
     return Boolean(agent?.enabled !== false && (folder.writers || ["*"]).some((id) => id === "*" || id === agent.id));
   }
@@ -301,6 +308,7 @@ export class Artifacts {
   }
 
   canManage(folder, user) {
+    if (folder?.sealedAgentId) return Boolean(user && !user.blocked && this.knowledge?.canManage(this.store.agent(folder.sealedAgentId), user));
     return this.knowledge?.ownerMemory ? Boolean(user && this.folderOwner(folder) === user.id) : user?.role === "owner";
   }
 
@@ -319,6 +327,7 @@ export class Artifacts {
 
   /** Team access given on the levels above a folder: it reaches every folder under them, present and future, of whoever gave it. */
   levelGrant(folder, userId) {
+    if (folder?.sealedAgentId) return { permission: "none", level: "" };
     let best = { permission: "none", level: "" };
     const all = this.store.value("artifactLevelAccess", {}) || {};
     const parts = String(folder?.path || "").split("/");
@@ -383,6 +392,8 @@ export class Artifacts {
       if (other.path === clean) throw new ArtifactError(`la cartella ${clean} esiste già`, 409);
       if (other.path.startsWith(`${clean}/`) || clean.startsWith(`${other.path}/`)) throw new ArtifactError(`${clean} starebbe dentro o sopra la cartella ${other.path}: scegli un percorso accanto`, 409);
     }
+    const creator = createdBy?.kind === "agent" ? this.store.agent(createdBy.id) : null;
+    const sealedAgentId = this.knowledge?.isSealed(creator) ? creator.id : "";
     const now = Date.now();
     const folder = {
       id: `af_${randomBytes(6).toString("hex")}`,
@@ -391,9 +402,10 @@ export class Artifacts {
       description: String(description || "").trim().slice(0, 600),
       kind: kind === "site" ? "site" : "files",
       policy: createdBy?.kind === "agent" ? "review" : policy === "direct" ? "direct" : "review",
-      writers: this.cleanWriters(writers),
+      writers: sealedAgentId ? [sealedAgentId] : this.cleanWriters(writers),
+      ...(sealedAgentId ? { sealedAgentId, ownerId: creator.brainOwnerId || "" } : {}),
       reviewers: this.cleanReviewers(reviewers),
-      memberAccess: this.cleanMemberAccess(memberAccess ?? (this.knowledge?.ownerMemory ? { default: "none", users: {} } : undefined)),
+      memberAccess: this.cleanMemberAccess(memberAccess ?? (this.knowledge?.ownerMemory || sealedAgentId ? { default: "none", users: {} } : undefined)),
       createdBy: createdBy || null,
       ...(this.knowledge?.ownerMemory ? { ownerId: createdBy?.kind === "user" ? createdBy.id : this.store.agent(createdBy?.id)?.brainOwnerId || "" } : {}),
       requestedBy,
@@ -446,6 +458,8 @@ export class Artifacts {
     if (title) changes.title = title;
     if (description) changes.description = description;
     if (writers !== undefined && writers !== null) changes.writers = this.writersFrom(writers);
+    // A sealed agent cannot open a folder to every agent, nor lock itself out of it.
+    if (changes.writers && agent && this.knowledge?.isSealed(agent)) changes.writers = [...new Set([...changes.writers.filter((id) => id !== "*"), agent.id])];
     if (policy !== undefined && policy !== null) changes.policy = policy === "direct" ? "direct" : "review";
     if (!Object.keys(changes).length) throw new ArtifactError("nothing to change: give writers, title, description or policy");
     const next = this.updateFolder(folder.id, changes, { role: owner ? "owner" : "member", name: requester.name });
@@ -523,7 +537,8 @@ export class Artifacts {
   foldersFor(agent, query = "", memberUserId = "") {
     const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
     return this.folders()
-      .filter((folder) => !this.knowledge?.ownerMemory || this.canWrite(this.store.artifactFolder(folder.id), agent) || this.canReadMember(folder, this.store.panelUser(this.knowledge.ownerId(agent))))
+      .filter((folder) => !folder.sealedAgentId || this.canWrite(this.store.artifactFolder(folder.id), agent))
+      .filter((folder) => (!this.knowledge?.ownerMemory && !this.knowledge?.isSealed(agent)) || this.canWrite(this.store.artifactFolder(folder.id), agent) || (!this.knowledge.isSealed(agent) && this.canReadMember(folder, this.store.panelUser(this.knowledge.ownerId(agent)))))
       .filter((folder) => !memberUserId || this.canReadMember(folder, this.store.panelUser(memberUserId)))
       .filter((folder) => !words.length || words.some((word) => `${folder.path} ${folder.title} ${folder.description}`.toLowerCase().includes(word)))
       .map((folder) => ({
@@ -588,13 +603,16 @@ export class Artifacts {
   }
 
   /** Whether a commit holds this object (a deleted file is still in its parent): what a reviewer may download. */
-  commitHolds(commitId, sha) {
+  commitHolds(commitId, sha) { return Boolean(this.objectInCommit(commitId, sha)); }
+
+  objectInCommit(commitId, sha) {
     const commit = this.store.artifactCommit(commitId);
-    if (!commit) return false;
+    if (!commit) return null;
     for (const id of [commit.id, commit.parent, commit.base, this.store.artifactFolder(commit.folderId)?.head]) {
-      if (id && [...this.treeOf(id).values()].some((file) => file.sha === sha)) return true;
+      const file = id && [...this.treeOf(id).values()].find((file) => file.sha === sha);
+      if (file) return { ...file };
     }
-    return false;
+    return null;
   }
 
   /**
@@ -620,7 +638,7 @@ export class Artifacts {
       folder = this.createFolder({
         path: wanted, title: create.title, description: create.description, kind: create.kind,
         // Whoever makes the folder may always push its first files into it.
-        writers: create.writers === undefined ? ["*"] : [...new Set([...this.writersFrom(create.writers), agent.id])],
+        writers: this.knowledge?.isSealed(agent) ? [agent.id] : create.writers === undefined ? ["*"] : [...new Set([...this.writersFrom(create.writers), agent.id])],
         createdBy: { kind: "agent", id: agent.id, name: agent.name }, requestedBy: requester,
       });
       // Publishing at once is the owner's word only: an agent's folder otherwise starts under review.
@@ -646,10 +664,11 @@ export class Artifacts {
     const total = files.reduce((sum, file) => sum + file.size, 0);
     if (total > LIMITS.pushBytes) throw new ArtifactError(`this push is ${Math.round(total / 1024 / 1024)} MB: at most ${LIMITS.pushBytes / 1024 / 1024} MB at a time`, 413);
 
+    const storage = this.knowledge?.isSealed(agent) ? agent.id : "";
     const held = this.heldFor(folder.id, agent.id);
     const seen = new Set();
     const send = files.filter((file) => {
-      if ((held.has(file.sha256) && this.hasObject(file.sha256)) || seen.has(file.sha256)) return false;
+      if ((!storage && held.has(file.sha256) && this.hasObject(file.sha256)) || seen.has(file.sha256)) return false;
       seen.add(file.sha256);
       return true;
     });
@@ -661,7 +680,9 @@ export class Artifacts {
     } catch (error) {
       if (error instanceof ArtifactError) throw error;
     }
-    if (send.length) {
+    if (send.length && storage) {
+      await this.boxes.artifactStore(agent.id, manifest.root, send);
+    } else if (send.length) {
       let writer = null;
       try {
         await this.boxes.artifactSend(agent.id, manifest.root, send.map((file) => ({ path: file.path, size: file.size, sha256: file.sha256 })), (index) => {
@@ -692,13 +713,19 @@ export class Artifacts {
       const start = pending ? this.readTree(pending.tree) : this.treeOf(base);
       const tree = new Map(start);
       if (mirror) for (const key of [...tree.keys()]) if (!prefix || key === prefix || key.startsWith(`${prefix}/`)) tree.delete(key);
-      for (const file of files) tree.set(file.target, { sha: file.sha256, size: file.size });
+      for (const file of files) tree.set(file.target, { sha: file.sha256, size: file.size, ...(storage ? { storage } : {}) });
       const changed = treeDelta(start, tree);
       if (!changed.added.length && !changed.modified.length && !changed.deleted.length) {
         return { nothing: true, folder, pending, text: pending ? `nothing new: your proposal ${short(pending.id)} in ${folder.path} already has exactly these files` : `nothing to commit: ${folder.path} already has exactly these files` };
       }
       const delta = treeDelta(this.treeOf(base), tree);
-      const secrets = this.scanSecrets(tree, [...delta.added, ...delta.modified]);
+      const paths = [...delta.added, ...delta.modified];
+      const remote = new Map();
+      if (storage) for (const path of paths) {
+        const file = tree.get(path);
+        if (file.size <= SCAN_BYTES) remote.set(path, await this.readFile(file));
+      }
+      const secrets = this.scanSecrets(tree, paths, storage ? (file, path) => remote.get(path) : null);
       if (secrets.length) throw new ArtifactError(`nothing was published: ${secrets.slice(0, 5).map((hit) => `${hit.path} (line ${hit.line})`).join(", ")} contains what looks like a token or a private key. Remove it and push again.`, 422);
       const now = Date.now();
       const treeSha = this.writeTree(tree);
@@ -904,12 +931,12 @@ export class Artifacts {
   }
 
   /** Token shapes and private keys in the text files a commit brings in: line numbers, never the values. */
-  scanSecrets(tree, paths) {
+  scanSecrets(tree, paths, read = null) {
     const hits = [];
     for (const path of paths) {
       const file = tree.get(path);
       if (!file || file.size > SCAN_BYTES) continue;
-      const data = this.readObject(file.sha);
+      const data = read ? read(file, path) : this.readObject(file.sha);
       if (!data || data.subarray(0, 8192).includes(0)) continue;
       const lines = data.toString("utf8").split("\n");
       for (let index = 0; index < lines.length; index += 1) {
@@ -1018,13 +1045,14 @@ export class Artifacts {
     if (!this.boxes) throw new ArtifactError("there are no desktops here");
     const folder = this.findFolder(folderRef);
     if (!folder) throw new ArtifactError("no such folder: list them with artifact_folders", 404);
+    if (this.knowledge?.isSealed(agent) && !this.canWrite(folder, agent)) throw new ArtifactError("folder not available", 403);
     this.checkMember(folder, memberUserId);
     const wanted = commitRef ? this.store.artifactCommit(String(commitRef).startsWith("ac_") ? commitRef : `ac_${commitRef}`) || this.store.artifactCommits(folder.id).find((item) => item.id.startsWith(`ac_${commitRef}`)) : null;
     const commit = commitRef ? wanted : folder.head ? this.store.artifactCommit(folder.head) : null;
     if (!commit || commit.folderId !== folder.id) throw new ArtifactError(commitRef ? "no such commit in this folder" : `${folder.path} has nothing published yet`, 404);
     if (commit.status === "rejected") throw new ArtifactError("that commit was rejected");
     const tree = this.readTree(commit.tree);
-    const files = [...tree.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([path, file]) => ({ path, size: file.size, read: () => this.stream(file.sha) }));
+    const files = [...tree.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([path, file]) => ({ path, size: file.size, read: () => this.stream(file.sha, null, file.storage) }));
     const result = await this.boxes.artifactCheckout(agent.id, folder.path, files, { overwrite, marker: { folder: folder.id, path: folder.path, commit: commit.id } });
     return `pulled ${folder.path} at commit ${short(commit.id)} «${commit.message}» into ${result.path} (${result.files} files). Work there and push the folder back with artifact_push: your changes are laid over whatever is published by then.`;
   }
@@ -1156,6 +1184,10 @@ export class Artifacts {
    * to). A folder added later under the level shows up there, as in a directory.
    */
   groupGrants(share, folder) {
+    if (share.sealedAgentId) {
+      const agent = this.store.agent(share.sealedAgentId);
+      return Boolean(agent && agent.enabled !== false && (folder.writers || []).includes(agent.id));
+    }
     return [share.createdBy, share.approvedBy].filter(Boolean).some((by) => {
       if (by.kind === "agent") {
         const agent = this.store.agent(by.id);
@@ -1198,6 +1230,9 @@ export class Artifacts {
     const folder = group ? this.groupFolder(group) : this.store.artifactFolder(folderId);
     if (!folder) throw new ArtifactError("cartella non trovata", 404);
     if (group && commit) throw new ArtifactError("il link di un livello segue sempre le versioni in onda delle sue cartelle");
+    const creatorAgent = createdBy?.kind === "agent" ? this.store.agent(createdBy.id) : null;
+    const sealedAgentId = this.knowledge?.isSealed(creatorAgent) ? creatorAgent.id : "";
+    if (sealedAgentId) status = "proposed";
     const clean = this.validLabel(label);
     if (this.store.artifactShareByLabel(clean)) throw new ArtifactError(`il link ${clean} esiste già`, 409);
     if (commit) {
@@ -1207,6 +1242,7 @@ export class Artifacts {
     const now = Date.now();
     const share = {
       id: `as_${randomBytes(6).toString("hex")}`, label: clean, folderId: folder.id, ...(group ? { prefix: group } : {}), view: view === "files" ? "files" : view === "site" ? "site" : folder.kind,
+      ...(sealedAgentId ? { sealedAgentId } : {}),
       access: this.cleanAccess(access), commit: commit || "", expiresAt: Number(expiresAt) || 0, status, revision: 1, root: this.cleanShareRoot(root),
       createdBy: createdBy || null, approvedBy: status === "active" ? createdBy || null : null, requestedBy, reason: String(reason || "").slice(0, 500), createdAt: now, updatedAt: now,
     };
@@ -1390,7 +1426,7 @@ export class Artifacts {
    */
   syncBrain() {
     if (!this.companyBrain?.enabled) return Promise.resolve();
-    const folders = this.store.artifactFolders().filter((folder) => (folder.memberAccess?.default || "write") !== "none" && !Object.values(folder.memberAccess?.users || {}).includes("none"));
+    const folders = this.store.artifactFolders().filter((folder) => !folder.sealedAgentId && (folder.memberAccess?.default || "write") !== "none" && !Object.values(folder.memberAccess?.users || {}).includes("none"));
     const body = folders.length
       ? folders.map((folder) => [
         `- **${folder.path}** — ${folder.title}${folder.kind === "site" ? " (sito)" : ""}`,

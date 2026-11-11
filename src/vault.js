@@ -124,10 +124,12 @@ export class Vault {
   canManage(record, user) { return Boolean(user && this.recordOwner(record) === user.id); }
 
   list(user = null, agent = null) {
-    return this.store.vaultSecrets().filter((secret) => !this.knowledge?.ownerMemory || (user ? this.canManage(secret, user) : agent && this.canUse(secret, agent))).map((secret) => this.view(secret));
+    return this.store.vaultSecrets().filter((secret) => (!this.knowledge?.ownerMemory && !(agent && !user && this.knowledge?.isSealed(agent))) || (user ? this.canManage(secret, user) : agent && this.canUse(secret, agent))).map((secret) => this.view(secret));
   }
 
   canUse(secret, agent) {
+    // A sealed agent uses only the secrets that name it.
+    if (this.knowledge?.isSealed(agent)) return Boolean((secret?.agents || []).includes(agent.id));
     if (this.knowledge?.ownerMemory && secret?.agents?.includes("*") && this.recordOwner(secret) !== this.knowledge.ownerId(agent)) return false;
     return Boolean(agent && (secret.agents || []).some((id) => id === "*" || id === agent.id));
   }

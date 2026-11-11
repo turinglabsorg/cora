@@ -44,13 +44,15 @@ export function bm25(docs, query, textOf, { k1 = 1.4, b = 0.75, limit = 10 } = {
 
 export class Memory {
   /** `sharedInBrain()` says the shared memories now live in the company brain: an agent then recalls only its own. */
-  constructor({ store, sharedInBrain = () => false, ownerKeys = null }) {
+  constructor({ store, sharedInBrain = () => false, ownerKeys = null, sealed = () => false }) {
     this.store = store;
+    this.sealed = sealed;
     this.sharedInBrain = sharedInBrain;
     this.ownerKeys = ownerKeys;
   }
 
   facts(agentId) {
+    if (!this.ownerKeys && this.sealed(agentId)) return this.store.memories(agentId).map((memory) => ({ ...memory, scope: "private" }));
     if (this.ownerKeys) return this.ownerKeys(agentId).flatMap((key) => this.store.memories(key).map((memory) => ({ ...memory, scope: key === agentId ? "private" : "owner" })));
     return [
       ...this.store.memories(agentId).map((memory) => ({ ...memory, scope: "private" })),
@@ -59,6 +61,7 @@ export class Memory {
   }
 
   searchFacts(agentId, query, limit = 10) {
+    if (!this.ownerKeys && this.sealed(agentId)) return this.store.searchMemories([agentId], query, limit).map((memory) => ({ ...memory, scope: "private" }));
     if (this.ownerKeys) return this.store.searchMemories(this.ownerKeys(agentId), query, limit).map((memory) => ({ ...memory, scope: memory.owner === agentId ? "private" : "owner" }));
     return this.store.searchMemories(this.sharedInBrain() ? [agentId] : [agentId, SHARED], query, limit)
       .map((memory) => ({ ...memory, scope: memory.owner === SHARED ? "shared" : "private" }));

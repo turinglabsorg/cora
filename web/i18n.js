@@ -1,6 +1,16 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Sigillato": "Sealed",
+  "Agente sigillato": "Sealed agent",
+  "Isolamento": "Isolation",
+  "Salva configurazione": "Save configuration",
+  "Ricordi personali e canali assegnati. Nessun accesso al Brain condiviso. Computer isolato; artefatti nel suo volume.": "Personal memories and assigned channels. No shared Brain access. Isolated desktop; artifacts stay in its volume.",
+  "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.": "Named grants stay. Rules for all agents do not apply. Changing isolation restarts the desktop.",
+  "Parte senza Brain condiviso. Ricorda solo le sue conversazioni e usa le risorse assegnate per nome. Computer e artefatti restano isolati.": "Starts without a shared Brain. Remembers only its conversations and uses resources assigned by name. Desktop and artifacts stay isolated.",
+  "I comproprietari accedono a questo agente e ai suoi ricordi personali. Il Brain condiviso resta escluso.": "Co-owners access this agent and its personal memories. The shared Brain remains excluded.",
+  "{count} ricordi personali. Restano solo suoi.": "{count} personal memories. They stay private to this agent.",
+
   "sessione": "session",
   "sessioni": "sessions",
   "Tutte le sessioni": "All sessions",

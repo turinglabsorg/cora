@@ -204,13 +204,20 @@ export class Brain {
     this.channels = channels;
     this.timezone = timezone;
     this.log = log;
-    this.memory = new Memory({ store, sharedInBrain: () => Boolean(this.companyBrain?.holdsShared), ...(knowledge?.ownerMemory ? { ownerKeys: (id) => knowledge.ownerKeys(id) } : {}) });
+    this.memory = new Memory({ store, sharedInBrain: () => Boolean(this.companyBrain?.holdsShared), sealed: (id) => Boolean(knowledge?.isSealed(store.agent(id))), ...(knowledge?.ownerMemory ? { ownerKeys: (id) => knowledge.ownerKeys(id) } : {}) });
     this.sleeping = new Set();
   }
 
   /** Channels whose archive an agent may search: the ones it listens to, on every transport, plus its panel rooms. */
   channelIdsFor(agent) {
-    if (this.knowledge?.ownerMemory) return [...new Set([ownerRoom(this.knowledge.ownerId(agent)), privateRoom(agent.id), ...(this.channels?.listFor(agent) || []).map((channel) => channel.id)])];
+    // Sealed: its private room, the channels it was put in (and their threads), and its own bot's chats.
+    if (this.knowledge?.isSealed(agent)) {
+      const own = this.store.archivedChannels().filter((id) => telegramBotAgent(id) === agent.id);
+      return [...new Set([privateRoom(agent.id), ...(this.channels?.listFor(agent) || []).map((channel) => channel.id), ...own])];
+    }
+    // Elsewhere, a channel a sealed agent was put in alone is not part of this agent's archive.
+    const open = (ids) => ids.filter((id) => !this.knowledge?.sealedChannel(id));
+    if (this.knowledge?.ownerMemory) return open([...new Set([ownerRoom(this.knowledge.ownerId(agent)), privateRoom(agent.id), ...(this.channels?.listFor(agent) || []).map((channel) => channel.id)])]);
     // A private chat with another agent's own Telegram bot is that agent's alone.
     const archived = this.store.archivedChannels().filter((id) => !isWebRoom(id) && [null, agent.id].includes(telegramBotAgent(id)));
     const visible = this.channels?.list() || [];
@@ -225,7 +232,14 @@ export class Brain {
       if (transport === "telegram") ids.push(...archived.filter((id) => telegramBotAgent(id) === agent.id));
       ids.push(...chosen, ...visible.filter((channel) => channel.parentId && wanted.has(channel.parentId)).map((channel) => channel.id));
     }
-    return [...new Set(ids)];
+    return open([...new Set(ids)]);
+  }
+
+  /** Whether two agents listen in at least one same channel (a sealed agent knows only those colleagues). */
+  sharesChannel(agent, other) {
+    const where = (who) => [...(who.channelIds || []), ...(this.channels?.listFor(who) || []).map((channel) => channel.id)];
+    const mine = new Set(where(agent));
+    return where(other).some((id) => mine.has(id));
   }
 
   /** The owner's personal agent instructions (~/.agents/AGENTS.md), reread when the file changes. */
@@ -250,6 +264,7 @@ export class Brain {
     this.knowledge?.assertCurrent(agent);
     const others = this.store.agents()
       .filter((other) => other.id !== agent.id && other.enabled && (!this.knowledge?.ownerMemory || this.knowledge.ownerId(other) === this.knowledge.ownerId(agent)))
+      .filter((other) => !this.knowledge?.isSealed(agent) && !this.knowledge?.isSealed(other) || this.sharesChannel(agent, other))
       .map((other) => `- ${other.name}${PRONOUNS[other.gender] ? ` (${PRONOUNS[other.gender]})` : ""}: ${agentTagline(other).slice(0, 140) || "(nessuna descrizione)"}`)
       .join("\n");
     const self = SELF[agent.gender] || SELF[""];
@@ -280,7 +295,7 @@ Appartieni a ${belongs.name} (su ${({ discord: "Discord", slack: "Slack", telegr
     ].join("\n"));
     // The owner edits cora in their own checkout. An agent working in it would fight them for
     // the same files, and has already reverted work of theirs that was not committed yet.
-    sections.push([
+    if (!this.knowledge?.isSealed(agent)) sections.push([
       "## Il codice di Cora",
       "Se lavori sul codice di Cora, lavora **solo** nel clone degli agenti: `~/GIT/@agents/cora` sul computer del proprietario.",
       "Non toccare mai `~/GIT/@turinglabs/@agentlab/cora`: è l'albero di lavoro del proprietario, ci sta scrivendo lui e le sue modifiche non sono ancora salvate.",
@@ -299,9 +314,11 @@ Appartieni a ${belongs.name} (su ${({ discord: "Discord", slack: "Slack", telegr
     if (people.length) {
       sections.push(`## Chi puoi taggare qui\nPer avvisare una persona scrivi @ seguito dal suo nome esattamente come in questo elenco: ${people.map((person) => `@${person.name}${person.owner ? " (il proprietario)" : ""}`).join(", ")}. Un nome scritto in un altro modo (un soprannome, un nome accorciato, il nome di battesimo) resta testo e non avvisa nessuno: per chi non è nell'elenco scrivi il nome senza @.`);
     }
-    const documents = agent.brainSource === "external" ? [] : this.store.contextDocuments().filter((document) => document.enabled);
+    const documents = agent.brainSource === "external" || this.knowledge?.isSealed(agent) ? [] : this.store.contextDocuments().filter((document) => document.enabled);
     if (documents.length) sections.push(`## File di contesto condivisi dell'istanza\n${documents.map((document) => `### ${document.name}\n${document.content}`).join("\n\n")}`);
-    if (agent.brainSource !== "external" && this.knowledge?.ownerMemory) {
+    if (this.knowledge?.isSealed(agent)) {
+      sections.push("## Agente sigillato\nSei un agente sigillato: lavori isolato dal resto della squadra. Hai soltanto la tua scheda, il tuo diario, i tuoi ricordi e le conversazioni dei canali in cui ti hanno messo. Il brain aziendale e i ricordi condivisi degli altri agenti per te non esistono: brain_search, brain_page e brain_note non sono disponibili, e remember salva solo nei tuoi ricordi. Segreti, cartelle degli artefatti e connettori li usi solo se il proprietario te li ha assegnati per nome; le regole per «tutti gli agenti» non valgono per te. Non riportare a chi ti scrive informazioni di altri clienti, progetti o persone che non vengano da questi canali: se ti chiedono di altro, rispondi che non ne hai accesso.");
+    } else if (agent.brainSource !== "external" && this.knowledge?.ownerMemory) {
       sections.push("## Memorie del tuo proprietario\nUsi solo le memorie del proprietario assegnato al tuo Brain. I suoi agenti interni condividono i suoi ricordi; gli altri proprietari restano separati. brain_search e brain_page mostrano le sue pagine e soltanto quelle che altri hanno condiviso esplicitamente. brain_note e remember scrivono nel suo spazio. Non puoi allargare la condivisione da solo: decide la persona nel pannello. Le pagine condivise da altri sono in sola lettura. Le revisioni del bibliotecario vanno al proprietario di quelle pagine.");
     } else if (agent.brainSource !== "external" && this.companyBrain?.enabled) {
       sections.push("## Il brain aziendale\nÈ la memoria comune di quest'azienda: pagine su clienti, progetti, persone, decisioni e procedure, tenute da un bibliotecario con le fonti. In ogni turno ti arrivano le pagine pertinenti; con brain_search cerchi nelle pagine e in ciò che è stato detto nelle chat, con brain_page leggi una pagina intera. Prima di chiedere al proprietario una cosa che l'azienda potrebbe già sapere, guarda lì. Quando impari qualcosa che vale per tutta l'azienda (una decisione, la preferenza di un cliente, chi fa cosa), segnalalo con brain_note: il bibliotecario lo mette nel brain. La tua memoria personale resta remember. Una pagina «da rivedere» non è ancora stata vista dal proprietario, ma vale.");
@@ -427,7 +444,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     this.knowledge?.assertCurrent(agent);
     if (agent.brainSource === "external") return "";
     const ids = this.channelIdsFor(agent).filter((id) => id !== channelId);
-    const places = this.store.recentElsewhere(agent.id, ids, Date.now() - ELSEWHERE_MS, { channels: 2, perChannel: 8 }).map((place) => this.knowledge?.ownerMemory ? { ...place, messages: place.messages.filter((message) => this.knowledge.messageOwner(message) === this.knowledge.ownerId(agent)) } : place).filter((place) => place.messages.length);
+    const places = this.store.recentElsewhere(agent.id, ids, Date.now() - ELSEWHERE_MS, { channels: 2, perChannel: 8 }).map((place) => this.knowledge ? { ...place, messages: place.messages.filter((message) => this.knowledge.ownsMessage(agent, message)) } : place).filter((place) => place.messages.length);
     if (!places.length) return "";
     const here = topics?.topic || [];
     const blocks = places.map(({ channelId: id, messages }) => {
@@ -814,7 +831,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       channelIds: this.channelIdsFor(agent),
       channelLabel: (id) => this.channelLabel(id),
       postingChannels: [...new Map([
-        { id: this.knowledge?.ownerMemory ? ownerRoom(this.knowledge.ownerId(agent)) : SALOTTO, name: "salotto", kind: "web" }, { id: privateRoom(agent.id), name: "la tua chat privata", kind: "web" },
+        ...(this.knowledge?.isSealed(agent) ? [] : [{ id: this.knowledge?.ownerMemory ? ownerRoom(this.knowledge.ownerId(agent)) : SALOTTO, name: "salotto", kind: "web" }]), { id: privateRoom(agent.id), name: "la tua chat privata", kind: "web" },
         ...(this.channels?.listFor?.(agent) || []), { id: channel.id, name: channel.name || this.channelLabel(channel.id), kind: channel.kind || "web" },
       ].map(({ id, name, kind }) => [id, { id, name, kind }])).values()],
       formatWhen: (ms) => formatWhen(ms, this.timezone),
@@ -1253,7 +1270,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     this.sleeping.add(agent.id);
     try {
       const since = agent.lastSleepAt ? Date.parse(agent.lastSleepAt) : 0;
-      const events = this.memory.archiveSince(this.channelIdsFor(agent), since, SLEEP_MESSAGES).filter((message) => !this.knowledge?.ownerMemory || this.knowledge.messageOwner(message) === this.knowledge.ownerId(agent));
+      const events = this.memory.archiveSince(this.channelIdsFor(agent), since, SLEEP_MESSAGES).filter((message) => !this.knowledge || this.knowledge.ownsMessage(agent, message));
       if (!events.length && !force) return { status: "nothing" };
       const facts = this.memory.facts(agent.id).slice(-300);
       const transcript = events.map((item) => {
@@ -1324,7 +1341,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const summary = { added: 0, updated: 0, removed: 0, noted: 0, core: false, diary: false };
     const owned = (id) => {
       const found = this.store.findMemory(String(id || ""));
-      return found && (ownerMemory ? this.knowledge.ownerKeys(agent.id).includes(found.key) : found.key === agent.id || found.key === SHARED) ? found : null;
+      return found && (ownerMemory || this.knowledge?.isSealed(agent) ? this.knowledge.ownerKeys(agent.id).includes(found.key) : found.key === agent.id || found.key === SHARED) ? found : null;
     };
     for (const item of (Array.isArray(plan.update) ? plan.update : []).slice(0, 40)) {
       const found = owned(item?.id);
@@ -1349,7 +1366,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
         summary.noted += 1;
         continue;
       }
-      this.store.addMemory(ownerMemory ? this.knowledge.memoryKey(agent) : item?.shared ? SHARED : agent.id, text, "sleep", { by: agent.name });
+      this.store.addMemory(ownerMemory || this.knowledge?.isSealed(agent) ? this.knowledge.memoryKey(agent) : item?.shared ? SHARED : agent.id, text, "sleep", { by: agent.name });
       summary.added += 1;
     }
     const core = String(plan.core || "").trim();

@@ -253,11 +253,11 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       }
       res.writeHead(206, { ...base, "Content-Range": `bytes ${start}-${end}/${file.size}`, "Content-Length": end - start + 1 });
       if (req.method === "HEAD") return res.end();
-      return artifacts.stream(file.sha, { start, end }).on("error", () => res.destroy()).pipe(res);
+      return artifacts.stream(file.sha, { start, end }, file.storage).on("error", () => res.destroy()).pipe(res);
     }
     res.writeHead(status, { ...base, "Content-Length": file.size });
     if (req.method === "HEAD") return res.end();
-    artifacts.stream(file.sha).on("error", () => res.destroy()).pipe(res);
+    artifacts.stream(file.sha, null, file.storage).on("error", () => res.destroy()).pipe(res);
   }
 
   /**
@@ -434,7 +434,8 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       const dir = found.file.path.includes("/") ? found.file.path.slice(0, found.file.path.lastIndexOf("/") + 1) : "";
       const siblings = [...tree.keys()].filter((path) => path.startsWith(dir) && !path.slice(dir.length).includes("/")).sort((a, b) => a.localeCompare(b, lang));
       record(req, target, "view", { path: found.file.path });
-      return drivePage(viewPage({ lang, file: found.file, siblings, title, read: (max) => artifacts.readObject(found.file.sha, max) }));
+      const data = found.file.size <= 512 * 1024 ? await artifacts.readFile(found.file, 512 * 1024) : null;
+      return drivePage(viewPage({ lang, file: found.file, siblings, title, read: () => data }));
     }
     if (url.pathname === "/_cora/zip") {
       const dir = String(url.searchParams.get("dir") || "").replace(/^\/+|\/+$/g, "");
@@ -448,7 +449,7 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
       res.writeHead(200, headers({ "Content-Type": "application/zip", "Content-Disposition": `attachment; filename="${name.replace(/[^\w.-]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name)}` }));
       if (req.method === "HEAD") return res.end();
       try {
-        await writeZip(res, entries.map(([path, file]) => ({ name: path.slice(inside.length), size: file.size, open: () => artifacts.stream(file.sha) })), new Date(target.commit.publishedAt || target.commit.createdAt));
+        await writeZip(res, entries.map(([path, file]) => ({ name: path.slice(inside.length), size: file.size, open: () => artifacts.stream(file.sha, null, file.storage) })), new Date(target.commit.publishedAt || target.commit.createdAt));
         res.end();
       } catch { res.destroy(); }
       return;
@@ -457,10 +458,15 @@ export function shareHosts({ config, store, artifacts, vault = null, cloud, firs
     if (found.redirect) return redirect(res, `${found.redirect}${url.search}`);
     if (found.listing !== undefined) {
       if (url.searchParams.get("q") || !found.listing) record(req, target, url.searchParams.get("q") ? "search" : "open", { detail: String(url.searchParams.get("q") || "").slice(0, 120) });
+      const snippets = new Map();
+      const dir = found.listing.replace(/\/$/, "");
+      const terms = String(url.searchParams.get("q") || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const candidates = [...tree.entries()].filter(([path, file]) => file.storage && file.size <= 256 * 1024 && (terms.length ? terms.every((term) => path.toLowerCase().includes(term)) : (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "") === dir)).slice(0, 60);
+      for (const [, file] of candidates) snippets.set(file.sha, await artifacts.readFile(file, 256 * 1024));
       return drivePage(browse({
         lang, tree, dir: found.listing.replace(/\/$/, ""), q: String(url.searchParams.get("q") || "").slice(0, 200), mode: url.searchParams.get("v") === "list" ? "list" : "grid",
         title, sharedBy: target.kind === "share" ? target.share.createdBy?.name || "" : "", updatedAt: target.commit.publishedAt || target.commit.createdAt, signedIn,
-        read: (sha, max) => artifacts.readObject(sha, max), direct: target.view === "site",
+        read: (sha, max) => { const file = [...tree.values()].find((entry) => entry.sha === sha); return file ? file.storage ? snippets.get(sha) || null : artifacts.readObject(sha, max) : null; }, direct: target.view === "site",
       }));
     }
     if (found.file) {

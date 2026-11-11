@@ -327,6 +327,8 @@ export function sanitizeAgent(input, previous = {}, { avatarBase = "" } = {}) {
     coOwnerIds: [...new Set((Array.isArray(merged.coOwnerIds) ? merged.coOwnerIds : []).map(id => cleanText(id, 160).trim()).filter(id => id && id !== merged.brainOwnerId))].slice(0, 20),
     brainSource: merged.brainSource === "external" ? "external" : "internal",
     brainOwnerId: cleanText(merged.brainOwnerId, 160).trim(),
+    // Sealed: only its own card, diary and memories, and only what it is given by name.
+    sealed: Boolean(merged.sealed),
     // Ollama decides the card when it starts, so one server per card is how an agent picks one.
     ollamaHost: cleanUrl(merged.ollamaHost),
     chattiness: clampNumber(merged.chattiness, 0, 1, 0.5),

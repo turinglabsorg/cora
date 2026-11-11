@@ -171,7 +171,7 @@ export class Librarian {
       const since = Number(last?.until) || started - BACKFILL_MS;
       const sourceMessages = this.ownerId ? this.knowledge.messagesSince(this.ownerId, since, RUN_MESSAGES) : this.store.messagesSince(this.store.archivedChannels(), since, RUN_MESSAGES);
       const messages = sourceMessages
-        .filter((message) => String(message.content || "").trim().length > 3 && (!this.ownerId || this.knowledge.messageOwner(message) === this.ownerId));
+        .filter((message) => String(message.content || "").trim().length > 3 && (this.ownerId ? this.knowledge.messageOwner(message) === this.ownerId : !this.knowledge?.sealedMessage(message)));
       const notes = await this.brain.notes();
       const shared = this.ownerId || (await this.brain.state("sharedImported", false)) ? [] : this.store.memories(SHARED);
       // Every message joins the searchable archive, whatever the librarian makes of it.

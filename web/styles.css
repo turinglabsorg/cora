@@ -2455,3 +2455,5 @@ input.thread-search { height: 38px; }
 .thread-flow .led { width: 7px; height: 7px; flex: none; border-radius: 50%; background: #2a2a2a; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06); }
 .thread-flow .led.on { background: var(--green); box-shadow: 0 0 8px rgba(140, 197, 106, 0.55); }
 .thread-flow .led.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
+
+.agent-knowledge .set-row[hidden] { display: none; }

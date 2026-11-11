@@ -123,6 +123,7 @@ const STATE_LABEL = {
 };
 
 const ICONS = {
+  lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/>',
   swap: '<path d="M4 7h16l-4-4M20 17H4l4 4"/>',
   archive: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M4.5 9v9.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M10 13h4"/>',
   folder: '<path d="M3.5 7.5a2 2 0 0 1 2-2h3.8l2 2.5h7.2a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
@@ -1258,7 +1259,7 @@ function renderAgents() {
         return h("a", { class: "row-link", href: `#/agent/${agent.id}/chat` },
           avatar(agent),
           h("span", { class: "grow" },
-            h("span", { class: "row-title" }, raw(agent.name), agentDot(agent)),
+            h("span", { class: "row-title" }, raw(agent.name), agentDot(agent), agent.sealed ? badge("Sigillato", "", "lock") : null),
             h("span", { class: "row-meta" }, `${modelLabel(agent.model, { short: true })} · ${tr(agent.box?.running ? "desktop acceso" : "desktop spento")} · ${account.toLowerCase()}`)),
           icon("next", "chev"));
       })) : empty("users", "Ancora nessun agente.", btn("Crea il primo", { icon: "plus", href: "#/new", cls: "primary" }))),
@@ -2470,7 +2471,7 @@ function agentOwnerPanel(agent) {
         finally { saving = false; save.disabled = false; save.textContent = tr("Salva proprietari"); root.setAttribute("aria-busy", "false"); }
       } });
       content.replaceChildren(
-        h("p", { class: "muted" }, agent.brainSource === "external" ? tr("L’agente usa un Brain esterno in sola lettura: i comproprietari condividono questa fonte, senza aprire il Brain interno.") : tr("Il Brain di {name} e i ricordi condivisi dai suoi agenti saranno accessibili ai comproprietari.", { name: primary?.name || data.primaryId })),
+        h("p", { class: "muted" }, agent.sealed ? tr("I comproprietari accedono a questo agente e ai suoi ricordi personali. Il Brain condiviso resta escluso.") : agent.brainSource === "external" ? tr("L’agente usa un Brain esterno in sola lettura: i comproprietari condividono questa fonte, senza aprire il Brain interno.") : tr("Il Brain di {name} e i ricordi condivisi dai suoi agenti saranno accessibili ai comproprietari.", { name: primary?.name || data.primaryId })),
         setRows(setRow("Persone dello spazio", "Possono gestire questo agente e il suo Brain.", choices(data.people, chosen, "proprietor"), { stack: true }),
           setRow("Proprietari in chat", "Le richieste di ciascuno valgono come quelle del proprietario. Non apre il pannello.", data.chatPeople.length ? choices(data.chatPeople, contacts, "chatProprietor") : h("p", { class: "muted" }, "Le persone compaiono dopo aver scritto nei canali dell'agente."), { stack: true })),
         h("div", { class: "row end" }, btn("Ricarica", { icon: "refresh", cls: "ghost", onclick: async () => { dirty = false; await load(true); } }), save), feedback);
@@ -2643,6 +2644,9 @@ function agentForm(agent, { only = "" } = {}) {
         h("div", { class: "set-row stack" }, subscription.node),
         setRow("Ragionamento", "Quanto pensa prima di rispondere: più alto è più accurato ma più lento.", effortSelect(agent)),
         setRow("Usa il suo computer", "Un desktop Linux tutto suo, che vedi anche tu.", switchInput("tools", "", agent.tools ?? true)))) : null,
+    isNew ? panel({ icon: "lock", title: "Isolamento" }, setRows(setRow("Agente sigillato",
+      "Parte senza Brain condiviso. Ricorda solo le sue conversazioni e usa le risorse assegnate per nome. Computer e artefatti restano isolati.",
+      switchInput("sealed", "Sigillato", agent.sealed ?? false), { stack: true }))) : null,
     characterPane.node, listening, owner, voice,
     h("div", { class: "savebar" },
       isNew ? null : armedButton("Elimina", "Conferma", { onconfirm: async () => {
@@ -2668,6 +2672,7 @@ function agentForm(agent, { only = "" } = {}) {
       platformsOff: [...(agent.platformsOff || []).filter((kind) => !platformsOn().includes(kind)), ...platformsOn().filter((kind) => form.elements[`platform-${kind}`] && !form.elements[`platform-${kind}`].checked)],
       ...(form.elements.ownerId ? { ownerId: form.elements.ownerId.value } : {}),
       enabled: form.elements.enabled.checked,
+      ...(isNew ? { sealed: form.elements.sealed.checked } : {}),
       // The old free-text personality is not edited here any more: an update that does not mention it keeps it.
       ...(data.has("personality") ? { personality: data.get("personality") } : {}),
       ...(shouldWriteCharacter({ isNew, section: route()[3] }) ? { character: characterPane.value() } : {}),
@@ -3881,6 +3886,7 @@ async function renderAgent() {
           badge(h("span", { class: "hero-model", title: modelLabel(agent.model, { short: true }) }, raw(modelLabel(agent.model, { short: true }))), "", "chip"),
           compact ? null : badge(agent.box?.running ? "Desktop acceso" : "Desktop spento", agent.box?.running ? "on" : "", "monitor"),
           compact || !agent.box?.outdated || !agent.box?.exists ? null : badge("Da aggiornare", "warn", "upgrade"),
+          agent.sealed ? badge("Sigillato", "", "lock") : null,
           compact ? null : platformBadges(agent)),
         !compact && agent.mailbox?.status === "ready" ? h("a", { class: "agent-email", href: `#/agent/${agent.id}/email` }, icon("mail"), raw(agent.mailbox.email)) : null),
       toggle),
@@ -3929,7 +3935,7 @@ async function memoryTab(agent) {
   // A new memory is a line at the top of the list, like a rule in Accesso: no panel of its own.
   const input = h("input", { type: "text", name: "text", placeholder: "Un fatto da ricordare. Es: «Sara odia le riunioni prima delle 10».", "aria-label": tr("Nuovo ricordo"), autocomplete: "off" });
   const add = h("form", { class: "memory-add" }, input,
-    h("div", { class: "memory-add-options" }, data.brain || data.ownerMemory ? null : switchInput("shared", "Condiviso", false), switchInput("pinned", "Fissato", false),
+    h("div", { class: "memory-add-options" }, data.sealed || data.brain || data.ownerMemory ? null : switchInput("shared", "Condiviso", false), switchInput("pinned", "Fissato", false),
       btn("Aggiungi", { icon: "plus", type: "submit", cls: "primary" })));
   add.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -3963,7 +3969,7 @@ async function memoryTab(agent) {
     : empty("moon", "Il diario si scrive di notte, quando dorme.");
   return sectionWorkspace({ title: "Memoria", base: `#/agent/${agent.id}/memoria`, current: route()[3], entries: [
     ["fonte", "Fonte", "book", "Memoria e knowledge", [source]],
-    ["ricordi", data.ownerMemory ? "Ricordi del proprietario" : "Ricordi", "book", "Fatti e preferenze", [panel({ icon: "book", title: data.ownerMemory ? "Ricordi del proprietario" : "Ricordi", hint: `${data.ownerMemory ? (all.length === 1 ? tr("1 ricordo del Brain, disponibile ai proprietari autorizzati e agli agenti che lo usano.") : tr("{count} ricordi del Brain, disponibili ai proprietari autorizzati e agli agenti che lo usano.", { count: all.length })) : data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length })} ${tr("A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.")}` },
+    ["ricordi", data.ownerMemory && !data.sealed ? "Ricordi del proprietario" : "Ricordi", "book", "Fatti e preferenze", [panel({ icon: "book", title: data.ownerMemory && !data.sealed ? "Ricordi del proprietario" : "Ricordi", hint: `${data.sealed ? tr("{count} ricordi personali. Restano solo suoi.", { count: all.length }) : data.ownerMemory ? (all.length === 1 ? tr("1 ricordo del Brain, disponibile ai proprietari autorizzati e agli agenti che lo usano.") : tr("{count} ricordi del Brain, disponibili ai proprietari autorizzati e agli agenti che lo usano.", { count: all.length })) : data.brain && !data.shared.length ? tr("{count} ricordi suoi. Quelli comuni a tutti sono nel Brain.", { count: all.length }) : tr("{count} tra privati e condivisi.", { count: all.length })} ${tr("A ogni messaggio riaffiorano quelli pertinenti; quelli fissati ci sono sempre.")}` },
       add, h("label", { class: "search" }, icon("search"), search), list)]],
     ["scheda", "Scheda", "layers", "Sempre a mente", [corePanel]],
     ["diario", "Diario", "moon", "Consolidamento e diario", [panel({ icon: "moon", title: "Diario", hint: "Le ultime due pagine gli tornano in mente ogni giorno." }, diary)]],
@@ -4004,16 +4010,29 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
 }
 
 function agentKnowledgePane(agent, data) {
-  const source = h("select", { "aria-label": tr("Fonte della memoria"), disabled: !data.canManage },
+  const seal = switchInput("sealed", "Sigillato", data.sealed,
+    "Ricordi personali e canali assegnati. Nessun accesso al Brain condiviso. Computer isolato; artefatti nel suo volume.");
+  const sealInput = seal.querySelector("input");
+  sealInput.disabled = !data.canManage;
+  const source = h("select", { "aria-label": tr("Fonte della memoria"), disabled: !data.canManage || data.sealed },
     h("option", { value: "internal", selected: data.source === "internal" }, "Brain interno"),
     h("option", { value: "external", selected: data.source === "external" }, "Brain esterno · sola lettura"));
   const link = h("input", { type: "password", autocomplete: "off", "aria-label": tr("Link al Brain esterno"), placeholder: "https://…", disabled: !data.canManage });
   const external = h("div", { class: "stack-sm" }, link,
     h("p", { class: "muted" }, data.external.configured ? tr("Link salvato: {host}", { host: data.external.host }) : tr("Collega un link HTTPS che espone le pagine in JSON o Markdown.")),
     h("p", { class: "muted" }, "Quando scegli questa fonte, l'agente usa solo il Brain esterno per memoria e knowledge. Se non risponde, segnala il problema."));
+  const sourceRow = setRow("Fonte", null, source);
   const externalRow = setRow("Brain esterno", null, external, { stack: true });
   externalRow.hidden = source.value !== "external";
-  source.addEventListener("change", () => { externalRow.hidden = source.value !== "external"; });
+  const syncSeal = () => {
+    source.disabled = !data.canManage || sealInput.checked;
+    sourceRow.hidden = sealInput.checked;
+    check.hidden = sealInput.checked || source.value !== "external";
+    externalRow.hidden = sealInput.checked || source.value !== "external";
+    check.disabled = !data.canManage || sealInput.checked || source.value !== "external";
+  };
+  source.addEventListener("change", syncSeal);
+  sealInput.addEventListener("change", syncSeal);
   const owner = data.owners ? h("select", { "aria-label": tr("Proprietario del Brain") },
     h("option", { value: "", selected: !data.owner }, "Non assegnato"),
     data.owners.map((person) => h("option", { value: person.id, selected: person.id === data.owner?.id }, raw(person.name)))) : null;
@@ -4024,17 +4043,18 @@ function agentKnowledgePane(agent, data) {
     catch (error) { feedback.textContent = tr(error.message); }
     finally { check.disabled = false; }
   } });
-  const save = btn("Salva fonte", { icon: "check", cls: "primary", disabled: !data.canManage, onclick: async () => {
+  const save = btn("Salva configurazione", { icon: "check", cls: "primary", disabled: !data.canManage, onclick: async () => {
     save.disabled = true;
-    const body = { source: source.value, ...(link.value.trim() ? { url: link.value.trim() } : {}), ...(owner ? { ownerId: owner.value } : {}) };
+    const body = { sealed: sealInput.checked, source: sealInput.checked ? "internal" : source.value, ...(link.value.trim() ? { url: link.value.trim() } : {}), ...(owner ? { ownerId: owner.value } : {}) };
     link.value = "";
     try { await api(`/api/agents/${agent.id}/knowledge`, { method: "PUT", body }); await loadState(); renderAgent(); }
     catch (error) { feedback.textContent = tr(error.message); save.disabled = false; }
   } });
-  return panel({ icon: "book", title: "Memoria e knowledge", hint: "La fonte che l'agente usa per ricordare e recuperare informazioni." },
-    setRows(setRow("Fonte", null, source), externalRow,
+  syncSeal();
+  return panel({ icon: "book", title: "Memoria e knowledge", cls: "agent-knowledge", hint: "La fonte che l'agente usa per ricordare e recuperare informazioni." },
+    setRows(setRow("Isolamento", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true }), sourceRow, externalRow,
       owner ? setRow("Proprietario del Brain", "Gestisce questa memoria.", owner) : null),
-    h("div", { class: "row end" }, data.source === "internal" && data.owner ? btn("Apri Brain", { icon: "book", cls: "ghost", href: "#/brain?" + new URLSearchParams({ ownerId: data.owner.id }) }) : null, check, save), feedback);
+    h("div", { class: "row end" }, !data.sealed && data.source === "internal" && data.owner ? btn("Apri Brain", { icon: "book", cls: "ghost", href: "#/brain?" + new URLSearchParams({ ownerId: data.owner.id }) }) : null, check, save), feedback);
 }
 
 function memoryItem(agent, memory, brain = false) {
@@ -4056,7 +4076,7 @@ function memoryItem(agent, memory, brain = false) {
       text),
     h("span", { class: "row-actions" },
       btn("", { icon: "pin", cls: `sm ghost${memory.pinned ? " lit" : ""}`, title: memory.pinned ? "Sblocca" : "Fissa", onclick: () => update({ pinned: !memory.pinned }, memory.pinned ? "Sbloccato" : "Fissato") }),
-      brain && memory.scope !== "shared"
+      agent.sealed ? null : brain && memory.scope !== "shared"
         ? btn("", { icon: "bulb", cls: "sm ghost", title: "Manda al brain", onclick: () => update({ shared: true }, "Mandato al bibliotecario del brain") })
         : btn("", { icon: "share", cls: `sm ghost${memory.scope === "shared" ? " lit" : ""}`, title: memory.scope === "shared" ? "Rendi privato" : "Condividi con tutti", onclick: () => update({ shared: memory.scope !== "shared" }, memory.scope === "shared" ? "Ora è privato" : "Ora lo sanno tutti") }),
       btn("", { icon: "edit", cls: "sm ghost", title: "Modifica", onclick: () => {
