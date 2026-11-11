@@ -30,9 +30,10 @@ export function threadLink(thread) {
  * `threads`: every known channel ({ id, name, guildId, thread, parentId }).
  */
 export function threadTopics(threads, here) {
-  const topic = here?.thread || here?.parentId ? issueKeys(here.name) : [];
+  const current = here?.thread || here?.parentId ? { id: here.id, name: here.name } : null;
+  const topic = current ? issueKeys(here.name) : [];
   const others = new Map();
-  if (!here?.guildId) return { topic, others };
+  if (!here?.guildId) return { topic, others, current };
   const seen = new Set();
   for (const thread of threads) {
     if (!thread?.id || seen.has(thread.id) || thread.id === here.id || thread.guildId !== here.guildId || !(thread.thread || thread.parentId)) continue;
@@ -42,7 +43,7 @@ export function threadTopics(threads, here) {
       others.set(key, [...(others.get(key) || []), { id: thread.id, name: thread.name, guildId: thread.guildId }]);
     }
   }
-  return { topic, others };
+  return { topic, others, current };
 }
 
 /**

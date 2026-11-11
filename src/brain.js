@@ -429,18 +429,25 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     return parts.join("\n\n");
   }
 
+  threadChannel(channelId) {
+    const live = this.channels?.info?.(channelId);
+    const saved = this.store.value?.("threadNames", {})?.[channelId];
+    return saved ? { ...saved, ...live, id: channelId, name: live?.name && live.name !== channelId ? live.name : saved.name,
+      thread: Boolean(live?.thread || saved.thread), parentId: live?.parentId || saved.parentId || null } : live;
+  }
+
   /** The issue a thread is about and the threads of the same server that own the others (src/thread-topics.js). */
   threadMap(agent, channelId) {
     if (!this.channels?.info) return { topic: [], others: new Map() };
     let here = null;
-    try { here = this.channels.info(channelId); } catch { return { topic: [], others: new Map() }; }
+    try { here = this.threadChannel(channelId); } catch { return { topic: [], others: new Map() }; }
     const known = [...(this.channels.list?.() || []), ...(this.channels.listFor?.(agent) || [])];
     return threadTopics(known, here);
   }
 
   /**
    * The agent's latest exchanges in its other places (Discord, Telegram, the panel): one conversation, many surfaces.
-   * Another thread with its own issue is another topic: from a thread with its own topic it shows as a pointer only.
+   * Distinct threads share pointers only, even without issue keys or with identical titles.
    */
   elsewhere(agent, channelId, topics = null) {
     this.knowledge?.assertCurrent(agent);
@@ -448,15 +455,15 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const ids = this.channelIdsFor(agent).filter((id) => id !== channelId);
     const places = this.store.recentElsewhere(agent.id, ids, Date.now() - ELSEWHERE_MS, { channels: 2, perChannel: 8 }).map((place) => this.knowledge ? { ...place, messages: place.messages.filter((message) => this.knowledge.ownsMessage(agent, message)) } : place).filter((place) => place.messages.length);
     if (!places.length) return "";
-    const here = topics?.topic || [];
+    const current = topics?.current || this.threadMap(agent, channelId).current;
     const blocks = places.map(({ channelId: id, messages }) => {
       let info = null;
-      try { info = this.channels?.info?.(id); } catch {}
-      const theirs = info?.parentId ? issueKeys(info.name) : [];
-      const otherTopic = theirs.length && !theirs.some((key) => here.includes(key));
+      try { info = this.threadChannel(id); } catch {}
+      const otherThread = Boolean(info?.thread || info?.parentId);
+      const theirs = otherThread ? issueKeys(info.name) : [];
       const label = `dove="${this.channelLabel(id)}"${theirs.length ? ` tema="${theirs.join(", ")}"` : ""}`;
-      if (otherTopic && here.length) {
-        return `<altrove ${label}>altro thread, altro tema (${theirs.join(", ")}): l'ultimo messaggio è delle ${formatWhen(messages.at(-1).at, this.timezone)}. Il suo lavoro si fa là (${threadLink({ ...info, id })}), non qui.</altrove>`;
+      if (current || otherThread) {
+        return `<altrove ${label}>${otherThread ? "altro thread" : "altra conversazione"}, altro tema${theirs.length ? ` (${theirs.join(", ")})` : ""}: l'ultimo messaggio è delle ${formatWhen(messages.at(-1).at, this.timezone)}. Il suo lavoro si fa là (${threadLink({ ...info, id })}), non qui.</altrove>`;
       }
       const short = messages.map((item) => ({ ...item, content: item.content.length > 600 ? `${item.content.slice(0, 600)}…` : item.content }));
       return `<altrove ${label}>\n${formatTranscript(short, agent, this.timezone)}\n</altrove>`;
@@ -464,10 +471,10 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     return `Le tue ultime conversazioni in altri posti. Tra superfici diverse (Discord, Telegram, il pannello) è la stessa conversazione con le stesse persone. Ogni thread e canale ha però il suo tema: quello che leggi qui sotto è contesto, non lavoro da continuare qui, e un «procedi» detto in questa conversazione non riprende il lavoro di un altro thread.\n${blocks.join("\n")}`;
   }
 
-  topicNote({ topic, others }) {
-    if (!topic.length) return "";
+  topicNote({ topic, others, current }) {
+    if (!topic.length && !current) return "";
     const elsewhere = [...others].slice(0, 12).map(([key, threads]) => `${key} → ${threads.map((thread) => `«${thread.name}» ${threadLink(thread)}`).join(" o ")}`);
-    return `Tema di questo thread: ${topic.join(", ")}. Qui lavori solo su questo.${elsewhere.length ? ` Le altre issue hanno il loro thread: ${elsewhere.join("; ")}. Il lavoro su quelle si scrive nel loro thread con say({text, channel_id}); Cora non pubblica qui i messaggi che portano il lavoro di un altro thread.` : ""}`;
+    return `Tema di questo thread: ${topic.length ? topic.join(", ") : `«${current.name}» (channel_id "${current.id}")`}. Qui lavori solo su questo. La richiesta attuale e il lavoro da proseguire sono quelli della cronologia di questo thread. Ricordi e riferimenti ad altre conversazioni non autorizzano a riprenderne il lavoro qui; se il riferimento manca, chiedi chiarimento invece di scegliere un altro compito.${elsewhere.length ? ` Le altre issue hanno il loro thread: ${elsewhere.join("; ")}. Il lavoro su quelle si scrive nel loro thread con say({text, channel_id}); Cora non pubblica qui i messaggi che portano il lavoro di un altro thread.` : ""}`;
   }
 
   async chatTurn({ agent, history, channel, forced, computer, authorized = false, requestAuthorized = false, belongsTo = false, computerDenied = false, postFile, say, inbox, replyTo = null, onMessageHandled }) {
@@ -575,15 +582,18 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const steps = (trace.steps || []).filter((step) => step.type === "tool" || step.type === "text").slice(-20).map((step) => step.type === "tool"
       ? `- ${step.name} ${JSON.stringify(step.args || {}).slice(0, 300)} → ${String(step.result || "").replace(/\s+/g, " ").slice(0, 300)}`
       : `- (scritto) ${String(step.text || "").replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
-    const original = String(trace.prompt || "").replace(/^Ora: [^\n]*\n\n/, "").replace(/\n\n\[Obiettivo\][\s\S]*$/, "");
+    const topics = { ...this.threadMap(agent, channel.id), asked: issueKeys(routine ? `${routine.name} ${routine.prompt}` : String(trace.prompt || "").split("<chat>\n").pop().split("\n</chat>")[0]) };
+    let original = String(trace.prompt || "").replace(/^Ora: [^\n]*\n\n/, "").replace(/\n\n\[Obiettivo\][\s\S]*$/, "");
+    if (topics.current) original = original.replace(/<altrove\b[^>]*>[\s\S]*?<\/altrove>/g, "");
     const user = [
       original,
+      this.topicNote(topics),
       `[Cora] Cora si è riavviata mentre lavoravi a questo compito (iniziato ${formatWhen(Date.parse(trace.startedAt), this.timezone)}). Gli ultimi passi che avevi fatto:\n${steps || "- (nessuno registrato)"}`,
       trace.output ? `Risultato già registrato prima del riavvio:\n${trace.output}` : "",
       "Riprendi da dove eri: controlla com'è la situazione adesso (qualcosa potrebbe essere già fatto), poi porta a termine il compito e scrivi il risultato.",
     ].join("\n\n");
     return this.loop({
-      agent, mode: routine?.kind === "reminder" ? "reminder" : trace.kind === "routine" ? "routine" : "chat", channel, user, computer: agent.tools, postFile, say, inbox, onTrace, onMessageHandled, replyTo,
+      agent, mode: routine?.kind === "reminder" ? "reminder" : trace.kind === "routine" ? "routine" : "chat", channel, user, computer: agent.tools, postFile, say, inbox, onTrace, onMessageHandled, replyTo, topics,
       maxSteps: TASK_STEPS, deadline: Date.now() + TASK_DEADLINE_MS, images: [], task: true,
       goalRequest: routine ? this.routineGoal(routine) : original.split("<chat>\n").pop().split("\n</chat>")[0].split("\n").filter((line) => line.includes(" ★:")).slice(-1).join("\n"), routine,
       goalContext: routine ? "" : original.split("<chat>\n").pop().split("\n</chat>")[0].slice(-6000),

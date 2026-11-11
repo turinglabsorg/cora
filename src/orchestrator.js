@@ -1129,6 +1129,7 @@ export class Orchestrator {
       const authorized = this.authorized(queued, agent, state);
       const mayUseComputer = queued ? queued.kind === "owner" || authorized || queued.delegated : state.ownerOrigin;
       if (this.threadWork.has(state.id, agent.id) || this.sessions.blocking(agent.id, state.id)) return;
+      if (last.kind === "agent" && state.budget <= 0) return;
       const computer = Boolean(agent.tools && mayUseComputer && !this.threadWork.has(state.id, agent.id));
       this.acknowledge(state, agent.id, [...state.humanQueue.values()].filter((item) => item.id === queued?.id || snapshot.includes(item)).map((item) => item.id));
       const delegationAuthorized = queued ? queued.kind === "owner" || Boolean(queued.delegated) : state.ownerOrigin;
@@ -1141,17 +1142,24 @@ export class Orchestrator {
       // nothing — it marks the message it took instead. No line in the channel either way.
       const working = this.showWorking(state, agent, last);
       let result;
+      let turnCounted = false;
       try {
-        const occupied = await this.withSession(agent, state.id, "chat", () => this.brain.chatTurn({
-          agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, requestAuthorized: Boolean(mayUseComputer), belongsTo: this.ownsAgent(queued, agent, state),
-          computerDenied: Boolean(agent.tools && !mayUseComputer),
-          replyTo: queued,
-          postFile: (file, caption, { replyTo = queued, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { ...this.replyDelivery(replyTo), delegationAuthorized }),
-          say,
-          // Everything already in the channel when the turn starts is old news, not just what the prompt shows.
-          inbox: this.inbox(state, state.history.slice()),
-          onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
-        }));
+        const occupied = await this.withSession(agent, state.id, "chat", () => {
+          if (!turnCounted) {
+            state.budget = Math.max(0, state.budget - 1);
+            turnCounted = true;
+          }
+          return this.brain.chatTurn({
+            agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, requestAuthorized: Boolean(mayUseComputer), belongsTo: this.ownsAgent(queued, agent, state),
+            computerDenied: Boolean(agent.tools && !mayUseComputer),
+            replyTo: queued,
+            postFile: (file, caption, { replyTo = queued, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { ...this.replyDelivery(replyTo), delegationAuthorized }),
+            say,
+            // Everything already in the channel when the turn starts is old news, not just what the prompt shows.
+            inbox: this.inbox(state, state.history.slice()),
+            onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
+          });
+        });
         if (occupied.busy) return;
         result = occupied.value;
       } catch (error) {
@@ -1741,7 +1749,6 @@ export class Orchestrator {
       this.store.appendArchive(state.id, item);
       this.restartInactivity(state, agent.id, item.at);
       if (!passive && !continuation) {
-        state.budget -= 1;
         this.queueColleagues(state, item, delegationAuthorized);
       }
     }
@@ -1854,7 +1861,6 @@ export class Orchestrator {
     this.store.appendArchive(state.id, item);
     this.restartInactivity(state, agent.id, item.at);
     if (text && !passive && !continuation) {
-      state.budget -= 1;
       this.queueColleagues(state, item, delegationAuthorized);
     }
     this.emit({ type: "web-message", room: state.id, item });

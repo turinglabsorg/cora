@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { Brain } from "../src/brain.js";
 import { issueKeys, threadLeak, threadTopics } from "../src/thread-topics.js";
 
 const G = "1521874685690642564";
@@ -32,4 +33,51 @@ test("another thread's work is a leak; this thread's issue, a question asked her
   assert.equal(threadLeak("REF-62 la seguo qui: https://discord.com/channels/1521874685690642564/1569410375882121336", handover), null);
   assert.equal(threadLeak("REF-99 non ha un thread", handover), null);
   assert.equal(threadLeak("Briefings chiusa su REF-62", at("1")), null, "a channel without a topic is never refused");
+});
+
+function contextFixture(here, other) {
+  const agent = { id: "nico", name: "Nico" };
+  const brain = Object.create(Brain.prototype);
+  brain.timezone = "Europe/Rome";
+  brain.channels = { info: (id) => [here, other].find((item) => item.id === id), list: () => [here, other] };
+  brain.channelIdsFor = () => [here.id, other.id];
+  brain.channelLabel = (id) => brain.channels.info(id).name;
+  brain.store = { recentElsewhere: () => [{ channelId: other.id, messages: [{ kind: "agent", agentId: agent.id, authorName: "Nico", at: Date.now(), content: "FOREIGN_WORK: continuo la ricerca segreti" }] }] };
+  return { brain, agent };
+}
+
+test("thread boundaries use identity, not issue codes, titles or transport", () => {
+  for (const [here, other] of [
+    [{ id: "handover", name: "Refracto autogestito", parentId: "lab" }, { id: "secrets", name: "Ricerca segreti", thread: true }],
+    [{ id: "handover", name: "REF-23 handover", thread: true }, { id: "secrets", name: "REF-23 secondo thread", thread: true }],
+    [{ id: "sl:C12345:1760000000.123456", name: "lab", parentId: "sl:C12345", kind: "slack" }, { id: "secrets", name: "Ricerca segreti" }],
+    [{ id: "general", name: "lab" }, { id: "sl:C12345:1760000000.123456", name: "lab", parentId: "sl:C12345", kind: "slack" }],
+  ]) {
+    const { brain, agent } = contextFixture(here, other);
+    assert.doesNotMatch(brain.elsewhere(agent, here.id, brain.threadMap(agent, here.id)), /FOREIGN_WORK/);
+  }
+});
+
+test("a resumed thread drops legacy elsewhere transcripts but keeps its own request and steps", async () => {
+  const here = { id: "handover", name: "Refracto autogestito", parentId: "lab" };
+  const { brain, agent } = contextFixture(here, { id: "secrets", name: "Ricerca segreti", parentId: "lab" });
+  let input;
+  brain.loop = async (args) => { input = args; return { text: "ok" }; };
+  await brain.resumeTurn({ agent, channel: here, trace: { kind: "chat", startedAt: new Date().toISOString(), prompt: '<altrove dove="Ricerca segreti">FOREIGN_WORK: sidebar</altrove>\n<chat>\nSeb ★: verifica Refracto CURRENT_WORK\n</chat>', steps: [{ type: "text", text: "CURRENT_STEP" }] } });
+  assert.doesNotMatch(input.user, /FOREIGN_WORK/);
+  assert.match(input.user, /CURRENT_WORK/);
+  assert.match(input.user, /CURRENT_STEP/);
+  assert.match(input.user, /Tema di questo thread: «Refracto autogestito»/);
+  assert.ok(input.topics, "resumed tools keep the same thread boundary as a fresh turn");
+});
+
+test("archived thread metadata still isolates context when the live channel cache misses", () => {
+  const here = { id: "handover", name: "handover" };
+  const other = { id: "secrets", name: "secrets" };
+  const { brain, agent } = contextFixture(here, other);
+  brain.store.value = () => ({ handover: { name: "Refracto autogestito", parentId: "lab", thread: true } });
+  assert.equal(brain.threadMap(agent, here.id).current.name, "Refracto autogestito");
+  assert.doesNotMatch(brain.elsewhere(agent, here.id, brain.threadMap(agent, here.id)), /FOREIGN_WORK/);
+  brain.store.value = () => ({ secrets: { name: "Ricerca segreti", parentId: "lab", thread: true } });
+  assert.doesNotMatch(brain.elsewhere(agent, here.id, brain.threadMap(agent, here.id)), /FOREIGN_WORK/);
 });

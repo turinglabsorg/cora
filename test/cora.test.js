@@ -4361,6 +4361,87 @@ describe("talking with the agents", () => {
     await quiet();
   });
 
+  test("threads without issue keys isolate Refracto from Cora and preserve their own current request", async () => {
+    const HANDOVER = "1599000000000000831";
+    const SECRETS = "1599000000000000832";
+    discord.dispatch("THREAD_CREATE", { id: HANDOVER, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Refracto autogestito" });
+    discord.dispatch("THREAD_CREATE", { id: SECRETS, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Ricerca nella pagina segreti" });
+    await sleep(150);
+    const inThread = (id) => discord.state.webhookPosts.filter((item) => item.username === "Olga" && item.channelId === id);
+    replies.set("Olga", () => ({ content: "Sto aggiungendo la sidebar Segreti / Registro. CORA_FOREIGN_TASK." }));
+    discord.say({ content: "@Olga, aggiungi la ricerca segreti. CORA_FOREIGN_REQUEST.", channel: SECRETS });
+    await waitFor(() => inThread(SECRETS).length === 1);
+    await quiet();
+    let prompt;
+    replies.set("Olga", (body) => { prompt = lastUserText(body); return { content: "Su Refracto attendo i test capabilities." }; });
+    discord.say({ content: "@Olga, a che punto sei qui? REFRACTO_CURRENT_REQUEST.", channel: HANDOVER });
+    await waitFor(() => inThread(HANDOVER).length === 1);
+    await quiet();
+    assert.doesNotMatch(prompt, /CORA_FOREIGN_TASK|CORA_FOREIGN_REQUEST|Sto aggiungendo la sidebar/);
+    assert.match(prompt, /REFRACTO_CURRENT_REQUEST/);
+    assert.match(prompt, /Tema di questo thread: «Refracto autogestito»/);
+    assert.match(prompt, new RegExp(`discord.com/channels/${GUILD}/${SECRETS}`), "other work remains discoverable by its thread link");
+
+    replies.set("Olga", (body) => { prompt = lastUserText(body); return { content: "Resto sul tema di questo canale." }; });
+    discord.say({ content: "@Olga, rispondi qui nel canale." });
+    await waitFor(() => posts("Olga").includes("Resto sul tema di questo canale."));
+    await quiet();
+    assert.doesNotMatch(prompt, /CORA_FOREIGN_TASK|CORA_FOREIGN_REQUEST|REFRACTO_CURRENT_REQUEST/, "thread transcripts do not leak into a parent channel either");
+
+    const resumed = await app.brain.resumeTurn({ agent: { ...olga, tools: false }, channel: app.channels.info(HANDOVER),
+      trace: { kind: "chat", startedAt: new Date().toISOString(), steps: [],
+        prompt: '<altrove dove="Ricerca segreti">CORA_LEGACY_WORK</altrove>\n<chat>\nSam ★: verifica Refracto REFRACTO_RESUMED_WORK\n</chat>' } });
+    assert.equal(resumed.text, "Resto sul tema di questo canale.");
+    assert.doesNotMatch(prompt, /CORA_LEGACY_WORK/);
+    assert.match(prompt, /REFRACTO_RESUMED_WORK/);
+    assert.match(prompt, /Tema di questo thread: «Refracto autogestito»/);
+  });
+
+  test("progress reports do not spend the colleague turn budget, and real handoffs remain bounded", async () => {
+    const THREAD = "1599000000000000833";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Refracto QA handoff" });
+    await sleep(150);
+    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 3 } });
+    let progress = 0;
+    const beforeSessions = app.store.threadSessions().filter((item) => item.channelId === THREAD).length;
+    replies.set("Olga", () => progress < 10
+      ? { tool_calls: [{ function: { name: "say", arguments: { text: `Verifica Refracto ${++progress}: lavoro ancora in corso.` } } }] }
+      : { content: "@Pino candidato pronto, verifica il pacchetto." });
+    replies.set("Pino", () => ({ content: "@Olga pacchetto verificato, conferma." }));
+    try {
+      discord.say({ content: "@Olga, prepara il candidato e fallo verificare al collega.", channel: THREAD });
+      await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && item.username === "Pino"), { what: "Pino receives a handoff after ten progress updates" });
+      await quiet();
+      const messages = discord.state.webhookPosts.filter((item) => item.channelId === THREAD);
+      assert.equal(messages.filter((item) => item.username === "Pino").length, 1, "a colleague is not restarted in a loop");
+      assert.equal(messages.filter((item) => /^Verifica Refracto/.test(item.content)).length, 10);
+      assert.equal(app.store.threadSessions().filter((item) => item.channelId === THREAD).length - beforeSessions, 3, "three actual turns, regardless of progress posts");
+      assert.equal(app.orchestrator.state(THREAD).budget, 0, "the third turn exhausts the real turn budget");
+    } finally {
+      await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } });
+    }
+  });
+
+  test("colleague fanout rechecks the remaining turn budget before starting each session", async () => {
+    const THREAD = "1599000000000000834";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Bounded colleague fanout" });
+    const rita = (await call("/api/agents", { method: "POST", body: { name: "Rita", model: "ollama/test-model", tools: false, channelIds: [CHANNEL] } })).data;
+    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 2 } });
+    replies.set("Olga", () => ({ content: "@Pino e @Rita, verificate il candidato." }));
+    replies.set("Pino", () => ({ content: "Verificato da Pino." }));
+    replies.set("Rita", () => ({ content: "Verificato da Rita." }));
+    try {
+      discord.say({ content: "@Olga, prepara il candidato.", channel: THREAD });
+      await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && /Verificato da/.test(item.content)));
+      await quiet();
+      assert.equal(app.store.threadSessions().filter((item) => item.channelId === THREAD).length, 2);
+      assert.equal(discord.state.webhookPosts.filter((item) => item.channelId === THREAD).length, 2);
+    } finally {
+      await call(`/api/agents/${rita.id}`, { method: "PUT", body: { enabled: false } });
+      await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } });
+    }
+  });
+
   test("only the agent you name answers, a follow-up without names goes to it again, and a mention of someone else keeps them quiet", async () => {
     replies.set("Olga", () => ({ content: "Sono Olga, dimmi." }));
     replies.set("Pino", () => ({ content: "Anche io!" }));
