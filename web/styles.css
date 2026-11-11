@@ -1897,6 +1897,9 @@ a.share-url:hover { color: var(--amber); }
 
 /* The vault: names you can use, values nobody reads back. */
 .art-switch { align-self: flex-start; }
+.vault-workspace [hidden] { display: none; }
+.vault-search { display: grid; gap: 8px; margin-bottom: 14px; }
+.vault-search .mono { font-size: 11px; }
 .vault-list { display: grid; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
 .vault-row { display: flex; align-items: flex-start; gap: 12px; min-width: 0; padding: 14px 2px; border-bottom: 1px solid var(--line); }
 .vault-row > .panel-ico { width: 34px; height: 34px; flex: none; }

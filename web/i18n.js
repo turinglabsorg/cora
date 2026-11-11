@@ -2762,5 +2762,13 @@ Object.assign(EN, {
   "La passkey non supporta PRF. Usa una password o un autenticatore compatibile.": "This passkey does not support PRF. Use a password or a compatible authenticator.",
   "La passkey non restituisce PRF. Scegli un altro metodo di sblocco.": "This passkey did not return PRF. Choose another unlock method.",
   "Sblocco non riuscito. Controlla password, passkey e cartella.": "Unlock failed. Check the password, passkey and folder.",
-  "Il documento cifrato non corrisponde alla versione richiesta.": "The encrypted document does not match the requested version."
+  "Il documento cifrato non corrisponde alla versione richiesta.": "The encrypted document does not match the requested version.",
+  "Cerca per nome, descrizione o agente": "Search by name, description or agent",
+  "Cerca nei segreti": "Search secrets",
+  "Nessun segreto corrisponde alla ricerca.": "No secrets match your search.",
+  "Cancella ricerca": "Clear search",
+  "{count} di {total} segreti": "{count} of {total} secrets",
+  "Chiavi, password e token": "Keys, passwords and tokens",
+  "Accessi e modifiche": "Access and changes"
+
 });

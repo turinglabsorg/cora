@@ -7622,13 +7622,32 @@ function renderSecrets() {
   let data = null;
   let form = "";
   let shown = null;
+  let workspace;
+  let secretRows = [];
+  const search = h("input", { type: "search", placeholder: tr("Cerca per nome, descrizione o agente"), "aria-label": tr("Cerca nei segreti"), autocomplete: "off", spellcheck: "false" });
+  const count = h("span", { class: "muted mono", role: "status", "aria-live": "polite" });
+  const noMatches = empty("search", "Nessun segreto corrisponde alla ricerca.");
+  const clear = btn("Cancella ricerca", { icon: "close", cls: "sm ghost", onclick: () => { search.value = ""; filterSecrets(); search.focus(); } });
+  const searchTools = h("div", { class: "vault-search" }, search, h("div", { class: "row" }, count, h("span", { class: "spacer" }), clear));
+  search.addEventListener("input", filterSecrets);
+  function filterSecrets() {
+    const words = plainText(search.value).trim().split(/\s+/).filter(Boolean);
+    let matches = 0;
+    for (const { row, text } of secretRows) {
+      row.hidden = !words.every((word) => text.includes(word));
+      if (!row.hidden) matches++;
+    }
+    count.textContent = tr("{count} di {total} segreti", { count: matches, total: secretRows.length });
+    noMatches.hidden = matches > 0 || !secretRows.length;
+    clear.hidden = !search.value;
+  }
   const reload = async () => {
     try {
       data = await api("/api/secrets");
       if (body.isConnected) draw();
     } catch (error) { body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), h("span", {}, raw(error.message)))); }
   };
-  const toggle = (name) => () => { form = form === name ? "" : name; shown = null; draw(); window.scrollTo?.({ top: 0, behavior: "smooth" }); };
+  const toggle = (name) => () => { form = form === name ? "" : name; shown = null; draw(); workspace?.selectSection("elenco"); window.scrollTo?.({ top: 0, behavior: "smooth" }); };
   const newButton = btn("Nuovo segreto", { icon: "plus", cls: "primary", onclick: toggle("new") });
 
   /**
@@ -7738,13 +7757,14 @@ function renderSecrets() {
   function draw() {
     newButton.hidden = askButton.hidden = !data.canManage;
     if (!data.enabled) {
-      body.replaceChildren(artifactsSwitch("segreti"), panel({ icon: "key", title: "Cassaforte" }, h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Questa Cora non ha una chiave per la cassaforte: serve CORA_SESSION_KEY."))));
+      body.replaceChildren(panel({ icon: "key", title: "Cassaforte" }, h("p", { class: "notice warn" }, icon("alert"), h("span", {}, "Questa Cora non ha una chiave per la cassaforte: serve CORA_SESSION_KEY."))));
       return;
     }
     const proposed = data.sends.filter((item) => item.status === "proposed");
     const live = data.sends.filter((item) => item.status === "active");
-    body.replaceChildren(...[
-      artifactsSwitch("segreti"),
+    secretRows = data.secrets.map((secret) => ({ row: secretRow(secret), text: plainText([secret.name, secret.description,
+      ...(secret.agents.includes("*") ? [tr("Tutti gli agenti"), ...S.data.agents.map((agent) => agent.name)] : secret.agents.map((id) => S.data.agents.find((agent) => agent.id === id)?.name || ""))].join(" ")) }));
+    const secretsPane = h("div", { class: "stack" }, ...[
       proposed.length ? h("section", { class: "requests art-reviews", "aria-label": tr("Invii da approvare") },
         h("span", { class: "label" }, tr("Invii da approvare"), h("i", { class: "count" }, raw(String(proposed.length)))),
         proposed.map((item) => h("div", { class: "art-review" },
@@ -7757,7 +7777,7 @@ function renderSecrets() {
         : form.startsWith("send:") ? sendForm(form.slice(5))
         : form.startsWith("approve:") && proposed.find((item) => item.id === form.slice(8)) ? sendForm(proposed.find((item) => item.id === form.slice(8)).name, proposed.find((item) => item.id === form.slice(8))) : null,
       panel({ icon: "key", title: "Cassaforte", hint: "Si usano per nome: un agente li mette nel suo hush e lancia i comandi con hush run, senza vederli." },
-        data.secrets.length ? h("ul", { class: "vault-list" }, data.secrets.map(secretRow)) : empty("key", "Ancora nessun segreto. Mettine uno, oppure chiedilo con un link a chi lo ha.")),
+        data.secrets.length ? [searchTools, h("ul", { class: "vault-list" }, secretRows.map(({ row }) => row)), noMatches] : empty("key", "Ancora nessun segreto. Mettine uno, oppure chiedilo con un link a chi lo ha.")),
       data.requests.length ? panel({ icon: "clock", title: "Aspettano di arrivare" },
         h("ul", { class: "vault-list" }, data.requests.map((request) => h("li", { class: "vault-row" },
           h("span", { class: "panel-ico" }, icon("link")),
@@ -7773,10 +7793,16 @@ function renderSecrets() {
               item.note ? `«${item.note}»` : "", item.opened ? tr("aperto {count} di {views}", { count: item.opened, views: item.views }) : tr("non ancora aperto"),
               tr("scade {when}", { when: fmtTime(new Date(item.expiresAt).toISOString(), true) })].filter(Boolean).join(" · ")))),
           data.canManage ? h("div", { class: "row-actions" }, armedButton("Revoca", "Conferma: chiudi il link", { cls: "sm", onconfirm: async () => { if (await guard(api(`/api/secrets/sends/${item.id}`, { method: "DELETE" }), "Link revocato")) reload(); } })) : null)))) : null,
-      data.canManage ? vaultLog(data) : null,
     ].filter(Boolean));
+    filterSecrets();
+    workspace = sectionWorkspace({ title: "Segreti", base: "#/artefatti/segreti", current: route()[2], entries: [
+      ["elenco", "Segreti", "key", "Chiavi, password e token", [secretsPane]],
+      ...(data.canManage ? [["registro", "Registro", "clock", "Accessi e modifiche", [vaultLog(data)]]] : []),
+    ] });
+    workspace.classList.add("vault-workspace");
+    body.replaceChildren(workspace);
   }
-  shell([pageHead("Segreti", "Chiavi, password e token usati per nome, come con hush: nessuno li rilegge dal pannello.", [askButton, newButton]), body], { title: "Segreti" });
+  shell([pageHead("Segreti", "Chiavi, password e token usati per nome, come con hush: nessuno li rilegge dal pannello.", [btn("Cartelle", { icon: "archive", cls: "ghost", onclick: () => { location.hash = "#/artefatti"; } }), askButton, newButton]), body], { title: "Segreti" });
   reload();
 }
 

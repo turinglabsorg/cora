@@ -298,3 +298,8 @@ The Intelligence group contains subscription accounts followed by one API keys e
 
 
 Domains are the primary unit on Settings → Domains. Each domain disclosure contains its own Resend account identity, masked key hint, account check/replacement, delivery/receipt readiness and DNS controls; do not separate account management above the domain list. Existing ready domains start closed and incomplete ones open. Add domain follows one flow: enter the domain, Continue, then reuse a connected Resend account or connect a new one, then connect the domain. Keep an accepted account selected if domain creation fails so retry cannot duplicate it. Accounts needing recovery appear in the account step. New and replacement secrets use the existing paste field.
+
+
+## Vault search and rail
+
+Secrets uses `sectionWorkspace()` at `#/artefatti/segreti` with Secrets (`elenco`) and owner-only Log (`registro`). Keep the search and inline drafts mounted when switching sections. The header's Folders action returns to the artifact library. A full-width search above the vault list matches name, description and permitted agent names, ignoring case and accents; all words must match. Show the visible/total count, a clear action and an explicit no-results state. Filter only the already-authorized metadata in the browser; never request or index secret values. Pending requests, approvals and active send links remain visible independently of the vault filter. Reuse the existing rail behavior on phones.
