@@ -328,7 +328,7 @@ test("Gemini connects through Google's manual authorization and keeps each subsc
   for (const model of ["gemini/claude-sonnet-5-5-low", "gemini/gpt-oss-120b-medium"]) {
     const result = await app.llm.runAgent({ ...options, model, subscriptionId: accounts[0].id });
     assert.equal(result.text, `Identity: ${accounts[0].id}@example.test`);
-    assert.ok(identity.calls().at(-1).argv.includes(model.slice("gemini/".length)), "the third-party model runs through the same Google profile");
+    assert.equal(identity.calls().at(-1).model, model.slice("gemini/".length), "the third-party model runs through the same Google profile");
   }
   const panel = panelHarness({ language: "en", fetch: async () => { throw new Error("unexpected request"); } });
   panel.run(`S.data = ${JSON.stringify(state)}`);

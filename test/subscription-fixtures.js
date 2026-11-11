@@ -79,11 +79,13 @@ if (provider === "gemini" && argv.includes("/usage")) {
   });
 } else if (provider === "gemini") {
   const reply = (id, result) => line({ jsonrpc: "2.0", id, result });
+  let model = "";
   readline.createInterface({ input: process.stdin }).on("line", (text) => {
     const message = JSON.parse(text);
+    if (message.method === "session/set_model") model = message.params.modelId;
     if (message.method !== "session/prompt") return reply(message.id, message.method === "session/new" ? { sessionId: "fixture" } : {});
     const account = saved();
-    fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ provider, directory, argv, scope: process.env.ANTIGRAVITY_CREDENTIAL_SCOPE, account: account?.email, inheritedKeys: Object.keys(process.env).filter((key) => /TOKEN|API_KEY|AUTH_TOKEN/.test(key)) }) + "\\n");
+    fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ provider, directory, argv, model, scope: process.env.ANTIGRAVITY_CREDENTIAL_SCOPE, account: account?.email, inheritedKeys: Object.keys(process.env).filter((key) => /TOKEN|API_KEY|AUTH_TOKEN/.test(key)) }) + "\\n");
     if (!account) { process.stderr.write("Login expired · Please run /login"); process.exit(1); }
     line({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "fixture", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Identity: " + account.email } } } });
     reply(message.id, { stopReason: "end_turn", usage: { inputTokens: 20, cachedReadTokens: 5, outputTokens: 3 } });
