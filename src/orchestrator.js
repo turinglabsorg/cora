@@ -15,7 +15,6 @@ import { AUDIO_LIMIT_BYTES, VOICE_LANGUAGES, speechParts } from "./voice.js";
 import { imageMime } from "./images.js";
 
 const HUMAN_DEBOUNCE_MS = 1200;
-const INACTIVITY_MS = 30 * 60 * 1000;
 // After a restart, unanswered human messages this recent are picked up again.
 const CATCH_UP_MS = 15 * 60 * 1000;
 const SLACK_THREAD_CATCH_UP_MS = 24 * 60 * 60 * 1000;
@@ -91,7 +90,7 @@ export function listenExit(text) {
 }
 
 /**
- * The answer to the thirty-minute question. "Devo rimanere in ascolto?" answered "no" or with a
+ * The answer to the inactivity question. "Devo rimanere in ascolto?" answered "no" or with a
  * goodbye is an exit for whoever was listening; anything that asks to stay, or says more, is not.
  */
 const IDLE_STAY = /\b(?:si|resta|restate|rimani|rimanete|ascolta|ascoltate|continua|continuate|procedi|aspetta|yes|stay|keep|wait)\b/u;
@@ -635,7 +634,7 @@ export class Orchestrator {
     const recipientsForExit = named.length ? candidates.filter((agent) => named.includes(agent.id)) : candidates;
     const decision = recipientsForExit.length ? await this.brain.disengagement({ message: item.content, agents: recipientsForExit, history: state.history.filter((entry) => entry.id !== item.id), reminded: Boolean(state.focus?.remindedAt) }) : null;
     const exits = decision === null ? listenersLeaving(item.content, recipientsForExit) : recipientsForExit.filter((agent) => decision.includes(agent.id)).map((agent) => agent.id);
-    // A "no" to the thirty-minute question lets go of whoever it was asked for, or of those it tags.
+    // A "no" to the inactivity question lets go of whoever it was asked for, or of those it tags.
     const declined = decision === null && !exits.length && state.focus?.remindedAt && idleDecline(item.content) ? (named.length ? named : previous).filter((id) => previous.includes(id)) : [];
     const leaving = exits.length ? exits : declined;
     // The answer to an agent's question comes from whoever it asked: the owner, or the person the agent belongs to.
@@ -677,8 +676,11 @@ export class Orchestrator {
   }
 
   async checkEngagements(now = Date.now()) {
+    const minutes = this.store.settings.conversationIdleMinutes;
+    if (minutes === null) return;
+    const inactivityMs = minutes * 60000;
     for (const [channelId, focus] of Object.entries(this.engagements)) {
-      if (!focus?.ids?.length || focus.remindedAt || now - focus.at < INACTIVITY_MS || this.reminding.has(channelId) || !this.channels.isActive(channelId)) continue;
+      if (!focus?.ids?.length || focus.remindedAt || now - focus.at < inactivityMs || this.reminding.has(channelId) || !this.channels.isActive(channelId)) continue;
       const channel = this.channelMeta(channelId);
       if (channel.guildId && !this.allowedGuild(channel.guildId)) continue;
       this.reminding.add(channelId);
@@ -689,8 +691,8 @@ export class Orchestrator {
           // An agent at work in this conversation is not idle here; work elsewhere does not postpone the question.
           if (this.states.get(channelId)?.working?.has(agent.id) || this.threadWork.has(channelId, agent.id)) continue;
           if (transportOf(channelId) === "discord" && !this.dmAgentId(channelId) && this.bots && !await this.bots.canRead(agent, channelId)) continue;
-          if (this.engagements[channelId] !== focus) break;
-          const text = this.store.settings.language === "en" ? "It has been 30 minutes since the last message. Should I keep listening to this conversation? I will stay connected until you explicitly ask me to leave." : "Sono passati 30 minuti dall'ultimo messaggio. Devo rimanere in ascolto di questa conversazione? Resto collegato finché non mi chiedi esplicitamente di uscire.";
+          if (this.engagements[channelId] !== focus || this.store.settings.conversationIdleMinutes !== minutes) break;
+          const text = this.store.settings.language === "en" ? `It has been ${minutes} minutes since the last message. Should I keep listening to this conversation? I will stay connected until you explicitly ask me to leave.` : `Sono passati ${minutes} minuti dall'ultimo messaggio. Devo rimanere in ascolto di questa conversazione? Resto collegato finché non mi chiedi esplicitamente di uscire.`;
           try { await this.postAs(agent, this.state(channelId), text, undefined, undefined, { passive: true }); }
           finally {
             // A question that cannot be delivered counts as asked: it waits for the next message instead of retrying every minute.
@@ -1028,7 +1030,7 @@ export class Orchestrator {
   }
 
   /** True while the agent is on a task anywhere: its own work is not silence. */
-  /** Any message in the conversation restarts the thirty minutes, the agent's own included. */
+  /** Any message in the conversation restarts the inactivity interval, the agent's own included. */
   restartInactivity(state, agentId, at) {
     const focus = state.focus;
     if (!focus?.ids?.includes(agentId)) return;

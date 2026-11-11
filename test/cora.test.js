@@ -4580,6 +4580,124 @@ describe("talking with the agents", () => {
     await waitFor(() => app.store.settings.decisionBackups.length === 0);
   });
 
+  test("Regia persists finite and infinite inactivity settings and recovers from refused saves", async (t) => {
+    const before = { ...app.store.settings };
+    t.after(() => app.store.updateSettings(before));
+    assert.equal(app.store.settings.conversationIdleMinutes, 30);
+    let refuse = false;
+    const panel = panelHarness({ hash: "#/settings/regia", fetch: async (path, init = {}) => {
+      if (refuse && path === "/api/settings" && init.method === "PUT") return { ok: false, status: 503, json: async () => ({ error: "fixture refused save" }) };
+      const result = await call(path, { method: init.method || "GET", body: init.body ? JSON.parse(init.body) : undefined });
+      return { ok: result.status < 400, status: result.status, json: async () => result.data };
+    } });
+    await panel.run("boot()");
+    const minutes = panel.app.querySelectorAll("input").find((field) => field.attributes["aria-label"] === "Minuti senza messaggi");
+    const unlimited = panel.app.querySelectorAll("input").find((field) => field.attributes.name === "conversationIdleUnlimited");
+    assert.ok(minutes); assert.ok(unlimited);
+    assert.equal(String(minutes.attributes.min), "5");
+    minutes.value = "7";
+    minutes.dispatch("change");
+    await waitFor(() => app.store.settings.conversationIdleMinutes === 7 && !minutes.disabled);
+    unlimited.checked = true;
+    unlimited.dispatch("change");
+    await waitFor(() => app.store.settings.conversationIdleMinutes === null && !unlimited.disabled);
+    assert.equal(minutes.disabled, true);
+    const saved = new Store(home);
+    assert.equal(saved.settings.conversationIdleMinutes, null);
+    saved.close();
+    refuse = true;
+    unlimited.checked = false;
+    unlimited.dispatch("change");
+    await waitFor(() => !unlimited.disabled);
+    assert.equal(unlimited.checked, true);
+    assert.equal(minutes.disabled, true);
+    assert.equal(app.store.settings.conversationIdleMinutes, null);
+    refuse = false;
+    unlimited.checked = false;
+    unlimited.dispatch("change");
+    await waitFor(() => app.store.settings.conversationIdleMinutes === 7 && !minutes.disabled);
+    minutes.value = "4";
+    minutes.dispatch("change");
+    assert.equal(app.store.settings.conversationIdleMinutes, 7);
+    assert.equal(Number(minutes.value), 7);
+    for (const value of [4, -1, 0, 5.5, "5", true, {}, "Infinity", Number.MAX_SAFE_INTEGER]) {
+      const refused = await call("/api/settings", { method: "PUT", body: { conversationIdleMinutes: value, maxAgentTurns: 39 } });
+      assert.equal(refused.status, 400, JSON.stringify(value));
+      assert.equal(app.store.settings.conversationIdleMinutes, 7);
+      assert.equal(app.store.settings.maxAgentTurns, before.maxAgentTurns, "invalid updates are atomic");
+    }
+    assert.equal((await call("/api/settings", { method: "PUT", body: { conversationIdleMinutes: 1000000 } })).status, 200);
+    assert.equal(app.store.settings.conversationIdleMinutes, 1000000, "finite values have no product ceiling");
+    const finite = new Store(home);
+    assert.equal(finite.settings.conversationIdleMinutes, 1000000);
+    finite.close();
+  });
+
+  test("configured inactivity interval applies live, infinity preserves engagement and the reminder names the chosen minutes", async (t) => {
+    const before = { ...app.store.settings };
+    t.after(() => app.store.updateSettings(before));
+    const THREAD = "1599000000000000891";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "configurable inactivity" });
+    await sleep(100);
+    replies.set("Olga", () => ({ content: "Resto qui." }));
+    discord.say({ content: "@Olga, ascolta qui", channel: THREAD });
+    await waitFor(() => posts("Olga").length === 1);
+    await quiet();
+    const focus = app.orchestrator.engagements[THREAD];
+    const reminders = () => discord.state.webhookPosts.filter((item) => item.channelId === THREAD && /Devo rimanere|Should I keep listening/.test(item.content));
+    assert.equal((await call("/api/settings", { method: "PUT", body: { conversationIdleMinutes: 7 } })).status, 200);
+    await app.orchestrator.checkEngagements(focus.at + 7 * 60000 - 1);
+    assert.equal(reminders().length, 0);
+    await call("/api/settings", { method: "PUT", body: { conversationIdleMinutes: null } });
+    await app.orchestrator.checkEngagements(focus.at + 1000000 * 60000);
+    assert.equal(reminders().length, 0);
+    assert.equal(focus.remindedAt, 0);
+    assert.deepEqual(focus.ids, [olga.id]);
+    app.orchestrator.engagements = app.store.value("conversationEngagements");
+    app.orchestrator.states.delete(THREAD);
+    await app.orchestrator.checkEngagements(focus.at + 1000001 * 60000);
+    assert.equal(reminders().length, 0, "infinity survives reloading persisted engagements");
+    await call("/api/settings", { method: "PUT", body: { conversationIdleMinutes: 5 } });
+    const canRead = app.orchestrator.bots.canRead;
+    let release;
+    let checking = false;
+    app.orchestrator.bots.canRead = async (agent, channelId) => {
+      if (channelId !== THREAD) return canRead.call(app.orchestrator.bots, agent, channelId);
+      checking = true;
+      return new Promise((resolve) => { release = () => resolve(true); });
+    };
+    try {
+      const pending = app.orchestrator.checkEngagements(focus.at + 5 * 60000);
+      await waitFor(() => checking);
+      await call("/api/settings", { method: "PUT", body: { conversationIdleMinutes: null } });
+      release();
+      await pending;
+      assert.equal(reminders().length, 0, "disabling during a pending delivery check suppresses the stale question");
+    } finally {
+      app.orchestrator.bots.canRead = canRead;
+    }
+    await call("/api/settings", { method: "PUT", body: { conversationIdleMinutes: 5 } });
+    await Promise.all([app.orchestrator.checkEngagements(focus.at + 5 * 60000), app.orchestrator.checkEngagements(focus.at + 5 * 60000)]);
+    assert.equal(reminders().length, 1);
+    assert.match(reminders()[0].content, /Sono passati 5 minuti/);
+    assert.deepEqual(app.orchestrator.engagements[THREAD].ids, [olga.id]);
+    await call("/api/settings", { method: "PUT", body: { conversationIdleMinutes: 6 } });
+    await app.orchestrator.checkEngagements(focus.at + 100 * 60000);
+    assert.equal(reminders().length, 1, "changing the value does not repeat an already asked question");
+    discord.say({ content: "Sì resta, grazie", channel: THREAD });
+    await waitFor(() => posts("Olga").filter((text) => text === "Resto qui.").length === 2);
+    await quiet();
+    const renewed = app.orchestrator.engagements[THREAD];
+    await call("/api/settings", { method: "PUT", body: { language: "en" } });
+    await app.orchestrator.checkEngagements(renewed.at + 6 * 60000 - 1);
+    assert.equal(reminders().length, 1);
+    await app.orchestrator.checkEngagements(renewed.at + 6 * 60000);
+    assert.equal(reminders().length, 2);
+    assert.match(reminders()[1].content, /It has been 6 minutes/);
+    await app.orchestrator.checkEngagements(renewed.at + 200 * 60000);
+    assert.equal(reminders().length, 2);
+  });
+
   test("thread engagement survives silence and a fresh state; only an explicit disengagement ends it", async () => {
     const THREAD = "1599000000000000791";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "persistent listening" });

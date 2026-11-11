@@ -303,3 +303,8 @@ Domains are the primary unit on Settings → Domains. Each domain disclosure con
 ## Vault search and rail
 
 Secrets uses `sectionWorkspace()` at `#/artefatti/segreti` with Secrets (`elenco`) and owner-only Log (`registro`). Keep the search and inline drafts mounted when switching sections. The header's Folders action returns to the artifact library. A full-width search above the vault list matches name, description and permitted agent names, ignoring case and accents; all words must match. Show the visible/total count, a clear action and an explicit no-results state. Filter only the already-authorized metadata in the browser; never request or index secret values. Pending requests, approvals and active send links remain visible independently of the vault filter. Reuse the existing rail behavior on phones.
+
+
+## Conversation inactivity control
+
+Settings → Regia has one autosaved Inactivity reminder row. A labelled integer input accepts at least five minutes without a product upper limit; a labelled ∞ No reminder switch disables the question and the numeric control. Keep the controls in the existing stacked setting row, with the minute unit beside the input. The initial duration is thirty minutes. Explain that the value applies to all conversations and never disconnects agents. Disable both controls while saving; a rejected save restores the last accepted value.
