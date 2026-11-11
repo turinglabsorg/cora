@@ -308,3 +308,7 @@ Secrets uses `sectionWorkspace()` at `#/artefatti/segreti` with Secrets (`elenco
 ## Conversation inactivity control
 
 Settings → Regia has one autosaved Inactivity reminder row. A labelled integer input accepts at least five minutes without a product upper limit; a labelled ∞ No reminder switch disables the question and the numeric control. Keep the controls in the existing stacked setting row, with the minute unit beside the input. The initial duration is thirty minutes. Explain that the value applies to all conversations and never disconnects agents. Disable both controls while saving; a rejected save restores the last accepted value.
+
+### Encryption passkey methods
+
+Keep **A · PRF** and **B** as separate, labelled enrollment/add-method actions. Show the B password-manager trust limitation before selection, using the existing muted text and wrapping button row. Never silently select B after A fails. Method rows distinguish A and B while preserving user-supplied labels; all fixed copy is translated. No new colors or components.
