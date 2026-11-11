@@ -346,3 +346,37 @@ test("a Slack thread stays live while an agent is engaged in it and goes to the 
   orchestrator.engagements[engaged] = null;
   assert.equal((await orchestrator.threadBoard()).threads.find((thread) => thread.id === engaged).open, false);
 });
+
+test("a Telegram chat stays live while an agent is engaged in it and goes to the history when they leave", async (t) => {
+  const ollama = await fakeOllama(() => ({ content: "PASS" }));
+  const app = startCora({
+    home: tempHome(), host: "127.0.0.1", port: 0, adminPassword: "fixture-password", sessionKey: "fixture-session", insecureCookies: true,
+    useResidentSubscriptions: false, cloudUrl: "", cloudKey: "", cloudSpace: "", discordToken: "", telegramToken: "", botTokenFor: () => "",
+    ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
+    ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
+  });
+  t.after(async () => { await app.stop(); await ollama.close(); });
+  await app.ready;
+  const { store, orchestrator } = app;
+  const nico = store.createAgent({ name: "Nico" });
+  const group = "tg:-5404651651";
+  const left = "tg:-5249932127";
+  const direct = `tg:281587912@${nico.id}`;
+  for (const id of [group, left]) orchestrator.sessions.finish(orchestrator.sessions.begin({ agentId: nico.id, channelId: id, kind: "chat" }));
+  const focus = { ids: [nico.id], turn: [nico.id], at: Date.now(), remindedAt: 0, owner: true };
+  orchestrator.engagements[group] = focus;
+  orchestrator.engagements[direct] = focus;
+  orchestrator.engagements[left] = null;
+  const board = await orchestrator.threadBoard();
+  const find = (id) => board.threads.find((thread) => thread.id === id);
+  assert.equal(find(group).kind, "telegram");
+  assert.equal(find(group).open, true);
+  assert.deepEqual(find(group).listening.map((agent) => agent.name), ["Nico"]);
+  assert.equal(find(group).flows.every((flow) => flow.status !== "active"), true);
+  assert.equal(find(direct).open, true);
+  assert.equal(find(direct).direct, true);
+  assert.equal(find(left).open, false);
+  assert.deepEqual(find(left).listening, []);
+  orchestrator.engagements[group] = null;
+  assert.equal((await orchestrator.threadBoard()).threads.find((thread) => thread.id === group).open, false);
+});

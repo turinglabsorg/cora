@@ -2065,7 +2065,7 @@ export class Orchestrator {
         parentName: parentId ? (known.get(parentId)?.name || "") : "",
         guildId,
         link: kind === "discord" && /^\d{5,}$/.test(id) && (guildId || this.defaultGuild()) ? `https://discord.com/channels/${guildId || this.defaultGuild()}/${id}` : "",
-        direct: Boolean(saved?.direct),
+        direct: Boolean(saved?.direct || (kind === "telegram" && (/@/.test(id) || (channel?.chatType || info?.chatType) === "private"))),
         total: 0,
         lastAt: "",
         closed: closed.has(id),
@@ -2078,7 +2078,7 @@ export class Orchestrator {
     for (const channel of known.values()) if (channel.thread || channel.parentId) ensure(channel.id);
     for (const id of Object.keys(labels)) ensure(id);
     const engagements = this.engagements || {};
-    for (const [id, focus] of Object.entries(engagements)) if (focus?.ids?.length && !closed.has(id) && slackIds(id)?.threadTs) ensure(id);
+    for (const [id, focus] of Object.entries(engagements)) if (focus?.ids?.length && !closed.has(id) && (slackIds(id)?.threadTs || transportOf(id) === "telegram")) ensure(id);
     const measured = [];
     for (const session of sessions) {
       const group = ensure(session.channelId);
@@ -2114,6 +2114,8 @@ export class Orchestrator {
       const ids = group.closed ? [] : (engagements[group.id]?.ids || []);
       group.listening = ids.map((id) => this.store.agent(id)).filter(Boolean).map((agent) => ({ id: agent.id, name: agent.name, color: agent.color || "#f2a93b" }));
       if (group.thread && !group.closed && (group.listening.length || (group.kind === "slack" && !group.flows.length))) group.open = true;
+      // A Telegram chat has no threads of its own: the chat is the conversation, live while an agent is engaged in it.
+      if (group.kind === "telegram") group.open = !group.closed && group.listening.length > 0;
     }
     const usage = await this.processUsage.sample(measured.map(([, pid]) => pid)).catch(() => new Map());
     for (const [flow, pid] of measured) if (usage.has(pid)) flow.usage = usage.get(pid);
