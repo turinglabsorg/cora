@@ -655,13 +655,6 @@ if (flavor === "gemini" && argv.includes("/usage")) {
   process.stdout.write(JSON.stringify(options.geminiUsage || { status: "SUCCESS", response: "Account: fixture@example.test" }));
   process.exit(options.geminiUsageFailed ? 1 : 0);
 }
-if (flavor === "claude" && argv.join(" ") === "-p --input-format stream-json --output-format stream-json --verbose") {
-  fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ flavor: "claude-catalog", argv, home: process.env.CLAUDE_CONFIG_DIR }) + "\\n");
-  process.stdin.once("data", () => {
-    process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "catalog", response: { models: [{ value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default" }, { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus" }, { value: "sonnet", resolvedModel: "claude-sonnet-5-6", displayName: "Sonnet" }] } } }) + "\\n");
-  });
-  return;
-}
 if (flavor === "codex" && argv.includes("debug") && argv.includes("models")) {
   fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ flavor: "codex-catalog", argv, home: process.env.CODEX_HOME }) + "\\n");
   process.stdout.write(JSON.stringify({ models: [{ slug: "gpt-6.1-terra", display_name: "GPT-6.1 Terra", visibility: "list", priority: 1 }, { slug: "gpt-6-sol", display_name: "GPT-6-Sol", visibility: "list", priority: 2 }, { slug: "gpt-reserve", display_name: "GPT-Reserve", visibility: "hide", priority: 3 }] }));

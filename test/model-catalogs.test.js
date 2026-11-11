@@ -24,7 +24,7 @@ test("subscription CLIs list the models their provider serves today through the 
   assert.ok(codex.every((model) => model.vision && model.thinking && model.tools));
   assert.deepEqual((await ids("grok")).map((model) => [model.id, model.label]), [["grok/grok-4.8", "Grok 4.8"], ["grok/grok-4.7-build-fast", "Grok 4.7 Build Fast"]]);
   assert.deepEqual((await ids("muse")).map((model) => [model.id, model.label, model.thinking]), [["muse/muse-wonder-1.1", "Muse Wonder 1.1", false]]);
-  assert.deepEqual((await ids("claude")).map((model) => [model.id, model.label]), [["claude/claude-opus-5-5", "Opus 5.5"], ["claude/claude-sonnet-5-6", "Sonnet 5.6"]], "aliases fold into one model each");
+  assert.deepEqual((await ids("claude")).map((model) => model.id), ["claude/claude-opus-5-5", "claude/claude-sonnet-5-5", "claude/claude-haiku-5-5", "claude/claude-fable-5-1"], "Claude keeps the ids agents already run on");
   const catalog = cli.calls().find((call) => call.flavor === "codex-catalog");
   assert.ok(catalog.home && catalog.home !== process.env.CODEX_HOME, "the catalog is read through the connected account's own home");
 

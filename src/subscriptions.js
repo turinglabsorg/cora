@@ -653,23 +653,7 @@ export class Subscriptions {
   }
 
   async readCatalog(provider, record) {
-    if (provider === "claude") {
-      // Claude Code answers its model picker in the first control exchange, before any turn.
-      return this.catalogCommand(record, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], {
-        input: `${JSON.stringify({ type: "control_request", request_id: "catalog", request: { subtype: "initialize" } })}\n`,
-        onLine: (message) => {
-          if (message.type !== "control_response") return null;
-          const seen = new Map();
-          for (const model of message.response?.response?.models || []) {
-            const name = String(model.resolvedModel || model.value || "");
-            if (!/^claude-[a-z0-9.-]+$/i.test(name) || seen.has(name)) continue;
-            const parts = name.match(/^claude-([a-z]+)-(\d+)-(\d+)$/i);
-            seen.set(name, { name, label: parts ? `${parts[1][0].toUpperCase()}${parts[1].slice(1)} ${parts[2]}.${parts[3]}` : String(model.displayName || name) });
-          }
-          return [...seen.values()];
-        },
-      });
-    }
+    // Claude keeps Cora's own list: its picker answers aliases and context variants, not the model ids agents run on.
     if (provider === "codex") {
       const output = await this.catalogCommand(record, [...(!record.resident ? ["-c", 'cli_auth_credentials_store="file"'] : []), "debug", "models"]);
       const data = JSON.parse(output || "{}");
