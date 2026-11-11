@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import { EN } from "../web/i18n.js";
 import * as character from "../src/character.js";
+import * as encryptedSpace from "../web/encrypted-space.js";
 
 class Element {
   constructor(tag = "", text = "") {
@@ -145,7 +146,7 @@ export function panelHarness({ source, fetch, hash = "", language = "it" }) {
   document.getElementById = () => app;
   const location = { hash };
   const context = createContext({
-    EN, ...character, Node: Element, document, fetch, FormData,
+    EN, ...character, ...encryptedSpace, Node: Element, document, fetch, FormData,
     navigator: { language }, location,
     history: { replaceState(_state, _title, url) { location.hash = String(url); } },
     localStorage: { getItem: () => language },

@@ -1,3 +1,4 @@
+import { encryptedSetting, encryptedSetup, encryptedFolderPanel } from "./encrypted-space.js";
 import { EN } from "./i18n.js";
 import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, characterType, shouldWriteCharacter } from "./character.js";
 
@@ -2131,6 +2132,7 @@ function subscriptionAccounts(provider, { onChange = () => {} } = {}) {
 function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
   const accounts = () => [...new Map([...(S.data.quotaAccounts || []).filter(item => item.id === currentId), ...(S.data.subscriptions || [])].map(item => [item.id, item])).values()];
   let provider = "";
+  let initialProvider = null;
   let selectedId = currentId || "";
   let choosing = !selectedId;
   let requestBusy = false;
@@ -2269,6 +2271,7 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       if (record?.resident) {
         content.append(h("p", { class: "subscription-description" }, "Nessun account residente disponibile. Collega un altro account oppure controlla i collegamenti nelle impostazioni."),
           h("div", { class: "subscription-footer" }, btn(tr("Collega {provider}", { provider: name }), { icon: "external", cls: "primary", onclick: connectNew }),
+            records.length ? btn("Cambia account", { cls: "ghost", onclick: changeAccount }) : null,
             btn("Impostazioni", { cls: "ghost", href: `#/settings/${provider}` })));
       } else content.append(h("div", { class: "subscription-footer" },
         btn(requestBusy ? "Preparazione dell'accesso…" : tr("Collega {provider}", { provider: name }), { icon: requestBusy ? "refresh" : "external", cls: "primary", onclick: record
@@ -2307,11 +2310,24 @@ function subscriptionPicker(currentId, { manage = false, isNew = false } = {}) {
       const needs = SUBSCRIPTION_HARNESSES.includes(provider);
       root.hidden = !needs;
       input.disabled = !needs;
+      if (initialProvider === null) initialProvider = value;
       if (previous !== provider) {
+        // Every account already signed in for this brain: the server's and the linked subscriptions.
+        const ready = accounts().filter((item) => item.provider === provider && item.status === "ready"
+          && (!item.resident || (!manage && S.data.settings.useResidentSubscriptions)));
         // A new agent starts on the account its creator signed in themselves, when there is one.
-        const own = isNew ? accounts().find((item) => item.provider === provider && item.status === "ready" && isOwnAccount(item)) : null;
-        selectedId = selections.has(provider) ? selections.get(provider) : (accounts().find((item) => item.id === currentId && item.provider === provider)?.id) || own?.id || "";
-        choosing = !selectedId && (manage || !S.data.settings.useResidentSubscriptions);
+        const own = isNew ? ready.find(isOwnAccount) : null;
+        // An agent moving to another brain starts on an account already signed in, never on a fresh sign-in:
+        // the only one there is, otherwise the list of them to choose from.
+        const switching = !isNew && !manage && provider !== initialProvider;
+        const kept = selections.has(provider) ? selections.get(provider) : accounts().find((item) => item.id === currentId && item.provider === provider)?.id;
+        if (kept !== undefined || own || !switching || !ready.length) {
+          selectedId = kept ?? own?.id ?? "";
+          choosing = !selectedId && (manage || !S.data.settings.useResidentSubscriptions);
+        } else {
+          selectedId = ready.length === 1 && !ready[0].resident ? ready[0].id : "";
+          choosing = ready.length > 1;
+        }
         actionError = "";
         authCode.value = "";
       }
@@ -2709,7 +2725,7 @@ function agentForm(agent, { only = "", knowledge = null } = {}) {
     ["carattere", "Carattere", "spark", "Personalità e modo di parlare", [characterPane.node]],
     ["ascolto", "Ascolto", "radio", "Canali e presenza", [listening]],
     ["voce", "Voce", "mic", "Lingua e risposte vocali", [voice]],
-    ["sicurezza", "Sicurezza", "lock", "Isolamento e protezione", [agentSecurityPane(agent, knowledge)]],
+    ["sicurezza", "Sicurezza", "lock", "Isolamento e protezione", [agentSecurityPane(agent, knowledge), agentRemoteAccessPane(agent)]],
     ["autorizzazioni", "Autorizzazioni", "shield", "Chi può farlo lavorare", [agentPermissionsPane(agent), owner].filter(Boolean)],
     ...platformsOn().map((kind) => [kind, TRANSPORTS[kind].label, TRANSPORTS[kind].icon, "Account e collegamento", [kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)]]),
     ["github", "GitHub", "github", "App e repository", [githubAccount(agent)]],
@@ -4063,6 +4079,8 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
+const encryptedUI = () => ({ h, btn, api, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace });
+
 function agentSecurityPane(agent, data) {
   if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));
   const seal = switchInput("sealed", "Sigillato", data.sealed,
@@ -4070,17 +4088,27 @@ function agentSecurityPane(agent, data) {
   const input = seal.querySelector("input");
   input.disabled = !data.canManage;
   const feedback = h("p", { role: "status", class: "muted" });
-  const save = btn("Salva sicurezza", { icon: "check", cls: "primary", disabled: !data.canManage, onclick: async () => {
-    save.disabled = true;
+  input.addEventListener("change", async () => {
+    if (!data.canManage || input.disabled) return;
+    const view = location.hash;
+    input.disabled = true;
+    feedback.classList.remove("err-text");
+    feedback.textContent = tr("Salvataggio…");
     try {
       await api(`/api/agents/${agent.id}/knowledge`, { method: "PUT", body: { sealed: input.checked } });
+      data.sealed = agent.sealed = input.checked;
+      feedback.textContent = tr("Salvato");
       await loadState();
-      renderAgent();
-    } catch (error) { feedback.textContent = tr(error.message); save.disabled = false; }
-  } });
+      if (location.hash === view) await renderAgent();
+      toast("Salvato");
+    } catch (error) {
+      input.checked = data.sealed;
+      feedback.textContent = tr(error.message);
+      feedback.classList.add("err-text");
+    } finally { input.disabled = !data.canManage; }
+  });
   return panel({ icon: "lock", title: "Sicurezza", hint: "Isolamento dell’agente, del computer e dei suoi artefatti." },
-    setRows(setRow("Agente sigillato", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true })),
-    h("div", { class: "row end" }, save), feedback);
+    setRows(setRow("Agente sigillato", "Le assegnazioni per nome restano. Le regole per tutti gli agenti non si applicano. Cambiare il sigillo riavvia il desktop.", seal, { stack: true })), feedback, encryptedSetting(encryptedUI(), agent));
 }
 
 function agentKnowledgePane(agent, data) {
@@ -4388,10 +4416,21 @@ async function desktopTab(agent) {
     actions: running ? [btn("", { icon: "maximize", href: viewer, target: "_blank", cls: "sm", title: "Schermo intero" }), action("restart", "", "refresh"), action("stop", "", "stop", "sm danger")] : null },
   outdated && agent.box?.exists ? h("div", { class: "banner" }, icon("upgrade"), h("span", { class: "grow" }, h("b", {}, "C'è una versione nuova del desktop. "), "Aggiornandolo si riavvia; la home, Tailscale e le chiavi restano."), action("upgrade", "Aggiorna", "upgrade", "sm primary")) : null,
   h("div", { class: "monitor-frame" }, screen));
-  return [desktop, agent.box?.exists ? await accessPanel(agent) : null];
+  return [desktop];
+}
+
+function agentRemoteAccessPane(agent) {
+  const root = h("div", { "aria-busy": "true" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  root.readyAccess = accessPanel(agent).then((content) => {
+    root.replaceChildren(...(content ? [content] : []));
+    root.setAttribute("aria-busy", "false");
+  });
+  return root;
 }
 
 async function accessPanel(agent) {
+  if (agent.sealed) return panel({ icon: "lock", title: "Accesso remoto" },
+    h("p", { class: "lead", role: "status" }, "Questo agente è sigillato, non può attivare la tailnet"));
   const data = await guard(api(`/api/agents/${agent.id}/box/access`));
   if (!data) return null;
   const tailscale = h("div", { class: "stack-sm" });
@@ -6681,6 +6720,14 @@ async function renderArtifactFolder(id, tab, dir = "") {
   catch (error) { slot.replaceChildren(empty("archive", error.message, btn("Torna agli artefatti", { icon: "back", href: "#/artefatti" }))); return; }
   if (location.hash !== view) return;
   const { folder } = data;
+  if (data.encrypted) {
+    try {
+      const workspace = await encryptedFolderPanel(encryptedUI(), folder, tab, S.data.agents, () => renderArtifactFolder(id, tab, dir));
+      if (location.hash !== view) return;
+      shell([pageHead(raw(folder.title), "Spazio cifrato"), workspace], { title: folder.title, back: "#/artefatti", mode: "artifacts" });
+    } catch (error) { slot.replaceChildren(empty("lock", error.message, btn("Riprova", { onclick: () => renderArtifactFolder(id, tab, dir) }))); }
+    return;
+  }
   const head = data.commits.find((commit) => commit.id === folder.head) || null;
   const pending = data.commits.filter((commit) => commit.status === "proposed" || commit.status === "conflict");
   const TABS = [["file", "File", "file"], ["commit", "Commit", "commit"], ["condivisione", "Condivisione", "link"], ...(data.canReview ? [["registro", "Registro", "clock"]] : []), ["permessi", "Permessi", "shield"], ["impostazioni", "Impostazioni", "sliders"]];
@@ -6711,7 +6758,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   ], { title: folder.title, back: dir ? artifactDirHref(folder.id, parent) : artifactLevelHref(folder.path.split("/").slice(0, -1).join("/")), mode: "artifacts" });
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
   const shown = tab === "commit" ? artifactTakes(data) : ["permessi", "impostazioni"].includes(tab) ? artifactPermissions(data, { settings: tab === "impostazioni" }) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
-  content.replaceChildren(...[shown].flat().filter(Boolean));
+  content.replaceChildren(...[shown].flat().filter(Boolean), ...(tab === "impostazioni" && data.encryptedEnabled && data.canEncrypt && !data.commits.length ? [encryptedSetup(encryptedUI(), folder, () => renderArtifactFolder(id, tab, dir))] : []));
 }
 
 /**
@@ -8148,7 +8195,7 @@ function artifactSpacePanel() {
     } }, raw(label))));
   amount.addEventListener("change", () => { const value = Math.round(Number(amount.value)); if (value >= 1) save(value); });
   const row = setRow("Tetto per gli artefatti", "Quanto possono occupare i file caricati dagli agenti e dal pannello. Di base è metà del disco; in ogni caso un caricamento si ferma se lascerebbe meno di 5 GB liberi.", h("div", { class: "stack-sm" }, modes, custom), { stack: true });
-  return panel({ icon: "layers", title: "Spazio", hint: "Lo spazio che usano gli artefatti su questa macchina." }, box, setRows(row));
+  return h("div", { class: "stack" }, panel({ icon: "layers", title: "Spazio", hint: "Lo spazio che usano gli artefatti su questa macchina." }, box, setRows(row)), encryptedSetting(encryptedUI()));
 }
 
 async function saveSettings(changes, row = null) {
