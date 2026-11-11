@@ -1,3 +1,4 @@
+import { keyHint } from "./key-hint.js";
 import { encryptedSpaceFor, encryptedFolder } from "./encrypted-space.js";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -945,6 +946,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         ollamaCloud: llm.cloudAccount || { signedIn: false, signinUrl: "" },
         // Which keys are stored, apart from whether the thing they unlock is reachable some other way.
         keys: { ollama: Boolean(llm.ollamaKey), orcarouter: Boolean(llm.routers.orcarouter.key), typesafe: Boolean(brain.doc?.key), soniox: Boolean(voice?.enabled), deepseek: Boolean(llm.deepseek?.key) },
+        keyHints: user.role === "owner" ? Object.fromEntries(Object.entries({ ollama: llm.ollamaKey, orcarouter: llm.routers.orcarouter.key, typesafe: brain.doc?.key, soniox: voice?.key, deepseek: llm.deepseek?.key }).map(([provider, value]) => [provider, keyHint(value)])) : {},
         doc: { installed: Boolean(brain.doc?.installed), ...(brain.doc?.installed ? brain.doc.activity() : {}) },
         subscriptions: subscriptions.list().filter((entry) => !knowledge?.ownerMemory || entry.connectedBy?.id === user.id),
         credentials: credentials ? credentials.list(user) : [],
@@ -989,6 +991,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
     }
     const providerKeyMatch = /^\/api\/providers\/(ollama|orcarouter|typesafe|soniox|deepseek)\/key$/.exec(path);
     if (providerKeyMatch && method === "PUT") {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario gestisce le chiavi dello spazio.");
       const body = await readJson(req, 4096);
       const key = String(body.key || "").trim();
       if (!key || key.length > 2048 || /[\r\n\x00]/.test(key)) throw new HttpError(400, "chiave API non valida");
@@ -1009,19 +1012,19 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       catch { throw new HttpError(502, "impossibile salvare la chiave in modo sicuro"); }
       if (provider === "soniox") {
         voice.setKey(key);
-        return send(res, 200, { provider, configured: true });
+        return send(res, 200, { provider, configured: true, keyHint: keyHint(key) });
       }
       // TypeSafe is not a model provider: its key is doc's, for the checks on what agents say.
       if (provider === "typesafe") {
         if (brain.doc) brain.doc.key = key;
-        return send(res, 200, { provider, configured: true });
+        return send(res, 200, { provider, configured: true, keyHint: keyHint(key) });
       }
       if (provider === "ollama") llm.ollamaKey = key;
       else if (provider === "deepseek") llm.deepseek.key = key;
       else llm.routers.orcarouter.key = key;
       if (["ollama", "deepseek"].includes(provider)) subscriptions.usage.invalidate(`provider_${provider}`);
       llm.cache = { at: 0, models: [] };
-      return send(res, 200, { provider, configured: true });
+      return send(res, 200, { provider, configured: true, keyHint: keyHint(key) });
     }
     if (path === "/api/credentials" && method === "GET") return send(res, 200, credentials ? credentials.list(user) : []);
     if (path === "/api/credentials" && method === "POST") {

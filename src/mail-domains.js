@@ -1,3 +1,4 @@
+import { keyHint } from "./key-hint.js";
 import { randomBytes } from "node:crypto";
 import { domainToASCII } from "node:url";
 
@@ -38,7 +39,7 @@ export class MailDomains {
   view() {
     const data = this.data();
     const legacy = this.available && this.defaultDomain && !data.domains.some((domain) => domain.name === this.defaultDomain) ? [{ id: "default", name: this.defaultDomain, accountId: "", accountName: "Cora", legacy: true, ready: true, relayReady: true, records: [] }] : [];
-    return { available: this.available, defaultDomain: this.defaultDomain, accounts: data.accounts, domains: [...legacy, ...data.domains.map((domain) => ({ ...domain, ready: domain.ready && data.accounts.some((account) => account.id === domain.accountId && account.ready), accountName: data.accounts.find((account) => account.id === domain.accountId)?.name || "Resend" }))] };
+    return { available: this.available, defaultDomain: this.defaultDomain, accounts: data.accounts.map((account) => ({ ...account, keyHint: keyHint(this.keys.get(account.id) || this.tokenFor(this.keyName(account.id))) })), domains: [...legacy, ...data.domains.map((domain) => ({ ...domain, ready: domain.ready && data.accounts.some((account) => account.id === domain.accountId && account.ready), accountName: data.accounts.find((account) => account.id === domain.accountId)?.name || "Resend" }))] };
   }
 
   async json(url, { token, method = "GET", body } = {}, provider = false) {

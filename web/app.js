@@ -3895,47 +3895,85 @@ function mailDomainsPane() {
       slot.setAttribute("aria-busy", "false");
       if (!data.available) { slot.replaceChildren(panel({ icon: "mail", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))); return; }
       const feedback = h("p", { class: "mail-feedback", role: "alert" });
+      let busy = false;
       const act = async (button, fn) => {
-        button.disabled = true;
+        if (busy) return;
+        busy = true; button.disabled = true;
         feedback.textContent = "";
         try { await fn(); if (current()) await load(); }
-        catch (error) { feedback.textContent = tr(error.message); button.disabled = false; feedback.scrollIntoView({ block: "center", behavior: "smooth" }); }
+        catch (error) { button.before(feedback); feedback.textContent = tr(error.message); button.disabled = false; feedback.scrollIntoView({ block: "center", behavior: "smooth" }); }
+        finally { busy = false; }
       };
       const accountForm = (account = null) => {
         const name = h("input", { type: "text", required: true, maxlength: 80, value: account?.name || "", placeholder: "Per esempio: Azienda" });
-        const key = h("input", { type: "password", required: true, autocomplete: "new-password", placeholder: "re_…", maxlength: 1024 });
+        const key = h("input", { type: "password", required: true, autocomplete: "new-password", "aria-label": tr("API key Resend"), placeholder: "re_…", maxlength: 1024 });
         const submit = btn(account ? "Salva nuova chiave" : "Collega account", { icon: "link", cls: "primary", type: "submit" });
         return h("form", { class: "mail-account-form stack", onsubmit: (event) => { event.preventDefault(); act(submit, async () => { await api(account ? `/api/mail/accounts/${account.id}` : "/api/mail/accounts", { method: account ? "PUT" : "POST", body: { name: name.value, key: key.value } }); key.value = ""; }); } },
           field("Nome account", name), field("API key Resend", pasteField(key, { confirm: submit })), h("p", { class: "muted" }, "Usa una chiave con accesso completo: Cora verifica domini e ricezione. La chiave non viene mostrata agli agenti."),
           h("div", { class: "row" }, btn("Apri Resend", { href: "https://resend.com/api-keys", target: "_blank", icon: "external", cls: "ghost" }), h("span", { class: "spacer" }), submit));
       };
-      const accountRows = data.accounts.map((account) => h("article", { class: "mail-account" },
-        h("header", {}, h("div", { class: "grow" }, h("h3", {}, raw(account.name)), h("p", { class: "muted" }, "Resend")), tag(account.ready ? "Collegato" : account.error ? "Collegamento da verificare" : "Da verificare", account.ready ? "ok" : account.error ? "err" : "agent"),
+      const accountRow = (account) => account ? h("article", { class: "mail-account" },
+        h("header", {}, h("div", { class: "grow" }, h("h3", {}, raw(account.name)), h("p", { class: "muted" }, "Account Resend", account.keyHint ? raw(` · ${account.keyHint}`) : null)), tag(account.ready ? "Collegato" : account.error ? "Collegamento da verificare" : "Da verificare", account.ready ? "ok" : account.error ? "err" : "agent"),
           data.canManage ? btn("Verifica account", { icon: "refresh", cls: "sm ghost", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/accounts/${account.id}/check`, { method: "POST" })) }) : null),
         account.error ? h("p", { class: "err-text" }, raw(tr(account.error))) : null,
-        data.canManage ? h("details", {}, h("summary", {}, "Sostituisci chiave"), accountForm(account)) : null));
-      const accounts = panel({ icon: "key", title: "Account Resend", hint: "Ogni dominio usa l'account a cui appartiene. Puoi collegarne più di uno." },
-        accountRows.length ? accountRows : h("p", { class: "muted" }, "Collega il primo account Resend per aggiungere un tuo dominio."),
-        data.canManage ? h("details", { open: !accountRows.length, class: "mail-add-account" }, h("summary", {}, "Aggiungi account"), accountForm()) : h("p", { class: "muted" }, "Gli account e i domini vengono gestiti dal proprietario dello spazio."));
-      const domainCards = data.domains.map((domain) => panel({ icon: "globe", title: raw(domain.name), hint: raw(domain.accountName), actions: tag(domain.ready ? "Pronto" : "Da completare", domain.ready ? "ok" : "agent") },
+        data.canManage ? h("details", {}, h("summary", {}, "Sostituisci chiave"), accountForm(account)) : null) : null;
+      const domainCards = data.domains.map((domain) => panel({ cls: "mail-domain-card", icon: "globe", title: raw(domain.name), hint: raw(domain.legacy ? domain.accountName : `Resend · ${domain.accountName}`), actions: tag(domain.ready ? "Pronto" : "Da completare", domain.ready ? "ok" : "agent") },
         domain.legacy ? h("p", { class: "muted" }, "Dominio di Cora, già disponibile per gli agenti.") : h("div", { class: "stack" },
+          accountRow(data.accounts.find((account) => account.id === domain.accountId)),
           mailDomainChecks(domain, data.accounts.find((account) => account.id === domain.accountId)),
           domain.error ? h("p", { class: "err-text", role: "alert" }, raw(tr(domain.error))) : null,
           domain.records?.length ? h("details", { class: "mail-dns", open: !domain.ready }, h("summary", {}, "Record DNS da configurare"), h("p", { class: "muted" }, "Copia questi valori nel pannello DNS del dominio. La verifica può richiedere la propagazione dei record."),
             h("div", { class: "mail-records" }, domain.records.map((record) => h("article", { class: "mail-record" }, h("header", {}, h("b", {}, raw(`${record.record === "Receiving" ? tr("Ricezione") : record.record} · ${record.type}`)), tag(record.status === "verified" ? "Verificato" : "Da verificare", record.status === "verified" ? "ok" : "agent")),
               h("dl", {}, h("dt", {}, "Nome"), h("dd", {}, h("code", {}, raw(record.name || "@")), emailCopy(record.name || "@", "Copia")), h("dt", {}, "Valore"), h("dd", {}, h("code", {}, raw(record.value)), emailCopy(record.value, "Copia")), record.priority !== undefined ? [h("dt", {}, "Priorità"), h("dd", {}, raw(String(record.priority)))] : null))))) : null,
           data.canManage ? h("div", { class: "row" }, btn("Verifica DNS", { icon: "check", cls: "primary", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/domains/${domain.id}/verify`, { method: "POST" })) }), btn("Aggiorna", { icon: "refresh", cls: "ghost", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/domains/${domain.id}/check`, { method: "POST" })) })) : null)));
+      for (const [index, card] of domainCards.entries()) card.dataset.settingsUnconfigured = String(!data.domains[index].ready);
       let addDomain = null;
       if (data.canManage) {
         const name = h("input", { type: "text", required: true, placeholder: "posta.azienda.it", maxlength: 253, autocapitalize: "none", spellcheck: false });
-        const account = h("select", { required: true }, data.accounts.filter((item) => item.ready).map((item) => h("option", { value: item.id }, raw(item.name))));
-        const submit = btn("Aggiungi dominio", { icon: "plus", cls: "primary", type: "submit", disabled: !data.accounts.some((item) => item.ready) });
-        addDomain = panel({ icon: "plus", title: "Aggiungi dominio", hint: "Scegli il dominio e l'account che lo gestisce." }, h("form", { class: "stack", onsubmit: (event) => { event.preventDefault(); act(submit, () => api("/api/mail/domains", { method: "POST", body: { name: name.value, accountId: account.value } })); } },
-          field("Dominio", name), field("Account Resend", account),
-          h("p", { class: "mail-domain-note" }, icon("info"), "Se il dominio riceve già posta altrove, usa un sottodominio dedicato: cambiare i record MX cambia dove arrivano le email."),
-          !data.accounts.some((item) => item.ready) ? h("p", { class: "muted" }, "Collega e verifica prima un account Resend.") : null, submit));
+        let selectingAccount = false, pendingAccount = "";
+        const readyAccounts = data.accounts.filter((item) => item.ready);
+        const account = h("select", { required: true, "aria-label": tr("Account Resend") }, readyAccounts.map((item) => h("option", { value: item.id }, raw(item.name))), h("option", { value: "new" }, "Collega un nuovo account"));
+        const accountName = h("input", { type: "text", maxlength: 80, placeholder: "Per esempio: Azienda" });
+        const key = h("input", { type: "password", autocomplete: "new-password", "aria-label": tr("API key Resend"), placeholder: "re_…", maxlength: 1024 });
+        const submit = btn("Collega dominio", { icon: "plus", cls: "primary", type: "submit" });
+        const newAccount = h("div", { class: "stack mail-domain-new-account" }, field("Nome account", accountName), field("API key Resend", pasteField(key)),
+          h("p", { class: "muted" }, "Usa una chiave con accesso completo: Cora verifica domini e ricezione."),
+          btn("Apri Resend", { href: "https://resend.com/api-keys", target: "_blank", icon: "external", cls: "ghost" }));
+        const syncAccount = () => { const fresh = account.value === "new"; newAccount.hidden = !fresh; account.disabled = accountName.disabled = key.disabled = !selectingAccount; accountName.required = key.required = fresh; submit.disabled = fresh && !key.value.trim(); };
+        account.addEventListener("change", syncAccount); key.addEventListener("input", syncAccount); syncAccount();
+        const next = btn("Continua", { icon: "next", cls: "primary", onclick: () => {
+          if (!name.reportValidity()) return;
+          selectingAccount = true; syncAccount(); next.hidden = true; accountStep.hidden = false;
+          if (!accountName.value) accountName.value = name.value.trim();
+          account.focus();
+        } });
+        const accountStep = h("div", { class: "stack mail-domain-account-step", hidden: true },
+          h("span", { class: "label" }, "2 · Account Resend"), field("Account Resend", account), newAccount,
+          data.accounts.filter((item) => !item.ready).map((item) => accountRow(item)),
+          h("p", { class: "mail-domain-note" }, icon("info"), "Se il dominio riceve già posta altrove, usa un sottodominio dedicato: cambiare i record MX cambia dove arrivano le email."), submit);
+        addDomain = panel({ icon: "plus", title: "Aggiungi dominio", hint: "Prima il dominio, poi il suo account Resend." }, h("form", { class: "stack", onsubmit: (event) => {
+          event.preventDefault();
+          if (accountStep.hidden) { next.click(); return; }
+          act(submit, async () => {
+            const requestedDomain = name.value;
+            let accountId = account.value;
+            if (accountId === "new") {
+              const created = await api("/api/mail/accounts", { method: "POST", body: { name: accountName.value, key: key.value } });
+              key.value = "";
+              account.prepend(h("option", { value: created.id }, raw(created.name))); account.value = accountId = created.id; syncAccount(); submit.disabled = true;
+              if (!created.ready) { pendingAccount = created.id; accountStep.insertBefore(accountRow(created), submit); throw new Error(created.error || tr("Verifica prima il collegamento dell'account Resend.")); }
+            }
+            if (pendingAccount && accountId === pendingAccount) {
+              const checked = await api(`/api/mail/accounts/${pendingAccount}/check`, { method: "POST" });
+              if (!checked.ready) throw new Error(checked.error || tr("Verifica prima il collegamento dell'account Resend."));
+              pendingAccount = "";
+            }
+            await api("/api/mail/domains", { method: "POST", body: { name: requestedDomain, accountId } });
+          });
+        } }, h("span", { class: "label" }, "1 · Dominio"), field("Dominio", name), next, accountStep));
+        addDomain.dataset.settingsUnconfigured = String(!domainCards.length);
       }
-      slot.replaceChildren(feedback, accounts, ...domainCards, ...(addDomain ? [addDomain] : []));
+      slot.replaceChildren(feedback, ...domainCards, ...(addDomain ? [addDomain] : []));
     } catch (error) {
       if (current()) { slot.setAttribute("aria-busy", "false"); slot.replaceChildren(panel({ icon: "alert", title: "Domini non disponibili" }, h("p", { role: "alert" }, raw(tr(error.message))), btn("Riprova", { icon: "refresh", onclick: load }))); }
     }
@@ -8347,6 +8385,31 @@ function keyState(provider) {
  * is panels of rows, and every change saves itself. On phones the list comes first
  * and an entry opens its page alone, with a way back.
  */
+function settingsDisclosures(root, id, expanded, configured = true) {
+  if (typeof MutationObserver === "undefined") return root;
+  const convert = () => {
+    for (const card of root.querySelectorAll("section.panel")) {
+      if (card.parentElement.closest(".panel") || card.closest('[aria-busy="true"]')) continue;
+      const head = card.querySelector(":scope > .panel-head");
+      if (!head) continue;
+      const title = head.querySelector("h2")?.textContent || "";
+      const key = `${id}:${title}`;
+      const summary = h("summary", { class: "panel-head" }, [...head.childNodes]);
+      const body = card.querySelector(":scope > .panel-body");
+      const actions = summary.querySelector(".panel-actions");
+      if (actions?.querySelector("button, a, input, select")) body?.prepend(actions);
+      summary.append(h("span", { class: "settings-disclosure-label" }, tr("Dettagli"), icon("next")));
+      const details = h("details", { class: `${card.className} settings-disclosure`, "data-settings-disclosure": key, open: expanded.has(key) ? expanded.get(key) : card.dataset.settingsUnconfigured === "true" || !configured }, summary, body);
+      details.addEventListener("toggle", () => expanded.set(key, details.open));
+      card.replaceWith(details);
+    }
+  };
+  convert();
+  const observer = new MutationObserver(convert);
+  observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-busy"] });
+  return root;
+}
+
 function renderSettings() {
   if (route()[1] === "permessi") { location.hash = "#/agenti"; return; }
   const settings = S.data.settings;
@@ -8358,9 +8421,17 @@ function renderSettings() {
   // The box keeps its margin while the list scrolls inside it.
   const list = h("div", { class: "rail-list" });
   const nav = h("nav", { class: "rail-nav", "aria-label": tr("Impostazioni") }, list);
+  const expanded = new Map([...document.querySelectorAll("[data-settings-disclosure]")].map((card) => [card.dataset.settingsDisclosure, card.open]));
   const pages = new Map();
   const back = () => btn("Impostazioni", { icon: "back", cls: "sm ghost rail-back", onclick: () => show("") });
-  const page = (id, ...content) => pages.set(id, h("div", { class: "stack" }, back(), content));
+  const page = (id, ...content) => {
+    const root = h("div", { class: "stack" }, back(), content);
+    const unchanged = ["connettori", "mcp", "server", ...SUBSCRIPTION_HARNESSES].includes(id);
+    const configured = ["discord", "telegram", "slack"].includes(id) ? transportInfo(id).state !== "missing-token" || S.data.agents.some((agent) => id === "discord" ? agent.bot?.user : id === "telegram" ? agent.telegramBot?.user : agent.slackBot?.user)
+      : CONNECTION_KEYS.some(([provider]) => provider === id) ? keyState(id)[0] !== "off"
+        : id === "github" ? Boolean(settings.githubOrg) : id === "ssh" ? Boolean(settings.sshKeys.length) : true;
+    pages.set(id, unchanged ? root : settingsDisclosures(root, id, expanded, configured));
+  };
 
   page("email", emailChannelPane());
   page("connettori", connectorsPane());
@@ -8540,6 +8611,7 @@ function renderSettings() {
     // The page says what the list says: a key, a local Ollama or a missing program, not only "is there a key".
     const badgeFor = ([led, line]) => [raw(line), led === "on" ? "on" : led === "warn" ? "warn" : "", led === "on" ? "check" : led === "warn" ? "alert" : "key"];
     const status = badge(...badgeFor(keyState(provider)));
+    const hint = h("code", { class: "settings-key-hint", hidden: !S.data.keyHints?.[provider] }, raw(S.data.keyHints?.[provider] || ""));
     const save = btn(configured ? "Aggiorna chiave" : "Salva chiave", { icon: "check", cls: "primary", onclick: async () => {
       if (!key.value.trim()) { key.focus(); return; }
       save.disabled = true;
@@ -8550,6 +8622,9 @@ function renderSettings() {
         if (provider === "deepseek") S.data.providers.deepseek = Boolean(S.data.providers.deepseekInstalled);
         else if (provider !== "typesafe" && provider !== "soniox") S.data.providers[provider] = true;
         S.data.keys = { ...S.data.keys, [provider]: true };
+        S.data.keyHints = { ...S.data.keyHints, [provider]: result.keyHint || "" };
+        hint.textContent = result.keyHint || "";
+        hint.hidden = !result.keyHint;
         drawNav();
         const [text, cls, icon_] = badgeFor(keyState(provider));
         status.replaceChildren(icon(icon_), text);
@@ -8571,7 +8646,7 @@ function renderSettings() {
                 : cloud.signedIn ? h("p", { class: "muted" }, "Non serve: questa macchina è già collegata a Ollama Cloud.")
                   : h("p", { class: "muted" }, "In alternativa alla chiave, collega questa macchina al tuo account Ollama.",
                     cloud.signinUrl ? [" ", h("a", { href: cloud.signinUrl, target: "_blank", rel: "noopener" }, tr("Collega questa macchina"))] : null));
-    page(provider, panel({ icon: mark, title: name, actions: status }, h("div", { class: "provider-key" }, about),
+    page(provider, panel({ icon: mark, title: name, actions: [hint, status] }, h("div", { class: "provider-key" }, about),
       setRows(setRow("Chiave API", "Salvata in hush, non si rivede più.", h("div", { class: "input-row" }, pasteField(key, { confirm: save }), save), { stack: true }))));
   };
   for (const [provider, name, mark] of CONNECTION_KEYS) keyPage(provider, name, mark);

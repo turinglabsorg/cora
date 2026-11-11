@@ -2513,3 +2513,34 @@ input.thread-search { height: 38px; }
 }
 
 .encrypted-space [hidden] { display: none; }
+
+/* Existing Settings stay compact until their details are requested. */
+.settings-disclosure > summary { list-style: none; cursor: pointer; }
+.settings-disclosure > summary::-webkit-details-marker { display: none; }
+.settings-disclosure > summary:hover { background: var(--well); border-radius: inherit; }
+.settings-disclosure > summary:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; border-radius: inherit; }
+.settings-disclosure-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font: 500 10px var(--mono); flex: none; }
+.settings-disclosure-label .ico { width: 16px; height: 16px; }
+.settings-disclosure[open] > summary .settings-disclosure-label .ico { transform: rotate(90deg); }
+.settings-key-hint { white-space: nowrap; font: 12px var(--mono); color: var(--muted); }
+.settings-disclosure > .panel-body > .panel-actions { justify-content: flex-start; }
+@media (max-width: 600px) {
+  .settings-disclosure > summary { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; grid-template-areas: "icon title title" "icon status details"; gap: 8px 10px; }
+  .settings-disclosure > summary .panel-ico { grid-area: icon; }
+  .settings-disclosure > summary .panel-title { grid-area: title; }
+  .settings-disclosure > summary .panel-actions { grid-area: status; justify-content: flex-start; flex-wrap: wrap; }
+  .settings-disclosure-label { grid-area: details; }
+}
+
+.mail-domain-account-step[hidden], .mail-domain-new-account[hidden] { display: none; }
+
+.settings-disclosure:not([open]) > summary .panel-title p { display: none; }
+@media (max-width: 600px) {
+  .settings-disclosure > summary:not(:has(.panel-actions)) { grid-template-areas: "icon title details"; }
+}
+
+.settings-disclosure.mail-domain-card:not([open]) > summary .panel-title p { display: block; }
+@media (max-width: 600px) {
+  .email-channel .email-settings-tabs { flex-wrap: wrap; }
+  .email-channel .email-settings-tabs button { flex: 1 1 calc(50% - 3px); white-space: normal; }
+}

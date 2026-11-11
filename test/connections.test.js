@@ -118,7 +118,7 @@ test("API keys are stored through hush before taking effect, never returned and 
     assert.equal((await request(path, { method: "PUT", body: { key: " " } })).status, 400);
     const saved = await request(path, { method: "PUT", body: { key: `fixture-${provider}-key` } });
     assert.equal(saved.status, 200);
-    assert.deepEqual(saved.data, { provider, configured: true });
+    assert.deepEqual(saved.data, { provider, configured: true, keyHint: "•••• -key" });
     assert.equal(stored.get(`CORA_${provider.toUpperCase()}_API_KEY`), `fixture-${provider}-key`);
     assert.equal(app.llm.providers()[provider], true);
   }

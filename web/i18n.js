@@ -1,6 +1,14 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Prima il dominio, poi il suo account Resend.": "First the domain, then its Resend account.",
+  "Collega un nuovo account": "Connect a new account",
+  "Collega dominio": "Connect domain",
+  "Continua": "Continue",
+  "1 · Dominio": "1 · Domain",
+  "2 · Account Resend": "2 · Resend account",
+  "Usa una chiave con accesso completo: Cora verifica domini e ricezione.": "Use a full-access key: Cora checks domains and inbound email.",
+  "Verifica prima il collegamento dell'account Resend.": "Verify the Resend account connection first.",
   "Cifratura": "Encryption",
   "Scrittura": "Write",
   "Accesso effettivo: {access}": "Effective access: {access}",

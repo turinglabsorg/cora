@@ -44,6 +44,8 @@ test("multiple Resend accounts keep their domains, webhooks, credentials and rea
   assert.equal(vault.get(app.mailDomains.keyName(alpha.id)), keyA);
   assert.equal(state.relayAccounts.get(alpha.id).api_key, keyA);
   const metadata = (await call("/api/mail/domains")).data;
+  assert.equal(metadata.accounts.find((item) => item.id === alpha.id).keyHint, "•••• lpha");
+  assert.equal(metadata.accounts.find((item) => item.id === beta.id).keyHint, "•••• beta");
   assert.doesNotMatch(JSON.stringify(metadata), /re_fixture|whsec_|fixture-mail-registration|fixture-mailbox-client-key/);
   assert.doesNotMatch(JSON.stringify(app.store.value("mailDomains")), /re_fixture|whsec_/);
   const restarted = new MailDomains({ ...app.mailDomains, tokenFor: (name) => vault.get(name) || "" });
