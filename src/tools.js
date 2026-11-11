@@ -101,6 +101,7 @@ export const TOOL_DEFS = [
       properties: {
         text: { type: "string" },
         channel_id: { type: "string", description: "optional destination id from list_channels; omit for this conversation" },
+        end_conversation: { type: "boolean", description: "true only when the person explicitly ends your participation in this conversation. Atomically stop your own listening here and send this farewell. Interpret the person's intent in context; completing work or saying thanks alone does not end listening. Only the current conversation can be ended; colleagues and other conversations stay connected." },
         voice: { type: "boolean", description: "true: also send these words as a voice message (Soniox) when someone asks for it. For replies to voice messages, Cora chooses voice-only by default and honors the person's explicit request for text or both; this flag never overrides that preference." },
       },
       required: ["text"],
@@ -726,16 +727,18 @@ export async function executeTool(call, ctx) {
         if (!text) return { text: "error: empty message" };
         if (!ctx.say) return { text: "error: there is no conversation to post to right now" };
         const target = String(args.channel_id || channelId || "");
+        if (args.end_conversation === true && (!ctx.canEndConversation || target !== channelId)) return { text: "error: only a human chat turn can end its own current conversation" };
         if (target !== channelId && !ctx.postingChannels?.some((channel) => channel.id === target)) {
           // A thread under a channel the agent may write to counts, even one opened since this turn began.
           const thread = await ctx.threadFor?.(target).catch(() => null);
           if (!thread) return { text: "error: destination not authorized; choose a channel from list_channels" };
           ctx.postingChannels.push({ id: thread.id, name: thread.name, kind: thread.kind });
         }
-        const sent = await ctx.say(text.slice(0, 4000), target, { voice: args.voice === true });
+        const sent = await ctx.say(text.slice(0, 4000), target, { voice: args.voice === true, endConversation: args.end_conversation === true });
         const messages = Array.isArray(sent) ? sent : [];
         const receipt = {
           channel_id: target,
+          ...(args.end_conversation === true ? { conversation_closed: true } : {}),
           channel_name: ctx.postingChannels?.find((channel) => channel.id === target)?.name || "",
           message_ids: messages.map((item) => String(item.id || item.message_id || "")).filter(Boolean),
           mentions: [...new Set(messages.flatMap((item) => [...String(item.content || "").matchAll(/<@!?(\d+)>/g)].map((match) => match[1])))],

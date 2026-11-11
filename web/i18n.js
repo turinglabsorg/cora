@@ -1,6 +1,17 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Decisore": "Decision model",
+  "Modello del decisore": "Decision model",
+  "Account del decisore": "Decision model account",
+  "ID del modello del decisore": "Decision model ID",
+  "Riserva del decisore {number}": "Decision backup {number}",
+  "ID della riserva {number}": "Backup model ID {number}",
+  "Interpreta i congedi dalla conversazione. Scegli un modello piccolo: legge solo gli ultimi scambi, senza strumenti.": "Interprets conversation dismissals. Choose a small model: it reads only recent exchanges, without tools.",
+  "Se il decisore non risponde, prova queste riserve in ordine. Modelli e account sono indipendenti dal bibliotecario.": "If the decision model does not answer, try these backups in order. Models and accounts are independent of the librarian.",
+  "Nessuna riserva: resta disponibile lo sgancio esplicito dell’agente.": "No backup: the agent can still explicitly end its own participation.",
+  "Scelte brevi sulla conversazione, con una configurazione propria.": "Brief conversation decisions, with their own configuration.",
+
   "Sigillato": "Sealed",
   "Agente sigillato": "Sealed agent",
   "Isolamento": "Isolation",

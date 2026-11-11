@@ -265,3 +265,8 @@ Token counts and the reasoning line show up only after the turn has produced the
 ## Sealed agents
 
 Use the existing amber rocker in Memory → Source and in New agent. Keep the explanation next to the control, name the retained explicit grants, and explain that changing isolation restarts the desktop. A neutral lock badge identifies a sealed agent in the roster and detail header. Hide shared Brain and external-source controls while sealed; personal memories have no sharing actions. Reuse the section rail and existing tokens on desktop and phone.
+
+
+## Decision model in Settings
+
+Settings → Regia keeps the conversation decision model in its own panel below the orchestration controls. Use the existing Settings rows, model picker, account selector and numbered backup rows. Every change saves in place. The primary model, account and ordered backups belong to the decision model; they never read or edit the librarian's configuration. Give every primary and backup picker an accessible name. Keep the mounted Settings rail and the existing mobile layout.

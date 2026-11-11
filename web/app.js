@@ -8441,12 +8441,72 @@ function renderSettings() {
     if (!(await saveSettings({ goalMode: event.target.checked }, goalRow))) event.target.checked = !event.target.checked;
     drawNav();
   });
+  const decisionPanel = () => {
+    const decisionAccountChange = (modelId, value) => {
+      const { subscriptionId, credentialId } = brainAccountChange(modelId, value, true);
+      return { decisionSubscriptionId: subscriptionId, decisionCredentialId: credentialId };
+    };
+    const pickedOf = (picker) => picker.querySelector("input").value.trim() || picker.querySelector("select").value;
+    const model = modelPicker("decisionModel", settings.decisionModel || "ollama/gpt-oss:20b", { allowDefault: false });
+    const account = h("div", { class: "brain-account" });
+    const drawAccount = (modelId) => {
+      const select = brainAccountSelect(modelId || "ollama/gpt-oss:20b", { subscriptionId: S.data.settings.decisionSubscriptionId, credentialId: S.data.settings.decisionCredentialId }, "Account del decisore");
+      account.replaceChildren(...(select ? [select] : []));
+      select?.addEventListener("change", () => saveSettings(decisionAccountChange(modelId, select.value), modelRow));
+    };
+    drawAccount(settings.decisionModel);
+    model.querySelector("select").setAttribute("aria-label", tr("Modello del decisore"));
+    model.querySelector("input").setAttribute("aria-label", tr("ID del modello del decisore"));
+    const modelRow = setRow("Modello del decisore", "Interpreta i congedi dalla conversazione. Scegli un modello piccolo: legge solo gli ultimi scambi, senza strumenti.", h("div", { class: "stack-sm" }, model, account), { stack: true });
+    model.addEventListener("change", () => {
+      const value = pickedOf(model);
+      if (!value) return;
+      if (value !== (S.data.settings.decisionModel || "")) {
+        saveSettings({ decisionModel: value, decisionSubscriptionId: "", decisionCredentialId: "" }, modelRow);
+        drawAccount(value);
+      }
+    });
+    const backupsRow = setRow("Modelli di riserva", "Se il decisore non risponde, prova queste riserve in ordine. Modelli e account sono indipendenti dal bibliotecario.", null, { stack: true });
+    const backupsBox = h("div", { class: "brain-backups" });
+    backupsRow.append(h("div", { class: "set-control" }, backupsBox));
+    const drawBackups = () => {
+      const backups = (S.data.settings.decisionBackups || []).map((entry) => ({ ...entry }));
+      const save = (next) => saveSettings({ decisionBackups: next }, backupsRow).then(drawBackups);
+      const rows = backups.map((entry, index) => {
+        const picker = modelPicker(`decisionBackup${index}`, entry.model, {});
+        picker.querySelector("select").setAttribute("aria-label", tr("Riserva del decisore {number}", { number: index + 1 }));
+        picker.querySelector("input").setAttribute("aria-label", tr("ID della riserva {number}", { number: index + 1 }));
+        const slot = h("div", { class: "brain-account" });
+        const drawSlot = (modelId) => {
+          const select = brainAccountSelect(modelId, entry, "Account della riserva");
+          slot.replaceChildren(...(select ? [select] : []));
+          select?.addEventListener("change", () => save(backups.map((item, at) => at === index ? { ...item, ...brainAccountChange(modelId, select.value, true) } : item)));
+        };
+        drawSlot(entry.model);
+        picker.addEventListener("change", () => {
+          const value = pickedOf(picker);
+          if (value && value !== entry.model) save(backups.map((item, at) => at === index ? { model: value, subscriptionId: "", credentialId: "" } : item));
+        });
+        return h("div", { class: "brain-backup" },
+          h("span", { class: "brain-backup-n", "aria-hidden": "true" }, String(index + 1)),
+          h("div", { class: "grow stack-sm" }, picker, slot),
+          btn("", { icon: "trash", cls: "ghost", title: tr("Togli questa riserva"), onclick: () => save(backups.filter((_, at) => at !== index)) }));
+      });
+      const add = backups.length < 3 ? btn("Aggiungi riserva", { icon: "plus", cls: backups.length ? "ghost" : "", onclick: () => {
+        const fallback = (S.data.models || []).find((item) => item.usable !== false && item.id !== S.data.settings.decisionModel)?.id || "ollama/gpt-oss:20b";
+        if (fallback) save([...backups, { model: fallback, subscriptionId: "", credentialId: "" }]);
+      } }) : null;
+      backupsBox.replaceChildren(...rows, ...(rows.length ? [] : [h("p", { class: "muted" }, tr("Nessuna riserva: resta disponibile lo sgancio esplicito dell’agente."))]), ...(add ? [add] : []));
+    };
+    drawBackups();
+    return panel({ icon: "chip", title: "Decisore", hint: "Scelte brevi sulla conversazione, con una configurazione propria." }, setRows(modelRow, backupsRow));
+  };
   page("regia", panel({ icon: "sliders", title: "Regia", hint: "Quanto possono parlarsi tra loro prima di fermarsi ad aspettare un umano." },
     setRows(
       numberRow("maxAgentTurns", "Messaggi tra agenti", "Quanti messaggi si scambiano dopo ogni messaggio umano, prima di fermarsi.", 0, 40),
       numberRow("maxRepliesPerRound", "Risposte per giro", "Quanti agenti parlano insieme.", 1, 6),
       numberRow("historySize", "Messaggi di contesto", "Quanta chat rileggono prima di rispondere.", 5, 100),
-      goalRow)));
+      goalRow)), decisionPanel());
 
   const model = modelPicker("defaultModel", settings.defaultModel, { allowDefault: false });
   const modelNote = () => {
