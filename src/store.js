@@ -587,7 +587,8 @@ export class Store {
   tokens_out INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS thread_sessions_lookup ON thread_sessions(agent_id, channel_id, started_at);
-CREATE INDEX IF NOT EXISTS traces_channel ON traces(channel_id, started_at);`);
+CREATE INDEX IF NOT EXISTS traces_channel ON traces(channel_id, started_at);
+CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id, started_at);`);
     try { this.db.exec("ALTER TABLE thread_sessions ADD COLUMN machine TEXT NOT NULL DEFAULT ''"); } catch {}
     try { this.db.exec("ALTER TABLE messages ADD COLUMN meta TEXT"); } catch {}
     // Older databases have no token counts: their traces simply read as zero.
@@ -1565,6 +1566,32 @@ CREATE INDEX IF NOT EXISTS traces_channel ON traces(channel_id, started_at);`);
 
   threadSessions(limit = 400) {
     return this.stmt("SELECT * FROM thread_sessions ORDER BY started_at DESC LIMIT ?").all(Math.max(1, Math.min(1000, Number(limit) || 400))).map(threadSessionRow);
+  }
+
+  /** Every thread with its newest sessions (live ones always) and how many it had in all. */
+  threadSessionsByChannel(perChannel = 12) {
+    return this.stmt(`SELECT * FROM (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY started_at DESC) AS rank, COUNT(*) OVER (PARTITION BY channel_id) AS total
+      FROM thread_sessions) WHERE rank <= ? OR status = 'active' ORDER BY started_at DESC`)
+      .all(Math.max(1, Math.min(200, Number(perChannel) || 12)))
+      .map((row) => ({ ...threadSessionRow(row), total: row.total || 0 }));
+  }
+
+  /**
+   * The turns taken before sessions were recorded become finished sessions, once:
+   * the history then starts with the first conversation, not with the release.
+   */
+  backfillThreadSessions() {
+    const first = this.stmt("SELECT MIN(started_at) AS at FROM thread_sessions WHERE id NOT LIKE 'bf_%'").get()?.at || "9999";
+    const result = this.stmt(`INSERT OR IGNORE INTO thread_sessions(id, agent_id, channel_id, kind, status, pid, boot, host, machine, trace_id, started_at, heartbeat_at, ended_at, error, replaces, tokens_in, tokens_out)
+      SELECT 'bf_' || t.id, t.agent_id, t.channel_id, t.kind,
+        CASE t.status WHEN 'error' THEN 'error' WHEN 'stopped' THEN 'stopped' WHEN 'interrupted' THEN 'interrupted' WHEN 'running' THEN 'interrupted' ELSE 'done' END,
+        0, '', '', '', t.id, t.started_at, COALESCE(t.ended_at, t.started_at), COALESCE(t.ended_at, t.started_at), substr(t.error, 1, 500), '', t.tokens_in, t.tokens_out
+      FROM traces t
+      WHERE t.channel_id IS NOT NULL AND t.channel_id <> '' AND t.channel_id <> 'web' AND t.channel_id NOT LIKE 'web-%'
+        AND t.kind IN ('chat', 'routine', 'reminder') AND t.started_at < ?
+        AND NOT EXISTS (SELECT 1 FROM thread_sessions s WHERE s.trace_id = t.id)`).run(first);
+    return Number(result.changes || 0);
   }
 
   touchThreadSession(id) {

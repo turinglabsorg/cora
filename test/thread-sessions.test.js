@@ -249,3 +249,55 @@ test("a co-owner stops only the sessions of agents they manage and sees only the
   assert.equal(stopped.data.stopped, 1);
   assert.equal(f.app.store.activeThreadSession(other.id, channelId)?.status, "active");
 });
+
+test("past turns fill the history once, each thread keeps its count, and an id-only Discord thread still links", async (t) => {
+  const ollama = await fakeOllama(() => ({ content: "PASS" }));
+  const app = startCora({
+    home: tempHome(), host: "127.0.0.1", port: 0, adminPassword: "fixture-password", sessionKey: "fixture-session", insecureCookies: true,
+    useResidentSubscriptions: false, cloudUrl: "", cloudKey: "", cloudSpace: "", discordToken: "", telegramToken: "", botTokenFor: () => "",
+    ollamaUrl: ollama.url, ollamaKey: "fixture-key", orcaKey: "", claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes",
+    ownerInstructions: "/missing/AGENTS.md", sshAuthorizedKeys: "/missing/keys", docker: fakeDocker().path, startBoxes: false, schedulerTickMs: 3600000,
+  });
+  t.after(async () => { await app.stop(); await ollama.close(); });
+  await app.ready;
+  const { store, orchestrator } = app;
+  const vera = store.createAgent({ name: "Vera" });
+  const routine = "155500000000000301";
+  const named = "155500000000000302";
+  const guild = "155500000000000900";
+  const past = (channelId, kind, at, status = "done") => {
+    const trace = orchestrator.brain.traces.start({ agentId: vera.id, kind, channelId, model: "ollama/fixture", prompt: "p", system: "s" });
+    trace.finish({ status, output: `turno ${at}` });
+    store.db.prepare("UPDATE traces SET started_at = ?, ended_at = ? WHERE id = ?").run(at, at, trace.id);
+    return trace.id;
+  };
+  for (let hour = 0; hour < 15; hour++) past(routine, "routine", `2026-10-30T${String(hour).padStart(2, "0")}:00:00.000Z`);
+  const failed = past(named, "chat", "2026-10-31T10:00:00.000Z", "error");
+  past("web-ag_room", "chat", "2026-10-31T10:00:00.000Z");
+  past("", "librarian", "2026-10-31T10:00:00.000Z");
+  orchestrator.sessions.finish(orchestrator.sessions.begin({ agentId: vera.id, channelId: named, kind: "chat" }));
+  const later = past(named, "chat", new Date(Date.now() + 1000).toISOString());
+  assert.equal(store.backfillThreadSessions(), 16);
+  assert.equal(store.backfillThreadSessions(), 0);
+  assert.equal(store.threadSession(`bf_${failed}`).status, "error");
+  assert.equal(store.threadSession(`bf_${later}`), null);
+  orchestrator.discord.token = "fixture";
+  orchestrator.discord.guilds = new Map([[guild, { id: guild }]]);
+  orchestrator.discord.request = async (method, path) => {
+    if (path === `/channels/${named}`) return { id: named, name: "REF-26 vetrine", type: 11, parent_id: "155500000000000100", guild_id: guild };
+    throw Object.assign(new Error("Missing Access"), { status: 403 });
+  };
+  await orchestrator.threadBoard();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const board = await orchestrator.threadBoard();
+  const hourly = board.threads.find((thread) => thread.id === routine);
+  assert.equal(hourly.total, 15);
+  assert.equal(hourly.flows.length, 12);
+  assert.equal(hourly.lastAt, "2026-10-30T14:00:00.000Z");
+  assert.equal(hourly.link, `https://discord.com/channels/${guild}/${routine}`);
+  const thread = board.threads.find((item) => item.id === named);
+  assert.equal(thread.name, "REF-26 vetrine");
+  assert.equal(thread.thread, true);
+  assert.equal(thread.total, 2);
+  assert.equal(board.threads.some((item) => item.id.startsWith("web-")), false);
+});

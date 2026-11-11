@@ -1,6 +1,11 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "sessione": "session",
+  "sessioni": "sessions",
+  "Tutte le sessioni": "All sessions",
+  "Chiudi il thread": "Close the thread",
+  "Un thread per riga: aprilo per le sessioni": "One thread per row: open it for its sessions",
   "Ricarica": "Reload",
   "Agenti esterni (MCP)": "External agents (MCP)",
   "Configura Cora da un altro agente con i tuoi permessi.": "Configure Cora from another agent with your permissions.",

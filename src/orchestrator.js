@@ -209,6 +209,11 @@ export class Orchestrator {
     this.threadWork = new ThreadState();
     this.sessions = new ThreadSessions(this.store);
     this.sessions.reap();
+    if (!this.store.value("threadBackfill", 0)) {
+      const added = this.store.backfillThreadSessions();
+      this.store.setValue("threadBackfill", 1);
+      if (added) this.log?.({ type: "info", text: `storico thread: ${added} turni passati recuperati` });
+    }
     this.engagements = this.store.value("conversationEngagements", {});
     this.reminding = new Set();
     // The names people go by, by server (or "slack"): who wrote or was tagged since the start, on top of the archive.
@@ -1970,10 +1975,11 @@ export class Orchestrator {
     for (const id of missing) {
       // Asked once in the background: the page shows the name at its next refresh.
       this.nameMisses.set(id, Date.now());
-      this.discord.request("GET", `/channels/${id}`).then((channel) => {
-        if (!channel?.name) return;
+      this.lookupChannel(id).then((channel) => {
+        const name = channel?.name || (channel?.type === 1 ? `@${channel.recipients?.[0]?.global_name || channel.recipients?.[0]?.username || "privato"}` : "");
+        if (!name) return;
         const saved = this.store.value("threadNames", {});
-        saved[id] = { name: channel.name, parentId: channel.parent_id || "", guildId: channel.guild_id || "", thread: [10, 11, 12].includes(channel.type) };
+        saved[id] = { name, parentId: channel.parent_id || "", guildId: channel.guild_id || "", thread: [10, 11, 12].includes(channel.type), direct: channel.type === 1 };
         this.store.setValue("threadNames", saved);
         this.nameMisses.delete(id);
       }).catch(() => {});
@@ -1981,11 +1987,30 @@ export class Orchestrator {
     return names;
   }
 
+  /** A channel as Discord describes it: Cora's bot first, then each agent's own bot, which may be the only one inside. */
+  async lookupChannel(id) {
+    try { return await this.discord.request("GET", `/channels/${id}`); }
+    catch (error) {
+      for (const agent of this.store.agents()) {
+        const own = this.bots?.client?.(agent.id);
+        if (!own?.request) continue;
+        try { return await own.request("GET", `/channels/${id}`); } catch {}
+      }
+      throw error;
+    }
+  }
+
+  /** The server a Discord channel belongs to when it was never seen: the only server, or the main one. */
+  defaultGuild() {
+    const guilds = [...(this.discord?.guilds?.keys?.() || [])];
+    return guilds.length === 1 ? guilds[0] : "";
+  }
+
   async threadBoard() {
     const labels = this.store.value("threadLabels", {});
     const closed = new Set(this.store.value("closedThreads", []));
     const known = new Map((this.channels?.list?.() || []).map((channel) => [channel.id, channel]));
-    const sessions = this.store.threadSessions(400);
+    const sessions = this.store.threadSessionsByChannel(12);
     const ids = [...new Set([...Object.keys(labels), ...sessions.map((session) => session.channelId)])];
     const names = this.threadNames(ids, known);
     const groups = new Map();
@@ -1996,7 +2021,7 @@ export class Orchestrator {
       const slack = slackIds(id);
       const kind = channel?.kind || (slack ? "slack" : isWebRoom(id) ? "web" : transportOf(id) === "telegram" ? "telegram" : "discord");
       const info = !channel && !saved && (kind === "web" || kind === "telegram") ? this.channels?.info?.(id) : null;
-      const guildId = channel?.guildId || saved?.guildId || "";
+      const guildId = channel?.guildId || saved?.guildId || (saved?.direct ? "@me" : "");
       const parentId = channel?.parentId || saved?.parentId || (slack?.threadTs ? slackChannel(slack.channelId) : "");
       const group = {
         id,
@@ -2006,7 +2031,10 @@ export class Orchestrator {
         parentId,
         parentName: parentId ? (known.get(parentId)?.name || "") : "",
         guildId,
-        link: kind === "discord" && guildId ? `https://discord.com/channels/${guildId}/${id}` : "",
+        link: kind === "discord" && /^\d{5,}$/.test(id) && (guildId || this.defaultGuild()) ? `https://discord.com/channels/${guildId || this.defaultGuild()}/${id}` : "",
+        direct: Boolean(saved?.direct),
+        total: 0,
+        lastAt: "",
         closed: closed.has(id),
         open: Boolean(channel) && !closed.has(id),
         flows: [],
@@ -2018,6 +2046,9 @@ export class Orchestrator {
     for (const id of Object.keys(labels)) ensure(id);
     for (const session of sessions) {
       const group = ensure(session.channelId);
+      group.total = Math.max(group.total, session.total || 0);
+      const at = session.endedAt || session.startedAt || "";
+      if (at > group.lastAt) group.lastAt = at;
       const agent = this.store.agent(session.agentId);
       const live = session.status === "active" ? this.liveTrace(session.agentId, session.channelId) : null;
       const liveFull = live?.full?.() || null;

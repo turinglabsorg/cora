@@ -1093,6 +1093,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .page-head { align-items: center; }
   /* A commit's message is what the page is about: the app bar only says "Commit", so it stays, smaller. */
   .art-commit-head { flex-direction: column; align-items: stretch; gap: 10px; }
+  .page-title .thread-title.heading h1 { display: block; font-size: 23px; line-height: 1.2; letter-spacing: -0.02em; }
   .art-commit-head .page-title h1 { display: block; margin-bottom: 10px; font-size: 23px; line-height: 1.2; letter-spacing: -0.02em; overflow-wrap: anywhere; }
   .art-commit-head .page-actions { justify-content: flex-start; }
   .art-decide .row { flex-wrap: wrap; }
@@ -2279,13 +2280,70 @@ a.share-stats:hover { color: var(--amber); }
   .character-legacy { flex-direction: column; align-items: stretch; }
 }
 
-/* Thread desk: one card per Discord or Slack thread, one row per agent session. */
-.thread-list { display: flex; flex-direction: column; gap: 12px; }
-.thread-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel-2); box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
-.thread-card.closed { opacity: .72; }
-.thread-open { display: block; min-width: 0; color: inherit; text-decoration: none; border-radius: var(--r-sm); }
+/* Thread desk: a compact card per live thread, one row per agent session; history is one row per thread. */
+.thread-list { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.thread-card, .thread-past { min-width: 0; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel-2); box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
+.thread-card { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 8px 12px; }
+.thread-card.closed, .thread-past.closed { opacity: .72; }
+.thread-card > header, .thread-past > summary { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.thread-ico { display: grid; place-items: center; width: 20px; height: 20px; color: var(--faint); }
+.thread-ico .ico { width: 16px; height: 16px; }
+.thread-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.thread-head p { margin: 0; }
+.thread-head .thread-meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-actions { display: flex; gap: 2px; align-items: center; }
+.thread-actions .btn.sm.only-icon { width: 32px; height: 32px; min-height: 32px; }
+.thread-title { display: flex; gap: 4px; align-items: center; min-width: 0; }
+.thread-title b, .thread-title h1 { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Outfit, sans-serif; font-weight: 600; letter-spacing: -.02em; }
+.thread-title b { font-size: 15px; }
+.thread-title .thread-id { font-family: "DM Mono", monospace; font-weight: 500; font-size: 12px; letter-spacing: 0; color: var(--muted); }
+.thread-open { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; color: inherit; text-decoration: none; border-radius: var(--r-sm); }
+.thread-title b { display: block; }
 .thread-open:hover b, .thread-open:focus-visible b { color: var(--amber); }
-.thread-open b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-title .thread-rename { flex: none; width: 26px; height: 26px; min-height: 26px; opacity: .45; color: var(--muted); }
+.thread-title .thread-rename .ico { width: 14px; height: 14px; }
+.thread-title:hover .thread-rename, .thread-title .thread-rename:focus-visible { opacity: 1; }
+.thread-title.editing { gap: 6px; }
+.thread-name { flex: 1; min-width: 0; min-height: 36px; padding: 6px 10px; background: var(--well); color: var(--text); border: 1px solid var(--amber-line); border-radius: var(--r-sm); font: inherit; font-family: Outfit, sans-serif; font-weight: 600; }
+.thread-name:focus { outline: none; border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-glow); }
+.thread-title.editing .btn.sm.only-icon { flex: none; width: 36px; height: 36px; min-height: 36px; }
+.thread-title.heading { gap: 6px; }
+.thread-title.heading .thread-rename { width: 32px; height: 32px; min-height: 32px; }
+.thread-idle { padding-left: 30px; }
+.thread-flows { display: flex; flex-direction: column; min-width: 0; }
+.thread-flow { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 10px; align-items: center; min-width: 0; padding: 6px 0; border-top: 1px solid var(--line); }
+.thread-card .thread-flows .thread-flow:first-child { border-top: 0; padding-top: 2px; }
+.thread-flow .avatar.xs { width: 20px; height: 20px; font-size: 9px; }
+.thread-flow-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.thread-flow-line { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.thread-flow-line b { flex: none; font-family: Outfit, sans-serif; font-weight: 600; font-size: 13px; }
+.thread-flow-line .thread-meta { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-reason, .thread-error { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+.thread-flow.live .thread-reason { color: var(--text); }
+.thread-error { color: var(--red); }
+.thread-flow-actions { display: flex; gap: 2px; }
+.thread-flow-actions .btn.sm.only-icon { width: 30px; height: 30px; min-height: 30px; }
+.thread-past > summary { padding: 8px 10px 8px 12px; cursor: pointer; list-style: none; border-radius: var(--r-md); }
+.thread-past > summary::-webkit-details-marker { display: none; }
+.thread-past > summary:hover { background: rgba(255,255,255,.02); }
+.thread-past > summary:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
+.thread-last { margin: 2px 0 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12.5px; }
+.thread-last b { color: var(--text); font-weight: 600; }
+.thread-agents { display: flex; padding-right: 4px; }
+.thread-agents .avatar.xs { width: 20px; height: 20px; font-size: 9px; }
+.thread-agents .avatar + .avatar { margin-left: -6px; }
+.thread-chev { width: 16px; height: 16px; margin: 0 6px; color: var(--muted); transition: transform .15s ease; }
+.thread-past[open] .thread-chev { transform: rotate(90deg); }
+.thread-past-body { padding: 0 12px 8px 42px; border-top: 1px solid var(--line); }
+.thread-past-body .thread-flows .thread-flow:first-child { border-top: 0; }
+.thread-all { display: inline-block; margin-top: 4px; color: var(--amber); font-family: "DM Mono", monospace; font-size: 11px; letter-spacing: .04em; text-decoration: none; }
+.thread-all:hover { text-decoration: underline; }
+.thread-create { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.thread-create input, .thread-create select { min-height: 44px; }
+@media (max-width: 640px) {
+  .thread-agents { display: none; }
+  .thread-past-body { padding-left: 12px; }
+}
 .thread-sum { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin: 0 0 14px; color: var(--muted); font-family: "DM Mono", monospace; font-size: 12px; letter-spacing: .04em; }
 .thread-sum b { margin-right: 6px; color: var(--text); font-family: Outfit, sans-serif; font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
 .thread-who { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
@@ -2310,28 +2368,10 @@ a.share-stats:hover { color: var(--amber); }
   .thread-turn > summary .badges { grid-column: 2; grid-row: 2; }
   .thread-turn > summary .thread-turn-chev { grid-column: 3; grid-row: 1; }
 }
-.thread-card > header { display: flex; gap: 12px; align-items: center; }
-.thread-card > header b { font-family: Outfit, sans-serif; font-weight: 600; letter-spacing: -.02em; }
 .thread-meta { display: flex; gap: 8px; align-items: center; color: var(--muted); font-family: "DM Mono", monospace; font-size: 11px; letter-spacing: .04em; }
 .thread-meta a { color: var(--amber); }
-.thread-flows { display: flex; flex-direction: column; }
-.thread-flow { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--line); }
-.thread-flow-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.thread-flow-line b { font-family: Outfit, sans-serif; }
-.thread-reason { margin: 4px 0 0; font-size: 13px; line-height: 1.45; }
-.thread-error { margin: 4px 0 0; color: var(--red); font-size: 12px; }
-.thread-flow-actions { display: flex; gap: 6px; }
-.thread-manage, .thread-create { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
-.thread-manage .thread-name, .thread-create input, .thread-create select { min-height: 44px; }
-.thread-name { flex: 1; min-width: 140px; background: var(--well); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 8px 10px; font: inherit; }
 .thread-create .field { flex: 1; min-width: 160px; margin: 0; }
 
-.thread-card > header b.thread-id { font-family: var(--mono); font-weight: 500; font-size: 12px; letter-spacing: 0; color: var(--muted); overflow-wrap: anywhere; }
-.thread-flow .led { width: 8px; height: 8px; margin-top: 5px; flex: none; border-radius: 50%; background: #2a2a2a; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06); }
+.thread-flow .led { width: 7px; height: 7px; flex: none; border-radius: 50%; background: #2a2a2a; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06); }
 .thread-flow .led.on { background: var(--green); box-shadow: 0 0 8px rgba(140, 197, 106, 0.55); }
 .thread-flow .led.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
-.thread-name { font: inherit; }
-@media (max-width: 720px) {
-  .thread-flow-actions { align-self: center; }
-  .thread-manage { align-items: stretch; }
-}
