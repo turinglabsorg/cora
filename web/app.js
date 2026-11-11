@@ -8959,7 +8959,8 @@ async function renderThreads() {
   } }) : null;
   plus?.setAttribute("aria-expanded", "false");
   create?.addEventListener("thread-created", () => { create.hidden = true; plus.setAttribute("aria-expanded", "false"); threadsRefresh(); });
-  const heading = pageHead("Thread", "Una sessione per agente, legata al thread Discord o Slack.", plus);
+  if (plus) workspace.querySelector(".email-workspace-nav").append(plus);
+  const heading = pageHead("Thread");
   heading.classList.add("thread-list-head");
   shell([
     heading,

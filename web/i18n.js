@@ -2562,7 +2562,6 @@ export const EN = {
   "di {cores} core": "of {cores} cores",
   "Nome del thread": "Thread name",
   "Rinomina": "Rename",
-  "Una sessione per agente, legata al thread Discord o Slack.": "One session per agent, bound to the Discord or Slack thread.",
   "Attivi": "Live",
   "Chi sta lavorando adesso": "Who is working now",
   "Sessioni già chiuse": "Closed sessions",
