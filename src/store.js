@@ -1616,6 +1616,13 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
     return this.stmt("SELECT * FROM thread_sessions ORDER BY started_at DESC LIMIT ?").all(Math.max(1, Math.min(1000, Number(limit) || 400))).map(threadSessionRow);
   }
 
+  chatTurnsAfterLastHuman(channelId) {
+    const at = this.stmt("SELECT MAX(at) AS at FROM messages WHERE channel_id = ? AND kind IN ('owner', 'human')").get(String(channelId)).at;
+    if (at === null) return null;
+    return this.stmt("SELECT COUNT(*) AS total FROM thread_sessions WHERE channel_id = ? AND kind = 'chat' AND started_at >= ?")
+      .get(String(channelId), new Date(Number(at)).toISOString()).total;
+  }
+
   threadParticipantIds(channelId) {
     return this.stmt("SELECT agent_id FROM thread_sessions WHERE channel_id = ? UNION SELECT agent_id FROM traces WHERE channel_id = ?")
       .all(String(channelId), String(channelId)).map((row) => row.agent_id);

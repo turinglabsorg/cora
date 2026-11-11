@@ -231,10 +231,21 @@ export class Orchestrator {
   state(channelId) {
     let state = this.states.get(channelId);
     if (!state) {
-      state = { id: channelId, history: [], seen: new Set(), heardFrom: new Set(), humanQueue: new Map(), mainBlind: false, focus: this.engagements[channelId] || null, generation: 0, budget: 0, ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
+      state = { id: channelId, history: [], seen: new Set(), heardFrom: new Set(), humanQueue: new Map(), mainBlind: false, focus: this.engagements[channelId] || null, generation: 0, budget: Math.min(this.store.settings.maxAgentTurns, Math.max(0, this.store.value(`conversationTurnBudget:${channelId}`, 0))), ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
       this.states.set(channelId, state);
     }
     return state;
+  }
+
+  setTurnBudget(state, remaining) {
+    state.budget = Math.max(0, Math.trunc(remaining));
+    this.store.setValue(`conversationTurnBudget:${state.id}`, state.budget);
+  }
+
+  restoreTurnBudget(state) {
+    if (this.store.value(`conversationTurnBudget:${state.id}`, null) !== null) return;
+    const spent = this.store.chatTurnsAfterLastHuman(state.id);
+    this.setTurnBudget(state, spent === null ? 0 : this.store.settings.maxAgentTurns - spent);
   }
 
   allowedGuild(guildId) {
@@ -608,7 +619,7 @@ export class Orchestrator {
     if (human) {
       await this.address(state, last);
       state.humanQueue.set(last.id, last);
-      state.budget = this.store.settings.maxAgentTurns;
+      this.setTurnBudget(state, this.store.settings.maxAgentTurns);
     }
     state.generation += 1;
     state.ownerOrigin = last.kind === "owner";
@@ -722,7 +733,7 @@ export class Orchestrator {
       if (human) {
         if (item.addressed.some((id) => !item.handledBy.includes(id)) || (!item.disengaged.length && (roomAgentId(state.id) || this.dmAgentId(state.id)))) state.humanQueue.set(item.id, item);
         state.generation += 1;
-        state.budget = this.store.settings.maxAgentTurns;
+        this.setTurnBudget(state, this.store.settings.maxAgentTurns);
         state.ownerOrigin = item.kind === "owner";
         this.schedule(state, HUMAN_DEBOUNCE_MS);
       } else if (item.kind === "bot") {
@@ -1088,7 +1099,7 @@ export class Orchestrator {
       for (const recipient of item.addressed || []) {
         if (!eligible.some((agent) => agent.id === recipient)) this.acknowledge(state, recipient, [id]);
       }
-      if (item.toOthers || (item.kind === "agent" && state.budget <= 0) || (!direct && !item.addressed?.length)
+      if (item.toOthers || (item.kind === "agent" && state.budget <= 0 && !item.addressed?.some((id) => state.working?.has(id))) || (!direct && !item.addressed?.length)
         || (item.addressed?.length && item.addressed.every((id) => item.handledBy?.includes(id)))) state.humanQueue.delete(id);
     }
     const agents = eligible.filter((agent) => !state.working.has(agent.id));
@@ -1148,7 +1159,7 @@ export class Orchestrator {
       try {
         const occupied = await this.withSession(agent, state.id, "chat", () => {
           if (!turnCounted) {
-            state.budget = Math.max(0, state.budget - 1);
+            this.setTurnBudget(state, state.budget - 1);
             turnCounted = true;
           }
           return this.brain.chatTurn({
@@ -1158,7 +1169,7 @@ export class Orchestrator {
             postFile: (file, caption, { replyTo = queued, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { ...this.replyDelivery(replyTo), delegationAuthorized }),
             say,
             // Everything already in the channel when the turn starts is old news, not just what the prompt shows.
-            inbox: this.inbox(state, state.history.slice()),
+            inbox: this.inbox(state, state.history.slice(), agent.id),
             onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
           });
         });
@@ -1304,7 +1315,7 @@ export class Orchestrator {
       state.humanQueue.set(item.id, item);
       state.ownerOrigin = item.kind === "owner";
       state.generation += 1;
-      state.budget = this.store.settings.maxAgentTurns;
+      this.setTurnBudget(state, this.store.settings.maxAgentTurns);
       this.schedule(state, 0);
     }
   }
@@ -1393,6 +1404,7 @@ export class Orchestrator {
     const working = this.showWorking(state, agent, null);
     try {
       await this.ensureHistory(state);
+      this.restoreTurnBudget(state);
       replyTo = trace.steps?.findLast((step) => step.replyTo)?.replyTo
         || state.history.findLast((item) => ["human", "owner"].includes(item.kind) && item.at <= Date.parse(trace.startedAt));
       const delegationAuthorized = replyTo?.kind === "owner" || Boolean(replyTo?.delegated) || this.authorized(replyTo, agent, state);
@@ -1402,7 +1414,7 @@ export class Orchestrator {
         agent, trace, channel: this.turnChannel(state.id), replyTo,
         postFile: (file, caption, options = {}) => this.postAs(agent, state, caption, file, options.traceId, { ...this.replyDelivery(options.replyTo || replyTo), delegationAuthorized }),
         say: (text, target = state.id, options = {}) => this.postDirect(agent, state, target, text, { ...options, delegationAuthorized, ...(target === state.id ? this.replyDelivery(options.replyTo || replyTo) : {}) }),
-        inbox: this.inbox(state, state.history), routine,
+        inbox: this.inbox(state, state.history, agent.id), routine,
         onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
       }));
       if (occupied.busy) return;
@@ -1422,10 +1434,12 @@ export class Orchestrator {
   }
 
   /** Messages people wrote in the channel after a turn started, each handed out once: how a busy agent gets steered. */
-  inbox(state, seenItems) {
-    const seen = new Set(seenItems.map((item) => item.id));
+  inbox(state, seenItems, agentId = "") {
+    const colleagueReport = (item) => item.kind === "agent" && !item.passive && !item.request
+      && item.addressed?.includes(agentId) && !item.handledBy?.includes(agentId) && state.humanQueue.has(item.id);
+    const seen = new Set(seenItems.filter((item) => !colleagueReport(item)).map((item) => item.id));
     return () => {
-      const fresh = state.history.filter((item) => !seen.has(item.id) && (item.kind === "owner" || item.kind === "human"));
+      const fresh = state.history.filter((item) => !seen.has(item.id) && (item.kind === "owner" || item.kind === "human" || colleagueReport(item)));
       for (const item of fresh) seen.add(item.id);
       return fresh;
     };
@@ -1785,8 +1799,10 @@ export class Orchestrator {
   }
 
   queueColleagues(state, item, authorized = false) {
-    if (state.budget <= 0 || !state.focus?.ids.includes(item.agentId)) return;
-    const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId && (tagged(item.content, agent.name) || (item.handoffResult && item.returnToAgentId === agent.id && state.focus.ids.includes(agent.id))));
+    if (!state.focus?.ids.includes(item.agentId)) return;
+    const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId
+      && (state.budget > 0 || state.working?.has(agent.id))
+      && (tagged(item.content, agent.name) || (item.handoffResult && item.returnToAgentId === agent.id && state.focus.ids.includes(agent.id))));
     if (!called.length) return;
     item.addressed = called.map((agent) => agent.id);
     item.delegated = authorized;
@@ -2312,7 +2328,7 @@ export class Orchestrator {
     try {
       const occupied = await this.withSession(agent, channel.id, "email", () => this.brain.emailTurn({ agent, email, channel,
         say: (text, target = channel.id, options = {}) => this.postDirect(agent, state, target, text, { ...options, passive: true }),
-        inbox: this.inbox(state, state.history),
+        inbox: this.inbox(state, state.history, agent.id),
         onMessageHandled: (ids) => this.acknowledge(state, agent.id, ids),
       }));
       if (occupied.busy) return "busy";
@@ -2394,7 +2410,7 @@ export class Orchestrator {
         replyTo: resumeTrace?.steps?.findLast((step) => step.replyTo)?.replyTo,
         postFile: (file, caption, { replyTo, traceId } = {}) => this.postAs(agent, state, caption, file, traceId, { passive: true, ...this.replyDelivery(replyTo) }),
         say: (text, target = state.id, { voice = false, replyTo, traceId } = {}) => this.postDirect(agent, state, target, text, { passive: true, voice, traceId, ...(target === state.id ? this.replyDelivery(replyTo) : {}) }),
-        inbox: this.inbox(state, state.history),
+        inbox: this.inbox(state, state.history, agent.id),
         onTrace: (traceId) => this.store.attachRoutineTrace(run.id, traceId),
         onMessageHandled: (ids) => { this.acknowledge(state, agent.id, ids); },
       }));

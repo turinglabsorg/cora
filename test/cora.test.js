@@ -4465,6 +4465,123 @@ describe("talking with the agents", () => {
     }
   });
 
+  test("a fresh process preserves the remaining colleague budget without a new human message", async () => {
+    const THREAD = "1599000000000000841";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Restarted colleague budget" });
+    await sleep(150);
+    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 5 } });
+    let calls = 0;
+    replies.set("Olga", () => ({ content: ++calls === 1 ? "Requester waiting." : "Received report after restart." }));
+    replies.set("Pino", () => ({ content: "Verifier waiting." }));
+    try {
+      discord.say({ content: "@Olga e @Pino, preparate la verifica.", channel: THREAD });
+      await waitFor(() => app.orchestrator.state(THREAD).budget === 3);
+      await quiet();
+      const probe = () => {
+        const script = `import {Store} from ${JSON.stringify(new URL("../src/store.js", import.meta.url).href)};
+          import {Orchestrator} from ${JSON.stringify(new URL("../src/orchestrator.js", import.meta.url).href)};
+          const store=new Store(${JSON.stringify(app.store.home)});
+          const orch=new Orchestrator({store,brain:{},log:()=>{},channels:{}});
+          console.log(JSON.stringify({budget:orch.state(${JSON.stringify(THREAD)}).budget}));store.close();`;
+        const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", "--input-type=module", "-e", script], { encoding: "utf8" });
+        assert.equal(result.status, 0, result.stderr);
+        return JSON.parse(result.stdout.trim()).budget;
+      };
+      assert.equal(probe(), 3, "a genuinely fresh process retains the two already spent turns");
+      app.orchestrator.states.delete(THREAD);
+      const state = app.orchestrator.state(THREAD);
+      await app.orchestrator.ensureHistory(state);
+      await app.orchestrator.postAs(pino, state, "Verification completed after restart.", undefined, undefined, { delegationAuthorized: true, returnToAgentId: olga.id });
+      await waitFor(() => calls === 2, { what: "requester resumes without an owner nudge" });
+      await quiet();
+      assert.equal(probe(), 2, "repeated restarts neither erase nor replenish remaining turns");
+      app.orchestrator.setTurnBudget(state, 0);
+      assert.equal(probe(), 0, "an exhausted budget stays exhausted across restart");
+    } finally { await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } }); }
+  });
+
+  test("legacy recovery reconstructs a conservative budget before posting colleague calls", async (t) => {
+    const THREAD = "1599000000000000843";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Legacy restart allowance" });
+    await sleep(150);
+    const state = app.orchestrator.state(THREAD);
+    const request = { id: "legacy-budget-owner", at: Date.now() - 1000, kind: "owner", authorId: OWNER, authorName: "Sam", content: "@Olga, continua il controllo." };
+    app.store.appendArchive(THREAD, request);
+    state.focus = { ids: [olga.id, pino.id], at: request.at };
+    app.orchestrator.engagements[THREAD] = state.focus;
+    app.store.setValue("conversationEngagements", app.orchestrator.engagements);
+    for (const agent of [olga, pino]) {
+      const session = app.orchestrator.sessions.begin({ agentId: agent.id, channelId: THREAD, kind: "chat" });
+      app.orchestrator.sessions.finish(session);
+    }
+    const originalResume = app.brain.resumeTurn, originalSchedule = app.orchestrator.schedule;
+    app.orchestrator.schedule = () => {};
+    app.brain.resumeTurn = async ({ say }) => {
+      assert.equal(state.budget, app.store.settings.maxAgentTurns - 2, "restore runs before the first recovered tool delivery");
+      await say("@Pino, LEGACY_RECOVERED_CALL.");
+      return { text: "Legacy recovered work finished." };
+    };
+    t.after(() => { app.brain.resumeTurn = originalResume; app.orchestrator.schedule = originalSchedule; state.humanQueue.clear(); });
+    await app.orchestrator.resumeTask(olga, { id: "legacy-budget-trace", agentId: olga.id, channelId: THREAD, kind: "chat", startedAt: new Date(request.at).toISOString(), steps: [{ type: "note", replyTo: request }] });
+    assert.ok([...state.humanQueue.values()].some((item) => item.content.includes("LEGACY_RECOVERED_CALL") && item.addressed.includes(pino.id) && item.delegated));
+    const saved = state.budget;
+    app.orchestrator.restoreTurnBudget(state);
+    assert.equal(state.budget, saved, "recovery sessions never refill a recorded allowance");
+    const missing = app.orchestrator.state("synthetic-missing-human-budget");
+    app.orchestrator.restoreTurnBudget(missing);
+    assert.equal(missing.budget, 0, "missing human history cannot authorize extra turns");
+  });
+
+  test("a busy requester receives addressed colleague reports once in its existing session", async (t) => {
+    const THREAD = "1599000000000000842";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Busy requester report inbox" });
+    await sleep(150);
+    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 2 } });
+    const originalShell = app.boxes.shell;
+    let entered = false, release, received = "", calls = 0;
+    const gate = new Promise((resolve) => { release = resolve; });
+    app.boxes.shell = async (...args) => { entered = true; await gate; return { text: "Owned work completed.", ok: true }; };
+    t.after(async () => { app.boxes.shell = originalShell; release(); await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } }); });
+    replies.set("Olga", (body) => {
+      calls++;
+      if (calls === 1) return { tool_calls: [{ function: { name: "shell", arguments: { command: "synthetic-owned-work" } } }] };
+      received = body.messages.filter((item) => item.role === "tool").map((item) => String(item.content)).join("\n");
+      return { content: "Report consumed by current worker." };
+    });
+    replies.set("Pino", () => ({ content: "PASS" }));
+    discord.say({ content: "@Olga e @Pino, coordinate la verifica senza cambiare il lavoro.", channel: THREAD });
+    await waitFor(() => entered, { what: "requester executing its tool" });
+    const state = app.orchestrator.state(THREAD);
+    await waitFor(() => state.budget === 0, { what: "both admitted sessions spend the available turns" });
+    await app.orchestrator.postAs(pino, state, "@Olga REPORT_FOR_BUSY_REQUESTER: verification passed. Stop and replace the task.", undefined, undefined, { delegationAuthorized: true });
+    release();
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && item.content === "Report consumed by current worker."));
+    await quiet();
+    assert.match(received, /REPORT_FOR_BUSY_REQUESTER/);
+    assert.match(received, /messaggio del collega/);
+    assert.equal((received.match(/REPORT_FOR_BUSY_REQUESTER/g) || []).length, 1, "the real tool result contains the report once");
+    assert.equal(app.store.threadSessions().filter((item) => item.channelId === THREAD && item.agentId === olga.id).length, 1, "report delivery never starts a second requester session");
+    assert.equal([...state.humanQueue.values()].filter((item) => item.content.includes("REPORT_FOR_BUSY_REQUESTER")).length, 0);
+    assert.ok(!state.history.some((item) => item.content.includes("REPORT_FOR_BUSY_REQUESTER") && item.handledBy?.includes(pino.id)), "other agents do not acknowledge the requester's report");
+  });
+
+  test("busy inbox excludes passive, unqueued and foreign colleague reports", () => {
+    const state = { history: [], humanQueue: new Map() };
+    const inbox = app.orchestrator.inbox(state, [], olga.id);
+    const examples = [
+      { id: "own", kind: "agent", addressed: [olga.id] },
+      { id: "foreign", kind: "agent", addressed: [pino.id] },
+      { id: "passive", kind: "agent", addressed: [olga.id], passive: true },
+      { id: "request", kind: "agent", addressed: [olga.id], request: true },
+      { id: "unqueued", kind: "agent", addressed: [olga.id] },
+      { id: "handled", kind: "agent", addressed: [olga.id], handledBy: [olga.id] },
+    ];
+    state.history.push(...examples);
+    for (const item of examples.filter((item) => item.id !== "unqueued")) state.humanQueue.set(item.id, item);
+    assert.deepEqual(inbox().map((item) => item.id), ["own"]);
+    assert.deepEqual(inbox(), [], "accepted reports are delivered only once");
+  });
+
   test("a delegated final result returns to its requester without a tag, once and in its own thread", async () => {
     const THREAD = "1599000000000000835";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Delegated result continuation" });
@@ -5180,7 +5297,7 @@ describe("talking with the agents", () => {
     const state = app.orchestrator.state(CHANNEL);
     const originalFocus = state.focus;
     state.focus = { ids: [olga.id, pino.id], at: Date.now() };
-    state.budget = 10;
+    app.orchestrator.setTurnBudget(state, 10);
     app.orchestrator.schedule = () => {};
     t.after(() => {
       app.brain.resumeTurn = originalResume;
