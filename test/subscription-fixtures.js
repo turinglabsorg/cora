@@ -32,7 +32,7 @@ if (provider === "gemini" && argv.includes("/usage")) {
   process.exit(saved() ? 0 : 1);
 } else if (provider === "gemini" && argv.includes("/logout")) {
   fs.rmSync(marker, { force: true }); process.exit(0);
-} else if (provider === "gemini" && !argv.includes("--input-format")) {
+} else if (provider === "gemini" && argv[0] !== "acp") {
   process.stdout.write("Select login method:\\n > Google OAuth\\n");
   let selected = false;
   readline.createInterface({ input: process.stdin }).on("line", (code) => {
@@ -77,6 +77,17 @@ if (provider === "gemini" && argv.includes("/usage")) {
     if (code !== "fixture-authorization-code") process.exit(1);
     setTimeout(() => { save(); process.exit(0); }, state().codeDelayMs || 0);
   });
+} else if (provider === "gemini") {
+  const reply = (id, result) => line({ jsonrpc: "2.0", id, result });
+  readline.createInterface({ input: process.stdin }).on("line", (text) => {
+    const message = JSON.parse(text);
+    if (message.method !== "session/prompt") return reply(message.id, message.method === "session/new" ? { sessionId: "fixture" } : {});
+    const account = saved();
+    fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ provider, directory, argv, scope: process.env.ANTIGRAVITY_CREDENTIAL_SCOPE, account: account?.email, inheritedKeys: Object.keys(process.env).filter((key) => /TOKEN|API_KEY|AUTH_TOKEN/.test(key)) }) + "\\n");
+    if (!account) { process.stderr.write("Login expired · Please run /login"); process.exit(1); }
+    line({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "fixture", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Identity: " + account.email } } } });
+    reply(message.id, { stopReason: "end_turn", usage: { inputTokens: 20, cachedReadTokens: 5, outputTokens: 3 } });
+  }).on("close", () => process.exit(0));
 } else {
   const input = [];
   process.stdin.on("data", (chunk) => input.push(chunk));
@@ -86,8 +97,7 @@ if (provider === "gemini" && argv.includes("/usage")) {
     fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(record) + "\\n");
     if (!account) { process.stderr.write(provider === "grok" ? "Not signed in. Run \`grok login\` to authenticate." : "Login expired · Please run /login"); process.exit(1); }
     const text = "Identity: " + account.email;
-    if (provider === "gemini") line({ event: "result", result: { status: "SUCCESS", response: text, usage: { input_tokens: 20, cache_read_tokens: 5, output_tokens: 3, thinking_tokens: 2 } } });
-    else if (provider === "claude" || provider === "grok") line({ type: "result", result: text });
+    if (provider === "claude" || provider === "grok") line({ type: "result", result: text });
     else if (provider === "muse") line({ payload_type: "run.terminal.completed", payload: { terminal: "completed", text } });
     else { fs.writeFileSync(argv[argv.indexOf("-o") + 1], text); line({ type: "item.completed", item: { type: "agent_message", text } }); }
   });

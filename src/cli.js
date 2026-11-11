@@ -28,7 +28,7 @@ export function childEnv() {
   return env;
 }
 
-function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, signal }) {
+function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, signal, interactive }) {
   signal?.throwIfAborted();
   return new Promise((resolve) => {
     const tracked = Boolean(noteChildPid.getStore());
@@ -37,6 +37,10 @@ function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, sign
     const stdout = [];
     const stderr = [];
     let partial = "";
+    const io = {
+      write(message) { if (child.stdin.writable) child.stdin.write(`${JSON.stringify(message)}\n`); },
+      close() { child.stdin.end(); },
+    };
     const lines = (chunk, end = false) => {
       if (!onLine) return;
       partial += chunk;
@@ -44,7 +48,7 @@ function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, sign
       partial = end ? "" : parts.pop();
       for (const line of parts) {
         if (!line.trim()) continue;
-        try { onLine(line); } catch {}
+        try { onLine(line, io); } catch {}
       }
     };
     let timedOut = false;
@@ -84,7 +88,8 @@ function run(bin, args, { input, cwd, timeoutMs, onLine, env = {}, authEnv, sign
       resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), timedOut });
     });
     child.stdin.on("error", () => {});
-    child.stdin.end(input);
+    if (interactive) interactive(io);
+    else child.stdin.end(input);
   });
 }
 
@@ -114,56 +119,117 @@ function textSteps(onStep) {
   };
 }
 
+const GEMINI_THOUGHT_LEVELS = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" };
+
+/**
+ * Antigravity over ACP: the only mode that streams its thoughts. Each run gets its own
+ * --gemini-dir, so the Cora MCP server and the permissions belong to this run alone.
+ */
 export async function runGemini({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, onStep, effort = "", authEnv, signal }) {
   if (!authEnv?.HOME || !authEnv.ANTIGRAVITY_CREDENTIAL_SCOPE) throw new Error("subscription da collegare");
   const directory = join(workDir, `gemini-${randomBytes(6).toString("hex")}`);
-  const config = join(directory, ".agents");
-  mkdirSync(config, { recursive: true, mode: 0o700 });
+  const agents = join(directory, ".agents", "agents");
+  const geminiDir = join(directory, ".gemini");
+  for (const dir of [agents, join(geminiDir, "config"), join(geminiDir, "antigravity-cli")]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tools = mcp && toolNames.length ? toolNames : [];
-  const agents = join(config, "agents");
-  mkdirSync(agents, { recursive: true, mode: 0o700 });
   writeFileSync(join(agents, "cora.md"), `---\nname: cora\ndescription: Cora agent with Cora MCP tools only\nmainAgent: true\nsubagent: false\ntools: []\ncommandExecutionPolicy: off\n---\n${system}\n`, { mode: 0o600 });
-  writeFileSync(join(config, "mcp_config.json"), JSON.stringify({ mcpServers: tools.length ? {
+  writeFileSync(join(geminiDir, "config", "mcp_config.json"), JSON.stringify({ mcpServers: tools.length ? {
     cora: { command: process.execPath, args: [MCP_SCRIPT], env: { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token }, enabledTools: tools,
       tools: Object.fromEntries(tools.map((name) => [name, { eager: true }])) },
   } : {} }), { mode: 0o600 });
-  const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--disable-slash-commands", "--agent", "cora", "--model", model,
-    "--settings", JSON.stringify(geminiSettings(tools)), ...(effort ? ["--effort", effort] : [])];
-  const input = `${JSON.stringify({ event: "user", message: { content: `<istruzioni_di_sistema>\n${system}\n</istruzioni_di_sistema>\n\n${prompt}` } })}\n`;
+  writeFileSync(join(geminiDir, "antigravity-cli", "settings.json"), JSON.stringify(geminiSettings(tools)), { mode: 0o600 });
+  const args = ["acp", "--agent", "cora", "--disable-telemetry", "--gemini-dir", geminiDir];
+  const text = `<istruzioni_di_sistema>\n${system}\n</istruzioni_di_sistema>\n\n${prompt}`;
   const texts = textSteps(onStep);
-  let final = null;
+  const pending = new Map();
+  let nextId = 0;
   let fragment = "";
-  const onLine = (line) => {
-    const event = JSON.parse(line);
-    if (event.event === "result") final = event.result;
-    if (event.event !== "step_update") return;
-    const step = event.step_update || {};
-    if (step.step_type === "agent_response" && step.text_delta) {
-      fragment += step.text_delta;
-      if (step.state === "DONE") { texts.text(fragment); fragment = ""; }
-    } else if (step.step_type === "tool") {
-      if (fragment) { texts.text(fragment); fragment = ""; }
-      texts.flush();
-    } else if (step.step_type === "thinking" && step.text_delta) {
-      texts.flush();
-      onStep?.({ type: "thinking", text: step.text_delta });
+  let thought = "";
+  let result = null;
+  let failure = "";
+  const flushThought = () => {
+    if (thought.trim()) onStep?.({ type: "thinking", text: thought.trim() });
+    thought = "";
+  };
+  const request = (io, method, params, then) => {
+    nextId += 1;
+    pending.set(nextId, then);
+    io.write({ jsonrpc: "2.0", id: nextId, method, params });
+  };
+  const fail = (io, error) => {
+    failure = String(error?.message || error || "");
+    io.close();
+  };
+  const start = (io) => request(io, "initialize", { protocolVersion: 1, clientCapabilities: {} }, (error) => {
+    if (error) return fail(io, error);
+    request(io, "session/new", { cwd: directory, mcpServers: [] }, (error, session) => {
+      if (error) return fail(io, error);
+      const sessionId = session.sessionId;
+      const ask = () => request(io, "session/prompt", { sessionId, prompt: [{ type: "text", text }] }, (error, done) => {
+        if (error) return fail(io, error);
+        result = done || {};
+        io.close();
+      });
+      request(io, "session/set_model", { sessionId, modelId: model }, (error) => {
+        if (error) return fail(io, error);
+        const level = GEMINI_THOUGHT_LEVELS[effort];
+        if (!level) return ask();
+        request(io, "session/set_config_option", { sessionId, configId: "thought_level", value: level }, () => ask());
+      });
+    });
+  });
+  const onLine = (line, io) => {
+    const message = JSON.parse(line);
+    if (message.method === "session/update") {
+      const update = message.params?.update || {};
+      const chunk = String(update.content?.text || "");
+      if (update.sessionUpdate === "agent_thought_chunk") thought += chunk;
+      else if (update.sessionUpdate === "agent_message_chunk") {
+        flushThought();
+        fragment += chunk;
+      } else if (update.sessionUpdate === "tool_call") {
+        flushThought();
+        if (fragment) { texts.text(fragment); fragment = ""; }
+        texts.flush();
+      }
+      return;
     }
+    if (message.method === "session/request_permission") {
+      const call = message.params?.toolCall || {};
+      const ours = /^mcp_cora_/.test(String(call.name || call.title || "")) || /^mcp_cora_/.test(String(call.rawInput?.name || ""));
+      const options = message.params?.options || [];
+      const option = options.find((item) => String(item.kind).startsWith(ours ? "allow_once" : "reject")) || options.find((item) => String(item.kind).startsWith(ours ? "allow" : "reject"));
+      io.write({ jsonrpc: "2.0", id: message.id, result: { outcome: option ? { outcome: "selected", optionId: option.optionId } : { outcome: "cancelled" } } });
+      return;
+    }
+    if (message.method && message.id !== undefined) {
+      io.write({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "not supported by Cora" } });
+      return;
+    }
+    const then = pending.get(message.id);
+    if (!then) return;
+    pending.delete(message.id);
+    then(message.error || null, message.result);
   };
   try {
-    const out = await run(bin, args, { input, cwd: directory, timeoutMs, onLine, authEnv, signal });
+    const out = await run(bin, args, { cwd: directory, timeoutMs, onLine, authEnv, signal, interactive: start });
     signal?.throwIfAborted();
     if (out.timedOut) throw new Error(`gemini: no answer within ${Math.round(timeoutMs / 1000)}s`);
-    if (!final || out.code !== 0 || final.status !== "SUCCESS") {
-      if (/authentication required|authentication failed|not signed in/i.test(`${final?.error || ""} ${out.stderr}`)) throw new Error("gemini: not signed in, collega la subscription");
-      const error = new Error(`gemini: ${String(final?.error || "Antigravity non ha completato la richiesta").slice(0, 240)}`);
-      if (/individual quota reached|usage limit reached/i.test(String(final?.error || ""))) Object.assign(error, { code: "GEMINI_QUOTA_EXHAUSTED", model });
+    flushThought();
+    const answer = fragment.trim();
+    const warning = /^\u26a0\ufe0f?\s*/.test(answer) ? answer.replace(/^\u26a0\ufe0f?\s*/, "") : "";
+    const problem = failure || warning;
+    if (!result || problem || !["end_turn", "max_tokens"].includes(result.stopReason)) {
+      if (/authentication required|authentication failed|not signed in|not logged in/i.test(`${problem} ${out.stderr}`)) throw new Error("gemini: not signed in, collega la subscription");
+      const error = new Error(`gemini: ${String(problem || "Antigravity non ha completato la richiesta").slice(0, 240)}`);
+      if (/individual quota reached|usage limit reached/i.test(problem)) Object.assign(error, { code: "GEMINI_QUOTA_EXHAUSTED", model });
       throw error;
     }
-    texts.finish(final.response);
-    const usage = final.usage || {};
-    return { text: String(final.response || ""), usage: {
-      in: (Number(usage.input_tokens) || 0) + (Number(usage.cache_read_tokens) || 0),
-      out: Number(usage.output_tokens) || 0,
+    texts.finish(answer);
+    const usage = result.usage || {};
+    return { text: answer, usage: {
+      in: (Number(usage.inputTokens) || 0) + (Number(usage.cachedReadTokens) || 0),
+      out: Number(usage.outputTokens) || 0,
     } };
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
