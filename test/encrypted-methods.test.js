@@ -5,7 +5,7 @@ import { readdirSync } from "node:fs";
 import { encryptedSpaceFor } from "../src/encrypted-space.js";
 import { knowledgeWorld } from "./knowledge-fixtures.js";
 import { createPasskey, createFolderKeys, protectBundle, unlockBundle, proveAccess, encryptDocument, documentId } from "../web/encrypted-crypto.js";
-import { uploadEncryptedFile } from "../web/encrypted-files.js";
+import { uploadEncryptedFile, downloadEncryptedFile } from "../web/encrypted-files.js";
 import { convertEncryptedFolder } from "../web/encrypted-conversion.js";
 const password = "synthetic plaintext conversion password";
 async function setup(t) {
@@ -88,7 +88,8 @@ test("confirmed decryption preserves binary bytes, paths, empty files, every ver
   assert.equal((await x.f.request(x.f.bob, `/api/encrypted/folders/${x.folder}/decrypt-finish`, { method: "POST", body: finalInput })).status, 404);
 });
 test("cancel, tampering, global policy changes and persistence failures leave all encrypted versions intact", async t => {
-  const x = await setup(t); await uploadEncryptedFile({ ...x, file: new File([randomBytes(600000)], "unchanged.bin") });
+  const x = await setup(t), originalBytes = randomBytes(600000);
+  const binary = await uploadEncryptedFile({ ...x, file: new File([originalBytes], "unchanged.bin") });
   await uploadEncryptedFile({ ...x, file: new File(["SECOND VERSIONED FILE"], "second.txt") });
   const snapshot = () => JSON.stringify(x.f.app.store.db.prepare("SELECT data FROM encrypted_documents WHERE folder = ?").all(x.folder));
   const original = snapshot(), controller = new AbortController();
@@ -103,6 +104,13 @@ test("cancel, tampering, global policy changes and persistence failures leave al
   const store = x.f.app.store; assert.equal(store.artifactCommits(x.folder).length, 0); assert.equal(store.value(`encryptedFolder:${x.folder}`), true); assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM encrypted_conversions").get().n, 0);
   assert.equal(store.artifactBytes(), 0);
   assert.equal(readdirSync(x.f.app.artifacts.dir + "/objects", { recursive: true, withFileTypes: true }).filter(entry => entry.isFile()).length, 0);
+  await x.f.request(x.f.admin, "/api/encrypted/settings", { method: "PUT", body: { enabled: false } });
+  const restored = await x.api(`/api/encrypted/folders/${x.folder}`);
+  const fresh = await unlockBundle(x.folder, restored.folder.methods[0], password);
+  const recovered = restored.documents.find(doc => doc.id === binary.doc.id);
+  const exact = await downloadEncryptedFile({ ...x, bundle: fresh, document: recovered }); assert.deepEqual(Buffer.from(exact.bytes), originalBytes);
+  const retry = await convertEncryptedFolder({ ...x, bundle: fresh }); assert.equal(retry.versions, 2);
+
 });
 test("concurrent encrypted edits prevent an incomplete plaintext cutover", async t => {
   const x = await setup(t), original = await x.save({ title: "Concurrent", content: "first" }); let changed = false;
