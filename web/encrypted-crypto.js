@@ -27,6 +27,7 @@ async function wrappingKey(folder, item, password = "", create = false, signal) 
       credential = await credentialRequest("create", { publicKey: { challenge: random(32), rp: { name: "Cora · Spazio cifrato", id: location.hostname }, user: { id: seed, name: folder, displayName: "Spazio cifrato · " + folder }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", userVerification: "required" }, attestation: "none", ...(item.derivation === "handle-v1" ? {} : { extensions: { prf: {} } }) } }, signal);
       if (!credential) throw Error("Creazione della passkey annullata.");
       item.credentialId = credential.id;
+      if (item.derivation === "auto") item.derivation = credential.getClientExtensionResults?.().prf?.enabled === true ? "prf-v1" : "handle-v1";
     }
     const compatible = item.derivation === "handle-v1";
     let output, authenticatorData;
@@ -40,20 +41,20 @@ async function wrappingKey(folder, item, password = "", create = false, signal) 
     }
     const flags = new Uint8Array(authenticatorData || []);
     if (flags.length < 37 || !(flags[32] & 1) || !(flags[32] & 4)) throw Error("La passkey non conferma la verifica dell’utente. Riprova sbloccando il gestore.");
-    if (!output || new Uint8Array(output).byteLength !== 32) throw Error(compatible ? "Il gestore non restituisce il dato necessario alla passkey B. Usa un altro metodo." : "La passkey non restituisce PRF. Crea una passkey B per i gestori senza PRF.");
+    if (!output || new Uint8Array(output).byteLength !== 32) throw Error(compatible ? "Il gestore non restituisce il dato necessario alla passkey. Usa un altro metodo." : "La passkey non restituisce PRF. Riprova con il gestore originale o usa un altro metodo già configurato.");
     try {
       const material = await crypto.subtle.importKey("raw", output, "HKDF", false, ["deriveKey"]);
       return await crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: compatible ? from64(item.salt) : encoder.encode("cora:encrypted-space:v1"), info: encoder.encode(compatible ? `cora:encrypted-space:handle-v1:${folder}` : folder) }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     } finally { new Uint8Array(output).fill(0); }
   } finally { seed?.fill(0); }
 }
-export async function protectBundle(folder, bundle, kind, password = "", label = "", derivation = "prf-v1", signal) {
+export async function protectBundle(folder, bundle, kind, password = "", label = "", derivation = "auto", signal) {
   const method = { kind, label, ...(kind === "passkey" ? { derivation } : {}), salt: to64(random(32)), iv: to64(random(12)), ...(kind === "password" ? { iterations: 600000 } : {}) };
   const key = await wrappingKey(folder, method, password, true, signal);
   method.ciphertext = to64(await crypto.subtle.encrypt({ name: "AES-GCM", iv: from64(method.iv), additionalData: wrapAad(folder, method) }, key, encoder.encode(JSON.stringify(bundle))));
   return method;
 }
-export async function createFolderKeys(folder, kind, password, label = "", derivation = "prf-v1", signal) {
+export async function createFolderKeys(folder, kind, password, label = "", derivation = "auto", signal) {
   const rsa = await crypto.subtle.generateKey({ name: "RSA-OAEP", modulusLength: 3072, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["encrypt", "decrypt"]);
   const signing = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
   const bundle = { v: 1, folder, privateKey: await crypto.subtle.exportKey("jwk", rsa.privateKey), signingKey: await crypto.subtle.exportKey("jwk", signing.privateKey) };
