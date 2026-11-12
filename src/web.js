@@ -1379,6 +1379,24 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 201, { agent: await publicAgent(result.agent), created: result.created, notes: result.notes });
     }
 
+    const duplicateMatch = /^\/api\/agents\/([\w-]+)\/duplicate$/.exec(path);
+    if (duplicateMatch && agentTransfer) {
+      const agent = store.agent(duplicateMatch[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      if (!agentTransfer.canExport(agent, user)) throw new HttpError(403, "Solo il proprietario dell'agente può duplicarlo.");
+      if (method === "GET") return send(res, 200, agentTransfer.duplicateView(agent));
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      const body = await readJson(req, 16 * 1024);
+      const result = await agentTransfer.duplicate(agent, user, { name: typeof body.name === "string" ? body.name : "" }, {
+        prepare: (input) => { checkCredentialChoice(null, input); return input; },
+      });
+      bots?.sync();
+      tgBots?.sync();
+      skBots?.sync();
+      broadcast({ type: "agents" });
+      return send(res, 201, { agent: await publicAgent(result.agent), created: result.created, notes: result.notes });
+    }
+
     const exportMatch = /^\/api\/agents\/([\w-]+)\/export(?:\/(file|links)(?:\/(apl_[a-f0-9]{12}))?)?$/.exec(path);
     if (exportMatch && agentTransfer) {
       const agent = store.agent(exportMatch[1]);

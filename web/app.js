@@ -2758,6 +2758,7 @@ function agentForm(agent, { only = "", knowledge = null } = {}) {
   form.classList.add("agent-settings-save");
   form.replaceChildren(savebar);
   const exportPane = agentExportPane(agent);
+  const duplicatePane = agentDuplicatePane(agent);
   const entries = [
     ["identita", "Identità", "user", "Nome, immagine e colore", [identity]],
     ["carattere", "Carattere", "spark", "Personalità e modo di parlare", [characterPane.node]],
@@ -2767,10 +2768,11 @@ function agentForm(agent, { only = "", knowledge = null } = {}) {
     ["autorizzazioni", "Autorizzazioni", "shield", "Chi può farlo lavorare", [agentPermissionsPane(agent), owner].filter(Boolean)],
     ...platformsOn().map((kind) => [kind, TRANSPORTS[kind].label, TRANSPORTS[kind].icon, "Account e collegamento", [kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)]]),
     ["github", "GitHub", "github", "App e repository", [githubAccount(agent)]],
+    ["duplica", "Duplica", "copy", "Una copia in questo spazio", [duplicatePane]],
     ["esporta", "Esporta", "download", "File o link per un altro spazio", [exportPane]],
   ];
   controls = sectionWorkspace({ title: "Impostazioni", base: `#/agent/${agent.id}/impostazioni`, current: route()[3], entries,
-    onSelect: (id) => { form.hidden = !["identita", "carattere", "ascolto", "voce"].includes(id); if (id === "esporta") void exportPane.load(); } });
+    onSelect: (id) => { form.hidden = !["identita", "carattere", "ascolto", "voce"].includes(id); if (id === "esporta") void exportPane.load(); if (id === "duplica") void duplicatePane.load(); } });
   controls.querySelector(".email-workspace-detail").append(form);
   return controls;
 }
@@ -8205,6 +8207,44 @@ function agentExportPane(agent) {
       h("p", { class: "notice" }, icon("lock"), h("span", {}, h("b", {}, tr("Non esce mai: ")), tr("diario, messaggi, tracce, proprietari e permessi, canali, abbonamenti e chiavi, bot, casella email, GitHub, desktop, artefatti e valori dei segreti. Email, telefoni, id, IP, link con token e nomi delle persone dello spazio vengono oscurati."))),
       h("div", { class: "transfer-actions" }, download, h("span", { class: "spacer" }), days, downloads, share),
       fresh, links].filter(Boolean));
+  };
+  return node;
+}
+
+/** Agent → Settings → Duplicate: export and import in one step, inside this space; the copy arrives switched off. */
+function agentDuplicatePane(agent) {
+  const body = h("div", { class: "stack" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  let loaded = false;
+  const node = panel({ icon: "copy", title: "Duplica agente", hint: tr("Una copia di {name} in questo spazio, per esempio su un'altra subscription.", { name: agent.name }) }, body);
+  node.load = async () => {
+    if (loaded) return;
+    loaded = true;
+    let data;
+    try { data = await api(`/api/agents/${agent.id}/duplicate`); }
+    catch (error) { loaded = false; body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), raw(error.message))); return; }
+    const name = h("input", { type: "text", value: data.suggestion, maxlength: 32, "aria-label": tr("Nome della copia") });
+    const carried = [
+      tag(tr("carattere")),
+      data.core ? tag(tr("scheda")) : null,
+      data.avatar ? tag(tr("immagine")) : null,
+      tag(tr(data.routines === 1 ? "1 routine" : "{n} routine", { n: data.routines })),
+      data.sharedMemory ? tag(tr("memoria condivisa"), "on") : tag(tr(data.memories === 1 ? "1 ricordo" : "{n} ricordi", { n: data.memories })),
+      tag(tr("canali e proprietari")),
+    ].filter(Boolean);
+    const go = btn("Duplica agente", { icon: "copy", cls: "primary", onclick: async () => {
+      go.disabled = true;
+      const done = await guard(api(`/api/agents/${agent.id}/duplicate`, { method: "POST", body: { name: name.value.trim() } }), "Agente duplicato");
+      if (!done) { go.disabled = false; return; }
+      await loadState();
+      location.hash = `#/agent/${done.agent.id}/cervello`;
+    } });
+    body.replaceChildren(...[
+      setRows(
+        setRow("Nome", "Come si chiamerà la copia.", name),
+        setRow("Cosa copia", data.sharedMemory ? "La memoria resta una sola: la copia legge quella del proprietario." : "Tutto resta in questo spazio: niente viene oscurato.", h("span", { class: "transfer-needs" }, carried), { stack: true })),
+      data.externalBrain ? h("p", { class: "notice warn" }, icon("alert"), h("span", {}, tr("Il brain esterno non si copia: la copia usa quello dello spazio."))) : null,
+      h("p", { class: "notice" }, icon("power"), h("span", {}, h("b", {}, tr("Arriva spenta: ")), tr("le routine sono sugli stessi canali ma disattivate. Scegli la subscription in Cervello prima di accenderla. Non si copiano subscription e chiave personale, bot, casella email, GitHub, desktop, diario, messaggi e tracce."))),
+      h("div", { class: "transfer-actions" }, h("span", { class: "spacer" }), go)].filter(Boolean));
   };
   return node;
 }
