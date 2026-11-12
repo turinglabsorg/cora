@@ -1,6 +1,7 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Solo su un dispositivo fidato. Resta in questo browser fino al lucchetto o a Esci.": "Only on a trusted device. Kept in this browser until the lock action or Log out.",
   "Blocca e dimentica accesso": "Lock and forget access",
   "Ricorda accesso": "Remember access",
   "Apri cartella": "Open folder",

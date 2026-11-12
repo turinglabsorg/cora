@@ -65,9 +65,9 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const passwordMethods = personal.methods.filter(m => m.kind === "password"), passkeyMethods = personal.methods.filter(m => m.kind === "passkey");
   const user = ui.currentUser?.id;
   const password = h("input", { name: "password", type: "password", autocomplete: "current-password", placeholder: tr("Password della cartella"), "aria-label": tr("Password della cartella") });
-  const remember = h("input", { type: "checkbox", "aria-label": tr("Ricorda accesso in questo browser"), "aria-description": tr("Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci."), disabled: !canRememberPassword() || !user });
-  const rememberRow = h("label", { class: "encrypted-remember", title: tr("Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci.") }, h("span", {}, "Ricorda accesso"), remember);
-  const rememberHint = h("small", { class: "muted", hidden: true }, "Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci.");
+  const remember = h("input", { type: "checkbox", "aria-label": tr("Ricorda accesso in questo browser"), "aria-description": tr("Solo su un dispositivo fidato. Resta in questo browser fino al lucchetto o a Esci."), disabled: !canRememberPassword() || !user });
+  const rememberRow = h("label", { class: "encrypted-remember", title: tr("Solo su un dispositivo fidato. Resta in questo browser fino al lucchetto o a Esci.") }, h("span", {}, "Ricorda accesso"), remember);
+  const rememberHint = h("small", { class: "muted", hidden: true }, "Solo su un dispositivo fidato. Resta in questo browser fino al lucchetto o a Esci.");
   let remembered = null, savedPasskey = null;
   try { remembered = await recalledPassword(user, personal.id, personal.methods); savedPasskey = await rememberedAccessMethod(user, personal.id, personal.methods); }
   catch { status.textContent = tr("Memoria del browser non disponibile. Puoi sbloccare normalmente."); }
