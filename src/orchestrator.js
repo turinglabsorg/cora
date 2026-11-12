@@ -231,21 +231,10 @@ export class Orchestrator {
   state(channelId) {
     let state = this.states.get(channelId);
     if (!state) {
-      state = { id: channelId, history: [], seen: new Set(), heardFrom: new Set(), humanQueue: new Map(), mainBlind: false, focus: this.engagements[channelId] || null, generation: 0, budget: Math.min(this.store.settings.maxAgentTurns, Math.max(0, this.store.value(`conversationTurnBudget:${channelId}`, 0))), ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
+      state = { id: channelId, history: [], seen: new Set(), heardFrom: new Set(), humanQueue: new Map(), mainBlind: false, focus: this.engagements[channelId] || null, generation: 0, ownerOrigin: false, running: false, pending: false, timer: null, loading: null };
       this.states.set(channelId, state);
     }
     return state;
-  }
-
-  setTurnBudget(state, remaining) {
-    state.budget = Math.max(0, Math.trunc(remaining));
-    this.store.setValue(`conversationTurnBudget:${state.id}`, state.budget);
-  }
-
-  restoreTurnBudget(state) {
-    if (this.store.value(`conversationTurnBudget:${state.id}`, null) !== null) return;
-    const spent = this.store.chatTurnsAfterLastHuman(state.id);
-    this.setTurnBudget(state, spent === null ? 0 : this.store.settings.maxAgentTurns - spent);
   }
 
   allowedGuild(guildId) {
@@ -619,7 +608,6 @@ export class Orchestrator {
     if (human) {
       await this.address(state, last);
       state.humanQueue.set(last.id, last);
-      this.setTurnBudget(state, this.store.settings.maxAgentTurns);
     }
     state.generation += 1;
     state.ownerOrigin = last.kind === "owner";
@@ -733,7 +721,6 @@ export class Orchestrator {
       if (human) {
         if (item.addressed.some((id) => !item.handledBy.includes(id)) || (!item.disengaged.length && (roomAgentId(state.id) || this.dmAgentId(state.id)))) state.humanQueue.set(item.id, item);
         state.generation += 1;
-        this.setTurnBudget(state, this.store.settings.maxAgentTurns);
         state.ownerOrigin = item.kind === "owner";
         this.schedule(state, HUMAN_DEBOUNCE_MS);
       } else if (item.kind === "bot") {
@@ -1077,8 +1064,7 @@ export class Orchestrator {
     if (fromHuman && (roomAgentId(state.id) || this.dmAgentId(state.id))) return { forced: pool, optional: [] };
     // Everywhere else an agent speaks only when called, in a channel as in a thread: named by a person (or still in
     // the conversation that person is having with it), called directly by another agent or bot. Nobody called,
-    // nobody answers; agents calling each other stop when the turn budget is spent.
-    if (last.kind === "agent" && state.budget <= 0) return { forced: [], optional: [] };
+    // nobody answers; colleague calls are reviewed for progress before another worker starts.
     return { forced: pool.filter((agent) => (fromHuman ? last.addressed?.includes(agent.id) : (last.handoffResult ? last.addressed?.includes(agent.id) : tagged(last.content, agent.name)))), optional: [] };
   }
 
@@ -1099,7 +1085,7 @@ export class Orchestrator {
       for (const recipient of item.addressed || []) {
         if (!eligible.some((agent) => agent.id === recipient)) this.acknowledge(state, recipient, [id]);
       }
-      if (item.toOthers || (item.kind === "agent" && state.budget <= 0 && !item.addressed?.some((id) => state.working?.has(id))) || (!direct && !item.addressed?.length)
+      if (item.toOthers || (!direct && !item.addressed?.length)
         || (item.addressed?.length && item.addressed.every((id) => item.handledBy?.includes(id)))) state.humanQueue.delete(id);
     }
     const agents = eligible.filter((agent) => !state.working.has(agent.id));
@@ -1142,7 +1128,24 @@ export class Orchestrator {
       const authorized = this.authorized(queued, agent, state);
       const mayUseComputer = queued ? queued.kind === "owner" || authorized || queued.delegated : state.ownerOrigin;
       if (this.threadWork.has(state.id, agent.id) || this.sessions.blocking(agent.id, state.id)) return;
-      if (last.kind === "agent" && state.budget <= 0) return;
+      if (!["owner", "human"].includes(last.kind)) {
+        const cancellation = () => this.store.value("cancelledColleagueReturns", {})[state.id]?.[agent.id] || 0;
+        const cancelledBefore = cancellation();
+        if (cancelledBefore && Number(last.at) <= cancelledBefore) {
+          this.acknowledge(state, agent.id, [last.id]);
+          return;
+        }
+        const verdict = await this.brain.colleagueProgress(agent, state.id, state.history, last);
+        if (state.generation !== generation || cancellation() !== cancelledBefore || !state.focus?.ids.includes(agent.id)) {
+          this.acknowledge(state, agent.id, [last.id]);
+          return;
+        }
+        if (verdict.pause) {
+          this.acknowledge(state, agent.id, [last.id]);
+          if (verdict.fresh) await this.notice(state.id, verdict.message);
+          return;
+        }
+      } else this.brain.clearProgressPause(agent.id, state.id);
       const computer = Boolean(agent.tools && mayUseComputer && !this.threadWork.has(state.id, agent.id));
       this.acknowledge(state, agent.id, [...state.humanQueue.values()].filter((item) => item.id === queued?.id || snapshot.includes(item)).map((item) => item.id));
       const delegationAuthorized = queued ? queued.kind === "owner" || Boolean(queued.delegated) : state.ownerOrigin;
@@ -1155,13 +1158,8 @@ export class Orchestrator {
       // nothing — it marks the message it took instead. No line in the channel either way.
       const working = this.showWorking(state, agent, last);
       let result;
-      let turnCounted = false;
       try {
         const occupied = await this.withSession(agent, state.id, "chat", () => {
-          if (!turnCounted) {
-            this.setTurnBudget(state, state.budget - 1);
-            turnCounted = true;
-          }
           return this.brain.chatTurn({
             agent, history: snapshot, channel, forced: isForced, computer, authorized: authorized && computer, requestAuthorized: Boolean(mayUseComputer), belongsTo: this.ownsAgent(queued, agent, state),
             computerDenied: Boolean(agent.tools && !mayUseComputer),
@@ -1192,7 +1190,6 @@ export class Orchestrator {
       }
       queue = queue.then(async () => {
         if (!isForced && (state.generation !== generation || postedOptional >= limitOptional)) return;
-        if (!isForced && last.kind !== "owner" && last.kind !== "human" && state.budget <= 0) return;
         if (!isForced) postedOptional += 1;
         if (posted > 0) await sleep(700 + Math.random() * 1500);
         try {
@@ -1212,7 +1209,7 @@ export class Orchestrator {
       clearInterval(typing);
     }
     if (state.humanQueue.size) this.schedule(state, 300);
-    else if (posted && state.budget > 0 && state.generation === generation) this.schedule(state, 2500 + Math.random() * 4000);
+    else if (posted && state.generation === generation) this.schedule(state, 2500 + Math.random() * 4000);
   }
 
   /**
@@ -1315,7 +1312,6 @@ export class Orchestrator {
       state.humanQueue.set(item.id, item);
       state.ownerOrigin = item.kind === "owner";
       state.generation += 1;
-      this.setTurnBudget(state, this.store.settings.maxAgentTurns);
       this.schedule(state, 0);
     }
   }
@@ -1404,7 +1400,6 @@ export class Orchestrator {
     const working = this.showWorking(state, agent, null);
     try {
       await this.ensureHistory(state);
-      this.restoreTurnBudget(state);
       replyTo = trace.steps?.findLast((step) => step.replyTo)?.replyTo
         || state.history.findLast((item) => ["human", "owner"].includes(item.kind) && item.at <= Date.parse(trace.startedAt));
       const delegationAuthorized = replyTo?.kind === "owner" || Boolean(replyTo?.delegated) || this.authorized(replyTo, agent, state);
@@ -1801,7 +1796,6 @@ export class Orchestrator {
   queueColleagues(state, item, authorized = false) {
     if (!state.focus?.ids.includes(item.agentId)) return;
     const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId
-      && (state.budget > 0 || state.working?.has(agent.id))
       && (tagged(item.content, agent.name) || (item.handoffResult && item.returnToAgentId === agent.id && state.focus.ids.includes(agent.id))));
     if (!called.length) return;
     item.addressed = called.map((agent) => agent.id);

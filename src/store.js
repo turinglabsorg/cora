@@ -30,7 +30,6 @@ function checkModel(value) {
 const DEFAULT_SETTINGS = {
   guildIds: [],
   ownerIds: [],
-  maxAgentTurns: 8,
   conversationIdleMinutes: 30,
   maxRepliesPerRound: 2,
   historySize: 30,
@@ -439,7 +438,6 @@ export function sanitizeSettings(input, previous = DEFAULT_SETTINGS) {
   return {
     guildIds: cleanIds(merged.guildIds),
     ownerIds: cleanIds(merged.ownerIds),
-    maxAgentTurns: Math.round(clampNumber(merged.maxAgentTurns, 0, 40, 8)),
     conversationIdleMinutes: cleanIdleMinutes(merged.conversationIdleMinutes),
     maxRepliesPerRound: Math.round(clampNumber(merged.maxRepliesPerRound, 1, 6, 2)),
     historySize: Math.round(clampNumber(merged.historySize, 5, 100, 30)),
@@ -1558,6 +1556,16 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
       .all(agentId, limit).map((row) => traceRow(row, false));
   }
 
+  latestHumanMessage(channelId) {
+    const row = this.stmt("SELECT * FROM messages WHERE channel_id = ? AND kind IN ('owner', 'human') ORDER BY at DESC LIMIT 1").get(String(channelId));
+    return row ? messageRow(row) : null;
+  }
+
+  agentThreadTraces(agentId, channelId, since = 0, limit = 4) {
+    return this.stmt("SELECT * FROM traces WHERE agent_id = ? AND channel_id = ? AND kind = 'chat' AND status IN ('done', 'pass') AND started_at >= ? ORDER BY started_at DESC LIMIT ?")
+      .all(agentId, channelId, new Date(since).toISOString(), limit).map((row) => traceRow(row, true));
+  }
+
   recentTraces(limit = 12) {
     return this.stmt("SELECT id, agent_id, kind, channel_id, model, started_at, ended_at, status, step_count, tools, output, error, tokens_in, tokens_out, goal, meter FROM traces ORDER BY started_at DESC LIMIT ?")
       .all(limit).map((row) => traceRow(row, false));
@@ -1614,13 +1622,6 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
 
   threadSessions(limit = 400) {
     return this.stmt("SELECT * FROM thread_sessions ORDER BY started_at DESC LIMIT ?").all(Math.max(1, Math.min(1000, Number(limit) || 400))).map(threadSessionRow);
-  }
-
-  chatTurnsAfterLastHuman(channelId) {
-    const at = this.stmt("SELECT MAX(at) AS at FROM messages WHERE channel_id = ? AND kind IN ('owner', 'human')").get(String(channelId)).at;
-    if (at === null) return null;
-    return this.stmt("SELECT COUNT(*) AS total FROM thread_sessions WHERE channel_id = ? AND kind = 'chat' AND started_at >= ?")
-      .get(String(channelId), new Date(Number(at)).toISOString()).total;
   }
 
   threadParticipantIds(channelId) {

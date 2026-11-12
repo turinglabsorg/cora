@@ -1,3 +1,4 @@
+import { assessProgress, progressWindows } from "./agent-progress.js";
 import { noteChildPid, recoverHarness } from "./thread-sessions.js";
 import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -741,6 +742,34 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     return { restart: false, reason: "Decisore di recupero non disponibile.", usage: null };
   }
 
+  clearProgressPause(agentId, channelId) {
+    this.store.setValue(`agentProgressPause:${channelId}:${agentId}`, null);
+  }
+
+  saveProgressPause(agent, channelId, verdict) {
+    const english = this.store.settings.language === "en";
+    const message = verdict.available
+      ? (english ? `${agent.name}: automatic exchanges paused because repeated work made no progress. ${verdict.reason}` : `${agent.name}: scambi automatici sospesi perché il lavoro si ripete senza progressi. ${verdict.reason}`)
+      : (english ? `${agent.name}: automatic exchanges paused because the progress judge and its backups are unavailable. This is not a confirmed loop.` : `${agent.name}: scambi automatici sospesi perché il giudice dei progressi e le sue riserve non sono disponibili. Non è un loop confermato.`);
+    const pause = { at: Date.now(), reason: verdict.available ? "loop" : "judge_unavailable", evidence: verdict.evidence, message: message + (english ? " A new human instruction can resume this agent; colleagues continue independently." : " Una nuova indicazione umana può far riprendere questo agente; i colleghi continuano autonomamente.") };
+    this.store.setValue(`agentProgressPause:${channelId}:${agent.id}`, pause);
+    this.log?.({ type: "warning", agentId: agent.id, channelId, text: pause.message });
+    return { pause: true, fresh: true, message: pause.message };
+  }
+
+  async colleagueProgress(agent, channelId, history, request) {
+    const key = `agentProgressPause:${channelId}:${agent.id}`;
+    const previous = this.store.value(key, null);
+    if (previous) return { pause: true, fresh: false, message: previous.message };
+    const human = this.store.latestHumanMessage(channelId) || history.findLast((item) => ["owner", "human"].includes(item.kind));
+    const turns = this.store.agentThreadTraces(agent.id, channelId, human?.at || 0, 4).reverse();
+    if (turns.length < 2) return { pause: false };
+    const verdict = await assessProgress({ llm: this.llm, settings: this.store.settings, agent, channelId,
+      request: `${human?.content || ""}\nCurrent colleague request: ${request?.content || ""}`, windows: progressWindows(turns) });
+    if (verdict.loop || !verdict.available) return this.saveProgressPause(agent, channelId, verdict);
+    return { pause: false };
+  }
+
   async evaluateMessage({ goal, request, messages, work, progress }, signal) {
     try {
       const out = await this.llm.chat({
@@ -825,6 +854,9 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const looked = new Set();
     let looping = false;
     let progressCalls = 0;
+    let loopReviewCalls = 0;
+    let loopEvidenceStart = 0;
+    let progressPauseText = "";
     let blockedWork = "";
     let ownerRevision = 0;
     const recent = [];
@@ -954,7 +986,8 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       trace.add({ type: "note", text: `doc: messaggio fermato — ${reason}` });
       return `error: not sent. ${reason}`;
     };
-    const runTool = async (name, args) => {
+    let activeToolCalls = 0;
+    const runToolBody = async (name, args) => {
       const before = await news();
       const started = Date.now();
       const allowed = tools.some((tool) => tool.name === name);
@@ -1002,8 +1035,32 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
           trace.add({ type: "note", text: `Verifica progressi: dipendenza esterna — ${blockedWork}` });
         }
       }
+      if (task && activeToolCalls === 1 && !halted && !asked && !steering.length && allowed && ++loopReviewCalls >= this.progressEvery) {
+        loopReviewCalls = 0;
+        const revision = ownerRevision;
+        const steps = trace.steps.slice(loopEvidenceStart).filter((step) => step.type === "tool").slice(-20);
+        if (steps.length >= 12) {
+          const middle = Math.floor(steps.length / 2);
+          const verdict = await assessProgress({ llm: this.llm, settings: this.store.settings, agent, channelId: channel.id,
+            request: goalRequest || user, windows: progressWindows([{ id: "previous", steps: steps.slice(0, middle) }, { id: "current", steps: steps.slice(middle) }]), signal: controller.signal });
+          trace.spent(verdict.usage);
+          await settleNews();
+          if (activeToolCalls === 1 && !halted && !steering.length && revision === ownerRevision && (verdict.loop || !verdict.available)) {
+            const pause = this.saveProgressPause(agent, channel.id, verdict);
+            progressPauseText = pause.message;
+            looping = true;
+            halted = true;
+            trace.add({ type: "note", text: pause.message, progressPause: true });
+            controller.abort();
+          }
+        }
+      }
       const steer = await news();
       return before || steer || review ? { ...output, text: [output.text, before, steer, review].filter(Boolean).join("\n\n") } : output;
+    };
+    const runTool = (name, args) => {
+      activeToolCalls++;
+      return runToolBody(name, args).finally(() => { activeToolCalls--; });
     };
     // New chat messages reach a working agent with its next tool result (or its next step on Ollama).
     const collectNews = () => {
@@ -1051,6 +1108,8 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
             if (decision.intent === "update" || decision.intent === "continue") {
               blockedWork = "";
               ownerRevision++;
+              loopEvidenceStart = trace.steps.length;
+              loopReviewCalls = 0;
             }
             if (decision.intent === "update") {
               keepReplyTo(fresh.at(-1));
@@ -1296,7 +1355,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
           if (next.kind === "confirm" && isDone(result.text)) break;
           final = result.text;
         }
-        return done(halted ? stoppedByOwner ? "Mi fermo qui." : "PASS" : final, 0);
+        return done(halted ? progressPauseText || (stoppedByOwner ? "Mi fermo qui." : "PASS") : final, 0);
       }
 
       const messages = [{ role: "system", content: system }, { role: "user", content: currentPrompt(), images: nativeImages() }];
@@ -1336,7 +1395,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
           // It confirmed it is done: post the real answer it gave, never the bare "DONE".
           if (isDone(result.text) && lastAnswer) return done(lastAnswer, steps);
           const next = await nextStep(result.text);
-          if (halted) return done(stoppedByOwner ? "Mi fermo qui." : "PASS", steps);
+          if (halted) return done(progressPauseText || (stoppedByOwner ? "Mi fermo qui." : "PASS"), steps);
           if (!next) return done(result.text, steps);
           if (next.kind !== "goal") nudges += 1;
           if (next.kind === "goal") {
@@ -1361,7 +1420,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
         }
       }
       // Stopped on request: what it has is the answer, and no further call is made for it.
-      if (halted) return done(stoppedByOwner ? "Mi fermo qui." : "PASS", steps);
+      if (halted) return done(progressPauseText || (stoppedByOwner ? "Mi fermo qui." : "PASS"), steps);
       if (lastAnswer) return done(lastAnswer, steps);
       trace.add({ type: "note", text: "Lavora da troppo: chiedo il messaggio finale." });
       messages.push({ role: "user", content: "[Cora] Ci stai lavorando da molto: fermati qui e scrivi cosa hai fatto, cosa manca e cosa ti blocca." });
@@ -1371,7 +1430,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       return done(final.text, steps);
     } catch (error) {
       await settleNews();
-      if (halted) return done(stoppedByOwner ? "Mi fermo qui." : "PASS", 0);
+      if (halted) return done(progressPauseText || (stoppedByOwner ? "Mi fermo qui." : "PASS"), 0);
       trace.finish({ status: "error", error: error.message });
       error.traceId = trace.id;
       throw error;

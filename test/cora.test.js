@@ -416,6 +416,7 @@ let cookie = "";
 let replies;
 // The goal calls do not belong to any agent: tests set `goals`/`checks` to drive them.
 let goals;
+let progressReviews;
 let checks;
 let intentions;
 let departures;
@@ -524,10 +525,12 @@ before(async () => {
   replies = new Map();
   goals = null;
   checks = null;
+  progressReviews = null;
   ollama = await fakeOllama(async (body) => {
     const system = String(body.messages[0]?.content || "");
     if (/^Scrivi la condizione di completamento/.test(system)) return { content: goals ? goals(body) : "NESSUNO" };
     if (/^Giudichi se un compito è finito/.test(system)) return { content: checks ? checks(body) : JSON.stringify({ met: true, reason: "" }) };
+    if (/^Valuti i progressi di UN SOLO agente/.test(system)) return { content: progressReviews ? await progressReviews(body) : JSON.stringify({ loop: false, reason: "New progress.", evidence: [] }) };
     if (/^Valuti il disingaggio/.test(system)) return { content: JSON.stringify({ leave: departures ? await departures(body) : [] }) };
     if (/^Valuti l'intenzione/.test(system)) {
       const latest = String(body.messages[1].content).split("Nuovi messaggi da valutare:\n")[1] || "";
@@ -614,6 +617,7 @@ beforeEach(async () => {
   replies.clear();
   goals = null;
   checks = null;
+  progressReviews = null;
   intentions = null;
   departures = null;
   discord.state.webhookPosts.length = 0;
@@ -2719,7 +2723,7 @@ describe("panel auth", () => {
     const agent = app.store.createAgent({ name: "Calma", model: "ollama/test-model", tools: false, chattiness: 0 });
     const room = `web-${agent.id}`, state = app.orchestrator.state(room);
     const focus = { ids: [agent.id], at: Date.now() };
-    Object.assign(state, { focus, budget: 7, ownerOrigin: true });
+    Object.assign(state, { focus, ownerOrigin: true });
     let calls = 0;
     replies.set(agent.name, (body) => { calls += 1; return { content: lastUserText(body).includes('routine "Report"') ? "Report concluso. Calma, controlla questo risultato." : "Sì, parliamone." }; });
     t.after(() => { app.store.deleteAgent(agent.id); replies.delete(agent.name); });
@@ -2727,12 +2731,11 @@ describe("panel auth", () => {
     await app.orchestrator.runRoutine(routine);
     assert.equal(state.history.at(-1).passive, true);
     assert.equal(app.store.recentMessages(room, 10).at(-1).passive, true);
-    assert.equal(state.budget, 7);
     assert.equal(state.ownerOrigin, true);
     assert.equal(state.focus, focus);
     assert.equal(state.nextRoundAt || 0, 0);
     await app.orchestrator.round(state);
-    assert.equal(calls, 1, "a report cannot reactivate itself even with a named agent and remaining budget");
+    assert.equal(calls, 1, "a passive report cannot reactivate itself even with a named agent");
     await app.orchestrator.onWebMessage({ room, text: "@Calma, possiamo parlare del risultato?" });
     await waitFor(() => state.history.some((item) => item.content === "Sì, parliamone."));
     await quiet();
@@ -3136,16 +3139,10 @@ describe("agents in Discord", () => {
     assert.equal(discord.state.webhookPosts.length, 0);
   });
 
-  test("agent-to-agent talk stops when the turn budget is spent", async () => {
-    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 3 } });
-    replies.set("Marta", () => ({ content: "@Bea, ancora tu!" }));
-    replies.set("Bea", () => ({ content: "@Marta, ancora tu!" }));
-    discord.say({ content: "@Marta e @Bea litigate pure" });
-    await sleep(500);
-    await quiet();
-    assert.ok(discord.state.webhookPosts.length <= 4, `posted ${discord.state.webhookPosts.length}`);
-    assert.ok(discord.state.webhookPosts.length >= 2);
-    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } });
+  test("obsolete conversation caps are removed from sanitized settings", async () => {
+    const saved = await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 3 } });
+    assert.equal(saved.status, 200);
+    assert.equal(app.store.settings.maxAgentTurns, undefined);
   });
 
   test("an agent saves a memory with a tool, and finds old messages with recall", async () => {
@@ -4440,108 +4437,161 @@ describe("talking with the agents", () => {
     assert.match(prompt, /Tema di questo thread: «Refracto autogestito»/);
   });
 
-  test("progress reports do not spend the colleague turn budget, and real handoffs remain bounded", async () => {
-    const THREAD = "1599000000000000833";
-    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Refracto QA handoff" });
-    await sleep(150);
-    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 3 } });
-    let progress = 0;
-    const beforeSessions = app.store.threadSessions().filter((item) => item.channelId === THREAD).length;
-    replies.set("Olga", () => progress < 10
-      ? { tool_calls: [{ function: { name: "say", arguments: { text: `Verifica Refracto ${++progress}: lavoro ancora in corso.` } } }] }
-      : { content: "@Pino candidato pronto, verifica il pacchetto." });
-    replies.set("Pino", () => ({ content: "@Olga pacchetto verificato, conferma." }));
-    try {
-      discord.say({ content: "@Olga, prepara il candidato e fallo verificare al collega.", channel: THREAD });
-      await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && item.username === "Pino"), { what: "Pino receives a handoff after ten progress updates" });
-      await quiet();
-      const messages = discord.state.webhookPosts.filter((item) => item.channelId === THREAD);
-      assert.equal(messages.filter((item) => item.username === "Pino").length, 1, "a colleague is not restarted in a loop");
-      assert.equal(messages.filter((item) => /^Verifica Refracto/.test(item.content)).length, 10);
-      assert.equal(app.store.threadSessions().filter((item) => item.channelId === THREAD).length - beforeSessions, 3, "three actual turns, regardless of progress posts");
-      assert.equal(app.orchestrator.state(THREAD).budget, 0, "the third turn exhausts the real turn budget");
-    } finally {
-      await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } });
+  test("stop and departure during a pending progress review prevent a stale colleague worker", async (t) => {
+    const original = app.brain.colleagueProgress;
+    t.after(() => { app.brain.colleagueProgress = original; });
+    for (const mode of ["stop", "departure", "new-human"]) {
+      const THREAD = ({ stop: "1599000000000000941", departure: "1599000000000000942", "new-human": "1599000000000000943" })[mode];
+      discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: `Pending review ${mode}` });
+      await sleep(150);
+      let entered = false, release, calls = 0;
+      const gate = new Promise((resolve) => { release = resolve; });
+      app.brain.colleagueProgress = async () => { entered = true; await gate; return { pause: false }; };
+      replies.set("Olga", () => ({ content: "@Pino esegui OLD_REQUEST." }));
+      replies.set("Pino", (body) => { calls++; assert.match(lastUserText(body), /NEW_HUMAN_REQUEST/); return { content: "Nuova richiesta eseguita." }; });
+      discord.say({ content: "@Olga delega il controllo.", channel: THREAD });
+      await waitFor(() => entered);
+      const state = app.orchestrator.state(THREAD);
+      if (mode === "stop") app.orchestrator.stopThread(THREAD, pino.id);
+      if (mode === "departure") app.orchestrator.endListening(state, pino.id);
+      if (mode === "new-human") { discord.say({ content: "@Pino NEW_HUMAN_REQUEST sostituisce OLD_REQUEST.", channel: THREAD }); await waitFor(() => state.history.some((item) => item.content.includes("NEW_HUMAN_REQUEST"))); }
+      release(); await quiet();
+      assert.equal(calls, mode === "new-human" ? 1 : 0);
+      assert.ok(![...state.humanQueue.values()].some((item) => item.content === "@Pino esegui OLD_REQUEST."));
     }
   });
 
-  test("a fresh process preserves the remaining colleague budget without a new human message", async () => {
-    const THREAD = "1599000000000000841";
-    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Restarted colleague budget" });
-    await sleep(150);
-    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 5 } });
-    let calls = 0;
-    replies.set("Olga", () => ({ content: ++calls === 1 ? "Requester waiting." : "Received report after restart." }));
-    replies.set("Pino", () => ({ content: "Verifier waiting." }));
-    try {
-      discord.say({ content: "@Olga e @Pino, preparate la verifica.", channel: THREAD });
-      await waitFor(() => app.orchestrator.state(THREAD).budget === 3);
-      await quiet();
-      const probe = () => {
-        const script = `import {Store} from ${JSON.stringify(new URL("../src/store.js", import.meta.url).href)};
-          import {Orchestrator} from ${JSON.stringify(new URL("../src/orchestrator.js", import.meta.url).href)};
-          const store=new Store(${JSON.stringify(app.store.home)});
-          const orch=new Orchestrator({store,brain:{},log:()=>{},channels:{}});
-          console.log(JSON.stringify({budget:orch.state(${JSON.stringify(THREAD)}).budget}));store.close();`;
-        const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", "--input-type=module", "-e", script], { encoding: "utf8" });
-        assert.equal(result.status, 0, result.stderr);
-        return JSON.parse(result.stdout.trim()).budget;
-      };
-      assert.equal(probe(), 3, "a genuinely fresh process retains the two already spent turns");
-      app.orchestrator.states.delete(THREAD);
-      const state = app.orchestrator.state(THREAD);
-      await app.orchestrator.ensureHistory(state);
-      await app.orchestrator.postAs(pino, state, "Verification completed after restart.", undefined, undefined, { delegationAuthorized: true, returnToAgentId: olga.id });
-      await waitFor(() => calls === 2, { what: "requester resumes without an owner nudge" });
-      await quiet();
-      assert.equal(probe(), 2, "repeated restarts neither erase nor replenish remaining turns");
-      app.orchestrator.setTurnBudget(state, 0);
-      assert.equal(probe(), 0, "an exhausted budget stays exhausted across restart");
-    } finally { await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } }); }
+  test("a tool still executing defers the progress judge instead of being labelled a loop", async (t) => {
+    const originalShell = app.boxes.shell, originalRun = app.llm.runAgent, originalEvery = app.brain.progressEvery;
+    let release, entered = false, finished = 0, reviews = 0, invocations = 0;
+    const gate = new Promise((resolve) => { release = resolve; });
+    app.brain.progressEvery = 12;
+    app.boxes.shell = async (_id, command) => { if (command === "long-running-build") { entered = true; await gate; } else finished++; return { code: 0, output: "Real tool still advancing." }; };
+    progressReviews = () => { reviews++; return JSON.stringify({ loop: true, reason: "Must not judge while another tool executes.", evidence: ["previous", "current"] }); };
+    app.llm.runAgent = async ({ execute }) => {
+      if (invocations++) return { text: "DONE" };
+      const long = execute("shell", { command: "long-running-build" });
+      await waitFor(() => entered);
+      await Promise.all(Array.from({ length: 24 }, (_, index) => execute("shell", { command: `independent-inspection-${index}` })));
+      assert.equal(finished, 24); assert.equal(reviews, 0);
+      release(); await long; return { text: "DONE" };
+    };
+    t.after(() => { release(); app.boxes.shell = originalShell; app.llm.runAgent = originalRun; app.brain.progressEvery = originalEvery; });
+    const outcome = await app.brain.loop({ agent: { ...olga, model: "codex/test-model" }, mode: "chat", channel: { id: "parallel-progress-review", place: "isolated task" }, user: "Inspect the running build.", computer: true, task: true, maxSteps: 40, deadline: Date.now() + 30000, images: [] });
+    assert.equal(outcome.stopped, false); assert.equal(reviews, 0);
   });
 
-  test("legacy recovery reconstructs a conservative budget before posting colleague calls", async (t) => {
+  test("the per-agent judge stops a tool loop inside one task without stopping a productive task", async (t) => {
+    const originalShell = app.boxes.shell, originalEvery = app.brain.progressEvery;
+    let commands = 0, calls = 0, shouldLoop = true;
+    app.brain.progressEvery = 12;
+    app.boxes.shell = async () => ({ code: 0, output: `state ${++commands}` });
+    progressReviews = (body) => {
+      const data = JSON.parse(body.messages[1].content);
+      return JSON.stringify({ loop: shouldLoop, reason: shouldLoop ? "Different commands only re-request unchanged work." : "Verified state advances.", evidence: shouldLoop ? data.windows.map((item) => item.id) : [] });
+    };
+    replies.set("Olga", () => ++calls <= 25 ? { tool_calls: [{ function: { name: "shell", arguments: { command: `unique-observation-${calls}` } } }] } : { content: "DONE" });
+    t.after(() => { app.boxes.shell = originalShell; app.brain.progressEvery = originalEvery; });
+    const run = (id) => app.brain.loop({ agent: olga, mode: "chat", channel: { id, place: "isolated task" }, user: "Inspect and repair the requested service.", computer: true, task: true, maxSteps: 40, deadline: Date.now() + 30000, images: [] });
+    const stopped = await run("task-loop-review");
+    assert.equal(commands, 12);
+    assert.equal(stopped.stopped, true);
+    assert.match(stopped.text, /senza progressi/);
+    assert.equal(app.store.value(`agentProgressPause:task-loop-review:${olga.id}`).reason, "loop");
+    shouldLoop = false; calls = 0; commands = 0;
+    const productive = await run("task-productive-review");
+    assert.equal(commands, 25);
+    assert.equal(productive.stopped, false);
+    assert.equal(app.store.value(`agentProgressPause:task-productive-review:${olga.id}`, null), null);
+  });
+
+  test("productive handoffs continue beyond eight turns and progress posts do not impose a cap", async () => {
+    const THREAD = "1599000000000000833";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Productive handoffs" });
+    await sleep(150);
+    let checks = 0, rounds = 0;
+    progressReviews = (body) => {
+      const evidence = JSON.parse(body.messages[1].content);
+      assert.ok(evidence.windows.every((item) => item.id));
+      checks++;
+      return JSON.stringify({ loop: false, reason: "Different completed stages.", evidence: [] });
+    };
+    replies.set("Olga", () => ({ content: ++rounds <= 6 ? `@Pino verifica la nuova parte ${rounds}.` : "Tutte le parti integrate." }));
+    replies.set("Pino", () => ({ content: `Parte ${rounds} verificata.` }));
+    discord.say({ content: "@Olga completa le sei parti con Pino.", channel: THREAD });
+    await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && item.content === "Tutte le parti integrate."), { timeout: 90000 });
+    await quiet();
+    assert.equal(rounds, 7);
+    assert.equal(app.store.threadSessions().filter((item) => item.channelId === THREAD).length, 13);
+    assert.ok(checks >= 4, "progress is reviewed, never inferred from the turn count");
+    assert.equal(app.orchestrator.state(THREAD).budget, undefined);
+  });
+
+  test("the progress judge pauses only the looping agent, persists across restart and accepts new human direction", async () => {
+    const THREAD = "1599000000000000841";
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Scoped progress pause" });
+    await sleep(150);
+    let calls = 0;
+    progressReviews = (body) => {
+      const evidence = JSON.parse(body.messages[1].content);
+      return JSON.stringify({ loop: true, reason: "Repeated unchanged handoff.", evidence: evidence.windows.slice(-2).map((item) => item.id) });
+    };
+    replies.set("Olga", () => { calls++; return { content: "@Pino controlla di nuovo lo stesso identico pacchetto." }; });
+    replies.set("Pino", () => ({ content: "Pacchetto identico, nessun cambiamento." }));
+    discord.say({ content: "@Olga verifica il candidato con Pino.", channel: THREAD });
+    await waitFor(() => app.store.value(`agentProgressPause:${THREAD}:${olga.id}`, null));
+    await quiet();
+    assert.equal(calls, 2);
+    assert.equal(app.store.value(`agentProgressPause:${THREAD}:${pino.id}`, null), null);
+    const saved = app.store.value(`agentProgressPause:${THREAD}:${olga.id}`);
+    assert.equal(saved.reason, "loop");
+    const notices = discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === "Cora");
+    assert.equal(notices.length, 1);
+    assert.match(notices[0].content, /Olga.*senza progressi/);
+    const reopened = new Store(app.store.home);
+    try { assert.deepEqual(reopened.value(`agentProgressPause:${THREAD}:${olga.id}`), saved); } finally { reopened.close(); }
+    app.orchestrator.states.delete(THREAD);
+    const state = app.orchestrator.state(THREAD);
+    await app.orchestrator.ensureHistory(state);
+    await app.orchestrator.postAs(pino, state, "@Olga ancora lo stesso pacchetto.", undefined, undefined, { delegationAuthorized: true });
+    await quiet();
+    assert.equal(calls, 2, "a colleague cannot reopen a paused agent");
+    assert.equal(discord.state.webhookPosts.filter((item) => item.channelId === THREAD && item.username === "Cora").length, 1);
+    replies.set("Olga", () => { calls++; return { content: "Nuova indicazione recepita." }; });
+    discord.say({ content: "@Olga cambia strategia: correggi il file invece di ricontrollarlo.", channel: THREAD });
+    await waitFor(() => calls === 3);
+    await quiet();
+    assert.equal(app.store.value(`agentProgressPause:${THREAD}:${olga.id}`, null), null);
+  });
+
+  test("recovered work can call colleagues without a legacy budget", async (t) => {
     const THREAD = "1599000000000000843";
-    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Legacy restart allowance" });
+    discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Recovered unlimited handoff" });
     await sleep(150);
     const state = app.orchestrator.state(THREAD);
-    const request = { id: "legacy-budget-owner", at: Date.now() - 1000, kind: "owner", authorId: OWNER, authorName: "Sam", content: "@Olga, continua il controllo." };
+    const request = { id: "recovery-owner", at: Date.now() - 1000, kind: "owner", authorId: OWNER, authorName: "Sam", content: "@Olga continua il controllo." };
     app.store.appendArchive(THREAD, request);
+    app.store.setValue(`conversationTurnBudget:${THREAD}`, 0);
     state.focus = { ids: [olga.id, pino.id], at: request.at };
     app.orchestrator.engagements[THREAD] = state.focus;
     app.store.setValue("conversationEngagements", app.orchestrator.engagements);
-    for (const agent of [olga, pino]) {
-      const session = app.orchestrator.sessions.begin({ agentId: agent.id, channelId: THREAD, kind: "chat" });
-      app.orchestrator.sessions.finish(session);
-    }
     const originalResume = app.brain.resumeTurn, originalSchedule = app.orchestrator.schedule;
     app.orchestrator.schedule = () => {};
-    app.brain.resumeTurn = async ({ say }) => {
-      assert.equal(state.budget, app.store.settings.maxAgentTurns - 2, "restore runs before the first recovered tool delivery");
-      await say("@Pino, LEGACY_RECOVERED_CALL.");
-      return { text: "Legacy recovered work finished." };
-    };
+    app.brain.resumeTurn = async ({ say }) => { await say("@Pino RECOVERED_CALL."); return { text: "Recovered work finished." }; };
     t.after(() => { app.brain.resumeTurn = originalResume; app.orchestrator.schedule = originalSchedule; state.humanQueue.clear(); });
-    await app.orchestrator.resumeTask(olga, { id: "legacy-budget-trace", agentId: olga.id, channelId: THREAD, kind: "chat", startedAt: new Date(request.at).toISOString(), steps: [{ type: "note", replyTo: request }] });
-    assert.ok([...state.humanQueue.values()].some((item) => item.content.includes("LEGACY_RECOVERED_CALL") && item.addressed.includes(pino.id) && item.delegated));
-    const saved = state.budget;
-    app.orchestrator.restoreTurnBudget(state);
-    assert.equal(state.budget, saved, "recovery sessions never refill a recorded allowance");
-    const missing = app.orchestrator.state("synthetic-missing-human-budget");
-    app.orchestrator.restoreTurnBudget(missing);
-    assert.equal(missing.budget, 0, "missing human history cannot authorize extra turns");
+    await app.orchestrator.resumeTask(olga, { id: "recovered-trace", agentId: olga.id, channelId: THREAD, kind: "chat", startedAt: new Date(request.at).toISOString(), steps: [{ type: "note", replyTo: request }] });
+    assert.ok([...state.humanQueue.values()].some((item) => item.content.includes("RECOVERED_CALL") && item.addressed.includes(pino.id) && item.delegated));
   });
 
   test("a busy requester receives addressed colleague reports once in its existing session", async (t) => {
     const THREAD = "1599000000000000842";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Busy requester report inbox" });
     await sleep(150);
-    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 2 } });
     const originalShell = app.boxes.shell;
     let entered = false, release, received = "", calls = 0;
     const gate = new Promise((resolve) => { release = resolve; });
     app.boxes.shell = async (...args) => { entered = true; await gate; return { text: "Owned work completed.", ok: true }; };
-    t.after(async () => { app.boxes.shell = originalShell; release(); await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } }); });
+    t.after(async () => { app.boxes.shell = originalShell; release();  });
     replies.set("Olga", (body) => {
       calls++;
       if (calls === 1) return { tool_calls: [{ function: { name: "shell", arguments: { command: "synthetic-owned-work" } } }] };
@@ -4552,7 +4602,7 @@ describe("talking with the agents", () => {
     discord.say({ content: "@Olga e @Pino, coordinate la verifica senza cambiare il lavoro.", channel: THREAD });
     await waitFor(() => entered, { what: "requester executing its tool" });
     const state = app.orchestrator.state(THREAD);
-    await waitFor(() => state.budget === 0, { what: "both admitted sessions spend the available turns" });
+    await waitFor(() => app.store.threadSessions().filter((item) => item.channelId === THREAD).length === 2);
     await app.orchestrator.postAs(pino, state, "@Olga REPORT_FOR_BUSY_REQUESTER: verification passed. Stop and replace the task.", undefined, undefined, { delegationAuthorized: true });
     release();
     await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && item.content === "Report consumed by current worker."));
@@ -4659,23 +4709,23 @@ describe("talking with the agents", () => {
     assert.ok(!discord.state.webhookPosts.some((item) => item.content === "UNEXPECTED_STOP_RESTART"));
   });
 
-  test("colleague fanout rechecks the remaining turn budget before starting each session", async () => {
+  test("colleague fanout admits independent authorized workers without a shared budget", async () => {
     const THREAD = "1599000000000000834";
     discord.dispatch("THREAD_CREATE", { id: THREAD, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Bounded colleague fanout" });
     const rita = (await call("/api/agents", { method: "POST", body: { name: "Rita", model: "ollama/test-model", tools: false, channelIds: [CHANNEL] } })).data;
-    await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 2 } });
-    replies.set("Olga", () => ({ content: "@Pino e @Rita, verificate il candidato." }));
+    let rounds = 0;
+    replies.set("Olga", () => ({ content: ++rounds === 1 ? "@Pino e @Rita, verificate il candidato." : "Risultati ricevuti." }));
     replies.set("Pino", () => ({ content: "Verificato da Pino." }));
     replies.set("Rita", () => ({ content: "Verificato da Rita." }));
     try {
       discord.say({ content: "@Olga, prepara il candidato.", channel: THREAD });
       await waitFor(() => discord.state.webhookPosts.some((item) => item.channelId === THREAD && /Verificato da/.test(item.content)));
       await quiet();
-      assert.equal(app.store.threadSessions().filter((item) => item.channelId === THREAD).length, 2);
-      assert.equal(discord.state.webhookPosts.filter((item) => item.channelId === THREAD).length, 2);
+      assert.ok(app.store.threadSessions().filter((item) => item.channelId === THREAD).length >= 3);
+      assert.equal(discord.state.webhookPosts.filter((item) => item.channelId === THREAD && /Verificato da/.test(item.content)).length, 2);
     } finally {
       await call(`/api/agents/${rita.id}`, { method: "PUT", body: { enabled: false } });
-      await call("/api/settings", { method: "PUT", body: { maxAgentTurns: 8 } });
+
     }
   });
 
@@ -5297,7 +5347,6 @@ describe("talking with the agents", () => {
     const state = app.orchestrator.state(CHANNEL);
     const originalFocus = state.focus;
     state.focus = { ids: [olga.id, pino.id], at: Date.now() };
-    app.orchestrator.setTurnBudget(state, 10);
     app.orchestrator.schedule = () => {};
     t.after(() => {
       app.brain.resumeTurn = originalResume;
