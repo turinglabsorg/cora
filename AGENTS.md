@@ -346,3 +346,8 @@ Coverage: `test/encrypted-methods.test.js`, the personal-passkey/confirmation sc
 ## Retired manual encrypted conversations
 
 Encrypted folders expose no Conversations tab or manual chat composer. `web/encrypted-chat.js` and its static route are retired. Legacy `#/artefatti/:folder/conversazioni` links canonicalize to Files while preserving a mounted unlocked view; `#/agent/:agent/chat/cifrata` canonicalizes to ordinary Agent Chat. No model restriction or folder picker is added to ordinary Chat. Existing encrypted documents/versions and private results remain unchanged; backend retention and conversion exports still handle legacy records. This removal does not design or implement encryption of real agent threads. Verify file/credential/lock/conversion journeys and unchanged legacy ciphertext, not new manual conversations.
+
+
+## Duplicate-call recovery and completion
+
+A local duplicate-call refusal must not suppress completion checks for the rest of a productive task. A successful, allowed, different non-talk/non-memory tool restores the normal and goal checks. Relevant admitted colleague messages and updated/continued human instructions refresh only lookup signatures in the duplicate window; shell commands and other side-effect signatures stay protected. This does not reset an independent progress pause, stop, departure, authorization or real dependency. Scoped integration cases cover goal/plain completion, fresh colleague reads, foreign reports, duplicate side effects and departure.

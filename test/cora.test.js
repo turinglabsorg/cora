@@ -5902,6 +5902,117 @@ describe("talking with the agents", () => {
     await quiet();
   });
 
+  test("completion checks recover after a refused duplicate and a successful different action", async (t) => {
+    const originalRun = app.llm.runAgent, originalShell = app.boxes.shell;
+    const originalGoalMode = app.store.settings.goalMode;
+    t.after(() => { app.llm.runAgent = originalRun; app.boxes.shell = originalShell; app.store.settings.goalMode = originalGoalMode; });
+    app.boxes.shell = async () => ({ code: 0, output: "Candidate stage completed." });
+    for (const goalMode of [false, true]) {
+      app.store.settings.goalMode = goalMode;
+      let calls = 0, completed = false, checked = 0;
+      goals = () => "The candidate is integrated and verified.";
+      checks = () => { checked++; return JSON.stringify({ met: completed, blocked: false, reason: completed ? "Verified." : "Integration is still missing." }); };
+      app.llm.runAgent = async ({ execute, prompt }) => {
+        calls++;
+        if (calls === 1) {
+          for (let index = 0; index < 4; index++) {
+            const result = await execute("list_routines", {});
+            if (index === 3) assert.match(result.text, /already done exactly this/);
+          }
+          const action = await execute("shell", { command: "prepare-candidate" });
+          assert.doesNotMatch(action.text, /^error:/);
+          return { text: "Sto preparando la prossima integrazione." };
+        }
+        if (!completed) {
+          assert.match(prompt, /Non hai finito|obiettivo non è ancora raggiunto/);
+          await execute("shell", { command: "integrate-and-verify-candidate" });
+          completed = true;
+          return { text: "Candidate integrated and verified." };
+        }
+        return { text: "DONE" };
+      };
+      const result = await app.brain.loop({ agent: { ...olga, model: "codex/test-model" }, mode: "chat",
+        channel: { id: `duplicate-recovery-${goalMode}`, place: "isolated task" }, user: "Integrate the candidate after the review.",
+        goalRequest: goalMode ? "Integrate the candidate after the review." : "", computer: true, task: true,
+        maxSteps: 30, deadline: Date.now() + 30000, images: [] });
+      assert.equal(completed, true, "a refused duplicate must not disable completion checks after work resumes");
+      assert.equal(result.text, "Candidate integrated and verified.");
+      assert.equal(result.stopped, false);
+      if (goalMode) assert.ok(checked >= 2);
+    }
+  });
+
+  test("an admitted colleague update refreshes duplicate reads without lifting a stop", async (t) => {
+    const originalRun = app.llm.runAgent;
+    t.after(() => { app.llm.runAgent = originalRun; });
+    let incoming = [], calls = 0;
+    app.llm.runAgent = async ({ execute }) => {
+      if (calls++) return { text: "DONE" };
+      for (let index = 0; index < 4; index++) await execute("list_routines", {});
+      incoming.push({ id: "fresh-review", kind: "agent", authorName: "Pino", agentId: pino.id,
+        addressed: [olga.id], handoffResult: true, content: "Review passed; use the new state.", at: Date.now() });
+      const fresh = await execute("list_routines", {});
+      assert.doesNotMatch(fresh.text, /already done exactly this/);
+      assert.match(fresh.text, /Review passed/);
+      incoming.push({ id: "departure", kind: "agent", authorName: "Pino", disengaged: [olga.id], content: "Late message", at: Date.now() });
+      const stopped = await execute("list_routines", {});
+      assert.match(stopped.text, /owner asked you to stop/);
+      return { text: "DONE" };
+    };
+    const result = await app.brain.loop({ agent: { ...olga, model: "codex/test-model" }, mode: "chat",
+      channel: { id: "duplicate-colleague-update", place: "isolated task" }, user: "Continue after review.",
+      inbox: () => incoming.splice(0), computer: true, task: true, maxSteps: 30, deadline: Date.now() + 30000, images: [] });
+    assert.equal(result.stopped, true);
+  });
+
+  test("colleague updates preserve duplicate protection for actions and ignore foreign reports", async (t) => {
+    const originalRun = app.llm.runAgent, originalShell = app.boxes.shell;
+    let incoming = [], actions = 0;
+    app.boxes.shell = async () => ({ code: 0, output: `Applied ${++actions}.` });
+    t.after(() => { app.llm.runAgent = originalRun; app.boxes.shell = originalShell; });
+    app.llm.runAgent = async ({ execute }) => {
+      for (let index = 0; index < 4; index++) await execute("shell", { command: "same-side-effect" });
+      for (let index = 0; index < 4; index++) await execute("list_routines", {});
+      incoming.push({ id: "foreign-review", kind: "agent", authorName: "Pino", addressed: [pino.id], content: "Not for this worker.", at: Date.now() });
+      const foreign = await execute("list_routines", {});
+      assert.match(foreign.text, /already done exactly this/);
+      assert.doesNotMatch(foreign.text, /Not for this worker/);
+      incoming.push({ id: "own-review", kind: "agent", authorName: "Pino", addressed: [olga.id], content: "New result for this worker.", at: Date.now() });
+      const action = await execute("shell", { command: "same-side-effect" });
+      assert.match(action.text, /already done exactly this/);
+      return { text: "Duplicate side effect refused." };
+    };
+    const result = await app.brain.loop({ agent: { ...olga, model: "codex/test-model" }, mode: "chat",
+      channel: { id: "duplicate-action-preserved", place: "isolated task" }, user: "Check the existing work.",
+      inbox: () => incoming.splice(0), computer: true, task: true, maxSteps: 30, deadline: Date.now() + 30000, images: [] });
+    assert.equal(actions, 3);
+    assert.equal(result.text, "Duplicate side effect refused.");
+  });
+
+  test("a new owner instruction refreshes reads while status alone preserves the duplicate guard", async (t) => {
+    const originalRun = app.llm.runAgent;
+    t.after(() => { app.llm.runAgent = originalRun; });
+    let incoming = [], calls = 0;
+    intentions = (body) => JSON.stringify({ intent: lastUserText(body).includes("NEW_REQUIREMENT") ? "update" : "status", reply: "Still working." });
+    app.llm.runAgent = async ({ execute }) => {
+      if (calls++) return { text: "DONE" };
+      for (let index = 0; index < 4; index++) await execute("list_routines", {});
+      incoming.push({ id: "status-request", kind: "owner", authorName: "Sam", authorId: OWNER,
+        addressed: [olga.id], content: "A che punto sei?", at: Date.now() });
+      assert.match((await execute("list_routines", {})).text, /already done exactly this/);
+      incoming.push({ id: "owner-update", kind: "owner", authorName: "Sam", authorId: OWNER,
+        addressed: [olga.id], content: "NEW_REQUIREMENT: use the updated issue state.", at: Date.now() });
+      const fresh = await execute("list_routines", {});
+      assert.doesNotMatch(fresh.text, /already done exactly this/);
+      assert.match(fresh.text, /NEW_REQUIREMENT/);
+      return { text: "Updated state checked." };
+    };
+    const result = await app.brain.loop({ agent: { ...olga, model: "codex/test-model" }, mode: "chat",
+      channel: { id: "duplicate-owner-update", place: "isolated task" }, user: "Check the current state.",
+      inbox: () => incoming.splice(0), computer: true, task: true, maxSteps: 30, deadline: Date.now() + 30000, images: [] });
+    assert.equal(result.text, "Updated state checked.");
+  });
+
   test("Cora harness: a long task frees the channel for the others, still gets new messages, and picks up again after a restart", async () => {
     intentions = (body) => JSON.stringify({ intent: lastUserText(body).includes("Pino, ci sei?") ? "continue" : "update" });
     app.orchestrator.releaseAfterMs = 300;
