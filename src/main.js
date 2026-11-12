@@ -162,6 +162,7 @@ export function startCora(overrides = {}) {
   // Threads opened and written in through Cora, never through another bot.
   brain.openThread = (agent, currentId, options) => orchestrator.openThread(agent, currentId, options);
   brain.threadFor = (agent, threadId) => orchestrator.threadFor(agent, threadId);
+  brain.conversationAgents = (channelId) => orchestrator.conversationAgents(channelId);
   // A private word to the owner from Cora: where a secret's link goes when they ask an agent for it.
   brain.messageOwner = (text) => orchestrator.messageOwner(text);
   brain.messagePersonFor = (agent, text) => orchestrator.messagePerson(text, knowledge.contactFor(knowledge.ownerId(agent)));

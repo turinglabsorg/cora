@@ -337,6 +337,12 @@ An addressed colleague report reaches a busy agent through its existing inbox, o
 
 Coverage: `test/encrypted-methods.test.js`, the personal-passkey/confirmation scenario in `test/cora.test.js`, and the existing encrypted space/files tests. Browser verification uses synthetic data, native Chromium virtual PRF/non-PRF authenticators and real IndexedDB at 1440/390/360 px. The test selector registers the new modules. Panel, manifest and worker notification icons use the same content-derived build as the application.
 
+
+## Current-conversation colleague reachability
+
+`Orchestrator.conversationAgents()` uses current assignments, enabled state, private-channel observation and actual Discord/Slack bot access. `Brain.conversationDirectory()` intersects that result with the existing owner/sealed contact directory. Fresh and recovered model prompts show only reachable colleagues and distinguish engagement; `list_agents` refreshes `conversation.channelId/reachable/engaged` on every call. Contact metadata grants no operational authorization.
+
+`postDirect()` rejects ineffective colleague tags before any delivery or own departure; final text delivery removes the ineffective tag and archives the visible non-delivery notice. Literal code, email addresses and longer names remain unchanged. Reachable colleagues can still be summoned before engagement. Cross-channel reports remain passive. Coverage: the `conversation colleague reachability` integration group and existing directory/Discord-mention cases in `test/cora.test.js`.
 ## Retired manual encrypted conversations
 
 Encrypted folders expose no Conversations tab or manual chat composer. `web/encrypted-chat.js` and its static route are retired. Legacy `#/artefatti/:folder/conversazioni` links canonicalize to Files while preserving a mounted unlocked view; `#/agent/:agent/chat/cifrata` canonicalizes to ordinary Agent Chat. No model restriction or folder picker is added to ordinary Chat. Existing encrypted documents/versions and private results remain unchanged; backend retention and conversion exports still handle legacy records. This removal does not design or implement encryption of real agent threads. Verify file/credential/lock/conversion journeys and unchanged legacy ciphertext, not new manual conversations.
