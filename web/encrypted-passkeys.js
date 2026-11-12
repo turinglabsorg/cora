@@ -29,11 +29,23 @@ export function encryptedPasskeySettings(ui) {
     const list = h("div", { class: "rows" });
     for (const item of data.passkeys) {
       const available = data.folders.filter(folder => !item.folders.some(used => used.id === folder.id));
-      const target = h("select", { "aria-label": tr("Cartella da abbinare a {name}", { name: item.label }) }, available.map(folder => h("option", { value: folder.id }, raw(folder.title || folder.path))));
+      const chooseFolder = () => {
+        const target = h("select", { "aria-label": tr("Cartella da abbinare a {name}", { name: item.label }) }, available.map(folder => h("option", { value: folder.id }, raw(folder.title || folder.path))));
+        const description = h("p", { class: "encrypted-folder-destination" });
+        const describe = () => {
+          const folder = available.find(folder => folder.id === target.value);
+          description.replaceChildren(h("b", {}, raw(folder.title || folder.path)), h("span", {}, raw(folder.path)));
+        };
+        target.addEventListener("change", describe); describe();
+        const dialog = h("dialog", { class: "encrypted-confirm", "aria-label": tr("Abbina cartella") }, h("h2", {}, "Abbina cartella"), h("p", {}, raw(item.label)), target, description,
+          h("div", { class: "row" }, btn("Annulla", { cls: "ghost", onclick: () => dialog.close() }), btn("Apri cartella", { icon: "folder", onclick: () => { dialog.close(); location.hash = `#/artefatti/${target.value}/cifratura/passkeys?passkey=${encodeURIComponent(item.credentialId)}`; } })));
+        dialog.addEventListener("close", () => dialog.remove(), { once: true });
+        root.append(dialog); dialog.showModal();
+      };
       list.append(h("div", { class: "set-row encrypted-credential-row" }, h("div", { class: "set-text" }, h("b", {}, raw(item.label)),
         h("small", {}, tr(item.derivation === "handle-v1" ? "Protezione del gestore" : "Protezione avanzata"), raw(" · " + (item.createdAt ? new Date(item.createdAt).toLocaleDateString() : tr("Data di creazione non disponibile")))),
         h("div", { class: "encrypted-used-folders" }, item.folders.length ? item.folders.map(folder => h("a", { href: `#/artefatti/${folder.id}/cifratura/passkeys` }, raw(folder.title || folder.path))) : h("small", {}, "Nessuna cartella abbinata"))),
-        available.length ? h("div", { class: "set-control stack-sm" }, target, btn("Abbina cartella", { cls: "sm", icon: "key", onclick: () => { location.hash = `#/artefatti/${target.value}/cifratura/passkeys?passkey=${encodeURIComponent(item.credentialId)}`; } })) : null));
+        available.length ? h("div", { class: "set-control" }, btn("Abbina cartella", { cls: "sm", icon: "key", onclick: chooseFolder })) : null));
     }
     root.replaceChildren(panel({ icon: "key", title: "Passkeys", hint: "Le tue passkey possono proteggere più cartelle. Ogni cartella conserva chiavi distinte. Qui Cora salva soltanto nomi e associazioni." },
       data.passkeys.length ? list : h("p", { class: "muted" }, "Nessuna passkey salvata."),

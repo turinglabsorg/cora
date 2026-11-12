@@ -4162,7 +4162,7 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
-const encryptedUI = () => ({ h, btn, api, icon, currentUser: S.data?.currentUser, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
+const encryptedUI = () => ({ h, btn, api, icon, passwordSection: LANG === "en" ? "Passwords" : "Password", currentUser: S.data?.currentUser, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
 
 function agentSecurityPane(agent, data) {
   if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));

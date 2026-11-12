@@ -58,7 +58,7 @@ export function encryptedSetup(ui, folder, reload) {
   };
   const root = h("div", { class: "stack" }, h("p", { class: "muted" }, "Solo per cartelle vuote. Ogni cartella ha chiavi proprie; i file esistenti non vengono convertiti."), h("p", { class: "muted" }, "Se perdi tutti i metodi di sblocco, i documenti sono irrecuperabili."), sectionWorkspace({ title: "Cifratura", base: `#/artefatti/${folder.id}/cifratura`, current: location.hash.split("?")[0].split("/")[4] || "", entries: [
     ["passkeys", "Passkeys", "key", "Passkey nuove o già salvate", [panel({ icon: "key", title: "Passkeys" }, passkeys)]],
-    ["passwords", "Passwords", "lock", "Password di questa cartella", [panel({ icon: "lock", title: "Passwords" }, h("form", { class: "stack-sm encrypted-enrollment", onsubmit: event => { event.preventDefault(); create("password"); } }, credentialAccount(ui, folder), password, again, btn("Aggiungi password", { icon: "plus", type: "submit" })))]]
+    ["passwords", ui.passwordSection || "Password", "lock", "Password di questa cartella", [panel({ icon: "lock", title: ui.passwordSection || "Password" }, h("form", { class: "stack-sm encrypted-enrollment", onsubmit: event => { event.preventDefault(); create("password"); } }, credentialAccount(ui, folder), password, again, btn("Aggiungi password", { icon: "plus", type: "submit" })))]]
   ] }), cancel, status);
   drawPasskeys().catch(error => { status.textContent = tr(error.message); });
   return root;
@@ -89,9 +89,12 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const files = h("div", { class: "stack-sm" }), methods = h("div", { class: "stack-sm" }), requests = h("div", { class: "stack-sm" }), sharing = h("div", { class: "stack-sm" });
   const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); removal.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = !remember.checked; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
   const lockButton = btn("", { icon: "lock", cls: "sm art-lock", title: tr("Blocca e dimentica accesso"), onclick: () => run(async () => {
-    lock();
-    await forgetPassword(user, personal.id);
-    remember.checked = false; savedPasskey = null; password.value = ""; updatePasskeyLabels(); lockButton.hidden = true; ui.changed?.();
+    lockButton.disabled = true;
+    try { await forgetPassword(user, personal.id); }
+    finally {
+      remember.checked = false; savedPasskey = null;
+      lock(); updatePasskeyLabels(); lockButton.hidden = true; lockButton.disabled = false; ui.changed?.();
+    }
   }) }); lockButton.hidden = !remember.checked;
   const run = async (fn) => { status.textContent = ""; try { await fn(); } catch (error) { status.textContent = tr(error.message); } };
   const proof = (intent) => proveAccess(api, folder.id, bundle, chosenMethod, intent);
@@ -197,7 +200,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     const hint = "Aggiungi un metodo alternativo prima di rimuovere quello precedente.";
     const methodWorkspace = sectionWorkspace({ title: "Cifratura", base: `#/artefatti/${folder.id}/cifratura`, current: location.hash.split("?")[0].split("/")[4] || "", entries: [
       ["passkeys", "Passkeys", "key", "Passkey nuove o già salvate", [panel({ icon: "key", title: "Passkeys", hint }, rows("passkey"), passkeyChoice(ui, { existing: registry.passkeys.filter(item => !data.folder.methods.some(method => method.credentialId === item.credentialId)), initial: new URLSearchParams(location.hash.split("?")[1] || "").get("passkey") || "", onCreate: label => addMethod("passkey", label), onReuse: item => addMethod("passkey", item.label, item) }))]],
-      ["passwords", "Passwords", "lock", "Password di questa cartella", [panel({ icon: "lock", title: "Passwords", hint }, rows("password"), h("form", { class: "stack-sm", onsubmit: event => { event.preventDefault(); run(() => addMethod("password", passwordName.value.trim() || "Password")); } }, credentialAccount(ui, folder), passwordName, addPassword, btn("Aggiungi password", { icon: "plus", type: "submit" }))) ]],
+      ["passwords", ui.passwordSection || "Password", "lock", "Password di questa cartella", [panel({ icon: "lock", title: ui.passwordSection || "Password", hint }, rows("password"), h("form", { class: "stack-sm", onsubmit: event => { event.preventDefault(); run(() => addMethod("password", passwordName.value.trim() || "Password")); } }, credentialAccount(ui, folder), passwordName, addPassword, btn("Aggiungi password", { icon: "plus", type: "submit" }))) ]],
       ...(data.canManage ? [["rimuovi", "Rimuovi cifratura", "lock", "Conserva file e versioni in chiaro", [removal.element]]] : [])
     ] });
     methods.replaceChildren(methodWorkspace);

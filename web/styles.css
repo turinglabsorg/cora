@@ -2658,3 +2658,7 @@ input.thread-search { height: 38px; }
 .encrypted-credential-row .set-control { align-items: stretch; width: 100%; }
 .encrypted-credential-row .set-control > select { min-width: 0; width: 100%; max-width: 100%; }
 .encrypted-credential-row .set-control > .btn { width: 100%; min-height: 40px; white-space: normal; font-size: 10px; padding: 8px; }
+
+.encrypted-folder-destination { display: flex; flex-direction: column; gap: 8px; overflow-wrap: anywhere; }
+.encrypted-folder-destination b { color: var(--text); }
+.encrypted-confirm > select { width: 100%; min-width: 0; }

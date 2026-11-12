@@ -53,6 +53,7 @@ export async function convertEncryptedFolder({ api, folder, bundle, method, sign
         if (recovery.versions !== undefined) return recovery;
       } catch { if (sent) throw Error("Verifica lo stato della cartella: il salvataggio finale potrebbe essere già riuscito."); }
     }
+    if (error instanceof TypeError && /fetch|network|load/i.test(error.message)) throw Error("Connessione interrotta. La conversione non è stata completata e la cartella cifrata è intatta. Puoi riprovare.");
     throw error;
   }
 }

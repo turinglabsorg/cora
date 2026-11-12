@@ -3109,3 +3109,5 @@ Object.assign(EN, {
 });
 
 Object.assign(EN, { "Eventuali link di condivisione, anche dei livelli superiori, esporranno i file in chiaro. Con un link pubblico chiunque potrà leggerli.": "Any share links, including links on parent levels, will expose the plaintext files. With a public link, anyone can read them." });
+
+Object.assign(EN, { "Apri cartella": "Open folder", "Connessione interrotta. La conversione non è stata completata e la cartella cifrata è intatta. Puoi riprovare.": "Connection interrupted. Conversion was not completed and the encrypted folder is intact. You can retry." });

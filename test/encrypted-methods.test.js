@@ -154,3 +154,24 @@ test("plaintext confirmation covers inherited links and refuses permission or sh
   const tree = artifacts.groupTree(store.artifactShare(added.id)).tree, item = tree.get("method-conversion/proof.txt");
   assert.ok(item); assert.equal(artifacts.readObject(item.sha).toString(), "PREFIX LINK CONTENT");
 });
+
+test("network interruption distinguishes confirmed rollback from an unknown final result and supports retry", async t => {
+  const x = await setup(t);
+  await x.save({ title: "Network recovery", content: "EXACT NETWORK RECOVERY" });
+  const original = JSON.stringify((await x.api(`/api/encrypted/folders/${x.folder}`)).documents);
+  const offline = async (url, options) => {
+    if (url.endsWith("/decrypt-finish")) throw new TypeError("Failed to fetch");
+    return x.api(url, options);
+  };
+  await assert.rejects(convertEncryptedFolder({ ...x, api: offline }), /Connessione interrotta.*intatta/);
+  assert.equal(JSON.stringify((await x.api(`/api/encrypted/folders/${x.folder}`)).documents), original);
+  let ticket;
+  const uncertain = async (url, options) => {
+    if (url.endsWith("/decrypt-finish") || url.endsWith("/decrypt-cancel")) throw new TypeError("Failed to fetch");
+    const result = await x.api(url, options); if (url.endsWith("/decrypt-start")) ticket = result.id; return result;
+  };
+  await assert.rejects(convertEncryptedFolder({ ...x, api: uncertain }), /Verifica lo stato della cartella/);
+  assert.equal(JSON.stringify((await x.api(`/api/encrypted/folders/${x.folder}`)).documents), original);
+  await x.api(`/api/encrypted/folders/${x.folder}/decrypt-cancel`, { method: "POST", body: { conversion: ticket } });
+  assert.equal((await convertEncryptedFolder(x)).versions, 1);
+});
