@@ -648,7 +648,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
   clearTimers();
   const [section, current] = route();
   const nav = [
-    ["agenti", "Agenti", "users", ["agenti", "agent", "new"].includes(section)],
+    ["agenti", "Agenti", "users", ["agenti", "agent", "new", "importa"].includes(section)],
     // The salotto opens from the Banco: it is one of the desk's rooms, not a section of its own.
     ["banco", "Banco", "grid", section === "banco" || section === "salotto"],
     ["brain", "Brain", "bulb", section === "brain"],
@@ -1284,7 +1284,7 @@ function renderAgents() {
     heading,
     requestsStrip(),
     usageOverview(usage, subscriptions),
-    panel({ icon: "users", title: "Gli agenti", cls: "agent-roster", actions: btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary", title: "Nuovo agente" }) },
+    panel({ icon: "users", title: "Gli agenti", cls: "agent-roster", actions: [btn("Importa", { icon: "upload", href: "#/importa", title: "Importa agente" }), btn("Nuovo agente", { icon: "plus", href: "#/new", cls: "primary", title: "Nuovo agente" })] },
       agents.length ? h("div", { class: "rows" }, agents.map((agent) => {
         // One platform: how it writes there; several: where it is.
         const kinds = agentPlatforms(agent);
@@ -2749,6 +2749,7 @@ function agentForm(agent, { only = "", knowledge = null } = {}) {
   const savebar = form.lastElementChild;
   form.classList.add("agent-settings-save");
   form.replaceChildren(savebar);
+  const exportPane = agentExportPane(agent);
   const entries = [
     ["identita", "Identità", "user", "Nome, immagine e colore", [identity]],
     ["carattere", "Carattere", "spark", "Personalità e modo di parlare", [characterPane.node]],
@@ -2758,9 +2759,10 @@ function agentForm(agent, { only = "", knowledge = null } = {}) {
     ["autorizzazioni", "Autorizzazioni", "shield", "Chi può farlo lavorare", [agentPermissionsPane(agent), owner].filter(Boolean)],
     ...platformsOn().map((kind) => [kind, TRANSPORTS[kind].label, TRANSPORTS[kind].icon, "Account e collegamento", [kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)]]),
     ["github", "GitHub", "github", "App e repository", [githubAccount(agent)]],
+    ["esporta", "Esporta", "download", "File o link per un altro spazio", [exportPane]],
   ];
   controls = sectionWorkspace({ title: "Impostazioni", base: `#/agent/${agent.id}/impostazioni`, current: route()[3], entries,
-    onSelect: (id) => { form.hidden = !["identita", "carattere", "ascolto", "voce"].includes(id); } });
+    onSelect: (id) => { form.hidden = !["identita", "carattere", "ascolto", "voce"].includes(id); if (id === "esporta") void exportPane.load(); } });
   controls.querySelector(".email-workspace-detail").append(form);
   return controls;
 }
@@ -8090,6 +8092,184 @@ function agentPermissionsPane(agent) {
   return panel({ icon: "shield", title: "Autorizzazioni", hint: tr("Chi può parlare e affidare lavori a {name}.", { name: agent.name }) }, body);
 }
 
+const REMOVED_LABELS = { email: "email", phone: "telefoni", id: "id", ip: "IP", link: "link", secret: "segreti", person: "persone" };
+
+/** What the privacy filter took out of one item, as small mono tags. */
+function removedTags(removed = {}) {
+  const kinds = Object.entries(removed).filter(([, n]) => n > 0);
+  if (!kinds.length) return null;
+  return h("span", { class: "transfer-removed", title: tr("Oscurati dal filtro privacy") }, icon("eye"), kinds.map(([kind, n]) => tag(`${tr(REMOVED_LABELS[kind] || kind)} ${n}`)));
+}
+
+/** A group of items to take or leave, closed by default, with its count in the summary. */
+function transferGroup(title, hint, items, { label, detail, key = "id" }) {
+  const boxes = items.map((item) => h("input", { type: "checkbox", checked: item.include, "data-key": item[key], "aria-label": label(item) }));
+  const count = h("span", { class: "transfer-count" });
+  const sync = () => { count.textContent = tr("{n} di {total}", { n: boxes.filter((box) => box.checked).length, total: items.length }); };
+  boxes.forEach((box) => box.addEventListener("change", sync));
+  sync();
+  const all = (on) => () => { boxes.forEach((box) => { box.checked = on; }); sync(); };
+  const node = h("details", { class: "transfer-group" },
+    h("summary", {}, h("span", { class: "grow" }, h("b", {}, title), h("small", {}, hint)), count, icon("next", "transfer-chevron")),
+    items.length ? h("div", { class: "transfer-tools" }, btn("Tutte", { cls: "sm ghost", onclick: all(true) }), btn("Nessuna", { cls: "sm ghost", onclick: all(false) })) : null,
+    items.length ? h("div", { class: "transfer-items" }, items.map((item, index) => h("label", { class: "transfer-item" }, boxes[index],
+      h("span", { class: "grow" }, h("span", { class: "transfer-line" }, raw(label(item))), detail ? detail(item) : null, removedTags(item.removed))))) : h("p", { class: "muted transfer-none" }, "Nessuna."));
+  node.chosen = () => boxes.filter((box) => box.checked).map((box) => box.dataset.key);
+  return node;
+}
+
+/** Agent → Settings → Export: what the package carries, what never leaves, a file or a link. */
+function agentExportPane(agent) {
+  const body = h("div", { class: "stack" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
+  let loaded = false;
+  const node = panel({ icon: "download", title: "Esporta agente", hint: tr("{name} in un file o in un link, senza dati personali.", { name: agent.name }) }, body);
+  node.load = async () => {
+    if (loaded) return;
+    loaded = true;
+    let data;
+    try { data = await api(`/api/agents/${agent.id}/export`); }
+    catch (error) { loaded = false; body.replaceChildren(h("p", { class: "notice warn" }, icon("alert"), raw(error.message))); return; }
+    const flag = (name, label, hint, on, extra) => {
+      const input = h("input", { type: "checkbox", name, checked: on });
+      return { input, row: setRow(label, [hint, extra || null], h("label", { class: "switch" }, input, h("span", { class: "rocker" }))) };
+    };
+    const personality = flag("personality", "Personalità", "Il testo libero del carattere.", data.personality.include, removedTags(data.personality.removed));
+    const core = flag("core", "Scheda", "Le note che ha sempre in testa.", data.core.include, removedTags(data.core.removed));
+    const picture = data.avatar.uploaded ? flag("avatar", "Immagine", "La foto caricata. Senza, Cora la ridisegna.", data.avatar.include) : null;
+    const schedule = (item) => h("small", { class: "transfer-meta" }, raw(item.kind === "reminder" ? new Date(item.runAt).toLocaleString(LOCALE) : item.schedule), item.enabled ? null : tr(" · spenta"));
+    const routines = transferGroup("Routine e reminder", "Nome, orario e istruzioni; il canale si sceglie all'arrivo.", data.routines, { label: (item) => item.name, detail: schedule });
+    const memories = transferGroup("Memoria operativa", "Le voci che parlano di persone partono escluse.", data.memories, { label: (item) => item.text });
+    const procedures = data.procedures.length ? transferGroup("Procedure", "Le pagine procedura del brain.", data.procedures, { key: "slug", label: (item) => item.title, detail: (item) => item.summary ? h("small", { class: "transfer-meta" }, raw(item.summary)) : null }) : null;
+    const needs = [...data.requirements.secrets.map((name) => tag(name)), ...data.requirements.connectors.map((service) => tag(service, "on"))];
+    const choice = () => ({
+      personality: personality.input.checked, core: core.input.checked, avatar: picture ? picture.input.checked : false,
+      routines: routines.chosen(), memories: memories.chosen(), procedures: procedures ? procedures.chosen() : [],
+    });
+    const download = btn("Scarica file", { icon: "download", cls: "primary", onclick: async () => {
+      download.disabled = true;
+      try {
+        const response = await fetch(`/api/agents/${agent.id}/export/file`, { method: "POST", headers: { "X-Cora": "1", "Content-Type": "application/json" }, body: JSON.stringify({ choice: choice() }), credentials: "same-origin" });
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || response.statusText);
+        const url = URL.createObjectURL(await response.blob());
+        const anchor = h("a", { href: url, download: data.fileName });
+        document.body.append(anchor); anchor.click(); anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        toast("File scaricato");
+      } catch (error) { toast(error.message, true); }
+      download.disabled = false;
+    } });
+    const days = h("select", { "aria-label": tr("Durata del link") }, [1, 7, 30].map((n) => h("option", { value: n, selected: n === 7 }, tr(n === 1 ? "1 giorno" : "{n} giorni", { n }))));
+    const downloads = h("select", { "aria-label": tr("Download consentiti") }, [1, 3, 5, 10, 20].map((n) => h("option", { value: n, selected: n === 1 }, tr(n === 1 ? "1 download" : "{n} download", { n }))));
+    const fresh = h("div", { class: "transfer-fresh", hidden: true });
+    const links = h("div", { class: "transfer-links" });
+    const drawLinks = (list) => {
+      const shown = list.filter((link) => link.status === "active");
+      links.replaceChildren(...shown.map((link) => {
+        let armed = false;
+        const revoke = btn("Revoca", { cls: "sm danger", onclick: async () => {
+          if (!armed) { armed = true; revoke.classList.add("armed"); revoke.querySelector("span").textContent = tr("Conferma revoca"); return; }
+          revoke.disabled = true;
+          if (await guard(api(`/api/agents/${agent.id}/export/links/${link.id}`, { method: "DELETE" }), "Link revocato")) { data.links = data.links.map((item) => item.id === link.id ? { ...item, status: "revoked" } : item); drawLinks(data.links); }
+          else revoke.disabled = false;
+        } });
+        return h("div", { class: "transfer-link" }, icon("link"),
+          h("span", { class: "grow" }, h("b", {}, tr("{used} di {max} download", { used: link.downloads, max: link.maxDownloads })),
+            h("small", {}, tr("scade il {when}", { when: new Date(link.expiresAt).toLocaleString(LOCALE) }), raw(` · ${link.counts.routines} ${tr("routine")} · ${link.counts.memories} ${tr("ricordi")}`))), revoke);
+      }));
+      links.hidden = !shown.length;
+    };
+    drawLinks(data.links);
+    const share = btn("Crea link", { icon: "link", onclick: async () => {
+      share.disabled = true;
+      const made = await guard(api(`/api/agents/${agent.id}/export/links`, { method: "POST", body: { choice: choice(), days: Number(days.value), downloads: Number(downloads.value) } }), "Link creato");
+      share.disabled = false;
+      if (!made) return;
+      fresh.hidden = false;
+      fresh.replaceChildren(h("p", { class: "muted" }, "Copialo ora: per sicurezza non si mostra di nuovo."), codeLine(made.url));
+      data.links = [made, ...data.links];
+      drawLinks(data.links);
+    } });
+    body.replaceChildren(...[
+      setRows(personality.row, core.row, picture?.row),
+      routines, memories, procedures,
+      needs.length ? setRow("Da configurare all'arrivo", "Solo i nomi: i valori dei segreti e gli account restano qui.", h("span", { class: "transfer-needs" }, needs), { stack: true }) : null,
+      h("p", { class: "notice" }, icon("lock"), h("span", {}, h("b", {}, tr("Non esce mai: ")), tr("diario, messaggi, tracce, proprietari e permessi, canali, abbonamenti e chiavi, bot, casella email, GitHub, desktop, artefatti e valori dei segreti. Email, telefoni, id, IP, link con token e nomi delle persone dello spazio vengono oscurati."))),
+      h("div", { class: "transfer-actions" }, download, h("span", { class: "spacer" }), days, downloads, share),
+      fresh, links].filter(Boolean));
+  };
+  return node;
+}
+
+/** Agents → Import: a file or a link, then what arrives and where its routines go, then a new agent, switched off. */
+function renderImport() {
+  const status = h("div", { class: "stack" });
+  const preview = h("div", { class: "stack" });
+  const read = async (body, button) => {
+    button.disabled = true;
+    status.replaceChildren(h("p", { class: "muted", role: "status" }, "Lettura del pacchetto…"));
+    try { const data = await api("/api/agent-imports/preview", { method: "POST", body }); status.replaceChildren(); drawPreview(data); }
+    catch (error) { status.replaceChildren(h("p", { class: "notice warn", role: "alert" }, icon("alert"), raw(error.message))); preview.replaceChildren(); }
+    button.disabled = false;
+  };
+  const link = h("input", { type: "url", placeholder: "https://…/agent-packages/…", "aria-label": tr("Link del pacchetto"), autocomplete: "off", spellcheck: "false" });
+  const readLink = btn("Leggi", { icon: "next", onclick: () => read({ url: link.value.trim() }, readLink) });
+  const fileInput = h("input", { type: "file", accept: ".json,application/json", class: "transfer-file", "aria-label": tr("File del pacchetto") });
+  const pick = btn("Scegli file", { icon: "upload", onclick: () => fileInput.click() });
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024) { status.replaceChildren(h("p", { class: "notice warn", role: "alert" }, icon("alert"), h("span", {}, tr("Il pacchetto supera i 4 MB.")))); return; }
+    await read({ file: await file.text() }, pick);
+    fileInput.value = "";
+  });
+  const drawPreview = (data) => {
+    const name = h("input", { type: "text", value: data.name.suggestion, maxlength: 32, "aria-label": tr("Nome dell'agente") });
+    const takeFlag = (key, label, hint, on = true) => {
+      const input = h("input", { type: "checkbox", checked: on });
+      return { key, input, row: setRow(label, hint, h("label", { class: "switch" }, input, h("span", { class: "rocker" }))) };
+    };
+    const flags = [
+      data.core ? takeFlag("core", "Scheda", "Le note che ha sempre in testa.") : null,
+      data.agent.avatar ? takeFlag("avatar", "Immagine", "La foto che aveva nell'altro spazio.") : null,
+      data.memories.length ? takeFlag("memories", tr("Memoria · {n} voci", { n: data.memories.length }), "Diventa la sua memoria privata.") : null,
+      data.procedures.length ? takeFlag("procedures", tr("Procedure · {n}", { n: data.procedures.length }), data.brain ? "Arrivano nel tuo brain da revisionare." : "Senza brain collegato non si importano.", data.brain) : null,
+    ].filter(Boolean);
+    const usable = data.channels.filter((channel) => !channel.thread);
+    const routineRows = data.routines.map((routine) => {
+      const select = h("select", { "aria-label": tr("Canale per {name}", { name: routine.name }), disabled: !routine.valid },
+        h("option", { value: "skip" }, tr("Non importare")),
+        usable.map((channel, index) => h("option", { value: channel.id, selected: routine.valid && index === 0 }, raw(`${TRANSPORTS[channel.kind]?.label || channel.kind} · ${channel.guildName ? channel.guildName + " / " : ""}${channel.name}`))));
+      return { routine, select, row: h("div", { class: "transfer-route" },
+        h("span", { class: "grow" }, h("b", {}, raw(routine.name)), h("small", { class: "transfer-meta" }, raw(routine.kind === "reminder" ? new Date(routine.runAt).toLocaleString(LOCALE) : routine.schedule), routine.valid ? null : tr(" · orario non valido o passato"))), select) };
+    });
+    const needs = [...data.requirements.secrets.map((item) => tag(item.name, item.present ? "on" : "")), ...data.requirements.connectors.map((item) => tag(item.service, item.connected ? "on" : ""))];
+    const go = btn("Importa agente", { icon: "check", cls: "primary", onclick: async () => {
+      go.disabled = true;
+      const body = { id: data.id, name: name.value.trim(), routines: Object.fromEntries(routineRows.map(({ routine, select }) => [routine.index, select.value])) };
+      for (const flag of flags) body[flag.key] = flag.input.checked;
+      const done = await guard(api("/api/agent-imports", { method: "POST", body }), "Agente importato");
+      if (!done) { go.disabled = false; return; }
+      await loadState();
+      location.hash = `#/agent/${done.agent.id}/impostazioni`;
+    } });
+    preview.replaceChildren(panel({ icon: "user", title: tr("Arriva {name}", { name: data.agent.name }), hint: tr("Da {source}, esportato il {when}.", { source: data.source === "file" ? tr("file") : data.source, when: data.exportedAt ? new Date(data.exportedAt).toLocaleString(LOCALE) : "—" }) },
+      setRows(
+        setRow("Nome", data.name.taken ? tr("«{name}» esiste già qui: ne serve un altro.", { name: data.name.requested }) : "Come si chiamerà in questo spazio.", name),
+        ...flags.map((flag) => flag.row)),
+      data.routines.length ? h("div", { class: "transfer-routes" }, h("div", { class: "transfer-heading" }, h("b", {}, tr("Routine · {n}", { n: data.routines.length })), h("small", {}, usable.length ? tr("Scegli il canale di ognuna: arrivano spente.") : tr("Nessun canale acceso in questo spazio: le routine restano fuori."))), routineRows.map((item) => item.row)) : null,
+      needs.length ? setRow("Da configurare", "Segreti e connettori che usava. In ambra quelli già presenti qui.", h("span", { class: "transfer-needs" }, needs), { stack: true }) : null,
+      h("p", { class: "notice" }, icon("power"), h("span", {}, tr("L'agente arriva spento e tuo. Le routine sono disattivate: accendile dopo aver controllato."))),
+      h("div", { class: "transfer-actions" }, h("span", { class: "spacer" }), go)));
+  };
+  shell([pageHead("Importa agente", "Da un file .cora-agent.json o da un link di Cora."),
+    panel({ icon: "upload", title: "Pacchetto", hint: "Cora controlla firma, versione e dimensione prima di mostrarti cosa arriva." },
+      setRows(
+        setRow("Da un link", "Il link che ti ha dato chi esporta.", h("div", { class: "input-row" }, pasteField(link, { confirm: readLink }), readLink), { stack: true }),
+        setRow("Da un file", "Il file .cora-agent.json scaricato dall'altro spazio.", h("span", {}, fileInput, pick))),
+      status),
+    preview], { title: "Importa agente", back: "#/agenti" });
+}
+
 function instanceAccessPanel() {
   const current = S.data.currentUser;
   const identity = h("div", { class: "access-identity" }, icon("user"),
@@ -9680,6 +9860,7 @@ async function render() {
   else if (page === "banco") await renderDashboard();
   else if (page === "agenti") renderAgents();
   else if (page === "new") renderNew();
+  else if (page === "importa") renderImport();
   else if (page === "archivio") renderRoutineArchive();
   else if (page === "contesto") renderContext();
   else if (page === "brain") renderBrain();
@@ -9694,7 +9875,7 @@ document.documentElement.lang = LANG;
 document.title = "Cora · Computer-Operating Resident Agents";
 
 /** While the state loads, the page being opened in outline: its own name, not always the agents page. */
-const BOOT_TITLES = { thread: "Thread", agenti: "Agenti", agent: "Agente", new: "Nuovo agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", domini: "Impostazioni", settings: "Impostazioni", archivio: "Archivio" };
+const BOOT_TITLES = { thread: "Thread", agenti: "Agenti", agent: "Agente", new: "Nuovo agente", importa: "Importa agente", salotto: "Salotto", banco: "Banco", contesto: "Contesto", brain: "Brain", artefatti: "Artefatti", domini: "Impostazioni", settings: "Impostazioni", archivio: "Archivio" };
 
 function bootSkeleton() {
   const [section] = route();

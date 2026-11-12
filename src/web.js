@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { AccessInvitations } from "./access-invitations.js";
+import { PACKAGE_MAX_BYTES } from "./agent-transfer.js";
 import { PanelMcp } from "./panel-mcp.js";
 import { drawnAvatar } from "./avatar.js";
 import { passLedger, verifyPass } from "./pass.js";
@@ -191,7 +192,7 @@ async function readJson(req, limit = 256 * 1024) {
   }
 }
 
-export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, credentials = null, github = null, mailDomains = null, email = null, googleConnector = null, keyConnectors = null, knowledge = null }) {
+export function createWeb({ config, store, subscriptions, discord, telegram, slack = null, channels, boxes, llm, orchestrator, brain, bots, tgBots, skBots = null, activity, storeSecret, traces, push = null, voice = null, companyBrain = null, librarian = null, slackApps = null, syncMainSlackApp = null, artifacts = null, vault = null, credentials = null, github = null, mailDomains = null, email = null, googleConnector = null, keyConnectors = null, knowledge = null, agentTransfer = null }) {
   // Tries of a doc rule across the brains in use: they take a while, so the panel follows them.
   const ruleTests = new Map();
   const encrypted = encryptedSpaceFor(store, { llm, knowledge, artifacts, publicOrigin: config.publicHost ? `https://${config.publicHost}` : "" });
@@ -471,7 +472,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       const routineId = /^\/api\/routines\/(rt_[\w-]+)(?:\/|$)/.exec(url.pathname)?.[1];
       const routine = routineId && store.routine(routineId);
       if (routine && !knowledge?.canManage(store.agent(routine.agentId), user)) throw new HttpError(404, "Routine non trovata.");
-      if (user.role !== "owner" && method !== "GET" && (url.pathname === "/api/subscriptions/resident/check" || !/^\/api\/(?:agents|routines|brain|subscriptions|connectors|artifacts|secrets|rooms|push)(?:\/|$)/.test(url.pathname))) throw new HttpError(403, "Solo il proprietario gestisce le impostazioni dello spazio.");
+      if (user.role !== "owner" && method !== "GET" && (url.pathname === "/api/subscriptions/resident/check" || !/^\/api\/(?:agents|agent-imports|routines|brain|subscriptions|connectors|artifacts|secrets|rooms|push)(?:\/|$)/.test(url.pathname))) throw new HttpError(403, "Solo il proprietario gestisce le impostazioni dello spazio.");
     },
   });
 
@@ -1344,6 +1345,47 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (!ready) throw new HttpError(400, "scegli una tua chiave oppure configura quella dello space");
       }
     };
+    if (agentTransfer && path === "/api/agent-imports/preview" && method === "POST") {
+      const body = await readJson(req, PACKAGE_MAX_BYTES * 2);
+      const view = await agentTransfer.stage(user, { url: typeof body.url === "string" ? body.url : "", file: body.url ? null : body.file ?? null, origin: connectorOrigin(req) });
+      let ownBrain = null;
+      try { ownBrain = knowledge?.ownerMemory ? knowledge.forUser(user) : companyBrain; } catch {}
+      return send(res, 200, { ...view, brain: Boolean(ownBrain?.enabled), channels: channels.list().map(({ id, name, kind, guildName, thread }) => ({ id, name, kind: kind || "discord", guildName: guildName || "", thread: Boolean(thread) })) });
+    }
+    if (agentTransfer && path === "/api/agent-imports" && method === "POST") {
+      const body = await readJson(req, 64 * 1024);
+      const result = await agentTransfer.commit(user, body.id, body, {
+        prepare: (input) => { checkCredentialChoice(null, input); return input; },
+        brainFor: (agent) => { try { const target = knowledge?.ownerMemory ? knowledge.forAgent(agent) : companyBrain; return target?.enabled ? target : null; } catch { return null; } },
+        channels: channels.list(),
+      });
+      bots?.sync();
+      tgBots?.sync();
+      skBots?.sync();
+      broadcast({ type: "agents" });
+      return send(res, 201, { agent: await publicAgent(result.agent), created: result.created, notes: result.notes });
+    }
+
+    const exportMatch = /^\/api\/agents\/([\w-]+)\/export(?:\/(file|links)(?:\/(apl_[a-f0-9]{12}))?)?$/.exec(path);
+    if (exportMatch && agentTransfer) {
+      const agent = store.agent(exportMatch[1]);
+      if (!agent) throw new HttpError(404, "agente non trovato");
+      if (!agentTransfer.canExport(agent, user)) throw new HttpError(403, "Solo il proprietario dell'agente può esportarlo.");
+      if (!exportMatch[2] && method === "GET") return send(res, 200, { ...(await agentTransfer.preview(agent)), links: agentTransfer.links(agent.id), fileName: agentTransfer.fileName(agent) });
+      if (exportMatch[2] === "file" && method === "POST") {
+        const body = await readJson(req, 256 * 1024);
+        const pack = await agentTransfer.build(agent, body.choice || {});
+        activity({ type: "agent", agentId: agent.id, text: `esportato ${agent.name} in un file (${pack.payload.routines.length} routine, ${pack.payload.memories.length} ricordi)` });
+        return send(res, 200, Buffer.from(JSON.stringify(pack, null, 2)), { "Content-Type": "application/json; charset=utf-8", "Content-Disposition": `attachment; filename="${agentTransfer.fileName(agent)}"` });
+      }
+      if (exportMatch[2] === "links" && !exportMatch[3] && method === "POST") {
+        const body = await readJson(req, 256 * 1024);
+        return send(res, 201, await agentTransfer.createLink(agent, user, { choice: body.choice || {}, days: body.days, downloads: body.downloads, origin: connectorOrigin(req) }));
+      }
+      if (exportMatch[2] === "links" && exportMatch[3] && method === "DELETE") return send(res, 200, agentTransfer.revokeLink(agent.id, exportMatch[3]));
+      throw new HttpError(405, "method not allowed");
+    }
+
     if (path === "/api/agents" && method === "POST") {
       const body = await readJson(req);
       // Whom an agent answers to is the owner of the space's choice.
@@ -2215,6 +2257,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       }
       // A request page posts a plain form: it checks its own origin, and the link is the key.
       if (url.pathname.startsWith("/send/")) return await vaultPages(req, res, url);
+      if (url.pathname.startsWith("/agent-packages/") && agentTransfer) {
+        if (req.method !== "GET") throw new HttpError(405, "method not allowed");
+        const found = agentTransfer.download(/^\/agent-packages\/([A-Za-z0-9_-]{43})$/.exec(url.pathname)?.[1]);
+        if (!found) return send(res, 410, { error: "Il link non vale più: è scaduto, revocato o ha finito i download." });
+        return send(res, 200, Buffer.from(JSON.stringify(found.pack, null, 2)), { "Content-Type": "application/json; charset=utf-8", "Content-Disposition": `attachment; filename="${found.fileName}"`, "Content-Security-Policy": "default-src 'none'" });
+      }
+
       if (url.pathname === "/mcp") return await panelMcp.handle(req, res, readJson);
       if (req.method !== "GET" && req.method !== "HEAD") {
         if (req.headers["x-cora"] !== "1") throw new HttpError(403, "missing X-Cora header");
