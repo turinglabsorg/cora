@@ -2531,7 +2531,7 @@ describe("panel auth", () => {
     const response = await fetch(`${base}/`);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-security-policy"), /default-src 'self'/);
-    assert.match(await response.text(), /assets\/app\.js/);
+    assert.match(await response.text(), /assets\/v\/[0-9a-f]{16}\/app\.js/);
   });
 
   test("database context from the panel reaches every provider through the shared system prompt", async () => {
@@ -3696,6 +3696,34 @@ describe("agents in Discord", () => {
     await assert.rejects(running, /owner stopped/);
     assert.ok(!app.subscriptions.running.has(subscriptionIds.gemini));
     await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
+  });
+
+  test("the panel's files move to a new address on every update, so no browser or proxy keeps an old copy", async () => {
+    const page = await fetch(`${base}/`);
+    assert.equal(page.headers.get("cache-control"), "no-cache", "the page itself is always asked again");
+    const html = await page.text();
+    const script = /<script type="module" src="\/assets\/v\/([0-9a-f]{16})\/app\.js"><\/script>/.exec(html);
+    assert.ok(script, "the page loads the panel from a versioned address");
+    const build = script[1];
+    assert.match(html, new RegExp(`href="/assets/v/${build}/styles\\.css"`));
+    assert.match(html, /href="\/assets\/favicon\.svg"|href="\/assets\/v\/[0-9a-f]{16}\/favicon\.svg"/);
+    const signedIn = await call("/api/login", { method: "POST", body: { password: PASSWORD }, auth: false });
+    const state = await call("/api/state", { headers: { Cookie: signedIn.headers.get("set-cookie").split(";")[0] } });
+    assert.equal(state.data.build, build, "the state reports the build the server serves");
+    for (const name of ["app.js", "styles.css", "encrypted-space.js", "encrypted-crypto.js", "i18n.js", "character.js"]) {
+      const current = await fetch(`${base}/assets/v/${build}/${name}`);
+      assert.equal(current.status, 200, name);
+      assert.equal(current.headers.get("cache-control"), "public, max-age=31536000, immutable", `${name} is kept for good under its build`);
+      assert.equal(await current.text(), await fetch(`${base}/assets/${name}`).then((response) => response.text()), `${name} is the same file`);
+    }
+    const old = await fetch(`${base}/assets/v/0123456789abcdef/app.js`);
+    assert.equal(old.status, 200, "a page still open on an older build gets the current file");
+    assert.equal(old.headers.get("cache-control"), "no-store", "never cached under the old address");
+    assert.equal((await fetch(`${base}/assets/app.js`)).headers.get("cache-control"), "no-cache", "the plain address stays for pages outside the panel");
+    assert.equal((await fetch(`${base}/assets/v/${build}/sw.js`)).status, 404, "the service worker keeps its own address and scope");
+    assert.equal((await fetch(`${base}/assets/v/${build}/index.html`)).status, 404);
+    assert.equal((await fetch(`${base}/assets/v/${build}/..%2Fpackage.json`)).status, 404);
+    assert.equal((await fetch(`${base}/assets/v/${build}/app.js`, { method: "POST", headers: { "X-Cora": "1" } })).status, 404);
   });
 
   test("Cora draws each agent's picture, open to anyone who fetches it, and keeps one of the owner's own in its place", async () => {

@@ -4,6 +4,10 @@ import { encryptedSetting, encryptedSetup, encryptedFolderPanel } from "./encryp
 import { EN } from "./i18n.js";
 import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, characterType, shouldWriteCharacter } from "./character.js";
 
+// The build this page runs: the server serves the panel under /assets/v/<build>/ and reports its current one in the state.
+const BUILD = (() => {
+  try { return /^\/assets\/v\/([0-9a-f]+)\//.exec(document.querySelector('script[src*="/assets/v/"]')?.getAttribute("src") || "")?.[1] || ""; } catch { return ""; }
+})();
 const LANGS = { it: "Italiano", en: "English" };
 const LANG = (() => {
   let saved = "";
@@ -491,6 +495,7 @@ async function loadState() {
   const data = await api("/api/state");
   if (S.revoked) return null;
   S.data = data;
+  if (BUILD && data.build && data.build !== BUILD) S.staleBuild = true;
   if (S.quotaPanel?.node.isConnected) S.quotaPanel.apply([...(data.quotaAccounts || data.subscriptions || []), ...(data.providerUsage || [])]);
   updateLamp();
   return S.data;
@@ -9752,7 +9757,10 @@ document.addEventListener("visibilitychange", async () => {
   if (location.hash !== view) return;
   if (keepLogin) { refreshSubscriptionViews(); return; }
   if (connectorViewActive()) return;
-  if (!document.activeElement?.matches("input, textarea, select") && !document.querySelector(".chat-input")?.value) render();
+  if (document.activeElement?.matches("input, textarea, select") || document.querySelector(".chat-input")?.value) return;
+  // Back to a page left open across an update (a phone's home-screen app resumes, it does not reload): load the new build.
+  if (S.staleBuild) { location.reload(); return; }
+  render();
 });
 
 // An app, not a page: no pinch or double-tap zoom.
