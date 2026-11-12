@@ -4,7 +4,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { knowledgeWorld } from './knowledge-fixtures.js';
 import { createFolderKeys, unlockBundle, proveAccess, encryptDocument, decryptDocument, documentId } from '../web/encrypted-crypto.js';
-import { uploadEncryptedFile, downloadEncryptedFile, encryptedFilesZip, encryptedFilePath, CHUNK_BYTES } from '../web/encrypted-files.js';
+import { uploadEncryptedFile, downloadEncryptedFile, encryptedFilesZip, encryptedFilePath, encryptedEntries, encryptedPreviewType, CHUNK_BYTES } from '../web/encrypted-files.js';
 
 async function setup(t) {
   const f = await knowledgeWorld(); t.after(() => f.close());
@@ -142,4 +142,20 @@ test('expired partial uploads are removed and the same file can be retried',asyn
   upload.expires=Date.now()-1;x.f.app.store.db.prepare('UPDATE encrypted_file_uploads SET expires = ?, data = ? WHERE id = ?').run(upload.expires,JSON.stringify(upload),upload.id);
   await assert.rejects(x.api(`/api/encrypted/folders/${x.folder}/file-finish`,{method:'POST',body:{upload:upload.id}}),e=>e.status===410);assert.equal(x.f.app.store.db.prepare('SELECT COUNT(*) AS n FROM encrypted_file_chunks').get().n,0);
   const recovered=await uploadEncryptedFile({...x,file:new File(['retry'],'retry.txt')});assert.equal(recovered.doc.version,1);
+});
+
+test('the encrypted Files tab walks folders like the plaintext one and uploads land where the person stands', async t => {
+  const x = await setup(t);
+  const saved = await uploadEncryptedFile({ ...x, file: new File(['png'], 'photo.png', { type: 'image/png' }), path: 'docs/photos/photo.png' });
+  const read = await downloadEncryptedFile({ ...x, document: saved.doc }); assert.equal(read.metadata.path, 'docs/photos/photo.png');
+  await assert.rejects(uploadEncryptedFile({ ...x, file: new File(['x'], 'x.txt'), path: 'docs/../x.txt' }), /Percorso/);
+  const items = [{ path: 'README.md', size: 3 }, { path: 'docs/note.txt', size: 5 }, { path: 'docs/photos/photo.png', size: 7 }, { path: 'Meeting notes', size: 2 }];
+  assert.deepEqual(encryptedEntries(items).dirs, [{ name: 'docs', count: 2, size: 12 }]);
+  assert.deepEqual(encryptedEntries(items).files.map(f => f.name), ['Meeting notes', 'README.md']);
+  assert.deepEqual(encryptedEntries(items, 'docs'), { dirs: [{ name: 'photos', count: 1, size: 7 }], files: [{ path: 'docs/note.txt', size: 5, name: 'note.txt' }] });
+  assert.deepEqual(encryptedEntries(items, 'missing'), { dirs: [], files: [] });
+  assert.equal(encryptedPreviewType('a/b.JPG', 'application/octet-stream'), 'image/jpeg');
+  assert.equal(encryptedPreviewType('page.html', 'text/html'), 'text/plain', 'decrypted HTML is never served as a page');
+  assert.equal(encryptedPreviewType('vector.svg', 'text/xml'), 'image/svg+xml');
+  assert.equal(encryptedPreviewType('blob.bin', ''), 'application/octet-stream');
 });

@@ -1,3 +1,4 @@
+import { forgetUserPasswords } from "./encrypted-memory.js";
 import { encryptedChatLauncher } from "./encrypted-chat.js";
 import { encryptedSetting, encryptedSetup, encryptedFolderPanel } from "./encrypted-space.js";
 import { EN } from "./i18n.js";
@@ -173,6 +174,7 @@ const ICONS = {
   tool: '<path d="M14.7 6.3a4.2 4.2 0 0 0-5.6 5.3L3 17.7 6.3 21l6.1-6.1a4.2 4.2 0 0 0 5.3-5.6l-2.7 2.7-2.6-.6-.6-2.6z"/>',
   check: '<path d="m4.5 12.5 5 5 10-11"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  face: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3M8 8v2M16 8v2M12 8v5h-2M8 16c2 2 6 2 8 0"/>',
   alert: '<path d="M12 3.5 2 20.5h20z"/><path d="M12 10v4.5M12 17.5v.01"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/>',
   file: '<path d="M14 3H6.5a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V7.5z"/><path d="M14 3v4.5h4.5"/>',
@@ -788,6 +790,7 @@ function closeAccountMenu(refocus = false) {
 }
 
 async function logout() {
+  await forgetUserPasswords(S.data?.currentUser?.id).catch(() => {});
   await guard(api("/api/logout", { method: "POST" }));
   S.events?.close();
   S.events = null;
@@ -4147,7 +4150,7 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
-const encryptedUI = () => ({ h, btn, api, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
+const encryptedUI = () => ({ h, btn, api, icon, currentUser: S.data?.currentUser, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
 
 function agentSecurityPane(agent, data) {
   if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));
@@ -6211,7 +6214,12 @@ function renderArtifacts() {
   if (id && view === "c" && commitId) return renderArtifactCommit(id, commitId);
   // A level of the paths (clienti, clienti/acme) opens like a directory: what is inside, a link for all of it.
   const level = id === "in" ? artifactDir(route().slice(2)) : "";
-  if (id && id !== "in") return renderArtifactFolder(id, view || "file", view === "file" || !view ? artifactDir(route().slice(3)) : artifactDir(String(new URLSearchParams(location.hash.split("?")[1] || "").get("in") || "").split("/")));
+  if (id && id !== "in") {
+    const tab = view || "file", dir = view === "file" || !view ? artifactDir(route().slice(3)) : artifactDir(String(new URLSearchParams(location.hash.split("?")[1] || "").get("in") || "").split("/"));
+    // An unlocked encrypted folder keeps its key in the mounted view: moving between its tabs and folders must not remount it.
+    if (S.encryptedView?.id === id && S.encryptedView.alive()) return S.encryptedView.navigate(tab, dir);
+    return renderArtifactFolder(id, tab, dir);
+  }
   const body = h("div", { class: "stack" }, skeleton("rows", 4));
   let data = null;
   let creating = new URLSearchParams(location.hash.split("?")[1] || "").get("encrypt") === "1";
@@ -6454,10 +6462,12 @@ function artifactKind(path) {
  * One file, shown the way the panel may show it: pictures and media as they are,
  * text as text with line numbers, anything else to download. Never rendered as a page.
  */
-async function artifactPreview(url, path, size, edit = null) {
-  if (S.data?.encryptionRequired) edit = null;
+async function artifactPreview(url, path, size, edit = null, local = null) {
+  if (S.data?.encryptionRequired && !local) edit = null;
   const kind = artifactKind(path);
-  const download = btn("Scarica", { icon: "download", cls: "sm ghost", href: `${url}?download=1` });
+  // A decrypted file lives only in this browser: it is saved from memory instead of fetched again.
+  const saveLocal = () => btn("Scarica", { icon: "download", cls: "sm ghost", onclick: () => Promise.resolve(local.download()).catch((error) => toast(error.message, true)) });
+  const download = local ? saveLocal() : btn("Scarica", { icon: "download", cls: "sm ghost", href: `${url}?download=1` });
   // Full screen: the browser's own when it has one, otherwise the preview covers the page until Esc.
   const full = btn("", { icon: "maximize", cls: "sm ghost", title: "Schermo intero", onclick: () => {
     const box = full.closest(".art-preview");
@@ -6469,16 +6479,19 @@ async function artifactPreview(url, path, size, edit = null) {
   } });
   let source = null;
   // A text the panel can write back: opened in its editor, saved as a new commit like an upload.
-  const change = edit && ARTIFACT_EDITABLE.test(path) && size <= 1024 * 1024 ? btn(edit.canReview ? "Modifica" : "Proponi una modifica", { icon: "edit", cls: "sm ghost", onclick: async () => {
+  const change = edit && (local ? local.editable : ARTIFACT_EDITABLE.test(path)) && size <= 1024 * 1024 ? btn(edit.canReview ? "Modifica" : "Proponi una modifica", { icon: "edit", cls: "sm ghost", onclick: async () => {
     const box = change.closest(".art-preview");
     if (!box) return;
     if (source === null) {
-      try { source = await (await fetch(url, { credentials: "same-origin" })).text(); } catch (error) { return toast(error.message, true); }
+      try { source = local ? await local.blob.text() : await (await fetch(url, { credentials: "same-origin" })).text(); } catch (error) { return toast(error.message, true); }
     }
     const restore = [...box.childNodes];
     const onCancel = () => box.replaceChildren(...restore);
     const onSave = async (text, message) => {
       if (text === source) { toast("Nessuna modifica da salvare"); return false; }
+      if (local?.save) {
+        try { await local.save(text); toast("Versione cifrata salvata."); return true; } catch (error) { toast(error.message, true); return false; }
+      }
       try {
         const done = await saveArtifactText({ folder: edit.folder, head: edit.head, path, text, message });
         toast(done.commit.status === "published" ? tr("Salvato: {message}", { message: done.commit.message }) : "Proposta: aspetta una revisione");
@@ -6493,10 +6506,13 @@ async function artifactPreview(url, path, size, edit = null) {
   // Taking a file out is a commit too: a reviewer's goes on air, anyone else's waits for a review.
   const drop = edit?.onRemove ? armedButton(edit.canReview ? "Elimina" : "Proponi di eliminare", edit.canReview ? "Elimina davvero" : "Proponi davvero", { cls: "sm ghost", onconfirm: () => edit.onRemove(path) }) : null;
   const title = h("span", { class: "grow" }, h("b", {}, raw(path.split("/").at(-1))), h("small", {}, raw(`${path} · ${fmtBytes(size)}`)));
-  const head = h("header", { class: "art-preview-head" }, title, change, full, download, drop);
+  const head = h("header", { class: "art-preview-head" }, title, ...(local?.extra || []), change, full, download, drop);
   if (kind === "image") return [head, h("div", { class: "art-media checker" }, h("img", { src: url, alt: raw(path) }))];
   if (kind === "video") return [head, h("div", { class: "art-media" }, h("video", { src: url, controls: true, preload: "metadata" }))];
   if (kind === "audio") return [head, h("div", { class: "art-media" }, h("audio", { src: url, controls: true, preload: "metadata" }))];
+  // A decrypted PDF stays out of the panel's frames (they accept only separate hosts): it opens in a tab of its own.
+  if (local && /\.pdf$/i.test(path) && local.blob) return [head, h("div", { class: "art-noview" }, icon("file"), h("p", {}, "PDF decifrato in questo browser: aprilo in una scheda o scaricalo."),
+    h("div", { class: "row" }, btn("Apri", { icon: "external", cls: "sm primary", onclick: () => window.open(url, "_blank", "noopener") }), saveLocal()))];
   // A PDF is rendered by the browser itself, so it is framed from an address apart from the panel.
   const commitId = /\/api\/artifacts\/commits\/(ac_[a-f0-9]{12})\/files\//.exec(url)?.[1];
   if (/\.pdf$/i.test(path) && commitId) {
@@ -6533,8 +6549,8 @@ async function artifactPreview(url, path, size, edit = null) {
       return [h("header", { class: "art-preview-head" }, title, modes, change, full, download, drop), body];
     }
   }
-  if (kind === "text" && size <= 2 * 1024 * 1024) {
-    const text = await artifactText(url);
+  if (kind === "text" && size <= 2 * 1024 * 1024 && (!local || local.blob)) {
+    const text = local ? await local.blob.text() : await artifactText(url);
     if (text !== null) {
       source = text;
       if (/\.(csv|tsv)$/i.test(path)) {
@@ -6545,7 +6561,7 @@ async function artifactPreview(url, path, size, edit = null) {
       return [head, ...codeLines(text)];
     }
   }
-  return [head, h("div", { class: "art-noview" }, icon("file"), h("p", {}, "Il pannello non mostra questo tipo di file: scaricalo."), download.cloneNode(true))];
+  return [head, h("div", { class: "art-noview" }, icon("file"), h("p", {}, "Il pannello non mostra questo tipo di file: scaricalo."), local ? saveLocal() : download.cloneNode(true))];
 }
 
 /** A stored file read as text, as the panel serves it (plain text only), or null. */
@@ -6792,11 +6808,8 @@ async function renderArtifactFolder(id, tab, dir = "") {
   if (location.hash !== view) return;
   const { folder } = data;
   if (data.encrypted) {
-    try {
-      const workspace = await encryptedFolderPanel({ ...encryptedUI(), permissions: () => artifactPermissions(data), folderSettings: () => artifactPermissions(data, { settings: true }) }, folder, tab, S.data.agents, () => renderArtifactFolder(id, route()[2] || tab, dir));
-      if (location.hash !== view) return;
-      shell([pageHead(raw(folder.title), "Spazio cifrato"), workspace], { title: folder.title, back: "#/artefatti", mode: "artifacts" });
-    } catch (error) { slot.replaceChildren(empty("lock", error.message, btn("Riprova", { onclick: () => renderArtifactFolder(id, tab, dir) }))); }
+    try { await renderEncryptedArtifactFolder(data, tab, dir, view); }
+    catch (error) { slot.replaceChildren(empty("lock", error.message, btn("Riprova", { onclick: () => renderArtifactFolder(id, tab, dir) }))); }
     return;
   }
   const head = data.commits.find((commit) => commit.id === folder.head) || null;
@@ -6831,6 +6844,53 @@ async function renderArtifactFolder(id, tab, dir = "") {
   document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
   const shown = tab === "cifratura" ? artifactEncryption(data, () => renderArtifactFolder(id, tab, dir)) : tab === "commit" ? artifactTakes(data) : ["permessi", "impostazioni"].includes(tab) ? artifactPermissions(data, { settings: tab === "impostazioni" }) : tab === "condivisione" ? artifactShares(data, dir) : tab === "registro" && data.canReview ? artifactLog(data) : artifactFiles(data, head, dir);
   content.replaceChildren(...[shown].flat().filter(Boolean));
+}
+
+/**
+ * An encrypted folder dressed exactly like any other: the same trail, title, badges, tabs and file browser.
+ * Its key lives in this mounted view, so tabs and subfolders change in place instead of remounting it.
+ */
+async function renderEncryptedArtifactFolder(data, tab, dir, view) {
+  const { folder } = data;
+  const state = { tab, dir };
+  const top = h("div", { class: "stack" });
+  const tabs = h("nav", { class: "tabs" });
+  const levelBack = artifactLevelHref(folder.path.split("/").slice(0, -1).join("/"));
+  let workspace = null;
+  const draw = () => {
+    const { tab: current, dir: at } = state;
+    const parts = at ? at.split("/") : [];
+    const href = (key, d = "") => (key === "file" ? artifactDirHref(folder.id, d) : `#/artefatti/${folder.id}/${key}`);
+    top.replaceChildren(
+      artifactTrail([...artifactLevelSteps(folder.path),
+        { label: folder.path.split("/").at(-1), href: href(current), icon: "folder" },
+        ...(current === "file" ? parts : []).map((part, index) => ({ label: part, href: artifactDirHref(folder.id, parts.slice(0, index + 1).join("/")) }))]),
+      pageHead(raw(current === "file" && at ? parts.at(-1) : folder.title), h("span", { class: "art-head-meta" },
+        badge(folder.kind === "site" ? "Sito" : "Cartella", "", folder.kind === "site" ? "globe" : "folder"),
+        badge("Cifrata", "", "lock")), workspace.lockButton),
+      current === "file" && at ? h("p", { class: "lead art-lead" }, raw(tr("Una sottocartella di {title}", { title: folder.title }))) : folder.description ? h("p", { class: "lead art-lead" }, raw(folder.description)) : "",
+      tabs);
+    top.querySelector(".page-head")?.classList.add("art-enc-head");
+    tabs.replaceChildren(...workspace.tabs().map(([key, label, name, count]) =>
+      h("a", { href: href(key, key === "file" ? at : ""), class: key === current ? "active" : "" }, icon(name), h("span", {}, label), count ? h("i", { class: "count" }, raw(String(count))) : null)));
+    app.querySelector(".appbar a.icon-btn")?.setAttribute("href", current === "file" && at ? artifactDirHref(folder.id, parts.slice(0, -1).join("/")) : levelBack);
+  };
+  workspace = await encryptedFolderPanel({ ...encryptedUI(), people: data.people || [],
+    permissions: () => artifactPermissions(data), folderSettings: () => artifactPermissions(data, { settings: true }),
+    preview: artifactPreview, artifactKind, fmtBytes, fileCount, icon, skeleton, toast, droppedFiles, textEditor,
+    path: folder.path, dir, changed: () => draw() }, folder, tab, S.data.agents, () => renderArtifactFolder(folder.id, route()[2] || state.tab, state.dir));
+  if (location.hash !== view) return;
+  draw();
+  shell([top, workspace], { title: folder.title, back: dir ? artifactDirHref(folder.id, dir.split("/").slice(0, -1).join("/")) : levelBack, mode: "artifacts" });
+  draw();
+  document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
+  S.encryptedView = { id: folder.id, alive: () => workspace.isConnected, navigate: (next, at) => {
+    state.tab = next;
+    if (next === "file") state.dir = at;
+    workspace.show(state.tab, state.dir);
+    draw();
+    document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
+  } };
 }
 
 function encryptionWarning(message = "Cifratura obbligatoria attiva: alcune cartelle contengono ancora file in chiaro.") {

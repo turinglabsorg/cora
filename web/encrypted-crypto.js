@@ -3,6 +3,7 @@ export const to64 = (value) => { let out = ""; for (const c of new Uint8Array(va
 export const from64 = (value) => Uint8Array.from(atob(value.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0));
 const random = (n) => crypto.getRandomValues(new Uint8Array(n));
 export const documentId = () => "ed_" + [...random(12)].map((n) => n.toString(16).padStart(2, "0")).join("");
+export const credentialName = (folder, name = "") => `Cora · ${name || "Spazio cifrato"} · ${folder}`;
 const wrapAad = (folder, item) => encoder.encode(`cora:${folder}:method:${item.kind}:${item.salt}`);
 async function credentialRequest(operation, options, signal) {
   if (signal?.aborted) throw new DOMException("", "AbortError");
@@ -13,7 +14,7 @@ async function credentialRequest(operation, options, signal) {
   try { return await Promise.race([pending, cancelled]); }
   finally { signal.removeEventListener("abort", abort); }
 }
-async function wrappingKey(folder, item, password = "", create = false, signal) {
+async function wrappingKey(folder, item, password = "", create = false, signal, name = "") {
   if (item.kind === "password") {
     if (create && password.length < 14) throw Error("Usa almeno 14 caratteri per la password.");
     const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
@@ -24,7 +25,7 @@ async function wrappingKey(folder, item, password = "", create = false, signal) 
   try {
     if (create) {
       seed = random(32);
-      credential = await credentialRequest("create", { publicKey: { challenge: random(32), rp: { name: "Cora · Spazio cifrato", id: location.hostname }, user: { id: seed, name: folder, displayName: "Spazio cifrato · " + folder }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", userVerification: "required" }, attestation: "none", ...(item.derivation === "handle-v1" ? {} : { extensions: { prf: {} } }) } }, signal);
+      credential = await credentialRequest("create", { publicKey: { challenge: random(32), rp: { name: name ? "Cora · " + name : "Cora · Spazio cifrato", id: location.hostname }, user: { id: seed, name: `${credentialName(folder, name)} · ${item.label || "Passkey"} · ${item.salt.slice(0, 8)}`, displayName: `${name || folder} · ${item.label || "Passkey"}` }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", userVerification: "required" }, attestation: "none", ...(item.derivation === "handle-v1" ? {} : { extensions: { prf: {} } }) } }, signal);
       if (!credential) throw Error("Creazione della passkey annullata.");
       item.credentialId = credential.id;
       if (item.derivation === "auto") item.derivation = credential.getClientExtensionResults?.().prf?.enabled === true ? "prf-v1" : "handle-v1";
@@ -48,17 +49,17 @@ async function wrappingKey(folder, item, password = "", create = false, signal) 
     } finally { new Uint8Array(output).fill(0); }
   } finally { seed?.fill(0); }
 }
-export async function protectBundle(folder, bundle, kind, password = "", label = "", derivation = "auto", signal) {
+export async function protectBundle(folder, bundle, kind, password = "", label = "", derivation = "auto", signal, name = "") {
   const method = { kind, label, ...(kind === "passkey" ? { derivation } : {}), salt: to64(random(32)), iv: to64(random(12)), ...(kind === "password" ? { iterations: 600000 } : {}) };
-  const key = await wrappingKey(folder, method, password, true, signal);
+  const key = await wrappingKey(folder, method, password, true, signal, name);
   method.ciphertext = to64(await crypto.subtle.encrypt({ name: "AES-GCM", iv: from64(method.iv), additionalData: wrapAad(folder, method) }, key, encoder.encode(JSON.stringify(bundle))));
   return method;
 }
-export async function createFolderKeys(folder, kind, password, label = "", derivation = "auto", signal) {
+export async function createFolderKeys(folder, kind, password, label = "", derivation = "auto", signal, name = "") {
   const rsa = await crypto.subtle.generateKey({ name: "RSA-OAEP", modulusLength: 3072, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["encrypt", "decrypt"]);
   const signing = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
   const bundle = { v: 1, folder, privateKey: await crypto.subtle.exportKey("jwk", rsa.privateKey), signingKey: await crypto.subtle.exportKey("jwk", signing.privateKey) };
-  return { publicKey: await crypto.subtle.exportKey("jwk", rsa.publicKey), signingKey: await crypto.subtle.exportKey("jwk", signing.publicKey), methods: [await protectBundle(folder, bundle, kind, password, label, derivation, signal)] };
+  return { publicKey: await crypto.subtle.exportKey("jwk", rsa.publicKey), signingKey: await crypto.subtle.exportKey("jwk", signing.publicKey), methods: [await protectBundle(folder, bundle, kind, password, label, derivation, signal, name)] };
 }
 export async function unlockBundle(folder, method, password = "", signal) {
   try {

@@ -2558,3 +2558,47 @@ input.thread-search { height: 38px; }
 
 .encrypted-file-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
 .encrypted-file-image { max-width: 100%; height: auto; }
+
+/* Encrypted folders share the artifact controls, with a compact unlock form. */
+.encrypted-credential-name { font-size: 12px; color: var(--muted); height: 34px; padding: 6px 10px; text-overflow: ellipsis; }
+.encrypted-unlock-field { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.encrypted-unlock-field > input { flex: 1; min-width: 0; width: 0; }
+.encrypted-unlock-field > .btn.only-icon { flex: 0 0 40px; width: 40px; height: 40px; margin: 0; }
+.encrypted-remember { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.encrypted-remember input { width: 16px; height: 16px; margin: 0; flex: none; accent-color: var(--amber); }
+.encrypted-password-form { gap: 10px; }
+.encrypted-passkey-actions:empty { display: none; }
+.encrypted-passkey-mark { display: grid; place-items: center; padding: 8px 0; color: var(--amber); }
+.encrypted-passkey-mark .ico { width: 48px; height: 48px; stroke-width: 1.4; }
+.encrypted-unlock [hidden], .encrypted-enrollment [hidden] { display: none; }
+@media (max-width: 600px) {
+  .encrypted-enrollment-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .encrypted-enrollment-actions > .btn { width: 100%; margin: 0; }
+}
+
+.encrypted-unlock-options:not(:has(button:not([hidden]))) { display: none; }
+.encrypted-passkey-only { display: flex; flex-direction: column; min-height: min(560px, calc(var(--app-h, 100dvh) - 180px)); }
+.encrypted-passkey-only .panel-body { flex: 1; gap: 24px; }
+.encrypted-passkey-only .encrypted-passkey-mark { flex: 1; min-height: 160px; padding: 24px 0; }
+.encrypted-passkey-only .encrypted-passkey-mark .ico { width: 104px; height: 104px; stroke-width: 1.2; }
+.encrypted-passkey-only .encrypted-passkey-actions { margin-top: auto; }
+
+@media (max-width: 600px) {
+  .encrypted-passkey-only { min-height: max(340px, calc(var(--app-h, 100dvh) - 280px)); }
+}
+
+.encrypted-passkey-only .encrypted-unlock-footer { margin-top: auto; gap: 12px; }
+/* Encrypted folders share the plaintext folder head; the lock sits square on the title line. */
+.page-head.art-enc-head { flex-wrap: nowrap; align-items: flex-start; }
+.page-head.art-enc-head .page-title { min-width: 0; }
+.page-head.art-enc-head .page-actions { flex: none; padding-top: 4px; }
+.log-row .badge { margin-left: 8px; vertical-align: 1px; }
+@media (max-width: 899px) {
+  .page-head.art-enc-head { align-items: center; }
+  .page-head.art-enc-head .page-actions { padding-top: 0; }
+}
+
+.encrypted-remember { align-self: flex-end; min-height: 28px; gap: 6px; font-size: 12px; color: var(--muted); }
+.encrypted-remember input { width: 14px; height: 14px; }
+.encrypted-unlock-options { justify-content: flex-end; }
+.encrypted-unlock .encrypted-unlock-options > .btn { width: auto; flex: none; margin: 0; }

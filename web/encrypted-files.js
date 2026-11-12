@@ -8,8 +8,8 @@ export function encryptedFilePath(value) {
   if (typeof value !== 'string' || !value || new TextEncoder().encode(value).length > 1024 || /^[A-Za-z]:/.test(value) || /[\\\u0000-\u001f\u007f]/.test(value) || value.split('/').some(part => !part || part === '.' || part === '..')) throw Error('Percorso del file non valido.');
   return value;
 }
-export async function uploadEncryptedFile({ api, folder, bundle, method, publicKey, file, previous = null, signal, progress = () => {}, share = null }) {
-  cancelled(signal); const path = encryptedFilePath(file.webkitRelativePath || file.name);
+export async function uploadEncryptedFile({ api, folder, bundle, method, publicKey, file, path: target = '', previous = null, signal, progress = () => {}, share = null }) {
+  cancelled(signal); const path = encryptedFilePath(target || file.webkitRelativePath || file.name);
   if (file.size > MAX_FILE_BYTES) throw Error('Ogni file può contenere al massimo 64 MiB.');
   const bytes = new Uint8Array(await file.arrayBuffer()); cancelled(signal);
   const chunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES)), id = share ? documentId() : previous?.id || documentId(), base = share ? 0 : previous?.version || 0, cipherFolder = share?.target || folder;
@@ -68,60 +68,194 @@ export function encryptedFilesZip(files) {
   const end = new Uint8Array(22); put(new DataView(end.buffer), [[0, 0x06054b50, 4], [8, files.length, 2], [10, files.length, 2], [12, centralSize, 4], [16, offset, 4]]);
   return new Blob([...local, ...central, end], { type: 'application/zip' });
 }
-export function encryptedFileControls(ui, options) {
-  const { h, btn, panel, tr, raw } = ui;
-  const status = h('p', { role: 'status', class: 'muted' }), preview = h('div', { class: 'stack-sm' }), urls = new Set(); let controller = null, previewController = null;
-  const download = (blob, name) => { const url = URL.createObjectURL(blob); urls.add(url); const link = document.createElement('a'); link.href = url; link.download = name; link.click(); setTimeout(() => { URL.revokeObjectURL(url); urls.delete(url); }, 30000); };
-  const clearPreview = () => { previewController?.abort(); preview.replaceChildren(); for (const url of urls) URL.revokeObjectURL(url); urls.clear(); };
-  const clear = () => { controller?.abort(); clearPreview(); };
-  const files = h('input', { type: 'file', multiple: true, hidden: true, 'aria-label': tr('Scegli file da cifrare') });
-  const directory = h('input', { type: 'file', multiple: true, webkitdirectory: '', hidden: true, 'aria-label': tr('Scegli cartella da cifrare') });
-  const cancel = btn('Annulla caricamento', { cls: 'ghost', onclick: () => controller?.abort() }); cancel.hidden = true;
-  const upload = async (list) => {
-    if (controller || !list.length) return; controller = new AbortController(); const signal = controller.signal; cancel.hidden = false;
-    uploadFiles.disabled = true; uploadFolder.disabled = true; status.textContent = ''; let saved = 0;
-    try {
-      const state = options.state(), previous = new Map();
-      for (const file of list) { encryptedFilePath(file.webkitRelativePath || file.name); if (file.size > MAX_FILE_BYTES) throw Error('Ogni file può contenere al massimo 64 MiB.'); }
-      for (const doc of options.documents()) { const item = JSON.parse(await decryptDocument(state.bundle, doc.envelope, `cora:${options.folder}:${doc.id}:${doc.version}`)); if (item.format === 'file-v1') previous.set(item.path, doc); }
-      for (const file of list) {
-        const path = file.webkitRelativePath || file.name;
-        const result = await uploadEncryptedFile({ ...state, api: options.api, folder: options.folder, file, previous: previous.get(path), signal, progress: (done, size) => { status.textContent = `${path} · ${Math.round(done / (size || 1) * 100)}%`; } });
-        previous.set(path, result.doc); saved++;
-      }
-      await options.refresh(); status.textContent = tr('File cifrati salvati: {count}.', { count: saved });
-    } catch (error) { await options.refresh(); status.textContent = (error.name === 'AbortError' ? tr('Caricamento annullato.') : tr(error.message)) + ' ' + tr('File già completati: {count}.', { count: saved }); }
-    finally { controller = null; cancel.hidden = true; uploadFiles.disabled = !options.canWrite(); uploadFolder.disabled = !options.canWrite(); files.value = ''; directory.value = ''; }
-  };
-  files.addEventListener('change', () => upload([...files.files])); directory.addEventListener('change', () => upload([...directory.files]));
-  const uploadFiles = btn('Carica file cifrati', { icon: 'upload', onclick: () => files.click() });
-  const uploadFolder = btn('Carica cartella cifrata', { icon: 'folder', onclick: () => directory.click() });
-  uploadFiles.disabled = !options.canWrite(); uploadFolder.disabled = !options.canWrite();
-  const zip = btn('Scarica file come ZIP', { icon: 'download', onclick: async () => {
-    if (controller) return; controller = new AbortController(); const signal = controller.signal; const opened = []; zip.disabled = true;
-    try {
-      for (const document of options.documents().filter(doc => doc.file)) opened.push(await downloadEncryptedFile({ api: options.api, folder: options.folder, bundle: options.state().bundle, document, signal }));
-      if (!opened.length) throw Error('Nessun file caricato da scaricare.');
-      download(encryptedFilesZip(opened), 'artifacts.zip'); status.textContent = tr('Archivio decifrato nel browser.');
-    } catch (error) { status.textContent = tr(error.message); }
-    finally { for (const file of opened) file.bytes.fill(0); controller = null; zip.disabled = false; }
-  } });
-  const open = async (doc, metadata) => {
-    clearPreview(); previewController = new AbortController(); const signal = previewController.signal;
-    preview.replaceChildren(h('p', {}, raw(metadata.path)), h('p', { class: 'muted' }, raw(`${metadata.size} byte · ${metadata.mime} · v${doc.version}`)), btn('Scarica file', { icon: 'download', onclick: async () => {
-      if (controller) return; controller = new AbortController(); const signal = controller.signal;
-      try { const file = await downloadEncryptedFile({ api: options.api, folder: options.folder, bundle: options.state().bundle, document: doc, signal }); download(new Blob([file.bytes], { type: file.metadata.mime }), file.metadata.path.split('/').at(-1)); file.bytes.fill(0); }
-      catch (error) { status.textContent = tr(error.message); } finally { controller = null; }
-    } }));
-    if (metadata.size <= 1024 * 1024 && (metadata.mime.startsWith('text/') || /^image\/(png|jpeg|webp|gif)$/.test(metadata.mime))) {
-      const file = await downloadEncryptedFile({ api: options.api, folder: options.folder, bundle: options.state().bundle, document: doc, signal });
+const PREVIEW_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', svg: 'image/svg+xml', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', pdf: 'application/pdf' };
+export const encryptedPreviewType = (path, mime = '') => PREVIEW_TYPES[String(path).split('.').at(-1).toLowerCase()] || (/^text\//.test(mime) ? 'text/plain' : 'application/octet-stream');
+export function encryptedEntries(items, dir = '') {
+  const here = dir ? `${dir}/` : '', dirs = new Map(), files = [];
+  for (const item of items) {
+    if (!item.path.startsWith(here)) continue;
+    const rest = item.path.slice(here.length), slash = rest.indexOf('/');
+    if (slash === -1) { files.push({ ...item, name: rest }); continue; }
+    const name = rest.slice(0, slash), entry = dirs.get(name) || { name, count: 0, size: 0 };
+    entry.count += 1; entry.size += item.size; dirs.set(name, entry);
+  }
+  return { dirs: [...dirs.values()].sort((a, b) => a.name.localeCompare(b.name)), files: files.sort((a, b) => a.name.localeCompare(b.name)) };
+}
+
+/**
+ * The encrypted Files tab, drawn like the plaintext one: a drop zone that lands where the person stands,
+ * folders to walk into, and the shared preview for the file chosen. Bytes are decrypted only in this view.
+ */
+export function encryptedFileBrowser(ui, options) {
+  const { h, btn, panel, tr, raw, icon, skeleton, fmtBytes, fileCount, toast, droppedFiles, textEditor, preview: artifactPreview, artifactKind } = ui;
+  const urls = new Set(); let controller = null, previewController = null, items = [], chosen = null, dir = options.dir || '';
+  const remember = (blob) => { const url = URL.createObjectURL(blob); urls.add(url); return url; };
+  const save = (blob, name) => { const link = document.createElement('a'); link.href = remember(blob); link.download = name; link.click(); };
+  const state = () => options.state();
+  const pane = h('div', { class: 'art-preview' });
+  const idle = () => pane.replaceChildren(h('div', { class: 'art-noview' }, icon('eye'), h('p', {}, tr('Scegli un file per vederlo.'))));
+  const clearPreview = () => { previewController?.abort(); previewController = null; chosen = null; delete pane.dataset.path; idle(); for (const url of urls) URL.revokeObjectURL(url); urls.clear(); };
+  const clear = () => { controller?.abort(); clearPreview(); items = []; element.replaceChildren(); };
+  const element = h('div', { class: 'stack' });
+  const busy = () => Boolean(controller);
+  async function load() {
+    const next = [], { bundle } = state();
+    for (const doc of options.documents().filter((d) => d.kind !== 'chat')) {
       try {
-        cancelled(signal);
-        if (metadata.mime.startsWith('text/')) preview.append(h('pre', { class: 'well encrypted-file-preview' }, raw(new TextDecoder().decode(file.bytes))));
-        else { const url = URL.createObjectURL(new Blob([file.bytes], { type: metadata.mime })); urls.add(url); preview.append(h('img', { src: url, alt: metadata.path, class: 'encrypted-file-image' })); }
-      } finally { file.bytes.fill(0); }
-    } else preview.append(h('p', { class: 'muted' }, 'Anteprima per testo e immagini fino a 1 MiB. Per gli altri file usa Scarica file.'));
+        const plain = JSON.parse(await options.decrypt(bundle, doc));
+        if (plain.format === 'file-v1') next.push({ doc, file: true, path: encryptedFilePath(plain.path), size: plain.size, mime: plain.mime, meta: plain });
+        else { const path = String(plain.title || tr('Senza titolo')).replace(/^\/+|\/+$/g, '') || tr('Senza titolo'); next.push({ doc, file: false, path, size: new TextEncoder().encode(plain.content || '').length, content: plain.content || '', title: plain.title || '' }); }
+      } catch { next.push({ doc, broken: true, path: tr('Documento non decifrabile') + ` (${doc.id.slice(-6)})`, size: 0 }); }
+    }
+    items = next;
+  }
+  const versionPicker = (item) => {
+    const latest = options.documents().find((d) => d.id === item.doc.id)?.version || item.doc.version;
+    if (latest < 2) return null;
+    return h('select', { class: 'sm', 'aria-label': tr('Versione'), onchange: (event) => open({ ...item }, Number(event.target.value)) },
+      Array.from({ length: Math.min(100, latest) }, (_, i) => latest - i).map((n) => h('option', { value: n, selected: item.doc.version === n }, raw('v' + n))));
   };
-  const updateAccess = () => { uploadFiles.disabled = !options.canWrite() || Boolean(controller); uploadFolder.disabled = !options.canWrite() || Boolean(controller); };
-  return { clear, clearPreview, open, updateAccess, element: panel({ icon: 'folder', title: 'File e cartelle cifrati', hint: 'Nomi, percorsi e contenuti sono cifrati nel browser. Fino a 64 MiB per file e 128 MiB cifrati per cartella. Un percorso già presente crea una nuova versione; le cartelle vuote non sono incluse.' }, h('div', { class: 'row' }, uploadFiles, uploadFolder, cancel, zip), files, directory, status, preview) };
+  async function open(item, version = 0, { scroll = true } = {}) {
+    previewController?.abort(); for (const url of urls) URL.revokeObjectURL(url); urls.clear();
+    previewController = new AbortController(); const signal = previewController.signal, token = Symbol(); chosen = token;
+    for (const row of element.querySelectorAll('.art-file')) row.classList.toggle('on', row.dataset.path === item.path);
+    pane.dataset.path = item.path; pane.replaceChildren(skeleton('rows', 2));
+    try {
+      let doc = item.doc, entry = item;
+      if (version && version !== doc.version) {
+        doc = await options.api(`/api/encrypted/folders/${options.folder}/documents?document=${doc.id}&version=${version}`);
+        const plain = JSON.parse(await options.decrypt(state().bundle, doc));
+        entry = plain.format === 'file-v1' ? { ...item, doc, size: plain.size, mime: plain.mime, meta: plain } : { ...item, doc, content: plain.content || '', size: new TextEncoder().encode(plain.content || '').length };
+      }
+      options.select(doc);
+      const kind = artifactKind(entry.path);
+      let blob = null;
+      if (!entry.file) blob = new Blob([entry.content], { type: 'text/plain' });
+      else if (kind !== 'other' || /\.pdf$/i.test(entry.path)) {
+        const opened = await downloadEncryptedFile({ api: options.api, folder: options.folder, bundle: state().bundle, document: doc, signal });
+        try { blob = new Blob([opened.bytes], { type: encryptedPreviewType(entry.path, entry.mime) }); } finally { opened.bytes.fill(0); }
+      }
+      if (chosen !== token) return;
+      const download = async () => {
+        if (blob) return save(blob, entry.path.split('/').at(-1));
+        const file = await downloadEncryptedFile({ api: options.api, folder: options.folder, bundle: state().bundle, document: doc });
+        try { save(new Blob([file.bytes], { type: file.metadata.mime }), file.metadata.path.split('/').at(-1)); } finally { file.bytes.fill(0); }
+      };
+      const latest = options.documents().find((d) => d.id === doc.id)?.version || doc.version;
+      const writable = options.canWrite() && doc.version === latest && (!entry.file || (entry.size <= 1024 * 1024 && kind === 'text'));
+      const shown = await artifactPreview(blob ? remember(blob) : '', entry.path, entry.size, writable ? { canReview: true } : null, {
+        blob, download, extra: [versionPicker({ ...entry, doc })], editable: writable,
+        save: writable ? async (text) => {
+          reopen(entry.path);
+          if (entry.file) await uploadEncryptedFile({ ...state(), api: options.api, folder: options.folder, file: new File([text], entry.path.split('/').at(-1), { type: entry.mime || 'text/plain' }), path: entry.path, previous: doc });
+          else await options.persist(doc, entry.title || entry.path, text);
+          await options.refresh(); return true;
+        } : null,
+      });
+      if (chosen === token) pane.replaceChildren(...shown.flat().filter(Boolean));
+      if (scroll && matchMedia('(max-width: 899px)').matches) pane.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    } catch (error) { if (chosen === token && error.name !== 'AbortError') pane.replaceChildren(h('div', { class: 'art-noview' }, icon('alert'), h('p', {}, tr(error.message)))); }
+  }
+  let reopenPath = '';
+  const reopen = (path) => { reopenPath = path; };
+  const newDocument = () => {
+    if (!options.canWrite()) return;
+    clearPreview(); options.select(null);
+    const here = dir ? `${dir}/` : '';
+    const name = h('input', { type: 'text', class: 'mono', maxlength: 200, placeholder: tr('nome del documento, es. note.md'), 'aria-label': tr('Nome del documento'), autocomplete: 'off', spellcheck: 'false' });
+    const editor = textEditor('', 'nuovo.md', { onCancel: idle, onSave: async (text) => {
+      const value = name.value.trim().replace(/^\/+|\/+$/g, '');
+      if (!value || value.split('/').some((part) => !part.trim() || part === '.' || part === '..')) { toast(tr('Dai un nome al documento.'), true); name.focus(); return false; }
+      if (items.some((item) => item.path === `${here}${value}`)) { toast(tr('Esiste già un file con questo nome: aprilo e modificalo.'), true); name.focus(); return false; }
+      reopen(`${here}${value}`); await options.persist(null, `${here}${value}`, text); await options.refresh(); toast(tr('Versione cifrata salvata.')); return true;
+    } });
+    pane.dataset.path = ''; pane.replaceChildren(h('header', { class: 'art-preview-head' }, h('span', { class: 'grow' }, h('b', {}, tr('Nuovo documento')), h('small', {}, raw(`${options.path}/${here}`)))), name, editor);
+    name.focus?.();
+  };
+  const status = h('span', { class: 'art-drop-status', role: 'status' });
+  const pick = h('input', { type: 'file', multiple: true, hidden: true, 'aria-label': tr('Scegli file da cifrare') });
+  const pickDir = h('input', { type: 'file', multiple: true, webkitdirectory: '', hidden: true, 'aria-label': tr('Scegli cartella da cifrare') });
+  async function send(list) {
+    if (controller || !list.length || !options.canWrite()) return;
+    controller = new AbortController(); const signal = controller.signal; let saved = 0; draw();
+    const here = dir ? `${dir}/` : '';
+    try {
+      for (const { file, path } of list) { encryptedFilePath(here + path); if (file.size > MAX_FILE_BYTES) throw Error('Ogni file può contenere al massimo 64 MiB.'); }
+      const previous = new Map(items.filter((item) => item.file).map((item) => [item.path, item.doc]));
+      for (const { file, path } of list) {
+        const target = here + path;
+        const result = await uploadEncryptedFile({ ...state(), api: options.api, folder: options.folder, file, path: target, previous: previous.get(target), signal, progress: (done, size) => { status.textContent = tr('{done} di {count} file · {name} {percent}%', { done: saved, count: list.length, name: target, percent: Math.round(done / (size || 1) * 100) }); } });
+        previous.set(target, result.doc); saved++;
+      }
+      toast(tr('File cifrati salvati: {count}.', { count: saved }));
+    } catch (error) { toast((error.name === 'AbortError' ? tr('Caricamento annullato.') : tr(error.message)) + ' ' + tr('File già completati: {count}.', { count: saved }), error.name !== 'AbortError'); }
+    finally { controller = null; status.textContent = ''; pick.value = ''; pickDir.value = ''; await options.refresh(); }
+  }
+  pick.addEventListener('change', () => send([...pick.files].map((file) => ({ file, path: file.name }))));
+  pickDir.addEventListener('change', () => send([...pickDir.files].map((file) => ({ file, path: file.webkitRelativePath || file.name }))));
+  const zip = async () => {
+    if (controller) return; controller = new AbortController(); const signal = controller.signal; const opened = [];
+    try {
+      for (const document of options.documents().filter((doc) => doc.file)) opened.push(await downloadEncryptedFile({ api: options.api, folder: options.folder, bundle: state().bundle, document, signal }));
+      if (!opened.length) throw Error('Nessun file caricato da scaricare.');
+      save(encryptedFilesZip(opened), `${options.path.split('/').at(-1) || 'artifacts'}.zip`);
+    } catch (error) { toast(tr(error.message), true); }
+    finally { for (const file of opened) file.bytes.fill(0); controller = null; }
+  };
+  function draw() {
+    const here = dir ? `${dir}/` : '', parts = dir ? dir.split('/') : [];
+    const { dirs, files } = encryptedEntries(items, dir);
+    const fresh = Boolean(dir) && !dirs.length && !files.length;
+    const rows = [
+      parts.length ? h('button', { type: 'button', class: 'art-file art-up', onclick: () => options.go(parts.slice(0, -1).join('/')) }, icon('back'), h('span', { class: 'grow' }, '..'), h('small', {}, tr('su'))) : null,
+      ...dirs.map((entry) => h('button', { type: 'button', class: 'art-file art-subdir', onclick: () => options.go(`${here}${entry.name}`) }, icon('folder'), h('span', { class: 'grow' }, raw(`${entry.name}/`)), h('small', {}, raw(fileCount(entry.count))))),
+      ...files.map((item) => h('button', { type: 'button', class: 'art-file', 'data-path': item.path, disabled: item.broken, onclick: () => open(item) },
+        icon(artifactKind(item.path) === 'image' ? 'eye' : item.file ? 'file' : 'edit'), h('span', { class: 'grow' }, raw(item.name)), h('small', {}, raw(fmtBytes(item.size))))),
+    ].filter(Boolean);
+    const list = h('div', { class: 'art-tree' }, rows.length && !fresh ? rows : [...(fresh ? rows.slice(0, 1) : []), h('p', { class: 'art-tree-empty' }, fresh ? tr('Cartella nuova: esiste quando ci carichi i primi file.') : tr('Ancora nessun file qui.'))]);
+    const where = h('code', { class: 'art-drop-where' }, raw(`${options.path}/${here}`));
+    const writable = options.canWrite();
+    const drop = h('div', { class: `art-drop${busy() ? ' busy' : ''}` },
+      h('span', { class: 'art-drop-ico' }, icon('upload')),
+      h('span', { class: 'grow art-drop-text' }, h('b', {}, tr('Trascina qui file o cartelle, oppure')), h('small', {}, tr('finiscono cifrati in'), ' ', where, ' ', status)),
+      btn('Carica qui', { icon: 'upload', cls: 'sm primary', disabled: busy(), onclick: () => pick.click() }),
+      btn('Una cartella', { icon: 'folder', cls: 'sm ghost', disabled: busy(), onclick: () => pickDir.click() }),
+      btn('Nuovo documento', { icon: 'edit', cls: 'sm ghost', disabled: busy(), onclick: newDocument }),
+      btn('Nuova cartella', { icon: 'plus', cls: 'sm ghost', disabled: busy(), onclick: () => {
+        if (drop.querySelector('.art-newdir')) return drop.querySelector('.art-newdir input').focus();
+        const name = h('input', { type: 'text', class: 'mono', maxlength: 120, placeholder: tr('nome della cartella'), autocomplete: 'off', spellcheck: 'false', 'aria-label': tr('Nome della nuova cartella') });
+        const form = h('form', { class: 'art-newdir' }, h('span', { class: 'mono faint' }, raw(`${options.path}/${here}`)), name, btn('Entra', { icon: 'next', cls: 'sm primary', type: 'submit' }), btn('Annulla', { cls: 'sm ghost', onclick: () => form.remove() }));
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          const value = name.value.trim().replace(/^\/+|\/+$/g, ''), segments = value.split('/').map((part) => part.trim());
+          if (!value || segments.some((part) => !part || part === '.' || part === '..' || /[\\\u0000-\u001f]/.test(part))) return toast(tr('Un nome di cartella: lettere, cifre, spazi, trattini; niente . o ..'), true);
+          options.go(`${here}${segments.join('/')}`);
+        });
+        drop.append(form); name.focus?.();
+      } }),
+      busy() ? btn('Annulla caricamento', { cls: 'sm ghost', onclick: () => controller?.abort() }) : null,
+      pick, pickDir);
+    const zone = h('div', { class: 'stack-sm art-zone' }, writable ? drop : h('p', { class: 'notice' }, icon('info'), tr('Hai accesso in lettura: puoi vedere e scaricare i file.')), h('div', { class: 'art-files' }, h('div', { class: 'stack-sm' }, list), pane));
+    let depth = 0;
+    zone.addEventListener('dragenter', (event) => { if (!writable || ![...(event.dataTransfer?.types || [])].includes('Files')) return; event.preventDefault(); depth += 1; zone.classList.add('over'); });
+    zone.addEventListener('dragover', (event) => { if ([...(event.dataTransfer?.types || [])].includes('Files')) event.preventDefault(); });
+    zone.addEventListener('dragleave', () => { depth = Math.max(0, depth - 1); if (!depth) zone.classList.remove('over'); });
+    zone.addEventListener('drop', async (event) => { event.preventDefault(); depth = 0; zone.classList.remove('over'); if (writable) send(await droppedFiles(event.dataTransfer)); });
+    const total = items.reduce((sum, item) => sum + item.size, 0);
+    element.replaceChildren(panel({ icon: 'file', title: tr('File cifrati'), hint: raw(tr('{count} · {size} · cifrati nel browser', { count: fileCount(items.length), size: fmtBytes(total) })),
+      actions: items.some((item) => item.file) ? btn('', { icon: 'download', cls: 'sm ghost', title: tr('Scarica tutto (ZIP)'), disabled: busy(), onclick: zip }) : null }, zone));
+    const again = reopenPath && files.find((item) => item.path === reopenPath); reopenPath = '';
+    if (again) open(again, 0, { scroll: false });
+    else if (!pane.querySelector('.art-preview-head, .art-editor')) {
+      const first = files.find((item) => /^index\.html?$/i.test(item.name)) || files.find((item) => /^readme/i.test(item.name)) || (dir ? null : files.find((item) => !item.broken));
+      if (first) open(first, 0, { scroll: false }); else idle();
+    } else for (const row of element.querySelectorAll('.art-file')) row.classList.toggle('on', row.dataset.path === pane.dataset.path);
+  }
+  return {
+    element, clear, clearPreview,
+    count: () => items.length,
+    async refresh() { await load(); draw(); },
+    setDir(next) { if (next === dir) return; dir = next; clearPreview(); draw(); },
+    updateAccess() {},
+  };
 }

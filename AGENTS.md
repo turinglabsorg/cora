@@ -2,7 +2,7 @@
 
 Always-on Discord agents with personalities, layered memory, routines and their own Docker desktops. See `README.md` for the architecture and `DESIGN.md` for the panel's design system (read it before any UI change).
 
-**UI rule:** every section or page with more than one view uses the `sectionWorkspace()` rail, one route per entry, as fixed in `DESIGN.md` → *Section rails are the rule*. No `.segmented` view switches or settings panels appended at the bottom of a page.
+**UI rule:** every section or page with more than one view uses the `sectionWorkspace()` rail, one route per entry, as fixed in `DESIGN.md` → *Section rails are the rule*. No `.segmented` view switches or settings panels appended at the bottom of a page. Artifact folders, including encrypted folders, retain their native horizontal artifact tabs for exact interface parity.
 
 ## External panel configuration MCP
 
@@ -321,3 +321,8 @@ An addressed colleague report reaches a busy agent through its existing inbox, o
 ## Encrypted file, grant and conversation paths
 
 `web/encrypted-crypto.js` holds browser cryptography, `encrypted-files.js` handles chunked binary/directory uploads and inert previews, and `encrypted-chat.js` handles encrypted conversation histories and the Agent Chat selector. All are explicit static assets in `src/web.js`. `src/encrypted-space.js` enforces native member permissions plus accepted encrypted key delivery, owner-only method/grant changes, atomic upload publication, independent file copies and temporary tool-free model requests. Keep ciphertext and private keys out of ordinary messages, traces, Brain and files. Lock/navigation revoke browser-owned work. Read-only access cannot persist or share new content. See `docs/encrypted-artifacts.md` for limits and trust boundaries. Integration coverage is `test/encrypted-files.test.js` plus existing encryption/enforcement regressions. Native credential-manager evidence is distinct from software authenticator fixtures.
+
+
+## Trusted-browser encrypted access
+
+`web/encrypted-memory.js` stores explicit opt-in remembered passwords or passkey-unlocked personal bundles in account/folder/wrapper-bound IndexedDB records, encrypted with a non-extractable local AES key. No remembered secret reaches the API. Remembered passkey access still needs an explicit Open folder action and fresh server permission/proof checks. Reload/navigation clear active keys but retain the remember choice; the square heading lock blocks and forgets, while logout clears only the account's records. Transactional generation markers prevent a concurrent tab save from recreating forgotten state. Storage failure must preserve normal password/passkey unlock. The native artifact shell/file browser is reused for encrypted folders; binary files never use the old editor-only layout.
