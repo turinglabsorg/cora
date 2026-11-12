@@ -23,7 +23,7 @@ that is not authorised for a connector does not even see its tool.
 | `linear.js` | Linear: a personal API key; 15 `linear_` actions (issues, comments, projects, cycles, labels, states) and `linear_graphql`. |
 | `asana.js` | Asana: a personal access token or an OAuth app; 17 `asana_` actions (tasks, subtasks, sections, comments, attachments, projects) and `asana_api`. |
 | `canva.js` | Canva: an OAuth integration authorised by the owner; 20 `canva_` actions (designs, exports, uploads, folders, brand templates, comments) and `canva_api`. |
-| `lovable.js` | Lovable: the official MCP server (`mcp.lovable.dev`), reached by Cora as an MCP client with the owner's OAuth token; 31 `lovable_` actions (projects, the project agent's messages, diffs and files, knowledge, skills, database, deploy, analytics, uploads) and `lovable_mcp`. |
+| `lovable.js` | Lovable: the official MCP server (`mcp.lovable.dev`), reached by Cora as an MCP client with the owner's OAuth token; 31 `lovable_` actions (projects, the project agent's messages, diffs and files, knowledge, skills, database, deploy, analytics, uploads) and `lovable_mcp`. The account's workspaces are kept on the record; the owner picks a default one in the card, which tools use when the agent names none (`settle`, `dress`, `prepare` hooks). |
 | `google.js` | Google: accounts connected through Cora's OAuth broker (`GoogleConnector`); 14 `gmail_` actions (send, reply, search, read, attachments, labels, archive, drafts) and `gmail_api`. |
 
 Google is `kind: "google"`: its card has its own flow in the panel (one card, several
@@ -63,6 +63,9 @@ the UI, so add the English for each new text there.
        async run(args, ctx) { /* returns the data the agent reads; fail("…") to refuse */ },
      }],
      context(ctx) { return { ...ctx, acme: client(ctx) }; },  // optional: a client every run shares
+     settle(checked, previous) { /* optional: what a (re)connection keeps, e.g. the owner's default workspace */ },
+     dress(definition, record) { /* optional: the agent-facing definition for this record, e.g. a default named */ },
+     prepare(tool, args, record) { /* optional: args before run, e.g. the default workspace or a name → id */ },
    };
    ```
 
@@ -82,6 +85,7 @@ card: {
   icon: "list",                 // an icon name from web/app.js
   description: "…",             // the catalogue card
   meta: "Acme · Progetti",      // the line under it
+  workspacePicker: true,        // optional: once connected, a «Workspace predefinito» select from record.workspaces
   intro: "…",                   // the first paragraph of the detail, also once connected
   modes: [{                     // one form per way to connect; two or more get a switch
     id: "key",                  // compared with the record's mode to open the right one
