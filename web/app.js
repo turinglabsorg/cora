@@ -1,3 +1,4 @@
+import { forgetUserPasswords } from "./encrypted-memory.js";
 import { encryptedChatLauncher } from "./encrypted-chat.js";
 import { encryptedSetting, encryptedSetup, encryptedFolderPanel } from "./encrypted-space.js";
 import { EN } from "./i18n.js";
@@ -173,6 +174,7 @@ const ICONS = {
   tool: '<path d="M14.7 6.3a4.2 4.2 0 0 0-5.6 5.3L3 17.7 6.3 21l6.1-6.1a4.2 4.2 0 0 0 5.3-5.6l-2.7 2.7-2.6-.6-.6-2.6z"/>',
   check: '<path d="m4.5 12.5 5 5 10-11"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  face: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3M8 8v2M16 8v2M12 8v5h-2M8 16c2 2 6 2 8 0"/>',
   alert: '<path d="M12 3.5 2 20.5h20z"/><path d="M12 10v4.5M12 17.5v.01"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/>',
   file: '<path d="M14 3H6.5a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V7.5z"/><path d="M14 3v4.5h4.5"/>',
@@ -788,6 +790,7 @@ function closeAccountMenu(refocus = false) {
 }
 
 async function logout() {
+  await forgetUserPasswords(S.data?.currentUser?.id).catch(() => {});
   await guard(api("/api/logout", { method: "POST" }));
   S.events?.close();
   S.events = null;
@@ -4147,7 +4150,7 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
-const encryptedUI = () => ({ h, btn, api, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
+const encryptedUI = () => ({ h, btn, api, icon, currentUser: S.data?.currentUser, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
 
 function agentSecurityPane(agent, data) {
   if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));
@@ -6793,7 +6796,7 @@ async function renderArtifactFolder(id, tab, dir = "") {
   const { folder } = data;
   if (data.encrypted) {
     try {
-      const workspace = await encryptedFolderPanel({ ...encryptedUI(), permissions: () => artifactPermissions(data), folderSettings: () => artifactPermissions(data, { settings: true }) }, folder, tab, S.data.agents, () => renderArtifactFolder(id, route()[2] || tab, dir));
+      const workspace = await encryptedFolderPanel({ ...encryptedUI(), people: data.people || [], permissions: () => artifactPermissions(data), folderSettings: () => artifactPermissions(data, { settings: true }) }, folder, tab, S.data.agents, () => renderArtifactFolder(id, route()[2] || tab, dir));
       if (location.hash !== view) return;
       shell([pageHead(raw(folder.title), "Spazio cifrato"), workspace], { title: folder.title, back: "#/artefatti", mode: "artifacts" });
     } catch (error) { slot.replaceChildren(empty("lock", error.message, btn("Riprova", { onclick: () => renderArtifactFolder(id, tab, dir) }))); }

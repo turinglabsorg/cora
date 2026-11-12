@@ -27,3 +27,11 @@ Lock, navigation and inactivity clear local drafts/previews and revoke pending b
 Temporary file analysis currently accepts editor documents and UTF-8 text files up to 1 MiB, bound to the exact selected version. Arbitrary binary storage does not imply arbitrary binary model analysis. Every approval discloses the worker/provider boundary and expires after ten minutes. The model provider's retention remains its own responsibility.
 
 The existing global requirement is forward-only: new plaintext writers are refused, historical plaintext remains available under its permissions with a warning, and no historical conversion/deletion is automatic. The actual policy switch is not changed by deployment. Native Chrome Password Manager coverage must be reported independently from real Bitwarden and synthetic authenticator tests.
+
+## Password managers and trusted browsers
+
+Enrollment and unlock forms supply an explicit folder-specific username to password managers. Passkey enrollment supplies a readable folder/method name with a unique suffix; existing credentials keep their original identity and derivation. Passwords are tried against the folder's current password wrappers locally. Passkeys remain explicit actions without a method dropdown.
+
+Remember password is optional and off by default. In secure contexts with IndexedDB, the browser stores the password encrypted with a non-extractable AES-GCM key in its own origin storage. Records are bound to the signed-in account, personal folder and the exact current wrapper. No remembered password or local key is sent to Cora. Reload can refill the password, but unlocking still requires an explicit action. Lock clears active document/key state; Forget password deletes the saved browser record, and Sign out clears that account's records. Missing/changed methods and tampered records are discarded. Storage denial leaves normal password/passkey unlock usable.
+
+The local key and ciphertext live on the same trusted device. This is convenience against repeat typing, not protection against a compromised browser, same-origin script or device user. Private/incognito browser retention is controlled by the browser. It is not cloud synchronization, and clearing browser storage removes it.

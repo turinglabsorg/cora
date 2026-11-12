@@ -55,6 +55,7 @@ const STATIC = {
   "/sw.js": ["sw.js", "text/javascript; charset=utf-8"],
   "/assets/send.js": ["send.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-space.js": ["encrypted-space.js", "text/javascript; charset=utf-8"],
+  "/assets/encrypted-memory.js": ["encrypted-memory.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-crypto.js": ["encrypted-crypto.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-files.js": ["encrypted-files.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-chat.js": ["encrypted-chat.js", "text/javascript; charset=utf-8"],

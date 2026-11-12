@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { test } from "node:test";
-import { protectBundle, unlockBundle } from "../web/encrypted-crypto.js";
+import { protectBundle, unlockBundle, credentialName } from "../web/encrypted-crypto.js";
 
 const folder = "synthetic-auto-passkey", bundle = { v: 1, folder, synthetic: "PRIVATE_SYNTHETIC_BUNDLE" };
 function authenticator(t, prf) {
@@ -10,7 +10,7 @@ function authenticator(t, prf) {
   const flags = () => { const data = new Uint8Array(37); data[32] = state.uv ? 5 : 1; return data; };
   const credentials = {
     async create({ publicKey }) {
-      state.createCalls++; if (state.pending) return new Promise(() => {});
+      state.user = publicKey.user; state.createCalls++; if (state.pending) return new Promise(() => {});
       if (state.cancelled) throw new DOMException("Cancelled", "NotAllowedError");
       assert.equal(publicKey.authenticatorSelection.userVerification, "required");
       state.seed = Uint8Array.from(publicKey.user.id);
@@ -85,4 +85,18 @@ test("explicit abort interrupts pending enrollment without waiting for the manag
   controller.abort(); await assert.rejects(pending, { name: "AbortError" });
   assert.equal(a.getCalls, 0); a.pending = false;
   assert.deepEqual(await unlockBundle(folder, await protectBundle(folder, bundle, "passkey")), bundle);
+});
+
+test("password-manager identity distinguishes folders with the same title", () => {
+  assert.notEqual(credentialName("folder-one", "Personal"), credentialName("folder-two", "Personal"));
+  assert.match(credentialName("folder-one", "Personal"), /Personal/);
+});
+test("new passkeys expose the folder and method name without changing secret derivation", async t => {
+  const a = authenticator(t, false);
+  const method = await protectBundle(folder, bundle, "passkey", "", "Phone", "auto", undefined, "Personal documents");
+  assert.match(a.user.name, /Personal documents/);
+  assert.match(a.user.name, /Phone/);
+  assert.match(a.user.name, new RegExp(method.salt.slice(0, 8)));
+  assert.equal(a.user.displayName, "Personal documents · Phone");
+  assert.deepEqual(await unlockBundle(folder, method), bundle);
 });

@@ -1,4 +1,5 @@
-import { createFolderKeys, protectBundle, unlockBundle, encryptDocument, decryptDocument, proveAccess, documentId } from "./encrypted-crypto.js";
+import { canRememberPassword, rememberPassword, recalledPassword, forgetPassword } from "./encrypted-memory.js";
+import { createFolderKeys, protectBundle, unlockBundle, encryptDocument, decryptDocument, proveAccess, documentId, credentialName } from "./encrypted-crypto.js";
 import { encryptedConversations } from "./encrypted-chat.js";
 import { encryptedFileControls, downloadEncryptedFile, uploadEncryptedFile } from "./encrypted-files.js";
 export { createFolderKeys, protectBundle, unlockBundle, encryptDocument, decryptDocument, proveAccess, to64, from64 } from "./encrypted-crypto.js";
@@ -23,10 +24,14 @@ export function encryptedSetting(ui, agent = null) {
   }).catch((error) => box.replaceChildren(h("p", { role: "alert" }, error.message), btn("Riprova", { onclick: () => box.replaceChildren(encryptedSetting(ui, agent)) })));
   return agent ? box : panel({ icon: "lock", title: "Spazio cifrato" }, box);
 }
+function credentialAccount(ui, folder) {
+  return ui.h("input", { class: "encrypted-credential-name", type: "text", name: "username", autocomplete: "username", readonly: true, value: credentialName(folder.id, folder.title || folder.path), "aria-label": ui.tr("Nome nel gestore password") });
+}
 export function encryptedSetup(ui, folder, reload) {
   const { h, btn, api, panel, tr } = ui;
-  const password = h("input", { type: "password", autocomplete: "new-password", minlength: 14, "aria-label": tr("Password della cartella"), placeholder: tr("Almeno 14 caratteri") });
-  const again = h("input", { type: "password", autocomplete: "new-password", "aria-label": tr("Ripeti la password"), placeholder: tr("Ripeti la password") });
+  const account = credentialAccount(ui, folder);
+  const password = h("input", { name: "password", type: "password", autocomplete: "new-password", minlength: 14, "aria-label": tr("Password della cartella"), placeholder: tr("Almeno 14 caratteri") });
+  const again = h("input", { name: "password-confirmation", type: "password", autocomplete: "new-password", "aria-label": tr("Ripeti la password"), placeholder: tr("Ripeti la password") });
   const status = h("p", { role: "status", class: "muted" });
   let setupController = null;
   const cancelSetup = h("button", { class: "btn ghost", hidden: true, onclick: () => setupController?.abort() }, "Annulla");
@@ -36,7 +41,7 @@ export function encryptedSetup(ui, folder, reload) {
     cancelSetup.disabled = false;
     try {
       if (kind === "password" && password.value !== again.value) throw Error("Le password non coincidono.");
-      const payload = await createFolderKeys(folder.id, kind, password.value, kind === "passkey" ? "Passkey" : "", derivation, setupController.signal);
+      const payload = await createFolderKeys(folder.id, kind, password.value, kind === "passkey" ? "Passkey" : "", derivation, setupController.signal, folder.title || folder.path);
       if (setupController.signal.aborted) throw new DOMException("", "AbortError");
       password.value = ""; again.value = "";
       await api(`/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: payload }); reload();
@@ -45,7 +50,7 @@ export function encryptedSetup(ui, folder, reload) {
   };
   const root = panel({ icon: "lock", title: "Spazio cifrato", hint: "Solo per cartelle vuote. Ogni cartella ha chiavi proprie; i file esistenti non vengono convertiti." },
     h("p", { class: "muted" }, "Se perdi tutti i metodi di sblocco, i documenti sono irrecuperabili."),
-    h("div", { class: "stack-sm" }, password, again, h("p", { class: "muted" }, "Il metodo viene scelto automaticamente. Se il gestore non supporta la protezione avanzata, la sicurezza dipende dalla protezione del gestore stesso. Le chiavi non vengono inviate a Cora."), h("div", { class: "row" }, btn("Proteggi con password", { cls: "primary", icon: "lock", onclick: () => create("password") }), btn("Crea passkey", { icon: "key", onclick: () => create("passkey") })), cancelSetup), status);
+    h("form", { class: "stack-sm encrypted-enrollment", onsubmit: event => { event.preventDefault(); create("password"); } }, account, password, again, h("p", { class: "muted" }, "Il metodo viene scelto automaticamente. Se il gestore non supporta la protezione avanzata, la sicurezza dipende dalla protezione del gestore stesso. Le chiavi non vengono inviate a Cora."), h("div", { class: "row encrypted-enrollment-actions" }, btn("Proteggi con password", { cls: "primary", icon: "lock", type: "submit" }), btn("Crea passkey", { icon: "key", onclick: () => create("passkey") })), cancelSetup), status);
   return root;
 }
 
@@ -56,10 +61,24 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   let data = await api(`/api/encrypted/folders/${folder.id}`), bundle = null, chosenMethod = null, selected = null, text = "";
   const status = h("p", { role: "status", class: "muted" });
   const personal = data.accessGrant ? (await api(`/api/encrypted/folders/${data.accessGrant.target}`)).folder : data.folder;
-  const methodSelect = h("select", { "aria-label": tr("Metodo di sblocco") }, personal.methods.map((m) => h("option", { value: m.id }, raw(m.label + " · " + m.kind))));
-  const password = h("input", { type: "password", autocomplete: "current-password", placeholder: tr("Password della cartella"), "aria-label": tr("Password della cartella") });
-  const changeMethod = () => { password.hidden = personal.methods.find((m) => m.id === methodSelect.value)?.kind !== "password"; password.value = ""; };
-  methodSelect.addEventListener("change", changeMethod); changeMethod();
+  const personalFolder = data.accessGrant ? (await api(`/api/artifacts/folders/${personal.id}`)).folder : folder;
+  const passwordMethods = personal.methods.filter(m => m.kind === "password"), passkeyMethods = personal.methods.filter(m => m.kind === "passkey");
+  const user = ui.currentUser?.id;
+  const password = h("input", { name: "password", type: "password", autocomplete: "current-password", placeholder: tr("Password della cartella"), "aria-label": tr("Password della cartella") });
+  const remember = h("input", { type: "checkbox", disabled: !canRememberPassword() || !user });
+  const rememberRow = h("label", { class: "encrypted-remember" }, remember, h("span", {}, "Ricorda password in questo browser"));
+  const rememberHint = h("small", { class: "muted" }, "Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci.");
+  let remembered = null;
+  try { remembered = await recalledPassword(user, personal.id, personal.methods); }
+  catch { status.textContent = tr("Memoria del browser non disponibile. Puoi sbloccare normalmente."); }
+  if (remembered) { password.value = remembered.password; remember.checked = true; }
+  remembered = null;
+  const forget = btn("Dimentica password", { cls: "sm ghost", onclick: () => run(async () => {
+    await forgetPassword(user, personal.id); password.value = ""; remember.checked = false; forget.hidden = true;
+    status.textContent = tr("Password dimenticata in questo browser.");
+  }) });
+  forget.hidden = !remember.checked;
+  remember.addEventListener("change", () => { if (!remember.checked) run(async () => { await forgetPassword(user, personal.id); forget.hidden = true; }); });
   const files = h("div", { class: "stack-sm" }), methods = h("div", { class: "stack-sm" }), requests = h("div", { class: "stack-sm" }), sharing = h("div", { class: "stack-sm" });
   const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; text = ""; password.value = ""; content.value = ""; title.value = ""; files.replaceChildren(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
   const run = async (fn) => { status.textContent = ""; try { await fn(); } catch (error) { status.textContent = tr(error.message); } };
@@ -76,13 +95,25 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     await refresh(); status.textContent = tr("Versione cifrata salvata.");
   };
   const cancelUnlock = h("button", { class: "btn ghost", hidden: true, onclick: () => unlockController?.abort() }, "Annulla sblocco");
-  const unlockButton = btn("Sblocca cartella", { cls: "primary", icon: "key", onclick: () => run(async () => {
+  const unlockWith = (method = null) => run(async () => {
     if (unlockController) return;
     unlockController = new AbortController(); const signal = unlockController.signal;
-    unlockButton.disabled = true; methodSelect.disabled = true; cancelUnlock.hidden = false;
+    for (const button of unlock.querySelectorAll("button")) button.disabled = true;
+    password.disabled = true; remember.disabled = true; cancelUnlock.hidden = false; cancelUnlock.disabled = false;
+    let candidate = password.value;
     try {
-      chosenMethod = personal.methods.find((m) => m.id === methodSelect.value);
-      let opened = await unlockBundle(personal.id, chosenMethod, password.value, signal); password.value = "";
+      let opened, chosenPassword;
+      if (method) { chosenMethod = method; opened = await unlockBundle(personal.id, method, "", signal); }
+      else {
+        if (!candidate && remember.checked) candidate = (await recalledPassword(user, personal.id, personal.methods))?.password || "";
+        let failure;
+        for (const item of passwordMethods) {
+          if (signal.aborted) throw Error("Sblocco annullato. Puoi riprovare.");
+          try { opened = await unlockBundle(personal.id, item, candidate, signal); chosenMethod = item; chosenPassword = item.id; break; }
+          catch (error) { failure = error; }
+        }
+        if (!opened) throw failure || Error("Sblocco non riuscito. Controlla password, passkey e cartella.");
+      }
       if (data.accessGrant) {
         const grant = data.accessGrant;
         opened = JSON.parse(await decryptDocument(opened, grant.envelope, `cora:${folder.id}:grant:${grant.id}:${grant.target}`));
@@ -96,10 +127,28 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
       if (signal.aborted) { bundle = null; throw Error("Sblocco annullato. Puoi riprovare."); }
       await refresh();
       if (signal.aborted) { lock(); throw Error("Sblocco annullato. Puoi riprovare."); }
-      unlock.hidden = true; locked.hidden = false;
-    } finally { unlockController = null; unlockButton.disabled = false; methodSelect.disabled = false; cancelUnlock.hidden = true; }
-  }) });
-  const unlock = panel({ icon: "lock", title: "Sblocca la cartella", hint: data.accessGrant ? "Sblocca la tua cartella personale per accettare e aprire l’accesso condiviso. I permessi restano separati dalle chiavi." : "La chiave viene aperta solo in questo browser. Non viene inviata al server." }, methodSelect, password, h("div", { class: "row" }, unlockButton, cancelUnlock));
+      if (!method) {
+        try {
+          if (remember.checked) await rememberPassword(user, personal.id, personal.methods.find(m => m.id === chosenPassword), candidate);
+          else await forgetPassword(user, personal.id);
+          forget.hidden = !remember.checked;
+        } catch { status.textContent = tr("Cartella sbloccata. Non è stato possibile ricordare la password in questo browser."); }
+      }
+      password.value = ""; unlock.hidden = true; locked.hidden = false;
+    } catch (error) { bundle = null; chosenMethod = null; throw error; }
+    finally {
+      candidate = ""; unlockController = null;
+      for (const button of unlock.querySelectorAll("button")) button.disabled = false;
+      password.disabled = false; remember.disabled = !canRememberPassword() || !user; cancelUnlock.hidden = true;
+    }
+  });
+  const unlockButton = btn("", { cls: "primary encrypted-unlock-submit", icon: "key", title: "Sblocca cartella", type: "submit" });
+  const passwordForm = h("form", { class: "stack-sm encrypted-password-form", hidden: !passwordMethods.length, onsubmit: event => { event.preventDefault(); unlockWith(); } },
+    credentialAccount(ui, personalFolder), h("div", { class: "encrypted-unlock-field" }, password, unlockButton), rememberRow, rememberHint);
+  const passkeys = h("div", { class: "stack-sm encrypted-passkey-actions" }, passkeyMethods.map(method => btn(passkeyMethods.length === 1 ? "Sblocca con passkey" : raw(tr("Sblocca con {name}", { name: method.label || "Passkey" })), { icon: "key", cls: passwordMethods.length ? "" : "primary", onclick: () => unlockWith(method) })));
+  const unlock = panel({ icon: "lock", title: "Sblocca la cartella", cls: "encrypted-unlock" + (!passwordMethods.length && passkeyMethods.length === 1 ? " encrypted-passkey-only" : ""), hint: data.accessGrant ? "Sblocca la tua cartella personale per accettare e aprire l’accesso condiviso. I permessi restano separati dalle chiavi." : "La chiave viene aperta solo in questo browser. Non viene inviata al server." },
+    !passwordMethods.length && passkeyMethods.length ? h("div", { class: "encrypted-passkey-mark", "aria-hidden": true }, ui.icon?.("face")) : null,
+    passwordForm, passkeys, h("div", { class: "row encrypted-unlock-options" }, forget, cancelUnlock));
   const locked = h("div", { class: "stack", hidden: true });
   const readDoc = async (doc) => {
     fileControls.clearPreview();
@@ -125,18 +174,18 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
         await api(`/api/encrypted/folders/${folder.id}/export`, { method: "POST", body: { document: selected.id, version: selected.version, proof: await proof(`export:${selected.id}:${selected.version}`) } });
         const url = URL.createObjectURL(new Blob([content.value], { type: "text/plain" })); const link = document.createElement("a"); link.href = url; link.download = (title.value || "document") + ".txt"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       }) }))));
-    const addPassword = h("input", { type: "password", autocomplete: "new-password", placeholder: tr("Nuova password · almeno 14 caratteri"), "aria-label": tr("Nuova password") });
+    const addPassword = h("input", { name: "password", type: "password", autocomplete: "new-password", placeholder: tr("Nuova password · almeno 14 caratteri"), "aria-label": tr("Nuova password") });
     const methodName = h("input", { type: "text", maxlength: 80, placeholder: tr("Nome, es. telefono personale"), "aria-label": tr("Nome del metodo") });
     const addMethod = async (kind, derivation = "auto") => {
       const label = methodName.value.trim() || (kind === "passkey" ? "Passkey" : "Password") + " " + (data.folder.methods.filter((m) => m.kind === kind).length + 1);
-      const item = await protectBundle(folder.id, bundle, kind, addPassword.value, label, derivation);
+      const item = await protectBundle(folder.id, bundle, kind, addPassword.value, label, derivation, undefined, folder.title || folder.path);
       addPassword.value = "";
       await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { add: item, proof: await proof("methods") } }); lock(); reload();
     };
     methods.replaceChildren(panel({ icon: "key", title: "Metodi di sblocco", hint: "Password e più passkey possono convivere. Aggiungi il metodo alternativo prima di rimuovere quello precedente." },
       h("div", { class: "rows" }, data.folder.methods.map((item) => h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(item.label), h("small", { class: "muted" }, raw(" · " + (item.kind === "passkey" ? tr(item.derivation === "handle-v1" ? "Protezione del gestore" : "Protezione avanzata") : item.kind)))), btn("Rimuovi", { cls: "ghost danger", disabled: data.folder.methods.length === 1, onclick: () => run(async () => {
         await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { remove: item.id, proof: await proof("methods") } }); lock(); reload();
-      }) })))), methodName, addPassword, h("p", { class: "muted" }, "Il metodo viene scelto automaticamente. Se il gestore non supporta la protezione avanzata, la sicurezza dipende dalla protezione del gestore stesso. Le chiavi non vengono inviate a Cora."), h("div", { class: "row" }, btn("Aggiungi password", { icon: "plus", onclick: () => run(() => addMethod("password")) }), btn("Aggiungi passkey", { icon: "key", onclick: () => run(() => addMethod("passkey")) }))));
+      }) })))), h("form", { class: "stack-sm encrypted-add-method", onsubmit: event => { event.preventDefault(); run(() => addMethod("password")); } }, credentialAccount(ui, folder), methodName, addPassword, h("p", { class: "muted" }, "Il metodo viene scelto automaticamente. Se il gestore non supporta la protezione avanzata, la sicurezza dipende dalla protezione del gestore stesso. Le chiavi non vengono inviate a Cora."), h("div", { class: "row" }, btn("Aggiungi password", { icon: "plus", type: "submit" }), btn("Aggiungi passkey", { icon: "key", onclick: () => run(() => addMethod("passkey")) })))));
     const agent = h("select", { "aria-label": tr("Agente") }, agents.map((a) => h("option", { value: a.id }, raw(a.name))));
     const operation = h("select", { "aria-label": tr("Operazione") }, h("option", { value: "read" }, "Lettura e analisi"), h("option", { value: "edit" }, "Proposta di modifica"));
     const instruction = h("textarea", { rows: 3, "aria-label": tr("Istruzione privata"), placeholder: tr("Istruzione privata per questa sessione…") });

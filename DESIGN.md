@@ -335,3 +335,9 @@ The Conversations rail uses the existing panels, status text, wrapping rows and 
 ## Automatic passkey setup
 
 Encrypted folders offer one Create passkey action and one Add passkey action. Detect the actual new credential’s PRF support automatically; never ask users to choose cryptographic tiers. Keep the password-manager trust boundary visible before enrollment, then identify the saved method as Advanced protection or Password manager protection. Existing methods retain their original derivation and never downgrade after an unlock error.
+
+## Compact encrypted-folder access
+
+Use the artifact breadcrumb, title and encrypted-folder badge in the native shell. The password form has a read-only, folder-specific password-manager username, a password field and a 40px icon-only key submit to its right. No method dropdown: try existing password wrappers locally; passkeys remain individually labelled actions. A sole passkey shows Unlock with passkey below a 104px outline recognition-face glyph with generous breathing room and the action at the bottom of the card; it does not promise a particular authenticator. Keep explicit accessible labels and keyboard form submission. Enrollment actions are each 100% width on phones.
+
+Remember password is an unchecked opt-in on secure, storage-capable browsers. State the trusted-device boundary next to it, and provide Forget password. It remembers only the current account and personal folder. Manual lock still clears document/private-key state and requires another explicit unlock. Logout removes remembered passwords for that account. Use existing colors, 10px form gaps, small lock actions and native panels. Audit rows separate a readable translated event/person from the outcome badge and date; raw ids do not replace names.
