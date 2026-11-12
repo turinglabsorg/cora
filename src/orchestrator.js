@@ -64,6 +64,11 @@ export function tagged(text, name) {
   return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(normalize(text));
 }
 
+function colleagueCalled(text, name) {
+  const pattern = new RegExp(`(^|[^\\p{L}\\p{N}_@.])@${escapeName(name)}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`, "iu");
+  return String(text || "").split(/(```[\s\S]*?```|`[^`\n]*`)/g).some((part, index) => index % 2 === 0 && pattern.test(part));
+}
+
 /**
  * A voice message cannot carry an "@": there the name said to someone is the call ("Ada, …", "ci sei,
  * Ada?"), within the words heard, not a name said in passing.
@@ -271,6 +276,31 @@ export class Orchestrator {
       if (!chosen.length) return !agent.sealed && !this.brain.knowledge?.sealedChannel(channelId, info?.parentId ?? undefined);
       return chosen.includes(channelId) || Boolean(info?.parentId && chosen.includes(info.parentId));
     });
+  }
+
+  async conversationAgents(channelId) {
+    let agents = this.agentsFor(channelId);
+    const state = this.states.get(channelId);
+    if (state?.mainBlind && state.heardFrom.size) agents = agents.filter((agent) => state.heardFrom.has(agent.id));
+    const transport = transportOf(channelId);
+    if (transport === "discord" && !this.dmAgentId(channelId) && this.bots) {
+      const access = await Promise.allSettled(agents.map((agent) => this.bots.canRead(agent, channelId)));
+      agents = agents.filter((agent, index) => access[index].status === "fulfilled" && access[index].value);
+    } else if (transport === "slack" && this.skBots) {
+      const info = this.channels.info(channelId);
+      const access = await Promise.allSettled(agents.map((agent) => !this.skBots.client(agent.id) || this.skBots.inChannel(agent.id, info.channelId)));
+      agents = agents.filter((agent, index) => access[index].status === "fulfilled" && access[index].value);
+    }
+    const focus = state?.focus || this.engagements[channelId];
+    return agents.map((agent) => ({ id: agent.id, engaged: Boolean(focus?.ids.includes(agent.id)) }));
+  }
+
+  async unreachableColleagues(agent, channelId, text) {
+    if (!["discord", "slack"].includes(transportOf(channelId))) return [];
+    const called = (this.brain.agentDirectory?.(agent) || []).filter((other) => other.id !== agent.id && colleagueCalled(text, other.name));
+    if (!called.length) return [];
+    const reachable = await this.conversationAgents(channelId);
+    return called.filter((other) => !reachable.some((entry) => entry.id === other.id));
   }
 
   isOwner(userId) {
@@ -1065,7 +1095,7 @@ export class Orchestrator {
     // Everywhere else an agent speaks only when called, in a channel as in a thread: named by a person (or still in
     // the conversation that person is having with it), called directly by another agent or bot. Nobody called,
     // nobody answers; colleague calls are reviewed for progress before another worker starts.
-    return { forced: pool.filter((agent) => (fromHuman ? last.addressed?.includes(agent.id) : (last.handoffResult ? last.addressed?.includes(agent.id) : tagged(last.content, agent.name)))), optional: [] };
+    return { forced: pool.filter((agent) => (fromHuman ? last.addressed?.includes(agent.id) : (last.handoffResult ? last.addressed?.includes(agent.id) : colleagueCalled(last.content, agent.name)))), optional: [] };
   }
 
   async round(state) {
@@ -1499,7 +1529,14 @@ export class Orchestrator {
     this.acknowledge(state, agentId, [...state.humanQueue.keys()]);
   }
 
+  async assertColleagueCalls(agent, channelId, text) {
+    const unavailable = await this.unreachableColleagues(agent, channelId, text);
+    if (unavailable.length) throw new Error(`Message not sent: ${unavailable.map((other) => other.name).join(", ")} cannot receive calls in this conversation. Do not wait for a reply or move the task to another thread. Check list_agents; ask the owner if their involvement is required.`);
+  }
+
   async postDirect(agent, current, target, text, options = {}) {
+    const destination = target || current.id;
+    if (destination === current.id) await this.assertColleagueCalls(agent, destination, text);
     if (options.endConversation) {
       if (target && target !== current.id) throw new Error("only the current conversation can be ended");
       this.endListening(current, agent.id);
@@ -1516,6 +1553,7 @@ export class Orchestrator {
       const own = this.bots?.client(agent.id);
       await (own || this.discord).fetchMessages(target, 1);
     }
+    await this.assertColleagueCalls(agent, target, text);
     return this.postAs(agent, state, text, undefined, undefined, { ...options, passive: true });
   }
 
@@ -1715,6 +1753,16 @@ export class Orchestrator {
     if (isWebRoom(state.id)) return this.postWeb(agent, state, text, file, traceId, { request, passive, delegationAuthorized, returnToAgentId });
     const chatId = telegramChatId(state.id);
     const slack = slackIds(state.id);
+    const unavailable = await this.unreachableColleagues(agent, state.id, text);
+    if (unavailable.length) {
+      const parts = String(text || "").split(/(```[\s\S]*?```|`[^`\n]*`)/g);
+      for (let index = 0; index < parts.length; index += 2) {
+        for (const other of unavailable) parts[index] = parts[index].replace(new RegExp(`(^|[^\\p{L}\\p{N}_@.])@${escapeName(other.name)}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`, "giu"), "$1" + other.name);
+      }
+      const names = unavailable.map((other) => other.name).join(", ");
+      const warning = this.store.settings.language === "en" ? `Cora: ${names} cannot receive calls in this conversation; no call was delivered to them.` : `Cora: ${names} non può ricevere richiami in questa conversazione; nessun richiamo gli è stato consegnato.`;
+      text = `${parts.join("")}\n\n${warning}`;
+    }
     // The ping (a mention of the owner) goes out with the message but stays out of the archive and the agents' transcripts.
     const body = chatId ? text || "" : slack ? await this.slackMentions(agent, state, text) : await this.discordMentions(agent, state, text);
     const content = ping && body ? `${ping} ${body}` : body;
@@ -1796,7 +1844,7 @@ export class Orchestrator {
   queueColleagues(state, item, authorized = false) {
     if (!state.focus?.ids.includes(item.agentId)) return;
     const called = this.agentsFor(state.id).filter((agent) => agent.id !== item.agentId
-      && (tagged(item.content, agent.name) || (item.handoffResult && item.returnToAgentId === agent.id && state.focus.ids.includes(agent.id))));
+      && (colleagueCalled(item.content, agent.name) || (item.handoffResult && item.returnToAgentId === agent.id && state.focus.ids.includes(agent.id))));
     if (!called.length) return;
     item.addressed = called.map((agent) => agent.id);
     item.delegated = authorized;

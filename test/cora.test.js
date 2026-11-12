@@ -3820,7 +3820,10 @@ describe("agents in Discord", () => {
     assert.equal(state.history.at(-1).passive, true, "a mention does not start another routine round");
     discord.state.privateTo.set(CHANNEL, "tagger-token");
     await app.orchestrator.postAs(agents[0], state, "@Receiver cannot read this channel.", undefined, undefined, { passive: true });
-    assert.equal(discord.state.botPosts.filter((post) => post.token === "tagger-token").at(-1).content, "@Receiver cannot read this channel.");
+    const refused = discord.state.botPosts.filter((post) => post.token === "tagger-token").at(-1).content;
+    assert.match(refused, /^Receiver cannot read this channel\./);
+    assert.match(refused, /Cora: Receiver/);
+    assert.doesNotMatch(refused, /<@|@Receiver/);
     discord.state.privateTo.delete(CHANNEL);
     const previousGoalMode = app.store.settings.goalMode;
     t.after(() => app.store.updateSettings({ goalMode: previousGoalMode }));
@@ -4286,6 +4289,129 @@ async function fakePhone() {
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
+
+
+describe("conversation colleague reachability", () => {
+  async function fixture(t) {
+    const threadId = "1599000000000000901";
+    discord.dispatch("THREAD_CREATE", { id: threadId, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Reachability" });
+    await sleep(120);
+    const specs = [
+      { name: "ReachSender", token: "reach-sender", userId: "600000000000000091", channelIds: [CHANNEL] },
+      { name: "ReachReceiver", token: "reach-receiver", userId: "600000000000000092", channelIds: [CHANNEL] },
+      { name: "ReachElsewhere", token: "reach-elsewhere", userId: "600000000000000093", channelIds: [OTHER_CHANNEL] },
+    ];
+    const agents = [];
+    t.after(async () => {
+      discord.state.privateTo.delete(threadId);
+      app.orchestrator.states.delete(threadId);
+      delete app.orchestrator.engagements[threadId];
+      for (const spec of specs) delete botTokens[`CORA_BOT_${spec.name.toUpperCase()}`];
+      for (const agent of agents) app.store.deleteAgent(agent.id);
+      await app.bots.sync();
+    });
+    for (const spec of specs) {
+      botTokens[`CORA_BOT_${spec.name.toUpperCase()}`] = spec.token;
+      discord.state.botUsers.set(spec.token, { id: spec.userId, username: spec.name });
+      const agent = app.store.createAgent({ name: spec.name, model: "ollama/test-model", tools: false, channelIds: spec.channelIds });
+      agents.push(agent);
+    }
+    await app.bots.sync();
+    for (const [index, agent] of agents.entries()) await waitFor(() => app.bots.client(agent.id)?.user?.id === specs[index].userId);
+    const state = app.orchestrator.state(threadId);
+    state.focus = { ids: [agents[0].id], turn: [agents[0].id], owner: true, at: Date.now() };
+    app.orchestrator.engagements[threadId] = state.focus;
+    return { threadId, state, sender: agents[0], receiver: agents[1], elsewhere: agents[2] };
+  }
+
+  test("prompts and the live directory separate engagement, channel assignment and real bot read access", async (t) => {
+    const { threadId, state, sender, receiver, elsewhere } = await fixture(t);
+    let directory = await app.brain.conversationDirectory(sender, threadId);
+    const entry = (id) => directory.find((item) => item.id === id).conversation;
+    assert.deepEqual(entry(receiver.id), { channelId: threadId, reachable: true, engaged: false }, "a reachable colleague may be summoned before joining the conversation");
+    assert.deepEqual(entry(elsewhere.id), { channelId: threadId, reachable: false, engaged: false });
+    state.focus.ids.push(receiver.id);
+    directory = await app.brain.conversationDirectory(sender, threadId);
+    assert.equal(entry(receiver.id).engaged, true);
+    discord.state.privateTo.set(threadId, "reach-sender");
+    directory = await app.brain.conversationDirectory(sender, threadId);
+    assert.equal(entry(receiver.id).reachable, false, "engagement cannot override Discord read permissions");
+    const prompt = app.brain.systemPrompt(sender, { place: "Discord", computer: false, colleagues: directory });
+    assert.doesNotMatch(prompt, /ReachReceiver|ReachElsewhere/);
+    assert.match(prompt, /Colleghi in questa conversazione/);
+    assert.match(prompt, /Non spostare il lavoro/);
+    const result = await executeTool({ name: "list_agents", args: {} }, { agent: sender, store: app.store, agentDirectory: () => app.brain.conversationDirectory(sender, threadId) });
+    assert.equal(JSON.parse(result.text).find((item) => item.id === receiver.id).conversation.reachable, false);
+    discord.state.privateTo.delete(threadId);
+    const refreshed = await executeTool({ name: "list_agents", args: {} }, { agent: sender, store: app.store, agentDirectory: () => app.brain.conversationDirectory(sender, threadId) });
+    assert.equal(JSON.parse(refreshed.text).find((item) => item.id === receiver.id).conversation.reachable, true, "the directory rechecks after a permission change");
+    app.store.updateAgent(receiver.id, { enabled: false });
+    assert.equal((await app.brain.conversationDirectory(sender, threadId)).find((item) => item.id === receiver.id).conversation.reachable, false);
+  });
+
+  test("say refuses an unreachable call before posting or disengaging and succeeds after access is restored", async (t) => {
+    const { threadId, state, sender, receiver } = await fixture(t);
+    discord.state.privateTo.set(threadId, "reach-sender");
+    const before = discord.state.botPosts.length;
+    const ctx = { agent: sender, store: app.store, channelId: threadId, canEndConversation: true,
+      postingChannels: [{ id: threadId, name: "Reachability" }],
+      say: (text, target, options) => app.orchestrator.postDirect(sender, state, target, text, options) };
+    const denied = await executeTool({ name: "say", args: { text: "@ReachReceiver please verify.", end_conversation: true } }, ctx);
+    assert.match(denied.text, /Message not sent: ReachReceiver/);
+    assert.equal(discord.state.botPosts.length, before);
+    assert.ok(state.focus.ids.includes(sender.id), "a refused farewell must not disengage its sender");
+    assert.equal(state.humanQueue.size, 0);
+    const code = "`@ReachReceiver` x@ReachReceiver.test @ReachReceiverExtra\n```\n@ReachReceiver\n```";
+    const literal = await executeTool({ name: "say", args: { text: code } }, ctx);
+    assert.match(literal.text, /Cora delivery receipt/);
+    assert.equal(discord.state.botPosts.at(-1).content, code, "code, email and longer names remain literal text");
+    assert.equal(state.humanQueue.size, 0, "literal examples do not queue a hidden colleague turn");
+    discord.state.privateTo.delete(threadId);
+    const sent = await executeTool({ name: "say", args: { text: "@ReachReceiver please verify." } }, ctx);
+    assert.match(sent.text, /mentions.*600000000000000092/);
+    assert.equal(state.history.at(-1).content, "@ReachReceiver please verify.");
+    assert.equal((await app.brain.conversationDirectory(sender, threadId)).find((item) => item.id === receiver.id).conversation.engaged, false, "delivery alone does not fabricate task acceptance");
+    await app.orchestrator.postAs(sender, state, "@ReachElsewhere please verify.", undefined, undefined, { passive: true });
+    assert.doesNotMatch(discord.state.botPosts.at(-1).content, /@ReachElsewhere|<@600000000000000093>/);
+    assert.match(discord.state.botPosts.at(-1).content, /Cora: ReachElsewhere/);
+    assert.match(state.history.at(-1).content, /Cora: ReachElsewhere/);
+  });
+
+  test("cross-thread say checks the destination and never uses the origin's successful access probe", async (t) => {
+    const { threadId, state, sender, receiver } = await fixture(t);
+    const target = "1599000000000000902";
+    discord.dispatch("THREAD_CREATE", { id: target, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Restricted destination" });
+    await sleep(120);
+    t.after(() => { discord.state.privateTo.delete(target); app.orchestrator.states.delete(target); });
+    assert.ok((await app.orchestrator.conversationAgents(threadId)).some((item) => item.id === receiver.id));
+    discord.state.privateTo.set(target, "reach-sender");
+    const before = discord.state.botPosts.length;
+    await assert.rejects(app.orchestrator.postDirect(sender, state, target, "@ReachReceiver please verify."), /Message not sent: ReachReceiver/);
+    assert.equal(discord.state.botPosts.length, before);
+    assert.equal(app.orchestrator.state(target).humanQueue.size, 0);
+    assert.equal(app.orchestrator.state(target).history.length, 0);
+  });
+
+  test("fresh and resumed model turns receive the current scoped roster rather than the old global roster", async (t) => {
+    const { threadId, state, sender } = await fixture(t);
+    discord.state.privateTo.set(threadId, "reach-sender");
+    const bodies = [];
+    replies.set(sender.name, (body) => { bodies.push(body); return { content: "Roster checked." }; });
+    const channel = app.orchestrator.turnChannel(threadId);
+    const result = await app.brain.loop({ agent: sender, channel, mode: "chat", user: "Check this conversation.", computer: false, task: false, maxSteps: 2, deadline: Date.now() + 15000, images: [] });
+    assert.equal(result.text, "Roster checked.");
+    assert.doesNotMatch(bodies.at(-1).messages[0].content, /ReachReceiver|ReachElsewhere/);
+    await app.brain.resumeTurn({ agent: sender, channel, trace: { kind: "chat", startedAt: new Date().toISOString(), prompt: "Check this conversation.", steps: [] } });
+    assert.match(bodies.at(-1).messages[0].content, /Colleghi in questa conversazione/);
+    assert.doesNotMatch(bodies.at(-1).messages[0].content, /ReachReceiver|ReachElsewhere/);
+    const canRead = app.bots.canRead;
+    t.after(() => { app.bots.canRead = canRead; });
+    app.bots.canRead = async (agent, id) => { if (agent.name === "ReachReceiver") throw new Error("transport unavailable"); return canRead.call(app.bots, agent, id); };
+    assert.ok(!(await app.orchestrator.conversationAgents(threadId)).some((item) => item.id !== sender.id && app.store.agent(item.id)?.name === "ReachReceiver"), "failed probes never advertise a reachable bot");
+    state.mainBlind = true; state.heardFrom.add(sender.id);
+    assert.deepEqual((await app.orchestrator.conversationAgents(threadId)).map((item) => item.id), [sender.id]);
+  });
+});
 
 test("agent directory exposes current registered contacts without credentials or foreign owners", async (t) => {
   const reader = app.store.createAgent({ name: "Directory reader", model: "ollama/test-model", tools: false, brainOwnerId: "directory-owner", channelIds: [CHANNEL] });

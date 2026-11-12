@@ -46,7 +46,7 @@ const AREAS = [
   { name: "usage", paths: [/^src\/(usage|provider-usage|subscription-usage|subscription-usage-worker)\.js$/], files: ["usage", "deepseek"], cora: ["subscription usage"] },
   { name: "subscriptions", paths: [/^src\/(subscriptions|subscription-browser|gemini-profile|gemini-quota)\.js$/, /^src\/subscription-terminal\.py$/, /^test\/subscription-fixtures\.js$/], files: ["connections", "model-catalogs"], cora: ["per-agent subscription", "subscription ", "manual subscription", "Claude OAuth", "device-code", "Gemini "] },
   { name: "mail", paths: [/^src\/(mail-domains|email-channel|desktop-mail|desktop-mailbox)\.m?js$/, /^src\/mail\//, /^test\/mail-fixtures\.js$/], files: ["mail-domains", "key-connectors"], cora: ["a managed default email domain", "agent mailboxes", "email channel"] },
-  { name: "discord", paths: [/^src\/(discord|agent-bots)\.js$/], files: ["units"], cora: ["agents in Discord", "Discord ", "listening without a dedicated bot", "shared listening", "direct messages"] },
+  { name: "discord", paths: [/^src\/(discord|agent-bots)\.js$/], files: ["units"], cora: ["conversation colleague reachability", "agent directory exposes", "agents in Discord", "Discord ", "listening without a dedicated bot", "shared listening", "direct messages"] },
   { name: "telegram", paths: [/^src\/(telegram|telegram-bots|telegram-setup)\.js$/], files: ["permissions"], cora: ["agents in Telegram", "Telegram "] },
   { name: "slack", paths: [/^src\/(slack|slack-bots|slack-apps)\.js$/], files: ["units"], cora: ["agents in Slack", "a fresh memory boundary", "the space owner connects Slack"] },
   { name: "process usage", paths: [/^src\/process-usage\.js$/], files: ["process-usage"] },
