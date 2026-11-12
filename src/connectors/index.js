@@ -2,13 +2,14 @@ import { asana } from "./asana.js";
 import { canva } from "./canva.js";
 import { google } from "./google.js";
 import { linear } from "./linear.js";
+import { lovable } from "./lovable.js";
 
 /**
  * Every connector, in the order the panel's catalogue shows them. The panel draws
  * each card and each form from what the module declares: to add a connector, write
  * its module next to these and list it here (see README.md).
  */
-export const CONNECTORS = [google, linear, asana, canva];
+export const CONNECTORS = [google, linear, asana, canva, lovable];
 
 /** The connectors that a person connects with a key or an app's credentials. */
 export const KEY_SERVICES = Object.fromEntries(CONNECTORS.filter((connector) => (connector.kind || "key") === "key")

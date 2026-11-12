@@ -5,6 +5,8 @@ import { mailWorld } from "./mail-fixtures.js";
 import { panelHarness } from "./panel.js";
 import { waitFor } from "./helpers.js";
 import { executeTool, summarizeArgs } from "../src/tools.js";
+import { fakeLovable, LOVABLE_TOKEN } from "./lovable-fixtures.js";
+import { LOVABLE_LOOPBACK } from "../src/connectors/lovable.js";
 
 const LINEAR_KEY = "lin_api_fixture_turinglabs";
 const ASANA_TOKEN = "asana_fixture_pat";
@@ -88,7 +90,7 @@ test("key connectors verify the service, keep values in the vault and authorise 
   const f = await connectorWorld(t);
   const initial = await f.call("/api/connectors");
   assert.equal(initial.status, 200);
-  assert.deepEqual(initial.data.keyConnectors.map((item) => [item.service, item.status]), [["linear", "new"], ["asana", "new"], ["canva", "new"]]);
+  assert.deepEqual(initial.data.keyConnectors.map((item) => [item.service, item.status]), [["linear", "new"], ["asana", "new"], ["canva", "new"], ["lovable", "new"]]);
 
   assert.equal((await f.call("/api/connectors/keys/linear", { method: "POST", body: { workspace: "turinglabs" } })).status, 400);
   const wrong = await f.call("/api/connectors/keys/linear", { method: "POST", body: { workspace: "otherspace", token: LINEAR_KEY } });
@@ -160,7 +162,7 @@ test("the connectors page shows Linear, Asana and Canva with their instructions 
   const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
   await node.readyConnectors;
   const cards = node.querySelectorAll(".connector-card");
-  assert.deepEqual(cards.map((card) => card.querySelector(".connector-card-name").textContent), ["Google", "Linear", "Asana", "Canva"]);
+  assert.deepEqual(cards.map((card) => card.querySelector(".connector-card-name").textContent), ["Google", "Linear", "Asana", "Canva", "Lovable"]);
   cards.find((card) => /Linear/.test(card.textContent)).click();
   assert.match(node.querySelector(".connector-detail").textContent, /workspace/);
   assert.match(node.querySelector(".connector-detail").textContent, /CORA_LINEAR_KEY/);
@@ -294,13 +296,13 @@ test("the panel draws the catalogue and the forms from src/connectors, so a new 
     return { ok: response.status < 400, status: response.status, json: async () => response.data };
   } });
   const served = (await f.call("/api/connectors")).data.catalog;
-  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tools[0]]), [["google", "google", "gmail_accounts"], ["linear", "key", "linear_teams"], ["asana", "key", "asana_workspaces"], ["canva", "key", "canva_me"]]);
+  assert.deepEqual(served.map((item) => [item.id, item.kind, item.tools[0]]), [["google", "google", "gmail_accounts"], ["linear", "key", "linear_teams"], ["asana", "key", "asana_workspaces"], ["canva", "key", "canva_me"], ["lovable", "key", "lovable_me"]]);
   assert.ok(served.find((item) => item.id === "asana").tools.length > 10, "the catalogue lists every Asana action");
   assert.equal(served.find((item) => item.id === "linear").secret, "CORA_LINEAR_KEY");
   const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
   await node.readyConnectors;
   const cards = node.querySelectorAll(".connector-card");
-  assert.deepEqual(cards.map((card) => card.querySelector(".connector-card-name").textContent), ["Google", "Linear", "Asana", "Canva", "Acme"]);
+  assert.deepEqual(cards.map((card) => card.querySelector(".connector-card-name").textContent), ["Google", "Linear", "Asana", "Canva", "Lovable", "Acme"]);
   cards.find((card) => /Acme/.test(card.textContent)).click();
   const detail = node.querySelector(".connector-detail");
   assert.match(detail.textContent, /Serve la chiave di Acme/);
@@ -445,4 +447,135 @@ test("Linear workspace connections isolate OAuth apps, grants, routing and token
   assert.equal(f.app.store.vaultSecret(second.secretName), null);
   assert.ok(second.appSecrets.every(name => !f.app.store.vaultSecret(name)));
   assert.doesNotMatch((await connectors.runTool(f.agent, "linear_comment", { issue: "TL-7", body: "Single workspace" })).text, /^error:/);
+});
+
+async function lovableWorld(t) {
+  const f = await connectorWorld(t);
+  const l = await fakeLovable(t);
+  f.app.keyConnectors.lovableApi = l.mcp;
+  f.app.keyConnectors.oauthUrls.lovable = { token: `${l.base}/oauth/token`, register: `${l.base}/oauth/register` };
+  return { ...f, l };
+}
+
+test("Lovable quick access registers Cora as a loopback client and connects from the pasted address", async (t) => {
+  const f = await lovableWorld(t);
+  const connectors = f.app.keyConnectors;
+  assert.equal((await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "quick" } })).status, 400, "nothing to paste yet");
+
+  const started = await f.call("/api/connectors/keys/lovable/authorize?mode=quick", { method: "POST" });
+  assert.equal(started.status, 200);
+  const url = new URL(started.data.url);
+  assert.equal(`${url.origin}${url.pathname}`, "https://lovable.dev/oauth/authorize");
+  assert.equal(url.searchParams.get("client_id"), "quick-client-fixture");
+  assert.equal(url.searchParams.get("redirect_uri"), LOVABLE_LOOPBACK);
+  assert.equal(url.searchParams.get("resource"), "https://mcp.lovable.dev");
+  assert.equal(url.searchParams.get("scope"), "offline projects:read projects:write workspaces:read workspaces:write");
+  assert.equal(url.searchParams.get("code_challenge_method"), "S256");
+  assert.deepEqual(f.l.registrations.map((item) => [item.redirect_uris, item.token_endpoint_auth_method]), [[[LOVABLE_LOOPBACK], "none"]]);
+  assert.ok(f.app.store.vaultSecret("CORA_LOVABLE_TOKEN_QUICK_CLIENT_ID"), "the public client id is kept for renewals");
+  assert.equal(connectors.record("lovable").status, "quick");
+  const state = url.searchParams.get("state");
+
+  const wrongPlace = await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "quick", returned: `https://evil.test/cora/lovable/callback?code=good-code&state=${state}` } });
+  assert.equal(wrongPlace.status, 400);
+  assert.match(wrongPlace.data.error, /127\.0\.0\.1/);
+  const stranger = await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "quick", returned: `${LOVABLE_LOOPBACK}?code=good-code&state=other` } });
+  assert.equal(stranger.status, 400);
+
+  const done = await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "quick", returned: `${LOVABLE_LOOPBACK}?code=good-code&state=${state}&iss=https%3A%2F%2Flovable.dev%2Foauth` } });
+  assert.equal(done.status, 200, JSON.stringify(done.data));
+  assert.deepEqual([done.data.record.status, done.data.record.mode, done.data.record.account, done.data.record.workspace], ["connected", "quick", "seb@example.test", "Dopamina"]);
+  assert.doesNotMatch(JSON.stringify(done.data), new RegExp(LOVABLE_TOKEN));
+  const exchange = f.l.tokens.at(-1).body;
+  assert.deepEqual([exchange.client_id, exchange.client_secret, exchange.redirect_uri, exchange.resource, Boolean(exchange.code_verifier)], ["quick-client-fixture", undefined, LOVABLE_LOOPBACK, "https://mcp.lovable.dev", true]);
+  const replay = await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "quick", returned: `${LOVABLE_LOOPBACK}?code=good-code&state=${state}` } });
+  assert.equal(replay.status, 400, "a pasted address works once");
+
+  assert.deepEqual(connectors.toolsFor(f.agent), [], "connected, but no agent is authorised");
+  await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { agents: [f.agent.id] } });
+  const tools = connectors.toolsFor(f.agent);
+  assert.equal(tools[0].name, "lovable_me");
+  assert.match(tools[0].description, /acting as seb@example\.test/);
+  assert.ok(tools.every((tool) => tool.name.startsWith("lovable_")));
+  const me = JSON.parse((await connectors.runTool(f.agent, "lovable_me")).text);
+  assert.equal(me.user.email, "seb@example.test");
+
+  const stored = JSON.parse(f.app.vault.value(f.app.store.vaultSecret("CORA_LOVABLE_TOKEN")).toString("utf8"));
+  await f.app.vault.put({ name: "CORA_LOVABLE_TOKEN", value: JSON.stringify({ ...stored, expires_at: Date.now() - 1000 }), agents: [f.agent.id], by: null, source: "connector" });
+  connectors.access.clear();
+  const workspaces = JSON.parse((await connectors.runTool(f.agent, "lovable_list_workspaces")).text);
+  assert.equal(workspaces.workspaces[0].id, "ws1");
+  assert.equal(f.l.state.refreshed, 1, "an expired token is renewed");
+  assert.deepEqual([f.l.tokens.at(-1).body.grant_type, f.l.tokens.at(-1).body.client_id, f.l.tokens.at(-1).body.client_secret], ["refresh_token", "quick-client-fixture", undefined], "the public client renews without a secret");
+
+  await f.call("/api/connectors/keys/lovable", { method: "DELETE" });
+  assert.equal(f.app.store.vaultSecret("CORA_LOVABLE_TOKEN"), null);
+  assert.equal(f.app.store.vaultSecret("CORA_LOVABLE_TOKEN_QUICK_CLIENT_ID"), null);
+  assert.deepEqual(connectors.toolsFor(f.agent), []);
+});
+
+test("Lovable through a workspace OAuth client returns to Cora's callback", async (t) => {
+  const f = await lovableWorld(t);
+  const connectors = f.app.keyConnectors;
+  const saved = await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "oauth", clientId: "app-client", clientSecret: "app-secret" } });
+  assert.equal(saved.status, 200);
+  assert.deepEqual([saved.data.record.status, saved.data.record.mode], ["app", "oauth"]);
+  assert.doesNotMatch(JSON.stringify(saved.data), /app-secret/);
+  const card = saved.data.catalog.find((item) => item.id === "lovable");
+  assert.deepEqual(card.modes.map((mode) => mode.id), ["quick", "key", "oauth"]);
+  assert.match(card.redirect, /\/connectors\/oauth\/lovable\/callback$/);
+  const started = await f.call("/api/connectors/keys/lovable/authorize", { method: "POST" });
+  const url = new URL(started.data.url);
+  assert.match(url.searchParams.get("redirect_uri"), /\/connectors\/oauth\/lovable\/callback$/);
+  assert.equal(url.searchParams.get("client_id"), "app-client");
+  const state = url.searchParams.get("state");
+  const record = await connectors.finishOAuth("lovable", { state, code: "good-code" }, state);
+  assert.deepEqual([record.status, record.mode], ["connected", "oauth"]);
+  const exchange = f.l.tokens.at(-1).body;
+  assert.deepEqual([exchange.client_id, exchange.client_secret, exchange.resource], ["app-client", "app-secret", "https://mcp.lovable.dev"]);
+  assert.equal(f.l.registrations.length, 0, "no dynamic registration with an app");
+});
+
+test("the Lovable card offers quick access with a new tab and a paste field", async (t) => {
+  const f = await lovableWorld(t);
+  const opened = [];
+  const panel = panelHarness({ hash: "#/settings/connettori/lovable", fetch: async (path, options = {}) => {
+    const response = await f.call(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  panel.run("window.open = (url, target) => { const tab = { location: { href: url }, opener: 1, close() {} }; globalThis.__opened = globalThis.__opened || []; globalThis.__opened.push(tab); return tab; }");
+  const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
+  await node.readyConnectors;
+  const detail = node.querySelector(".connector-detail");
+  assert.match(detail.textContent, /Accesso rapido/);
+  assert.match(detail.textContent, /App OAuth/);
+  assert.match(detail.textContent, /Chiave API/);
+  assert.match(detail.textContent, /127\.0\.0\.1/);
+  assert.doesNotMatch(detail.textContent, /\[object Object\]/);
+  node.querySelectorAll("button").find((button) => /Apri Lovable/.test(button.textContent)).click();
+  await waitFor(() => panel.run("(globalThis.__opened || []).length") === 1 && /lovable\.dev\/oauth\/authorize/.test(panel.run("globalThis.__opened[0].location.href")));
+  opened.push(panel.run("globalThis.__opened[0].location.href"));
+  const state = new URL(opened[0]).searchParams.get("state");
+  const field = node.querySelectorAll("input").find((input) => /Indirizzo della pagina di arrivo/.test(input.getAttribute("aria-label") || ""));
+  field.value = `${LOVABLE_LOOPBACK}?code=good-code&state=${state}`;
+  node.querySelectorAll("button").find((button) => /Completa il collegamento/.test(button.textContent)).click();
+  await waitFor(() => f.app.keyConnectors.record("lovable")?.status === "connected" && /CORA_LOVABLE_TOKEN/.test(node.textContent));
+  assert.match(node.textContent, /scollega e ricollega/);
+});
+
+test("Lovable connects with a workspace API key checked on the MCP server", async (t) => {
+  const f = await lovableWorld(t);
+  const connectors = f.app.keyConnectors;
+  assert.equal((await f.call("/api/connectors/keys/lovable", { method: "POST", body: {} })).status, 400, "a mode is required");
+  const wrong = await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "key", token: "lov_wrong" } });
+  assert.equal(wrong.status, 400);
+  assert.match(wrong.data.error, /non ha riconosciuto la chiave/);
+  assert.equal(f.app.store.vaultSecret("CORA_LOVABLE_TOKEN"), null, "a refused key never reaches the vault");
+  const done = await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "key", token: "lov_fixture_key" } });
+  assert.equal(done.status, 200, JSON.stringify(done.data));
+  assert.deepEqual([done.data.record.status, done.data.record.mode, done.data.record.account], ["connected", "key", "seb@example.test"]);
+  await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { agents: [f.agent.id] } });
+  const project = JSON.parse((await connectors.runTool(f.agent, "lovable_get_project", { project: "0b7c2d4e-1111-4222-8333-944455556666" })).text);
+  assert.equal(project.latest_commit_sha, "abc123");
+  assert.doesNotMatch(JSON.stringify(project), /lov_fixture_key/);
 });

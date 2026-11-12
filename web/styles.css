@@ -1132,7 +1132,7 @@ details.raw summary .ico { width: 15px; height: 15px; }
   .harness-row { padding: 10px 12px; }
   .harness-row:not(.on) .harness-hint { display: none; }
   .segmented { display: flex; width: 100%; }
-  .segmented button { flex: 1; }
+  .segmented button { flex: 1; min-width: 0; line-height: 1.25; padding-inline: 8px; white-space: normal; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .stat { padding: 12px; gap: 10px; }
   .stat .panel-ico { width: 32px; height: 32px; }

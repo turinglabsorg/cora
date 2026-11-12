@@ -583,7 +583,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!keyConnectors || !KEY_SERVICES[oauthStart[1]]) throw new HttpError(404, "Connettore non disponibile.");
       if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario collega i connettori.");
       if (actingUser) return send(res, 409, { error: "OAuth sign-in requires your browser session. Open the returned Cora page and authorise the app there.", browserAction: { path: `/#/settings/connettori/${oauthStart[1]}`, identity: user.id } });
-      const started = keyConnectors.beginOAuth(oauthStart[1], user, `${connectorOrigin(req)}/connectors/oauth/${oauthStart[1]}/callback`, url.searchParams.get("connection") || "");
+      const started = await keyConnectors.beginOAuth(oauthStart[1], user, `${connectorOrigin(req)}/connectors/oauth/${oauthStart[1]}/callback`, url.searchParams.get("connection") || "", url.searchParams.get("mode") || "");
       const name = config.insecureCookies ? "cora_oauth" : "__Host-cora_oauth";
       return send(res, 200, { url: started.url }, { "Set-Cookie": `${name}=${started.nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=900${config.insecureCookies ? "" : "; Secure"}` });
     }
