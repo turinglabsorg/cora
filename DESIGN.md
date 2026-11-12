@@ -331,3 +331,7 @@ The existing encrypted Files rail includes a file/folder upload panel above the 
 Encrypted folders retain the native Permissions and Settings rails. Folder permissions and encrypted key delivery remain visibly separate; pending recipients unlock their personal encrypted folder to accept a grant. Never imply that revocation retrieves exported copies or keys. Read-only access disables all persistence/upload controls.
 
 The Conversations rail uses the existing panels, status text, wrapping rows and inert, wrapping preformatted content. Keep the full temporary model-access boundary visible above the composer. Chat entry offers a folder selector and a clear path back to ordinary history. Lock clears previews, messages and drafts and revokes running requests. Conversation history is ciphertext; never render encrypted reasoning into the ordinary trace log.
+
+## Automatic passkey setup
+
+Encrypted folders offer one Create passkey action and one Add passkey action. Detect the actual new credential’s PRF support automatically; never ask users to choose cryptographic tiers. Keep the password-manager trust boundary visible before enrollment, then identify the saved method as Advanced protection or Password manager protection. Existing methods retain their original derivation and never downgrade after an unlock error.

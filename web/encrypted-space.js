@@ -30,13 +30,13 @@ export function encryptedSetup(ui, folder, reload) {
   const status = h("p", { role: "status", class: "muted" });
   let setupController = null;
   const cancelSetup = h("button", { class: "btn ghost", hidden: true, onclick: () => setupController?.abort() }, "Annulla");
-  const create = async (kind, derivation = "prf-v1") => {
+  const create = async (kind, derivation = "auto") => {
     setupController = new AbortController(); cancelSetup.hidden = false;
     for (const b of root.querySelectorAll("button")) b.disabled = true;
     cancelSetup.disabled = false;
     try {
       if (kind === "password" && password.value !== again.value) throw Error("Le password non coincidono.");
-      const payload = await createFolderKeys(folder.id, kind, password.value, kind === "passkey" ? (derivation === "handle-v1" ? "Passkey B" : "Passkey A · PRF") : "", derivation, setupController.signal);
+      const payload = await createFolderKeys(folder.id, kind, password.value, kind === "passkey" ? "Passkey" : "", derivation, setupController.signal);
       if (setupController.signal.aborted) throw new DOMException("", "AbortError");
       password.value = ""; again.value = "";
       await api(`/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: payload }); reload();
@@ -45,7 +45,7 @@ export function encryptedSetup(ui, folder, reload) {
   };
   const root = panel({ icon: "lock", title: "Spazio cifrato", hint: "Solo per cartelle vuote. Ogni cartella ha chiavi proprie; i file esistenti non vengono convertiti." },
     h("p", { class: "muted" }, "Se perdi tutti i metodi di sblocco, i documenti sono irrecuperabili."),
-    h("div", { class: "stack-sm" }, password, again, h("p", { class: "muted" }, "A usa PRF. B funziona senza PRF e dipende dalla protezione del gestore: non offre le stesse garanzie. Crea una nuova passkey dedicata; seme e chiavi non vengono inviati a Cora."), h("div", { class: "row" }, btn("Proteggi con password", { cls: "primary", icon: "lock", onclick: () => create("password") }), btn("Crea passkey A · PRF", { icon: "key", onclick: () => create("passkey") }), btn("Crea passkey B", { icon: "key", onclick: () => create("passkey", "handle-v1") })), cancelSetup), status);
+    h("div", { class: "stack-sm" }, password, again, h("p", { class: "muted" }, "Il metodo viene scelto automaticamente. Se il gestore non supporta la protezione avanzata, la sicurezza dipende dalla protezione del gestore stesso. Le chiavi non vengono inviate a Cora."), h("div", { class: "row" }, btn("Proteggi con password", { cls: "primary", icon: "lock", onclick: () => create("password") }), btn("Crea passkey", { icon: "key", onclick: () => create("passkey") })), cancelSetup), status);
   return root;
 }
 
@@ -127,16 +127,16 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
       }) }))));
     const addPassword = h("input", { type: "password", autocomplete: "new-password", placeholder: tr("Nuova password · almeno 14 caratteri"), "aria-label": tr("Nuova password") });
     const methodName = h("input", { type: "text", maxlength: 80, placeholder: tr("Nome, es. telefono personale"), "aria-label": tr("Nome del metodo") });
-    const addMethod = async (kind, derivation = "prf-v1") => {
+    const addMethod = async (kind, derivation = "auto") => {
       const label = methodName.value.trim() || (kind === "passkey" ? "Passkey" : "Password") + " " + (data.folder.methods.filter((m) => m.kind === kind).length + 1);
       const item = await protectBundle(folder.id, bundle, kind, addPassword.value, label, derivation);
       addPassword.value = "";
       await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { add: item, proof: await proof("methods") } }); lock(); reload();
     };
     methods.replaceChildren(panel({ icon: "key", title: "Metodi di sblocco", hint: "Password e più passkey possono convivere. Aggiungi il metodo alternativo prima di rimuovere quello precedente." },
-      h("div", { class: "rows" }, data.folder.methods.map((item) => h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(item.label), h("small", { class: "muted" }, raw(" · " + (item.kind === "passkey" ? (item.derivation === "handle-v1" ? "B" : "A · PRF") : item.kind)))), btn("Rimuovi", { cls: "ghost danger", disabled: data.folder.methods.length === 1, onclick: () => run(async () => {
+      h("div", { class: "rows" }, data.folder.methods.map((item) => h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(item.label), h("small", { class: "muted" }, raw(" · " + (item.kind === "passkey" ? tr(item.derivation === "handle-v1" ? "Protezione del gestore" : "Protezione avanzata") : item.kind)))), btn("Rimuovi", { cls: "ghost danger", disabled: data.folder.methods.length === 1, onclick: () => run(async () => {
         await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { remove: item.id, proof: await proof("methods") } }); lock(); reload();
-      }) })))), methodName, addPassword, h("p", { class: "muted" }, "A usa PRF. B funziona senza PRF e dipende dalla protezione del gestore: non offre le stesse garanzie. Crea una nuova passkey dedicata; seme e chiavi non vengono inviati a Cora."), h("div", { class: "row" }, btn("Aggiungi password", { icon: "plus", onclick: () => run(() => addMethod("password")) }), btn("Aggiungi passkey A · PRF", { icon: "key", onclick: () => run(() => addMethod("passkey")) }), btn("Aggiungi passkey B", { icon: "key", onclick: () => run(() => addMethod("passkey", "handle-v1")) }))));
+      }) })))), methodName, addPassword, h("p", { class: "muted" }, "Il metodo viene scelto automaticamente. Se il gestore non supporta la protezione avanzata, la sicurezza dipende dalla protezione del gestore stesso. Le chiavi non vengono inviate a Cora."), h("div", { class: "row" }, btn("Aggiungi password", { icon: "plus", onclick: () => run(() => addMethod("password")) }), btn("Aggiungi passkey", { icon: "key", onclick: () => run(() => addMethod("passkey")) }))));
     const agent = h("select", { "aria-label": tr("Agente") }, agents.map((a) => h("option", { value: a.id }, raw(a.name))));
     const operation = h("select", { "aria-label": tr("Operazione") }, h("option", { value: "read" }, "Lettura e analisi"), h("option", { value: "edit" }, "Proposta di modifica"));
     const instruction = h("textarea", { rows: 3, "aria-label": tr("Istruzione privata"), placeholder: tr("Istruzione privata per questa sessione…") });
