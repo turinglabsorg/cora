@@ -196,3 +196,110 @@ test("with owner memory, only the agent's owner exports it, procedures travel an
   const queue = await app.knowledge.forUser(bob.user).reviewQueue();
   assert.ok(queue.some((item) => /Rilascio settimanale/.test(JSON.stringify(item))), "the procedure waits for the importer's review");
 });
+
+test("Duplicate copies an agent inside the same space in one step: switched off, nothing scrubbed, no accounts", async (t) => {
+  const discord = await fakeDiscord();
+  const docker = fakeDocker();
+  const home = tempHome();
+  const seed = new Store(home);
+  seed.updateSettings({ guildIds: [GUILD], ownerIds: [OWNER] });
+  seed.close();
+  const app = startCora({ home, host: "127.0.0.1", port: 0, insecureCookies: true, adminPassword: "fixture-password", useResidentSubscriptions: false,
+    cloudUrl: "https://usecora.test", cloudKey: keys.publicKey, cloudSpace: "gamma", sessionKey: "fixture-duplicate", telegramToken: "", ollamaKey: "test-ollama-key", orcaKey: "",
+    claudeBin: "/missing/claude", codexBin: "/missing/codex", hermesBin: "/missing/hermes", grokBin: "/missing/grok", museBin: "/missing/muse",
+    botTokenFor: () => "", docker: docker.path, startBoxes: false, schedulerTickMs: 3600000, ownerInstructions: "/missing/instructions", sshAuthorizedKeys: "/missing/keys",
+    discordToken: MAIN_TOKEN, discordApi: discord.url });
+  await app.ready;
+  t.after(async () => { await app.stop(); await discord.close(); });
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const login = async (who) => (await fetch(`${base}/auth/cloud?${new URLSearchParams({ pass: signPass(keys.privateKey, { aud: "gamma.usecora.test", emailVerified: true, ...who }) })}`, { redirect: "manual" })).headers.get("set-cookie")?.split(";")[0] || "";
+  const call = async (cookie, path, { method = "GET", body } = {}) => {
+    const response = await fetch(`${base}${path}`, { method, headers: { Cookie: cookie, "X-Cora": "1", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, data: await response.json().catch(() => null) };
+  };
+  const owner = await login({ sub: "ac_seb", role: "owner", name: "Sebastiano Rossi", email: "sebastiano@dopamina.test" });
+  await call(owner, "/api/access", { method: "PUT", body: { domains: ["dopamina.test"] } });
+  const member = await login({ sub: "ac_marta", role: "member", name: "Marta Bianchi", email: "marta@dopamina.test" });
+
+  const radix = (await call(owner, "/api/agents", { method: "POST", body: {
+    name: "Radix", model: "ollama/test-model", chattiness: 0.3, tools: true, think: true, effort: "high", color: "#336699", gender: "male",
+    personality: "Custode della memoria. Rispondi a Sebastiano (sebastiano@dopamina.test).", character: { enabled: true, scores: { prudenza: 17 } }, channelIds: [CHANNEL],
+  } })).data;
+  app.store.setCore(radix.id, "Il proprietario è Sebastiano (sebastiano@dopamina.test). Verifica healthz dopo ogni deploy.");
+  app.store.setAvatarImage(radix.id, encodePng(512, 512, Buffer.alloc(512 * 512 * 4, 120)));
+  app.store.addMemory(radix.id, "Seb vuole prove con screenshot nel thread.", "manual", { pinned: true });
+  app.store.addMemory(radix.id, "Per i deploy si usa un worktree separato.");
+  app.store.createRoutine(radix.id, { name: "Giro mattutino", schedule: "0 9 * * 1-5", channelId: CHANNEL, prompt: "Scrivi a sebastiano@dopamina.test il riepilogo." });
+  app.store.createRoutine(radix.id, { kind: "reminder", name: "Ricordo passato", runAt: "2020-01-01T09:00:00+01:00", channelId: CHANNEL, prompt: "vecchio" });
+  app.store.createRoutine(radix.id, { kind: "reminder", name: "Ricordo futuro", runAt: "2099-01-01T09:00:00+01:00", channelId: CHANNEL, prompt: "Ricontrolla il rilascio." });
+  const original = JSON.stringify(app.store.agent(radix.id));
+  const originalRoutines = JSON.stringify(app.store.routines(radix.id));
+  const agentsBefore = app.store.agents().length;
+
+  assert.equal((await call(member, `/api/agents/${radix.id}/duplicate`)).status, 403, "only who may export the agent duplicates it");
+  assert.equal((await call(member, `/api/agents/${radix.id}/duplicate`, { method: "POST", body: {} })).status, 403);
+  const view = await call(owner, `/api/agents/${radix.id}/duplicate`);
+  assert.equal(view.status, 200);
+  assert.deepEqual(view.data, { suggestion: "Radix 2", routines: 2, memories: 2, sharedMemory: false, core: true, avatar: true, externalBrain: false });
+  assert.equal((await call(owner, `/api/agents/${radix.id}/duplicate`, { method: "POST", body: { name: "radix" } })).status, 409, "a taken name is refused");
+  assert.equal(app.store.agents().length, agentsBefore, "a refusal creates nothing");
+
+  const done = await call(owner, `/api/agents/${radix.id}/duplicate`, { method: "POST", body: {} });
+  assert.equal(done.status, 201, JSON.stringify(done.data));
+  assert.deepEqual(done.data.created, { routines: 2, memories: 2, sharedMemory: false });
+  const copy = app.store.agent(done.data.agent.id);
+  assert.notEqual(copy.id, radix.id);
+  assert.equal(copy.name, "Radix 2");
+  assert.equal(copy.enabled, false, "the copy starts switched off");
+  assert.equal(copy.subscriptionId, "");
+  assert.equal(copy.credentialId, "");
+  for (const key of ["personality", "core", "color", "model", "chattiness", "tools", "think", "effort", "gender", "brainOwnerId", "sealed", "avatarUpload"]) assert.deepEqual(copy[key], app.store.agent(radix.id)[key], key);
+  assert.deepEqual(copy.character, app.store.agent(radix.id).character);
+  assert.deepEqual(copy.channelIds, [CHANNEL]);
+  assert.match(copy.core, /sebastiano@dopamina\.test/, "inside the space nothing is scrubbed");
+  assert.deepEqual(app.store.avatar(copy.id), app.store.avatar(radix.id));
+  assert.deepEqual(app.store.routines(copy.id).map((routine) => [routine.name, routine.channelId, routine.enabled]), [["Giro mattutino", CHANNEL, false], ["Ricordo futuro", CHANNEL, false]]);
+  assert.match(app.store.routines(copy.id)[0].prompt, /sebastiano@dopamina\.test/);
+  assert.deepEqual(app.store.memories(copy.id).map((memory) => [memory.text, memory.pinned, memory.source]), [["Seb vuole prove con screenshot nel thread.", true, "duplicate"], ["Per i deploy si usa un worktree separato.", false, "duplicate"]]);
+  assert.equal(JSON.stringify(app.store.agent(radix.id)), original, "the original is unchanged");
+  assert.equal(JSON.stringify(app.store.routines(radix.id)), originalRoutines);
+  assert.equal(app.store.memories(radix.id).length, 2);
+  assert.ok(app.store.recentActivity(20).some((entry) => /duplicato Radix in Radix 2: 2 routine, 2 ricordi/.test(entry.text)));
+
+  const named = await call(owner, `/api/agents/${radix.id}/duplicate`, { method: "POST", body: { name: "Radix Codex" } });
+  assert.equal(named.status, 201);
+  assert.equal(named.data.agent.name, "Radix Codex");
+  assert.equal((await call(owner, `/api/agents/${radix.id}/duplicate`)).data.suggestion, "Radix 3");
+});
+
+test("with owner memory a duplicate shares the owner's memory instead of copying it; a sealed agent's copy gets its own", async (t) => {
+  const world = await knowledgeWorld();
+  t.after(() => world.close());
+  const { app, alice, bob, admin, request } = world;
+  const vera = (await request(alice, "/api/agents", { method: "POST", body: { name: "Vera", model: "ollama/test-model", personality: "Analista scettica." } })).data;
+  app.store.addMemory(app.knowledge.memoryKey(vera), "Prima di affermare qualcosa si verifica e si cita la fonte.");
+  assert.equal((await request(bob, `/api/agents/${vera.id}/duplicate`, { method: "POST", body: {} })).status, 403, "another owner does not copy someone else's agent");
+  assert.equal((await request(admin, `/api/agents/${vera.id}/duplicate`, { method: "POST", body: {} })).status, 403, "neither does the administrator of the space");
+  const view = await request(alice, `/api/agents/${vera.id}/duplicate`);
+  assert.equal(view.data.sharedMemory, true);
+  const done = await request(alice, `/api/agents/${vera.id}/duplicate`, { method: "POST", body: { name: "Vera Due" } });
+  assert.equal(done.status, 201, JSON.stringify(done.data));
+  assert.deepEqual(done.data.created, { routines: 0, memories: 0, sharedMemory: true });
+  const copy = app.store.agent(done.data.agent.id);
+  assert.equal(copy.brainOwnerId, alice.user.id, "the copy stays with the same owner");
+  assert.equal(app.store.memories(copy.id).length, 0);
+  const seen = app.knowledge.ownerKeys(copy.id).flatMap((key) => app.store.memories(key)).map((memory) => memory.text);
+  assert.ok(seen.includes("Prima di affermare qualcosa si verifica e si cita la fonte."), "the copy reads the owner's memory it shares");
+  assert.equal((await request(alice, `/api/agents/${copy.id}/export`)).status, 200, "its owner manages the copy");
+  assert.equal((await request(bob, `/api/agents/${copy.id}/export`)).status, 403);
+
+  app.store.updateAgent(vera.id, { sealed: true });
+  const sealed = app.store.agent(vera.id);
+  app.store.addMemory(app.knowledge.memoryKey(sealed), "Solo mia: la lista delle fonti preferite.");
+  const sealedCopy = await request(alice, `/api/agents/${vera.id}/duplicate`, { method: "POST", body: { name: "Vera Sigillata" } });
+  assert.equal(sealedCopy.status, 201, JSON.stringify(sealedCopy.data));
+  assert.deepEqual(sealedCopy.data.created, { routines: 0, memories: 1, sharedMemory: false });
+  const copied = app.store.agent(sealedCopy.data.agent.id);
+  assert.equal(copied.sealed, true, "a sealed agent's copy is sealed too");
+  assert.deepEqual(app.store.memories(copied.id).map((memory) => memory.text), ["Solo mia: la lista delle fonti preferite."]);
+});
