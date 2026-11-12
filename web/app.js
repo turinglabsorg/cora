@@ -3393,6 +3393,7 @@ function connectorsPane() {
     if (!record || record.status === "new") return { connected: false, status: "Da collegare" };
     if (record.status === "connected") return { connected: true, status: record.workspace || "Collegato" };
     if (record.status === "app") return { connected: false, status: "App pronta" };
+    if (record.status === "quick") return { connected: false, status: "Da collegare" };
     return { connected: false, status: "Non serve" };
   };
   const drawCatalog = () => {
@@ -3473,10 +3474,10 @@ function connectorsPane() {
       h("p", {}, tr(service.intro)),
       setRows(
         setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, ` · ${record.account}`) : null), tag("Collegato", "ok")),
-        record.mode === "oauth"
-          ? setRow("Autorizzazione", h("span", {}, "Token OAuth nella cassaforte come ", h("code", {}, raw(record.secretName || service.secret)), ". Cora lo rinnova da solo quando scade."), authorizeButton(service, "Autorizza di nuovo", record))
+        record.mode === "oauth" || record.mode === "quick"
+          ? setRow("Autorizzazione", h("span", {}, "Token OAuth nella cassaforte come ", h("code", {}, raw(record.secretName || service.secret)), ". Cora lo rinnova da solo quando scade.", record.mode === "quick" ? h("small", { class: "muted" }, " ", tr("Per autorizzare di nuovo con l'accesso rapido, scollega e ricollega.")) : null), record.mode === "quick" ? null : authorizeButton(service, "Autorizza di nuovo", record))
           : setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, raw(record.secretName || service.secret)), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
-        service.writes ? setRow("Chi firma", tr(record.mode === "oauth" ? service.writes.oauth : service.writes.key)) : null,
+        service.writes ? setRow("Chi firma", tr(record.mode === "oauth" || record.mode === "quick" ? service.writes.oauth : service.writes.key)) : null,
         service.tools?.length ? setRow("Strumenti degli agenti", h("span", { class: "connector-tools" }, "Gli agenti autorizzati hanno uno strumento di Cora per ogni azione, e Cora aggiunge la chiave a ogni chiamata: ", ...service.tools.flatMap((name, index) => [index ? ", " : "", h("code", {}, name)]), ".")) : null,
         setRow("Agenti autorizzati", "Solo gli agenti spuntati possono usare questo connettore.", agentChoices(record, service.id), { stack: true }),
         setRow("Scollega", "Toglie la chiave dalla cassaforte e l'accesso agli agenti.", disconnect)),
@@ -3484,11 +3485,19 @@ function connectorsPane() {
   };
 
   // A registered app is authorised with the owner's account on the service, which then sends them back to Cora.
-  const authorizeButton = (service, label, record = null) => btn(label, { icon: "link", cls: "primary", disabled: !data.canManage, onclick: async (event) => {
-    const button = event.currentTarget; button.disabled = true;
-    try { const result = await api(connectorPath(service.id, record, "/authorize"), { method: "POST" }); window.location.assign(result.url); }
-    catch (error) { toast(error.message, true); button.disabled = !data.canManage; }
-  } });
+  // Quick access opens the service in a new tab instead: the owner comes back here to paste the address it ends on.
+  const authorizeButton = (service, label, record = null, { mode = "" } = {}) => { const button = btn(label, { icon: mode ? "external" : "link", cls: "primary", disabled: !data.canManage, onclick: async () => {
+    button.disabled = true;
+    const tab = mode ? window.open("about:blank", "_blank") : null;
+    try {
+      const path = connectorPath(service.id, record, "/authorize");
+      const result = await api(mode ? `${path}${path.includes("?") ? "&" : "?"}mode=${encodeURIComponent(mode)}` : path, { method: "POST" });
+      if (tab) { tab.opener = null; tab.location.href = result.url; button.disabled = !data.canManage; }
+      else if (mode) { window.open(result.url, "_blank", "noopener"); button.disabled = !data.canManage; }
+      else window.location.assign(result.url);
+    }
+    catch (error) { tab?.close(); toast(error.message, true); button.disabled = !data.canManage; }
+  } }); return button; };
   const redirectValue = (service) => service.redirect
     ? h("span", { class: "connector-redirect-value" }, h("code", {}, raw(service.redirect)), btn("", { icon: "copy", cls: "sm ghost", title: "Copia indirizzo", onclick: async () => {
       try { await navigator.clipboard.writeText(service.redirect); toast("Copiato"); }
@@ -3547,9 +3556,10 @@ function connectorsPane() {
       if (row.steps && !editing) parts.push(steps(...row.steps.map((parts) => stepParts(parts, service))));
       if (row.field) { const node = input(row.field); parts.push(row.submit ? h("div", { class: "input-row token" }, node, submit(row.submit, send)) : node); }
       if (row.fields) parts.push(h("div", { class: "stack-sm" }, row.fields.map((spec) => field(spec.title, input(spec))), row.submit ? h("div", { class: "row end" }, submit(row.submit, send)) : null));
+      if (row.authorize) parts.push(h("div", { class: "row connector-actions" }, authorizeButton(service, row.authorize, record, { mode: mode.id })));
       if (row.note) parts.push(h("p", { class: "muted" }, row.note));
       const control = parts.length === 1 && !row.steps ? parts[0] : h("div", { class: "stack-sm" }, parts);
-      return setRow(row.title, row.hint || null, control, { stack: Boolean(row.steps || row.field || row.fields) });
+      return setRow(row.title, row.hint || null, control, { stack: Boolean(row.steps || row.field || row.fields || row.authorize) });
     });
     const appReady = Boolean(mode.ready && record?.status === mode.ready);
     if (service.oauth && mode.ready) {

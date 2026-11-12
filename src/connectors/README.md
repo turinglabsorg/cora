@@ -8,7 +8,7 @@ The person pastes what the service gives them. Cora checks it against the servic
 seals it in the vault and lets the owner choose which agents may use it. Those agents
 then get **one Cora tool per action** on the Cora MCP server (`asana_create_task`,
 `linear_comment`, `canva_export_design`, `gmail_search`, …), plus one generic call per service
-(`asana_api`, `linear_graphql`, `canva_api`, `gmail_api`) for what no action covers.
+(`asana_api`, `linear_graphql`, `canva_api`, `gmail_api`, `lovable_mcp`) for what no action covers.
 Cora adds the key to every call itself. The agent never sees the key, does not need
 `curl` or `secret_import`, and does not have to work out the API on its own. An agent
 that is not authorised for a connector does not even see its tool.
@@ -23,6 +23,7 @@ that is not authorised for a connector does not even see its tool.
 | `linear.js` | Linear: a personal API key; 15 `linear_` actions (issues, comments, projects, cycles, labels, states) and `linear_graphql`. |
 | `asana.js` | Asana: a personal access token or an OAuth app; 17 `asana_` actions (tasks, subtasks, sections, comments, attachments, projects) and `asana_api`. |
 | `canva.js` | Canva: an OAuth integration authorised by the owner; 20 `canva_` actions (designs, exports, uploads, folders, brand templates, comments) and `canva_api`. |
+| `lovable.js` | Lovable: the official MCP server (`mcp.lovable.dev`), reached by Cora as an MCP client with the owner's OAuth token; 31 `lovable_` actions (projects, the project agent's messages, diffs and files, knowledge, skills, database, deploy, analytics, uploads) and `lovable_mcp`. |
 | `google.js` | Google: accounts connected through Cora's OAuth broker (`GoogleConnector`); 14 `gmail_` actions (send, reply, search, read, attachments, labels, archive, drafts) and `gmail_api`. |
 
 Google is `kind: "google"`: its card has its own flow in the panel (one card, several
@@ -160,3 +161,31 @@ oauth: {
 
 Tests point `authorize` and `token` at a fake service with
 `keyConnectors.oauthUrls[<id>] = { token: "http://127.0.0.1:…/token" }`.
+
+### Quick access through a loopback client
+
+Some services (Lovable) register OAuth clients on their own only for loopback redirect
+URLs. A module that declares `oauth.register` and `oauth.loopback` gets a second way in,
+mode `quick`, on any plan of the service:
+
+1. «Apri Lovable» calls `POST /api/connectors/keys/<id>/authorize?mode=quick`: Cora
+   registers itself once as a public client (`token_endpoint_auth_method: none`), keeps
+   its client ID in the vault as `<secret>_QUICK_CLIENT_ID`, and answers the consent page,
+   which the panel opens in a new tab.
+2. After consent the service sends that tab to the loopback address, which does not
+   load. The owner pastes the address into the card; `POST /api/connectors/keys/<id>`
+   with `{ mode: "quick", returned }` checks its origin, path, state and the person who
+   started it, then trades the code (PKCE, no secret) like the callback would.
+3. Renewals send only the client ID. Disconnecting removes the token and the client ID.
+
+`oauth.tokenParams` adds fields to every token call (Lovable wants `resource`).
+
+### Services that are MCP servers
+
+When a service offers only an MCP server (Lovable), the module is the MCP client:
+`client()` in `lovable.js` opens a Streamable HTTP session (`initialize`, then
+`notifications/initialized`), keeps the `Mcp-Session-Id` per endpoint and token, reopens
+it once on a 404, and reads the JSON-RPC answer from JSON or from the SSE stream. Each
+action is still one Cora tool with its own schema; the generic tool calls any server tool
+by name and lists them with `tools/list`. `request` answers `headers` and `text` besides
+`status` and `data` for this.

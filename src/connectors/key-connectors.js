@@ -16,8 +16,8 @@ export class KeyConnectorError extends Error {
 const clean = (value, max = 400) => String(value ?? "").trim().slice(0, max);
 
 export class KeyConnectors {
-  constructor({ store, vault = null, google = null, log = () => {}, linearApi = "https://api.linear.app/graphql", asanaApi = "https://app.asana.com/api/1.0", canvaApi = "https://api.canva.com/rest/v1", oauthUrls = {}, fetch: fetchImpl = fetch }) {
-    Object.assign(this, { store, vault, google, log, linearApi, asanaApi, canvaApi, oauthUrls, fetch: fetchImpl });
+  constructor({ store, vault = null, google = null, log = () => {}, linearApi = "https://api.linear.app/graphql", asanaApi = "https://app.asana.com/api/1.0", canvaApi = "https://api.canva.com/rest/v1", lovableApi = "https://mcp.lovable.dev/", oauthUrls = {}, fetch: fetchImpl = fetch }) {
+    Object.assign(this, { store, vault, google, log, linearApi, asanaApi, canvaApi, lovableApi, oauthUrls, fetch: fetchImpl });
     // OAuth authorisations under way: nonce → who started it, the PKCE verifier and where Google-style callbacks return.
     this.pending = new Map();
     // Access tokens renewed from a stored refresh token, until they expire.
@@ -26,7 +26,7 @@ export class KeyConnectors {
     this.linearQueue = Promise.resolve();
   }
 
-  api() { return { linear: this.linearApi, asana: this.asanaApi, canva: this.canvaApi }; }
+  api() { return { linear: this.linearApi, asana: this.asanaApi, canva: this.canvaApi, lovable: this.lovableApi }; }
 
   /** A module's OAuth endpoints, which a test may point elsewhere. */
   oauthOf(service) {
@@ -167,6 +167,20 @@ export class KeyConnectors {
     return { workspace: clean(workspace?.name || "", 120), workspaceId: clean(workspace?.gid || "", 40), account: clean(me.data.name, 120) };
   }
 
+  async checkLovable(token) {
+    const request = async (url, options) => {
+      const answer = await this.call(url, options);
+      if (!answer.status) throw new KeyConnectorError("Lovable non risponde. Riprova tra poco.", 502);
+      if (answer.status === 401 || answer.status === 403) throw new KeyConnectorError("Lovable non ha riconosciuto la chiave: crea una chiave API con permesso Read & write e incollala di nuovo.");
+      return answer;
+    };
+    try { return await this.oauthOf("lovable").identify({ access: token, request, api: this.api(), mode: "key" }); }
+    catch (error) {
+      if (error instanceof KeyConnectorError) throw error;
+      throw new KeyConnectorError(/401|unauthori[sz]ed/i.test(error.message) ? "Lovable non ha riconosciuto la chiave: crea una chiave API con permesso Read & write e incollala di nuovo." : `Lovable ha rifiutato la chiave: ${clean(error.message, 300)}`);
+    }
+  }
+
   appInput(input, service) {
     const clientId = clean(input.clientId, 300), clientSecret = clean(input.clientSecret, 400);
     if (!clientId || !clientSecret) throw new KeyConnectorError(`Per ${KEY_SERVICES[service].name} servono il client ID e il client secret dell'app che crei tu.`);
@@ -181,12 +195,28 @@ export class KeyConnectors {
     const agents = previous?.agents || [];
     const base = { service, agents, connectedBy: user.id, connectedAt: new Date().toISOString() };
     let next;
-    if (input.mode === "oauth" && ["linear", "asana"].includes(service)) {
+    if (service === "lovable" && input.mode === "quick") {
+      const returned = clean(input.returned, 4000);
+      if (!returned) throw new KeyConnectorError("Premi «Apri Lovable», accetta, poi incolla qui l'indirizzo della pagina di arrivo.");
+      return this.finishPasted(service, returned, user);
+    }
+    if (service === "lovable" && input.mode === "key") {
+      const token = clean(input.token, 4000);
+      if (!token) throw new KeyConnectorError("Incolla la chiave API del workspace Lovable.");
+      if (previous?.status === "connected" && previous.mode !== "key") throw new KeyConnectorError("Scollega Lovable prima di cambiare il tipo di accesso.", 409);
+      const checked = await this.checkLovable(token);
+      this.vaultReady();
+      await this.vault.put({ name: meta.secret, value: token, description: `Connettore Lovable · chiave API${checked.workspace ? ` del workspace ${checked.workspace}` : ""}`, agents, by: this.by(user) });
+      this.access.delete(meta.secret);
+      next = { ...base, ...checked, status: "connected", mode: "key" };
+    } else if (input.mode === "oauth" && ["linear", "asana", "lovable"].includes(service)) {
       const app = this.appInput(input, service);
       this.vaultReady();
       await this.vault.put({ name: meta.appSecrets[0], value: app.clientId, description: `Connettore ${meta.name} · client ID dell'app`, agents: [], by: this.by(user) });
       await this.vault.put({ name: meta.appSecrets[1], value: app.clientSecret, description: `Connettore ${meta.name} · client secret dell'app`, agents: [], by: this.by(user) });
       next = { ...base, status: "app", mode: "oauth", workspace: "", account: "" };
+    } else if (service === "lovable") {
+      throw new KeyConnectorError("Scegli come collegare Lovable: accesso rapido, chiave API o app OAuth.");
     } else if (service === "asana") {
       const token = clean(input.token, 4000);
       if (!token) throw new KeyConnectorError("Incolla il token personale di Asana, oppure scegli di collegarla con un'app.");
@@ -212,7 +242,33 @@ export class KeyConnectors {
     return next;
   }
 
+  /** The vault name of the public client Cora registers on its own for quick access. */
+  quickClientName(service) { return `${KEY_SERVICES[service].secret}_QUICK_CLIENT_ID`; }
+
+  /** Quick access registers Cora as a public loopback client the first time, then reuses it. */
+  async quickClient(service, user) {
+    const oauth = this.oauthOf(service);
+    if (!oauth?.loopback || !oauth.register) throw new KeyConnectorError("Questo connettore non ha l'accesso rapido.", 404);
+    const name = this.quickClientName(service);
+    const stored = this.store.vaultSecret(name);
+    if (stored) return this.vault.value(stored).toString("utf8");
+    let response;
+    try {
+      response = await this.fetch(oauth.register, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ client_name: "Cora", redirect_uris: [oauth.loopback], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none", scope: (oauth.scopes || []).join(" ") }), signal: AbortSignal.timeout(20000) });
+    } catch { throw new KeyConnectorError(`${KEY_SERVICES[service].name} non risponde. Riprova tra poco.`, 502); }
+    let data = null;
+    try { data = await response.json(); } catch { data = null; }
+    if (!response.ok || !data?.client_id) throw new KeyConnectorError(`${KEY_SERVICES[service].name} non ha registrato Cora${data?.error_description ? `: ${clean(data.error_description, 300)}` : "."}`, 502);
+    await this.vault.put({ name, value: String(data.client_id), description: `Connettore ${KEY_SERVICES[service].name} · client pubblico dell'accesso rapido`, agents: [], by: this.by(user) });
+    return String(data.client_id);
+  }
+
   appCredentials(service, record = null) {
+    if (record?.mode === "quick") {
+      const stored = this.store.vaultSecret(this.quickClientName(service));
+      if (!stored) throw new KeyConnectorError("Accesso rapido non registrato: riparti da «Apri Lovable».", 409);
+      return { clientId: this.vault.value(stored).toString("utf8"), clientSecret: "" };
+    }
     if (service === "linear" && !record) record = this.selectedRecord(service);
     const [idName, secretName] = record?.appSecrets || KEY_SERVICES[service].appSecrets || [];
     const id = idName && this.store.vaultSecret(idName), secret = secretName && this.store.vaultSecret(secretName);
@@ -221,10 +277,11 @@ export class KeyConnectors {
   }
 
   /** Starts the owner's OAuth authorisation of a registered app: answers the service's page to open. */
-  beginOAuth(service, user, redirectUri, connectionId = "") {
+  async beginOAuth(service, user, redirectUri, connectionId = "", mode = "") {
     const oauth = this.oauthOf(service);
-    const record = this.selectedRecord(service, connectionId);
     if (!oauth) throw new KeyConnectorError("Questo connettore non ha un'autorizzazione OAuth.", 404);
+    if (mode === "quick") return this.beginQuick(service, user);
+    const record = this.selectedRecord(service, connectionId);
     if (service === "linear") {
       if (!this.linearAppReady(record)) throw new KeyConnectorError("Salva prima l'app Linear.", 409);
       if (connectionId && record.mode !== "oauth") throw new KeyConnectorError("Questo workspace usa una chiave personale.", 409);
@@ -245,13 +302,50 @@ export class KeyConnectors {
     return { url: url.href, nonce };
   }
 
+  /** Quick access: the owner accepts on the service, which sends the browser to a loopback address; the owner pastes it back. */
+  async beginQuick(service, user) {
+    const oauth = this.oauthOf(service);
+    this.vaultReady();
+    const previous = this.record(service);
+    if (previous?.status === "connected" && previous.mode !== "quick") throw new KeyConnectorError(`Scollega ${KEY_SERVICES[service].name} prima di cambiare il tipo di accesso.`, 409);
+    const clientId = await this.quickClient(service, user);
+    if (!previous) {
+      const next = { id: `kc_${randomBytes(6).toString("hex")}`, service, agents: [], status: "quick", mode: "quick", appSecrets: [this.quickClientName(service)], workspace: "", account: "", connectedBy: user.id, connectedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      this.save([...this.records().filter((item) => item.service !== service), next]);
+    }
+    for (const [key, value] of this.pending) if (value.expires < Date.now()) this.pending.delete(key);
+    const nonce = randomBytes(24).toString("base64url"), verifier = randomBytes(48).toString("base64url");
+    this.pending.set(nonce, { service, mode: "quick", userId: user.id, verifier, redirectUri: oauth.loopback, expires: Date.now() + 900000 });
+    const url = new URL(oauth.authorize);
+    url.search = new URLSearchParams({
+      response_type: "code", client_id: clientId, redirect_uri: oauth.loopback, state: nonce,
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
+      ...(oauth.scopes?.length ? { scope: oauth.scopes.join(oauth.scopeSeparator || " ") } : {}),
+      ...(oauth.params || {}),
+    });
+    return { url: url.href, nonce };
+  }
+
+  /** The owner pasted the loopback address the service sent the browser to: Cora finishes the authorisation with its code. */
+  async finishPasted(service, returned, user) {
+    let url;
+    try { url = new URL(returned.trim()); } catch { throw new KeyConnectorError("Incolla l'indirizzo intero, quello che inizia con http://127.0.0.1."); }
+    const expected = new URL(this.oauthOf(service).loopback);
+    if (url.origin !== expected.origin || url.pathname !== expected.pathname) throw new KeyConnectorError("Questo non è l'indirizzo di arrivo di Lovable: deve iniziare con http://127.0.0.1.");
+    const state = url.searchParams.get("state") || "";
+    const pending = this.pending.get(state);
+    if (!pending || pending.mode !== "quick" || pending.userId !== user.id) throw new KeyConnectorError("Autorizzazione scaduta o avviata da un'altra persona. Premi di nuovo «Apri Lovable».");
+    return this.finishOAuth(service, Object.fromEntries(url.searchParams), state);
+  }
+
   /** Calls a token endpoint with a form body, the way OAuth wants it. */
   async tokenCall(service, params, record = null) {
     const oauth = this.oauthOf(service);
     const { clientId, clientSecret } = this.appCredentials(service, record);
     const headers = { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" };
-    const form = new URLSearchParams(params);
-    if (oauth.clientAuth === "basic") headers.Authorization = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
+    const form = new URLSearchParams({ ...params, ...(oauth.tokenParams || {}) });
+    if (!clientSecret) form.set("client_id", clientId);
+    else if (oauth.clientAuth === "basic") headers.Authorization = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
     else { form.set("client_id", clientId); form.set("client_secret", clientSecret); }
     let response;
     try { response = await this.fetch(oauth.token, { method: "POST", headers, body: form.toString(), signal: AbortSignal.timeout(20000) }); }
@@ -279,7 +373,7 @@ export class KeyConnectors {
     if (!user || user.blocked) throw new KeyConnectorError("Accesso non autorizzato.", 403);
     if (error || !code) throw new KeyConnectorError("Autorizzazione annullata.");
     this.vaultReady();
-    const source = service === "linear" ? this.selectedRecord(service, pending.connectionId) : null;
+    const source = service === "linear" ? this.selectedRecord(service, pending.connectionId) : pending.mode === "quick" ? { mode: "quick" } : null;
     if (source && source.appVersion !== pending.appVersion) throw new KeyConnectorError("L'app è cambiata durante l'autorizzazione. Riparti dal collegamento.", 409);
     const data = await this.tokenCall(service, { grant_type: "authorization_code", code: String(code), redirect_uri: pending.redirectUri, code_verifier: pending.verifier }, source);
     const bundle = this.bundle(null, data);
@@ -299,7 +393,8 @@ export class KeyConnectors {
     const meta = KEY_SERVICES[service];
     await this.vault.put({ name: meta.secret, value: JSON.stringify(bundle), description: `Connettore ${meta.name} · token OAuth${checked.account ? ` di ${checked.account}` : ""}`, agents, by: this.by(user) });
     this.access.set(meta.secret, bundle);
-    const next = { ...(previous || {}), service, agents, ...checked, status: "connected", mode: "oauth", connectedBy: user.id, connectedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), id: previous?.id || `kc_${randomBytes(6).toString("hex")}` };
+    const quick = pending.mode === "quick" ? { mode: "quick", appSecrets: [this.quickClientName(service)] } : { mode: "oauth" };
+    const next = { ...(previous || {}), service, agents, ...checked, status: "connected", ...quick, connectedBy: user.id, connectedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), id: previous?.id || `kc_${randomBytes(6).toString("hex")}` };
     this.save([...this.records().filter((item) => item.service !== service), next]);
     this.log({ type: "connector", text: `connettore ${meta.name}: autorizzato con OAuth (${user.name})` });
     return next;
@@ -383,15 +478,16 @@ export class KeyConnectors {
 
   /** Answers the HTTP status and JSON of a call, without throwing on a refusal: the agent reads it. */
   async call(url, { method = "GET", headers = {}, body, raw, timeout = 30000 } = {}) {
-    let response;
+    let response, body_ = "";
     try {
       response = await this.fetch(url, { method, headers: { Accept: "application/json", ...headers }, body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeout) });
+      body_ = await response.text();
     } catch {
-      return { status: 0, data: null };
+      return { status: 0, data: null, headers: {}, text: "" };
     }
     let data = null;
-    try { data = await response.json(); } catch { data = null; }
-    return { status: response.status, data };
+    try { data = body_ ? JSON.parse(body_) : null; } catch { data = null; }
+    return { status: response.status, data, headers: Object.fromEntries(response.headers), text: body_ };
   }
 
   /** Runs a connector tool for an agent: Cora takes the key from the vault, the agent gets only the service's answer. */
@@ -419,7 +515,7 @@ export class KeyConnectors {
     let token = "", hidden = [];
     let result;
     try {
-      if (record.mode === "oauth") {
+      if (record.mode === "oauth" || record.mode === "quick") {
         const bundle = await this.oauthAccess(connector, record);
         token = bundle.access_token; hidden = [bundle.refresh_token];
       } else token = this.vault.value(this.store.vaultSecret(this.tokenName(connector, record))).toString("utf8");
