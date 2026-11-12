@@ -2586,3 +2586,13 @@ input.thread-search { height: 38px; }
 @media (max-width: 600px) {
   .encrypted-passkey-only { min-height: max(360px, calc(var(--app-h, 100dvh) - 200px)); }
 }
+
+/* Encrypted folders share the plaintext folder head; the lock sits square on the title line. */
+.page-head.art-enc-head { flex-wrap: nowrap; align-items: flex-start; }
+.page-head.art-enc-head .page-title { min-width: 0; }
+.page-head.art-enc-head .page-actions { flex: none; padding-top: 4px; }
+.log-row .badge { margin-left: 8px; vertical-align: 1px; }
+@media (max-width: 899px) {
+  .page-head.art-enc-head { align-items: center; }
+  .page-head.art-enc-head .page-actions { padding-top: 0; }
+}

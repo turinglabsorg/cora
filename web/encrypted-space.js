@@ -1,7 +1,7 @@
 import { canRememberPassword, rememberPassword, recalledPassword, forgetPassword } from "./encrypted-memory.js";
 import { createFolderKeys, protectBundle, unlockBundle, encryptDocument, decryptDocument, proveAccess, documentId, credentialName } from "./encrypted-crypto.js";
 import { encryptedConversations } from "./encrypted-chat.js";
-import { encryptedFileControls, downloadEncryptedFile, uploadEncryptedFile } from "./encrypted-files.js";
+import { encryptedFileBrowser, downloadEncryptedFile, uploadEncryptedFile } from "./encrypted-files.js";
 export { createFolderKeys, protectBundle, unlockBundle, encryptDocument, decryptDocument, proveAccess, to64, from64 } from "./encrypted-crypto.js";
 
 export function encryptedSetting(ui, agent = null) {
@@ -80,20 +80,21 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   forget.hidden = !remember.checked;
   remember.addEventListener("change", () => { if (!remember.checked) run(async () => { await forgetPassword(user, personal.id); forget.hidden = true; }); });
   const files = h("div", { class: "stack-sm" }), methods = h("div", { class: "stack-sm" }), requests = h("div", { class: "stack-sm" }), sharing = h("div", { class: "stack-sm" });
-  const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; text = ""; password.value = ""; content.value = ""; title.value = ""; files.replaceChildren(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
+  const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = true; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
+  const lockButton = btn("", { icon: "lock", cls: "sm art-lock", title: tr("Blocca cartella"), onclick: () => lock() }); lockButton.hidden = true;
   const run = async (fn) => { status.textContent = ""; try { await fn(); } catch (error) { status.textContent = tr(error.message); } };
   const proof = (intent) => proveAccess(api, folder.id, bundle, chosenMethod, intent);
   const refresh = async () => { data = await api(`/api/encrypted/folders/${folder.id}`); await draw(); };
-  const fileControls = encryptedFileControls(ui, { api, folder: folder.id, state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }), documents: () => data.documents, canWrite: () => data.canWrite, refresh });
+  const fileControls = encryptedFileBrowser(ui, { api, folder: folder.id, path: ui.path || folder.path || folder.title, dir: ui.dir || "", state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }), documents: () => data.documents, canWrite: () => data.canWrite, refresh, persist: (doc, name, body) => persist(doc, name, body),
+    decrypt: (opened, doc) => decryptDocument(opened, doc.envelope, `cora:${folder.id}:${doc.id}:${doc.version}`), select: (doc) => { selected = doc; drawRequestState(); }, go: (next) => { location.hash = `#/artefatti/${folder.id}/file${next ? `/${next.split("/").map(encodeURIComponent).join("/")}` : ""}`; } });
   const conversations = encryptedConversations(ui, { api, folder: folder.id, agents, defaultModel: ui.defaultModel, state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }) });
-  const title = h("input", { type: "text", "aria-label": tr("Titolo del documento"), placeholder: tr("Titolo del documento"), maxlength: 200 });
-  const content = h("textarea", { rows: 14, "aria-label": tr("Documento"), placeholder: tr("Scrivi un documento da conservare cifrato…") });
-  const persist = async () => {
-    const version = selected?.version || 0, docId = selected?.id || documentId();
-    const cipher = await encryptDocument(data.folder.publicKey, JSON.stringify({ title: title.value, content: content.value }), `cora:${folder.id}:${docId}:${version + 1}`);
+  const persist = async (doc, name, body) => {
+    const version = doc?.version || 0, docId = doc?.id || documentId();
+    const cipher = await encryptDocument(data.folder.publicKey, JSON.stringify({ title: name, content: body }), `cora:${folder.id}:${docId}:${version + 1}`);
     selected = await api(`/api/encrypted/folders/${folder.id}/documents`, { method: "POST", body: { id: docId, base: version, envelope: cipher, proof: await proof(`write:${docId}:${version}`) } });
-    await refresh(); status.textContent = tr("Versione cifrata salvata.");
   };
+  let drawRequestState = () => {};
+  files.append(fileControls.element);
   const cancelUnlock = h("button", { class: "btn ghost", hidden: true, onclick: () => unlockController?.abort() }, "Annulla sblocco");
   const unlockWith = (method = null) => run(async () => {
     if (unlockController) return;
@@ -134,7 +135,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
           forget.hidden = !remember.checked;
         } catch { status.textContent = tr("Cartella sbloccata. Non è stato possibile ricordare la password in questo browser."); }
       }
-      password.value = ""; unlock.hidden = true; locked.hidden = false;
+      password.value = ""; unlock.hidden = true; locked.hidden = false; lockButton.hidden = false; ui.changed?.();
     } catch (error) { bundle = null; chosenMethod = null; throw error; }
     finally {
       candidate = ""; unlockController = null;
@@ -150,30 +151,11 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     !passwordMethods.length && passkeyMethods.length ? h("div", { class: "encrypted-passkey-mark", "aria-hidden": true }, ui.icon?.("face")) : null,
     passwordForm, passkeys, h("div", { class: "row encrypted-unlock-options" }, forget, cancelUnlock));
   const locked = h("div", { class: "stack", hidden: true });
-  const readDoc = async (doc) => {
-    fileControls.clearPreview();
-    const plain = JSON.parse(await decryptDocument(bundle, doc.envelope, `cora:${folder.id}:${doc.id}:${doc.version}`));
-    selected = doc; text = plain.content || ""; title.value = plain.title || ""; content.value = text; await draw();
-    if (plain.format === "file-v1") await fileControls.open(doc, plain);
-  };
   async function draw() {
     drawAudit(); fileControls.updateAccess();
     if (bundle) await conversations.refresh();
-    const rows = h("div", { class: "rows" });
-    for (const doc of data.documents.filter(d => d.kind !== "chat")) {
-      let name;
-      try { name = JSON.parse(await decryptDocument(bundle, doc.envelope, `cora:${folder.id}:${doc.id}:${doc.version}`)).title || tr("Senza titolo"); }
-      catch { name = tr("Documento non decifrabile"); }
-      rows.append(h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(name), h("small", { class: "muted" }, raw(` · v${doc.version} · ${doc.kind}`))), btn("Apri", { icon: "file", onclick: () => run(() => readDoc(doc)) })));
-    }
-    const versions = h("select", { "aria-label": tr("Versione"), onchange: (event) => run(async () => {
-      if (!selected) return; const doc = await api(`/api/encrypted/folders/${folder.id}/documents?document=${selected.id}&version=${event.target.value}`); await readDoc(doc);
-    }) }, [1, ...(selected ? Array.from({ length: Math.min(100, (data.documents.find((doc) => doc.id === selected.id)?.version || selected.version) - 1) }, (_, i) => i + 2) : [])].map((n) => h("option", { value: n, selected: selected?.version === n }, raw("v" + n))));
-    files.replaceChildren(fileControls.element, panel({ icon: "file", title: "Documenti cifrati" }, rows, btn("Nuovo documento", { icon: "plus", disabled: !data.canWrite, onclick: () => { fileControls.clear(); selected = null; title.value = ""; content.value = ""; draw(); } })),
-      panel({ icon: "file", title: "Documento", hint: "Titolo e contenuto sono salvati cifrati. Le versioni precedenti restano disponibili." }, title, content, h("div", { class: "row" }, versions, btn("Salva cifrato", { cls: "primary", icon: "check", disabled: !data.canWrite || Boolean(selected?.file), onclick: () => run(persist) }), btn("Esporta", { icon: "download", disabled: !selected || Boolean(selected.file), onclick: () => run(async () => {
-        await api(`/api/encrypted/folders/${folder.id}/export`, { method: "POST", body: { document: selected.id, version: selected.version, proof: await proof(`export:${selected.id}:${selected.version}`) } });
-        const url = URL.createObjectURL(new Blob([content.value], { type: "text/plain" })); const link = document.createElement("a"); link.href = url; link.download = (title.value || "document") + ".txt"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }) }))));
+    if (bundle) await fileControls.refresh();
+    let requestButton = null, shareButton = null;
     const addPassword = h("input", { name: "password", type: "password", autocomplete: "new-password", placeholder: tr("Nuova password · almeno 14 caratteri"), "aria-label": tr("Nuova password") });
     const methodName = h("input", { type: "text", maxlength: 80, placeholder: tr("Nome, es. telefono personale"), "aria-label": tr("Nome del metodo") });
     const addMethod = async (kind, derivation = "auto") => {
@@ -223,7 +205,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     const result = h("div", { class: "stack-sm" }, h("h3", { class: "label" }, "Risultato privato"), answer, h("details", {}, h("summary", {}, "Ragionamento"), reasoning));
     requests.replaceChildren(panel({ icon: "shield", title: "Accessi temporanei", hint: "Durante l’accesso autorizzato worker e modello ricevono il contenuto selezionato in chiaro. La revoca impedisce gli accessi futuri, ma non ritira ciò che hanno già ricevuto." },
       h("p", { class: "muted" }, "Sessione separata, senza strumenti né uscite in chat. Risultato e ragionamento restano cifrati. Modelli Ollama e OrcaRouter; documenti dell’editor e file UTF-8 di testo fino a 1 MiB."),
-      h("div", { class: "row" }, agent, operation, btn("Richiedi accesso", { icon: "plus", disabled: !selected, onclick: () => run(async () => {
+      h("div", { class: "row" }, agent, operation, requestButton = btn("Richiedi accesso", { icon: "plus", disabled: !selected, onclick: () => run(async () => {
         await api(`/api/encrypted/folders/${folder.id}/requests`, { method: "POST", body: { agent: agent.value, document: selected.id, version: selected.version, operation: operation.value } }); await refresh();
       }) })), instruction, requestList, result));
     const accept = h("input", { type: "checkbox", checked: data.folder.acceptShares, disabled: !data.canManage, onchange: () => run(async () => {
@@ -243,7 +225,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
       }) })))) : null;
     sharing.replaceChildren(panel({ icon: "link", title: "Condivisione cifrata", hint: "La copia viene ricifrata con una nuova chiave per la cartella del destinatario. La persona deve accettarla." },
       h("label", { class: "row" }, accept, "Accetta proposte cifrate dal team"),
-      h("div", { class: "row" }, recipient, btn("Proponi copia cifrata", { disabled: !data.canWrite || !selected || !recipients.length, onclick: () => run(async () => {
+      h("div", { class: "row" }, recipient, shareButton = btn("Proponi copia cifrata", { disabled: !data.canWrite || !selected || !recipients.length, onclick: () => run(async () => {
         const target = recipients.find((r) => r.id === recipient.value);
         if (selected.file) {
           const opened = await downloadEncryptedFile({ api, folder: folder.id, bundle, document: selected });
@@ -264,15 +246,38 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
         await api(`/api/encrypted/folders/${folder.id}/receive`, { method: "POST", body: { delivery: delivery.id, accept: true, proof: await proof(`accept:${delivery.id}`) } }); await refresh();
       }) }), btn("Rifiuta", { cls: "ghost danger", onclick: () => run(async () => { await api(`/api/encrypted/folders/${folder.id}/receive`, { method: "POST", body: { delivery: delivery.id, accept: false } }); await refresh(); }) })))));
     if (grantPanel) sharing.append(grantPanel);
+    drawRequestState = () => { if (requestButton) requestButton.disabled = !selected; if (shareButton) shareButton.disabled = !data.canWrite || !selected || !recipients.length; };
   }
   const audit = h("div", { class: "stack-sm" });
-  function drawAudit() { audit.replaceChildren(panel({ icon: "clock", title: "Registro degli accessi", hint: "Persona, metodo, agente, operazione ed esito. Nessun contenuto o chiave." }, h("div", { class: "rows" }, data.audit.map((entry) => h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(`${entry.event} · ${entry.outcome}`), h("small", { class: "muted" }, raw(`${new Date(entry.at).toLocaleString()} · ${entry.actor} · ${entry.method || "—"} · ${entry.agent || "—"}`)))))))); }
+  const AUDIT_ICON = { unlock: "key", read: "eye", configure: "sliders", methods: "key", write: "edit", export: "download", share: "link", incoming: "link", grant: "shield", request: "shield", session: "shield", delete: "trash" };
+  const AUDIT_VERB = { unlock: "ha sbloccato la cartella", read: "ha aperto i documenti", configure: "ha attivato la cifratura", methods: "ha cambiato i metodi di sblocco", write: "ha salvato una versione", export: "ha esportato un documento", share: "ha proposto una copia cifrata", incoming: "ha ricevuto una copia cifrata", grant: "ha cambiato un accesso cifrato", request: "ha chiesto un accesso temporaneo", session: "sessione privata", delete: "ha eliminato" };
+  const OUTCOME = { success: "", denied: "rifiutato", accepted: "accettato", revoked: "revocato", proposed: "proposto", declined: "rifiutato", interrupted: "interrotta" };
+  const methodName = (value) => { const id = String(value || "").split(/[:-]/).at(-1); const method = personal.methods.find((m) => m.id === id) || data.folder.methods?.find((m) => m.id === id); return method ? method.label : ""; };
+  function drawAudit() {
+    const rows = data.audit.map((entry) => {
+      const extra = [methodName(entry.method), entry.agent ? agents.find((a) => a.id === entry.agent)?.name || entry.agent : "", entry.version ? `v${entry.version}` : ""].filter(Boolean).join(" · ");
+      const outcome = OUTCOME[entry.outcome] ?? entry.outcome;
+      return h("li", { class: `log-row${entry.outcome === "denied" ? " log-denied" : ""}` },
+        h("span", { class: "log-ico" }, ui.icon ? ui.icon(AUDIT_ICON[entry.event] || "info") : null),
+        h("span", { class: "grow log-text" }, h("span", {}, h("b", {}, tr("Tu")), " ", tr(AUDIT_VERB[entry.event] || entry.event), outcome ? h("span", { class: `badge${entry.outcome === "denied" ? " err" : ""}` }, tr(outcome)) : null), extra ? h("small", {}, raw(extra)) : null),
+        h("time", { class: "log-time" }, raw(new Date(entry.at).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }))));
+    });
+    audit.replaceChildren(panel({ icon: "clock", title: "Registro", hint: "Chi ha sbloccato, letto, salvato e condiviso, con metodo ed esito. Nessun contenuto né chiave." }, h("ol", { class: "log-list" }, rows.length ? rows : h("li", { class: "log-row" }, h("span", { class: "grow log-text" }, tr("Ancora niente da registrare."))))));
+  }
   drawAudit();
-  locked.append(h("div", { class: "row end" }, btn("Blocca cartella", { icon: "lock", onclick: lock })), sectionWorkspace({ title: "Spazio cifrato", base: `#/artefatti/${folder.id}`, current, entries: [
-    ["file", "Documenti", "file", "File e versioni cifrate", [files]], ["conversazioni", "Conversazioni", "chat", "Messaggi e ragionamento cifrati", [conversations.element]], ["accessi", "Accessi", "shield", "Autorizzazioni temporanee", [requests]], ["condivisione", "Condivisione", "link", "Copie per i destinatari", [sharing]], ["cifratura", "Cifratura", "key", "Password e passkey", [methods]], ["registro", "Registro", "clock", "Accessi e operazioni", [audit]],
-    ...(ui.permissions ? [["permessi", "Permessi", "shield", "Accesso del team", [ui.permissions()]]] : []),
-    ...(ui.folderSettings && data.canManage ? [["impostazioni", "Impostazioni", "sliders", "Impostazioni della cartella", [ui.folderSettings()]]] : []),
-  ] }));
+  const panes = { file: files, conversazioni: conversations.element, accessi: requests, condivisione: sharing, registro: audit, cifratura: methods,
+    ...(ui.permissions ? { permessi: ui.permissions() } : {}), ...(ui.folderSettings && data.canManage ? { impostazioni: ui.folderSettings() } : {}) };
+  const pane = h("div", { class: "stack" });
+  locked.append(pane);
+  root.show = (tab, dir = "") => {
+    const key = panes[tab] ? tab : "file";
+    pane.replaceChildren(panes[key]);
+    if (key === "file") fileControls.setDir(dir);
+  };
+  root.tabs = () => [["file", "File", "file", data.documents.filter((d) => d.kind !== "chat").length], ["conversazioni", "Conversazioni", "chat"], ["accessi", "Accessi", "spark"], ["condivisione", "Condivisione", "link"], ["registro", "Registro", "clock"],
+    ...(panes.permessi ? [["permessi", "Permessi", "shield"]] : []), ["cifratura", "Cifratura", "key"], ...(panes.impostazioni ? [["impostazioni", "Impostazioni", "sliders"]] : [])];
+  root.lockButton = lockButton;
+  root.show(current, ui.dir || "");
   let idle = null;
   const touch = () => { clearTimeout(idle); idle = setTimeout(lock, 5 * 60000); };
   for (const event of ["pointerdown", "keydown", "input"]) root.addEventListener(event, touch);
