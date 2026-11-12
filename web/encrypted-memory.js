@@ -35,8 +35,8 @@ export async function forgetPassword(user, folder) {
   const id = scope(user, folder); scopeEpochs.set(id, (scopeEpochs.get(id) || 0) + 1);
   await access("readwrite", store => { store.put(crypto.randomUUID(), generationKey(user, folder)); return store.delete(id); });
 }
-export async function rememberPassword(user, folder, method, password) {
-  if (!canRememberPassword() || !user || method.kind !== "password" || !password) throw Error("Memoria del browser non disponibile.");
+async function storeRemembered(user, folder, method, password, mode) {
+  if (!canRememberPassword() || !user || !["password", "passkey"].includes(method.kind) || !password) throw Error("Memoria del browser non disponibile.");
   const id = scope(user, folder), userEpoch = userEpochs.get(user), scopeEpoch = scopeEpochs.get(id), revision = await fingerprint(method);
   const userGeneration = await access("readonly", store => store.get(generationKey(user)));
   const folderGeneration = await access("readonly", store => store.get(generationKey(user, folder)));
@@ -44,30 +44,50 @@ export async function rememberPassword(user, folder, method, password) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const bytes = encoder.encode(password);
   try {
-    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: encoder.encode(id + revision) }, key, bytes);
+    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: encoder.encode(id + revision + mode) }, key, bytes);
     await access("readwrite", store => {
       const userRequest = store.get(generationKey(user));
       userRequest.onsuccess = () => {
         if (userRequest.result !== userGeneration) return;
         const folderRequest = store.get(generationKey(user, folder));
         folderRequest.onsuccess = () => {
-          if (folderRequest.result === folderGeneration && userEpochs.get(user) === userEpoch && scopeEpochs.get(id) === scopeEpoch) store.put({ key, iv, ciphertext, method: method.id, revision }, id);
+          if (folderRequest.result === folderGeneration && userEpochs.get(user) === userEpoch && scopeEpochs.get(id) === scopeEpoch) store.put({ key, iv, ciphertext, method: method.id, revision, mode }, id);
         };
       };
     });
   } finally { bytes.fill(0); }
 }
-export async function recalledPassword(user, folder, methods) {
+async function recalledValue(user, folder, methods, mode) {
   if (!canRememberPassword() || !user) return null;
   const id = scope(user, folder), record = await access("readonly", store => store.get(id));
-  if (!record) return null;
-  const method = methods.find(m => m.id === record.method && m.kind === "password");
+  if (!record || record.mode !== mode) return null;
+  const method = methods.find(m => m.id === record.method);
   if (!method || await fingerprint(method) !== record.revision) { await forgetPassword(user, folder); return null; }
   try {
-    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: record.iv, additionalData: encoder.encode(id + record.revision) }, record.key, record.ciphertext);
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: record.iv, additionalData: encoder.encode(id + record.revision + mode) }, record.key, record.ciphertext);
     try { return { method: method.id, password: decoder.decode(plain) }; }
     finally { new Uint8Array(plain).fill(0); }
   } catch { await forgetPassword(user, folder); return null; }
+}
+export const rememberPassword = (user, folder, method, password) => storeRemembered(user, folder, method, password, "password");
+export const recalledPassword = (user, folder, methods) => recalledValue(user, folder, methods, "password");
+export const rememberAccess = (user, folder, method, bundle) => storeRemembered(user, folder, method, JSON.stringify(bundle), "access");
+export async function recalledAccess(user, folder, methods) {
+  const saved = await recalledValue(user, folder, methods, "access");
+  if (!saved) return null;
+  try {
+    const bundle = JSON.parse(saved.password);
+    if (bundle.folder !== folder || bundle.v !== 1) throw Error("Invalid remembered access");
+    return { method: saved.method, bundle };
+  } catch { await forgetPassword(user, folder); return null; }
+}
+export async function rememberedAccessMethod(user, folder, methods) {
+  if (!canRememberPassword() || !user) return null;
+  const record = await access("readonly", store => store.get(scope(user, folder)));
+  if (!record || record.mode !== "access") return null;
+  const method = methods.find(m => m.id === record.method);
+  if (!method || await fingerprint(method) !== record.revision) { await forgetPassword(user, folder); return null; }
+  return record.method;
 }
 export async function forgetUserPasswords(user) {
   if (!canRememberPassword() || !user) return;

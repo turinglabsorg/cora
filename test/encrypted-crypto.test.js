@@ -10,7 +10,7 @@ function authenticator(t, prf) {
   const flags = () => { const data = new Uint8Array(37); data[32] = state.uv ? 5 : 1; return data; };
   const credentials = {
     async create({ publicKey }) {
-      state.user = publicKey.user; state.createCalls++; if (state.pending) return new Promise(() => {});
+      state.rpName = publicKey.rp.name; state.user = publicKey.user; state.createCalls++; if (state.pending) return new Promise(() => {});
       if (state.cancelled) throw new DOMException("Cancelled", "NotAllowedError");
       assert.equal(publicKey.authenticatorSelection.userVerification, "required");
       state.seed = Uint8Array.from(publicKey.user.id);
@@ -98,5 +98,6 @@ test("new passkeys expose the folder and method name without changing secret der
   assert.match(a.user.name, /Phone/);
   assert.match(a.user.name, new RegExp(method.salt.slice(0, 8)));
   assert.equal(a.user.displayName, "Personal documents · Phone");
+  assert.equal(a.rpName, "Cora · Personal documents");
   assert.deepEqual(await unlockBundle(folder, method), bundle);
 });

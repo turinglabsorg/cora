@@ -1,6 +1,11 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Apri cartella": "Open folder",
+  "Ricorda accesso in questo browser": "Remember access in this browser",
+  "Dimentica accesso": "Forget access",
+  "Accesso dimenticato in questo browser.": "Access forgotten in this browser.",
+  "Cartella sbloccata. Non è stato possibile ricordare l’accesso in questo browser.": "Folder unlocked. Access could not be remembered in this browser.",
   "Nome nel gestore password": "Password manager name",
   "Ricorda password in questo browser": "Remember password in this browser",
   "Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci.": "Only on a trusted device. Kept in this browser until Forget or Sign out.",

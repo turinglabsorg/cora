@@ -25,7 +25,7 @@ async function wrappingKey(folder, item, password = "", create = false, signal, 
   try {
     if (create) {
       seed = random(32);
-      credential = await credentialRequest("create", { publicKey: { challenge: random(32), rp: { name: "Cora · Spazio cifrato", id: location.hostname }, user: { id: seed, name: `${credentialName(folder, name)} · ${item.label || "Passkey"} · ${item.salt.slice(0, 8)}`, displayName: `${name || folder} · ${item.label || "Passkey"}` }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", userVerification: "required" }, attestation: "none", ...(item.derivation === "handle-v1" ? {} : { extensions: { prf: {} } }) } }, signal);
+      credential = await credentialRequest("create", { publicKey: { challenge: random(32), rp: { name: name ? "Cora · " + name : "Cora · Spazio cifrato", id: location.hostname }, user: { id: seed, name: `${credentialName(folder, name)} · ${item.label || "Passkey"} · ${item.salt.slice(0, 8)}`, displayName: `${name || folder} · ${item.label || "Passkey"}` }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", userVerification: "required" }, attestation: "none", ...(item.derivation === "handle-v1" ? {} : { extensions: { prf: {} } }) } }, signal);
       if (!credential) throw Error("Creazione della passkey annullata.");
       item.credentialId = credential.id;
       if (item.derivation === "auto") item.derivation = credential.getClientExtensionResults?.().prf?.enabled === true ? "prf-v1" : "handle-v1";

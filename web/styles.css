@@ -2586,3 +2586,5 @@ input.thread-search { height: 38px; }
 @media (max-width: 600px) {
   .encrypted-passkey-only { min-height: max(360px, calc(var(--app-h, 100dvh) - 200px)); }
 }
+
+.encrypted-passkey-only .encrypted-unlock-footer { margin-top: auto; gap: 12px; }
