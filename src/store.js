@@ -1311,6 +1311,13 @@ CREATE INDEX IF NOT EXISTS thread_sessions_channel ON thread_sessions(channel_id
       ORDER BY m.at DESC LIMIT 20`).all().map(messageRow);
   }
 
+  /** Every name a person signed with in a chat or the panel: what an exported agent must not carry. */
+  personNames(limit = 2000) {
+    const chat = this.stmt("SELECT DISTINCT author_name AS name FROM messages WHERE kind IN ('owner', 'human') AND author_name != '' LIMIT ?").all(limit).map((row) => row.name);
+    const panel = this.panelUsers().flatMap((user) => [user.name, String(user.email || "").split("@")[0]]);
+    return [...new Set([...chat, ...panel].map((name) => String(name || "").trim()).filter(Boolean))];
+  }
+
   /** How the owner signs on Discord, for messages written in the panel. */
   ownerName() {
     return this.stmt("SELECT author_name FROM messages WHERE kind = 'owner' ORDER BY at DESC LIMIT 1").get()?.author_name || "";

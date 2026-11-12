@@ -340,3 +340,9 @@ Remember access is an unchecked opt-in for passwords and passkeys on secure, sto
 ## Progress-based agent exchanges
 
 Settings → Regia shows a compact read-only **Scambi tra agenti** row and **Senza tetto fisso** badge, using existing setting-row typography and spacing. The description explains that productive exchanges continue and the Decisore stops repetition without progress. Do not reintroduce a conversation-wide numeric turn input. The rail caption uses progress checks and goal state; Regia and Decisore remain open.
+
+## Agent export and import
+
+Agent → Settings → **Esporta** is a rail entry like the others, loaded only when opened. Personality and card are setting rows with a rocker; what the privacy filter replaced sits under the hint as amber mono tags with the eye icon (`.transfer-removed`). Routines, memory and procedures are closed `details.transfer-group` cards on `--panel-2`: title and hint on the left, an amber mono `N di M` count and a chevron on the right; opened, *Tutte*/*Nessuna* ghost buttons and checkbox rows in a black well, three lines at most per item. A muted `.notice` with the lock lists what never leaves. One action row: *Scarica file* (primary), then lifetime and download selects and *Crea link*; a new link shows once in a `codeLine`, active links follow as hairline rows with a two-click red *Revoca*.
+
+**Importa agente** (`#/importa`, *Importa* beside *Nuovo agente* in the roster) has two panels: the package source (link with the paste field, or file) and, once read, *Arriva <nome>*: name field, rockers for card, picture, memory and procedures, a `.transfer-routes` block with one channel select per routine (stacked on phones), names to set up as tags (amber when already present), a notice that the agent arrives off with routines disabled, and the primary *Importa agente* aligned right (full width on phones). Errors use `.notice.warn`.

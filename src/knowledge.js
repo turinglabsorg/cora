@@ -30,28 +30,41 @@ export function publicKnowledgeAddress(address) {
   return Boolean(family && !privateNetworks.check(address, family === 4 ? "ipv4" : "ipv6"));
 }
 
-async function readLink(value, { allowLocal = false } = {}) {
+const BRAIN_LINK_COPY = {
+  url: "Inserisci il link HTTPS di un Brain leggibile.",
+  publicOnly: "Il Brain esterno deve essere raggiungibile tramite un indirizzo Internet pubblico.",
+  redirect: "Il link del Brain esterno contiene un reindirizzamento non valido.",
+  unreadable: "Il link del Brain esterno non è accessibile in lettura.",
+  tooLarge: "Il Brain esterno supera il limite di lettura.",
+  redirects: "Il link del Brain esterno contiene troppi reindirizzamenti.",
+};
+
+/** One GET to a public address only: every hop is resolved, checked and pinned, redirects included. */
+export async function readPublicLink(value, { allowLocal = false, maxBytes = MAX_BYTES, accept = "application/json, text/markdown, text/plain", userAgent = "Cora Knowledge", copy = BRAIN_LINK_COPY } = {}) {
   const signal = AbortSignal.timeout(8000);
-  let url = knowledgeUrl(value, { allowLocal });
+  const checked = (href) => {
+    try { return knowledgeUrl(href, { allowLocal }); } catch (error) { throw error instanceof KnowledgeError ? new KnowledgeError(copy.url, 400) : error; }
+  };
+  let url = checked(value);
   for (let hop = 0; hop < 5; hop++) {
     signal.throwIfAborted();
     const hostname = url.hostname.replace(/^\[|\]$/g, "");
     const addresses = isIP(hostname) ? [{ address: hostname, family: isIP(hostname) }] : await lookup(hostname, { all: true });
     signal.throwIfAborted();
-    if (!addresses.length || (!allowLocal && addresses.some(({ address }) => !publicKnowledgeAddress(address)))) throw new KnowledgeError("Il Brain esterno deve essere raggiungibile tramite un indirizzo Internet pubblico.", 400);
+    if (!addresses.length || (!allowLocal && addresses.some(({ address }) => !publicKnowledgeAddress(address)))) throw new KnowledgeError(copy.publicOnly, 400);
     const pinned = addresses[0];
     const result = await new Promise((resolve, reject) => {
       const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
-        method: "GET", signal, headers: { Accept: "application/json, text/markdown, text/plain", "User-Agent": "Cora Knowledge" },
+        method: "GET", signal, headers: { Accept: accept, "User-Agent": userAgent },
         lookup: (_host, options, callback) => options.all ? callback(null, [pinned]) : callback(null, pinned.address, pinned.family),
       }, (response) => {
-        if ([301, 302, 303, 307, 308].includes(response.statusCode)) { response.resume(); if (!response.headers.location) reject(new KnowledgeError("Il link del Brain esterno contiene un reindirizzamento non valido.")); else resolve({ redirect: response.headers.location }); return; }
-        if (response.statusCode !== 200) { response.resume(); reject(new KnowledgeError("Il link del Brain esterno non è accessibile in lettura.")); return; }
+        if ([301, 302, 303, 307, 308].includes(response.statusCode)) { response.resume(); if (!response.headers.location) reject(new KnowledgeError(copy.redirect)); else resolve({ redirect: response.headers.location }); return; }
+        if (response.statusCode !== 200) { response.resume(); reject(Object.assign(new KnowledgeError(copy.unreadable), { upstream: response.statusCode })); return; }
         const chunks = [];
         let size = 0;
         response.on("data", (chunk) => {
           size += chunk.length;
-          if (size > MAX_BYTES) { response.destroy(new KnowledgeError("Il Brain esterno supera il limite di lettura.")); return; }
+          if (size > maxBytes) { response.destroy(new KnowledgeError(copy.tooLarge)); return; }
           chunks.push(chunk);
         });
         response.on("end", () => resolve({ text: Buffer.concat(chunks).toString("utf8"), type: String(response.headers["content-type"] || "").split(";")[0] }));
@@ -61,10 +74,12 @@ async function readLink(value, { allowLocal = false } = {}) {
       request.end();
     });
     if (!result.redirect) return result;
-    url = knowledgeUrl(new URL(result.redirect, url).href, { allowLocal });
+    url = checked(new URL(result.redirect, url).href);
   }
-  throw new KnowledgeError("Il link del Brain esterno contiene troppi reindirizzamenti.");
+  throw new KnowledgeError(copy.redirects);
 }
+
+const readLink = (value, { allowLocal = false } = {}) => readPublicLink(value, { allowLocal });
 
 function externalPages({ text, type }) {
   let items;
