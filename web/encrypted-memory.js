@@ -2,7 +2,7 @@ const DB = "cora-encrypted-browser", STORE = "passwords";
 const userEpochs = new Map(), scopeEpochs = new Map();
 const encoder = new TextEncoder(), decoder = new TextDecoder();
 export function canRememberPassword() {
-  try { return Boolean(globalThis.isSecureContext && globalThis.indexedDB && globalThis.crypto?.subtle); }
+  try { return Boolean(globalThis.isSecureContext && globalThis.indexedDB && globalThis.crypto?.subtle && globalThis.localStorage); }
   catch { return false; }
 }
 function database() {
@@ -27,17 +27,24 @@ async function access(mode, action) {
 }
 const scope = (user, folder) => JSON.stringify([user, folder]);
 const generationKey = (user, folder) => JSON.stringify(folder ? [user, folder, "generation"] : [user]);
+const revocationKey = (user, folder) => "cora.encrypted.revocation." + generationKey(user, folder);
+const revocations = (user, folder) => [localStorage.getItem(revocationKey(user)), localStorage.getItem(revocationKey(user, folder))];
+const revoke = (user, folder) => { try { localStorage.setItem(revocationKey(user, folder), crypto.randomUUID()); return true; } catch { return false; } };
+const currentRecord = (user, folder, record) => JSON.stringify(record.revocations || [null, null]) === JSON.stringify(revocations(user, folder));
+
 async function fingerprint(method) {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(JSON.stringify([method.id, method.salt, method.iv, method.ciphertext]))))].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 export async function forgetPassword(user, folder) {
   if (!canRememberPassword() || !user) return;
   const id = scope(user, folder); scopeEpochs.set(id, (scopeEpochs.get(id) || 0) + 1);
-  await access("readwrite", store => { store.put(crypto.randomUUID(), generationKey(user, folder)); return store.delete(id); });
+  const revoked = revoke(user, folder);
+  try { await access("readwrite", store => { store.put(crypto.randomUUID(), generationKey(user, folder)); return store.delete(id); }); }
+  catch (error) { if (!revoked) throw Error("Cartella bloccata in questa pagina, ma la memoria del browser non è stata cancellata. Riprova il lucchetto prima di ricaricare."); throw error; }
 }
 async function storeRemembered(user, folder, method, password, mode) {
   if (!canRememberPassword() || !user || !["password", "passkey"].includes(method.kind) || !password) throw Error("Memoria del browser non disponibile.");
-  const id = scope(user, folder), userEpoch = userEpochs.get(user), scopeEpoch = scopeEpochs.get(id), revision = await fingerprint(method);
+  const id = scope(user, folder), userEpoch = userEpochs.get(user), scopeEpoch = scopeEpochs.get(id), savedRevocations = revocations(user, folder), revision = await fingerprint(method);
   const userGeneration = await access("readonly", store => store.get(generationKey(user)));
   const folderGeneration = await access("readonly", store => store.get(generationKey(user, folder)));
   const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
@@ -51,7 +58,7 @@ async function storeRemembered(user, folder, method, password, mode) {
         if (userRequest.result !== userGeneration) return;
         const folderRequest = store.get(generationKey(user, folder));
         folderRequest.onsuccess = () => {
-          if (folderRequest.result === folderGeneration && userEpochs.get(user) === userEpoch && scopeEpochs.get(id) === scopeEpoch) store.put({ key, iv, ciphertext, method: method.id, revision, mode }, id);
+          if (folderRequest.result === folderGeneration && userEpochs.get(user) === userEpoch && scopeEpochs.get(id) === scopeEpoch && JSON.stringify(savedRevocations) === JSON.stringify(revocations(user, folder))) store.put({ key, iv, ciphertext, method: method.id, revision, mode, revocations: savedRevocations }, id);
         };
       };
     });
@@ -60,12 +67,12 @@ async function storeRemembered(user, folder, method, password, mode) {
 async function recalledValue(user, folder, methods, mode) {
   if (!canRememberPassword() || !user) return null;
   const id = scope(user, folder), record = await access("readonly", store => store.get(id));
-  if (!record || record.mode !== mode) return null;
+  if (!record || record.mode !== mode || !currentRecord(user, folder, record)) return null;
   const method = methods.find(m => m.id === record.method);
   if (!method || await fingerprint(method) !== record.revision) { await forgetPassword(user, folder); return null; }
   try {
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: record.iv, additionalData: encoder.encode(id + record.revision + mode) }, record.key, record.ciphertext);
-    try { return { method: method.id, password: decoder.decode(plain) }; }
+    try { return currentRecord(user, folder, record) ? { method: method.id, password: decoder.decode(plain) } : null; }
     finally { new Uint8Array(plain).fill(0); }
   } catch { await forgetPassword(user, folder); return null; }
 }
@@ -84,16 +91,18 @@ export async function recalledAccess(user, folder, methods) {
 export async function rememberedAccessMethod(user, folder, methods) {
   if (!canRememberPassword() || !user) return null;
   const record = await access("readonly", store => store.get(scope(user, folder)));
-  if (!record || record.mode !== "access") return null;
+  if (!record || record.mode !== "access" || !currentRecord(user, folder, record)) return null;
   const method = methods.find(m => m.id === record.method);
   if (!method || await fingerprint(method) !== record.revision) { await forgetPassword(user, folder); return null; }
-  return record.method;
+  return currentRecord(user, folder, record) ? record.method : null;
 }
 export async function forgetUserPasswords(user) {
   if (!canRememberPassword() || !user) return;
   userEpochs.set(user, (userEpochs.get(user) || 0) + 1);
-  await access("readwrite", store => {
+  const revoked = revoke(user);
+  try { await access("readwrite", store => {
     const request = store.openCursor();
     request.onsuccess = () => { const cursor = request.result; if (!cursor) { store.put(crypto.randomUUID(), generationKey(user)); return; } try { if (JSON.parse(cursor.key)[0] === user) cursor.delete(); } catch { cursor.delete(); } cursor.continue(); };
-  });
+  }); }
+  catch (error) { if (!revoked) throw Error("La memoria del browser non è stata cancellata. Riprova Esci prima di chiudere la pagina."); throw error; }
 }

@@ -2979,6 +2979,45 @@ export const EN = {
   "in": "in",
   "out": "out",
   "1 passo": "1 step",
+  "Nome della passkey": "Passkey name",
+  "Nome della password": "Password name",
+  "Passkey salvata": "Saved passkey",
+  "Usa una passkey già salvata": "Use a saved passkey",
+  "Abbina passkey": "Associate passkey",
+  "Abbina cartella": "Associate folder",
+  "Cartella da abbinare a {name}": "Folder to associate with {name}",
+  "Nessuna cartella abbinata": "No associated folders",
+  "Nessuna passkey salvata.": "No saved passkeys.",
+  "Data di creazione non disponibile": "Creation date unavailable",
+  "Le tue passkey possono proteggere più cartelle. Ogni cartella conserva chiavi distinte. Qui Cora salva soltanto nomi e associazioni.": "Your passkeys can protect several folders. Each folder keeps separate keys. Cora stores only names and associations here.",
+  "Passkeys e cartelle cifrate": "Passkeys and encrypted folders",
+  "Passkey nuove o già salvate": "New or saved passkeys",
+  "Password di questa cartella": "Passwords for this folder",
+  "Aggiungi un metodo alternativo prima di rimuovere quello precedente.": "Add an alternative method before removing the previous one.",
+  "Rimuovi cifratura": "Remove encryption",
+  "Conserva file e versioni in chiaro": "Keep files and versions as plaintext",
+  "Salva questa cartella in chiaro, conservando contenuti e versioni. L’obbligo generale di cifratura deve essere spento.": "Save this folder as plaintext, preserving content and versions. Mandatory encryption must be off.",
+  "Rimuovere la cifratura?": "Remove encryption?",
+  "Decifra e salva in chiaro": "Decrypt and save as plaintext",
+  "Tutti i file e tutte le versioni vengono decifrati nel browser e salvati in chiaro. Conversazioni e ragionamenti diventano file JSON, senza essere inviati sui canali.": "Every file and version is decrypted in the browser and saved as plaintext. Conversations and reasoning become JSON files and are never sent to channels.",
+  "Si applicheranno i normali permessi della cartella: le persone e gli agenti autorizzati potranno leggere i contenuti senza passkey. Le altre cartelle che usano la stessa passkey restano cifrate.": "Normal folder permissions will apply: authorised people and agents can read its contents without a passkey. Other folders using the same passkey remain encrypted.",
+  "Gli originali cifrati vengono rimossi soltanto dopo il salvataggio verificato di tutte le versioni. Se annulli prima del salvataggio finale o si verifica un errore, restano intatti.": "Encrypted originals are removed only after every version has been saved and verified. Cancelling before the final save, or an error, leaves them intact.",
+  "Preparazione della copia in chiaro…": "Preparing the plaintext copy…",
+  "Versioni verificate: {n} di {total}": "Versions verified: {n} of {total}",
+  "Salvataggio finale della cartella…": "Saving the folder…",
+  "L’accesso ricordato non è più disponibile. Sblocca normalmente.": "Remembered access is no longer available. Unlock normally.",
+  "Conversione annullata. La cartella cifrata è intatta.": "Conversion cancelled. The encrypted folder is intact.",
+  "Disattiva l’obbligo di cifratura prima di salvare in chiaro.": "Turn off mandatory encryption before saving as plaintext.",
+  "Termina o revoca gli accessi temporanei prima di rimuovere la cifratura.": "Finish or revoke temporary access before removing encryption.",
+  "Completa o annulla i caricamenti prima di rimuovere la cifratura.": "Finish or cancel uploads before removing encryption.",
+  "Accetta o rifiuta le copie ricevute prima di rimuovere la cifratura.": "Accept or decline received copies before removing encryption.",
+  "Questa cartella protegge accessi ad altre cartelle cifrate. Sposta o rinuncia a quegli accessi prima della conversione.": "This folder protects access to other encrypted folders. Move or relinquish that access before conversion.",
+  "La cartella cifrata è cambiata. Riprova senza perdere i dati originali.": "The encrypted folder changed. Retry; the original data is preserved.",
+  "La copia non supera la verifica di integrità.": "The copy failed its integrity check.",
+  "La copia non è completa. La cartella cifrata è intatta.": "The copy is incomplete. The encrypted folder is intact.",
+  "La copia contiene un possibile segreto: conservalo nella cassaforte prima di salvare in chiaro.": "The copy contains a possible secret: put it in the vault before saving as plaintext.",
+  "Due documenti hanno lo stesso percorso. Rinominali prima della conversione.": "Two documents have the same path. Rename them before conversion.",
+  "Verifica lo stato della cartella: il salvataggio finale potrebbe essere già riuscito.": "Check the folder: the final save may already have succeeded.",
 };
 
 // Encrypted-space controls.
@@ -3068,3 +3107,9 @@ Object.assign(EN, {
   "Accessi e modifiche": "Access and changes"
 
 });
+
+Object.assign(EN, { "Eventuali link di condivisione, anche dei livelli superiori, esporranno i file in chiaro. Con un link pubblico chiunque potrà leggerli.": "Any share links, including links on parent levels, will expose the plaintext files. With a public link, anyone can read them." });
+
+Object.assign(EN, { "Apri cartella": "Open folder", "Connessione interrotta. La conversione non è stata completata e la cartella cifrata è intatta. Puoi riprovare.": "Connection interrupted. Conversion was not completed and the encrypted folder is intact. You can retry." });
+
+Object.assign(EN, { "Cartella bloccata in questa pagina, ma la memoria del browser non è stata cancellata. Riprova il lucchetto prima di ricaricare.": "The folder is locked on this page, but browser memory was not cleared. Retry the lock before reloading.", "La memoria del browser non è stata cancellata. Riprova Esci prima di chiudere la pagina.": "Browser memory was not cleared. Retry Log out before closing the page." });

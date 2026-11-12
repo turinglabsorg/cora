@@ -36,7 +36,7 @@ export function panelAssets(dir, files) {
       if (!file) return null;
       const id = current();
       let body = readFileSync(join(dir, file[0]));
-      if (key === "/") body = Buffer.from(versioned(body.toString("utf8"), id));
+      if (key === "/" || key.endsWith("/manifest.webmanifest")) body = Buffer.from(versioned(body.toString("utf8"), id));
       const cache = match && match[1] === id ? IMMUTABLE : match ? "no-store" : "no-cache";
       return { type: file[1], cache, body };
     },

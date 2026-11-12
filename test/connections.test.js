@@ -271,7 +271,7 @@ test("an account says whose it is, and a member's new agent starts on the accoun
   const firstKey = connections.ids.indexOf("chiavi-api");
   assert.ok(firstKey > connections.ids.indexOf("codex"));
   assert.equal(connections.ids.filter((id) => ["ollama", "orcarouter", "deepseek", "typesafe", "soniox"].includes(id)).length, 0);
-  assert.deepEqual(connections.ids.slice(firstKey + 1), ["regia", "modelli", "domini", "accesso", "ssh", "spazio", "controlli", "preferenze"], "agent permissions and GitHub apps live inside each agent; Domains stay with the agents, Spazio with general settings");
+  assert.deepEqual(connections.ids.slice(firstKey + 1), ["regia", "modelli", "domini", "accesso", "ssh", "spazio", "cifratura", "controlli", "preferenze"], "agent permissions and GitHub apps live inside each agent; Domains stay with the agents, Spazio with general settings");
   assert.match(connections.codex, /ChatGPT \/ Codex2 accounts/, "the server's account and Sara's, both ready");
   assert.deepEqual([connections.open, connections.className], [["codex"], "rail open"]);
   assert.deepEqual([connections.after, connections.active], [["chiavi-api"], ["chiavi-api"]]);

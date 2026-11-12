@@ -1,3 +1,4 @@
+import { encryptedPasskeySettings } from "./encrypted-passkeys.js";
 import { forgetUserPasswords } from "./encrypted-memory.js";
 import { encryptedChatLauncher } from "./encrypted-chat.js";
 import { encryptedSetting, encryptedSetup, encryptedFolderPanel } from "./encrypted-space.js";
@@ -8,6 +9,8 @@ import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, ch
 const BUILD = (() => {
   try { return /^\/assets\/v\/([0-9a-f]+)\//.exec(document.querySelector('script[src*="/assets/v/"]')?.getAttribute("src") || "")?.[1] || ""; } catch { return ""; }
 })();
+const panelAsset = name => BUILD ? `/assets/v/${BUILD}/${name}` : `/assets/${name}`;
+const panelWorker = BUILD ? `/sw.js?build=${BUILD}` : "/sw.js";
 const LANGS = { it: "Italiano", en: "English" };
 const LANG = (() => {
   let saved = "";
@@ -665,7 +668,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
   const info = S.data ? transportInfo() : { icon: "radio", label: "Cora", where: tr("Caricamento…") };
   app.replaceChildren(h("div", { class: `app${mode ? ` mode-${mode}` : ""}` },
     h("aside", { class: "sidebar" },
-      h("a", { class: "brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "" }), h("span", {}, h("b", {}, "Cora"), h("small", {}, "agenti residenti"))),
+      h("a", { class: "brand", href: "#/" }, h("img", { src: panelAsset("icon-192.png"), alt: "" }), h("span", {}, h("b", {}, "Cora"), h("small", {}, "agenti residenti"))),
       h("a", { class: "onair-card", href: "#/settings" },
         h("span", { class: "panel-ico" }, icon(info.icon)),
         h("span", { class: "grow" }, h("b", {}, S.data ? platformsOn().map((kind) => TRANSPORTS[kind].label).join(" · ") : info.label), h("small", {}, info.where)),
@@ -677,7 +680,7 @@ function shell(content, { title = "Cora", back = "", mode = "" } = {}) {
         h("a", { href: "#/new", class: section === "new" ? "active" : "" }, h("span", { class: "avatar xs add" }, icon("plus")), h("span", { class: "grow" }, "Nuovo agente"))),
       h("div", { class: "side-account" }, accountButton("side"))),
     h("header", { class: "appbar" },
-      back ? h("a", { class: "icon-btn", href: back, "aria-label": "Indietro" }, icon("back")) : h("a", { class: "appbar-brand", href: "#/" }, h("img", { src: "/assets/icon-192.png", alt: "Cora" })),
+      back ? h("a", { class: "icon-btn", href: back, "aria-label": "Indietro" }, icon("back")) : h("a", { class: "appbar-brand", href: "#/" }, h("img", { src: panelAsset("icon-192.png"), alt: "Cora" })),
       h("h1", {}, title),
       accountButton("bar")),
     h("main", { class: "content" }, h("div", { class: "wrap" }, S.data?.encryptionRequired && (["brain", "thread", "salotto", "contesto"].includes(section) || section === "agent" && ["chat", "memoria", "ragionamento"].includes(route()[2])) ? encryptionWarning("Lo storico precedente all’attivazione può contenere dati in chiaro e resta accessibile.") : null, content)),
@@ -4159,7 +4162,7 @@ function sectionWorkspace({ title, base, current = "", entries, onSelect = () =>
   return root;
 }
 
-const encryptedUI = () => ({ h, btn, api, icon, currentUser: S.data?.currentUser, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
+const encryptedUI = () => ({ h, btn, api, icon, passwordSection: LANG === "en" ? "Passwords" : "Password", currentUser: S.data?.currentUser, panel, switchInput, setRows, setRow, tr, raw, sectionWorkspace, defaultModel: S.data?.settings.defaultModel, policyChanged: (required) => { if (S.data) S.data.encryptionRequired = required; } });
 
 function agentSecurityPane(agent, data) {
   if (!data) return panel({ icon: "alert", title: "Sicurezza non disponibile" }, btn("Riprova", { icon: "refresh", onclick: renderAgent }));
@@ -5126,7 +5129,7 @@ async function enableNotifications() {
   try {
     const permission = await Notification.requestPermission();
     if (permission !== "granted") throw new Error("permesso negato");
-    const registration = await navigator.serviceWorker.register("/sw.js");
+    const registration = await navigator.serviceWorker.register(panelWorker);
     await navigator.serviceWorker.ready;
     const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlKey(S.data.push.publicKey) });
     await api("/api/push/subscribe", { method: "POST", body: { subscription: subscription.toJSON(), device: navigator.userAgent } });
@@ -6900,6 +6903,7 @@ async function renderEncryptedArtifactFolder(data, tab, dir, view) {
     draw();
     document.querySelector(".tabs a.active")?.scrollIntoView({ block: "nearest", inline: "center" });
   } };
+  await workspace.openRemembered();
 }
 
 function encryptionWarning(message = "Cifratura obbligatoria attiva: alcune cartelle contengono ancora file in chiaro.") {
@@ -8598,7 +8602,7 @@ function artifactSpacePanel() {
     } }, raw(label))));
   amount.addEventListener("change", () => { const value = Math.round(Number(amount.value)); if (value >= 1) save(value); });
   const row = setRow("Tetto per gli artefatti", "Quanto possono occupare i file caricati dagli agenti e dal pannello. Di base è metà del disco; in ogni caso un caricamento si ferma se lascerebbe meno di 5 GB liberi.", h("div", { class: "stack-sm" }, modes, custom), { stack: true });
-  return h("div", { class: "stack" }, panel({ icon: "layers", title: "Spazio", hint: "Lo spazio che usano gli artefatti su questa macchina." }, box, setRows(row)), encryptedSetting(encryptedUI()));
+  return h("div", { class: "stack" }, panel({ icon: "layers", title: "Spazio", hint: "Lo spazio che usano gli artefatti su questa macchina." }, box, setRows(row)));
 }
 
 async function saveSettings(changes, row = null) {
@@ -8750,7 +8754,7 @@ function renderSettings() {
   const back = () => btn("Impostazioni", { icon: "back", cls: "sm ghost rail-back", onclick: () => show("") });
   const page = (id, ...content) => {
     const root = h("div", { class: "stack" }, back(), content);
-    const unchanged = ["regia", "modelli", "connettori", "mcp", "email", "server", "spazio", "accesso", "ssh", "controlli", "preferenze", ...SUBSCRIPTION_HARNESSES].includes(id);
+    const unchanged = ["regia", "modelli", "connettori", "mcp", "email", "server", "spazio", "cifratura", "accesso", "ssh", "controlli", "preferenze", ...SUBSCRIPTION_HARNESSES].includes(id);
     const configured = ["discord", "telegram", "slack"].includes(id) ? transportInfo(id).state !== "missing-token" || S.data.agents.some((agent) => id === "discord" ? agent.bot?.user : id === "telegram" ? agent.telegramBot?.user : agent.slackBot?.user)
       : true;
     pages.set(id, unchanged ? root : settingsDisclosures(root, id, expanded, configured));
@@ -9129,6 +9133,7 @@ function renderSettings() {
 
   /* ---------- Generale ---------- */
   if (S.data.artifacts?.space) page("spazio", artifactSpacePanel());
+  page("cifratura", h("div", { class: "stack" }, encryptedSetting(encryptedUI()), encryptedPasskeySettings(encryptedUI())));
   page("controlli", docChecksPane());
   page("preferenze", languagePanel(), notificationsPanel());
 
@@ -9156,6 +9161,7 @@ function renderSettings() {
       const space = S.data.artifacts.space;
       return [space.used > space.limit * 0.9 ? "warn" : null, tr("{used} di {limit} per gli artefatti", { used: fmtBytes(space.used), limit: fmtBytes(space.limit) })];
     } }] : []),
+    { id: "cifratura", group: "Generale", label: "Spazio cifrato", mark: "lock", state: () => [null, tr("Passkeys e cartelle cifrate")] },
     { id: "controlli", group: "Generale", label: "Controlli di doc", mark: "shield", state: () => [doc.installed ? "on" : "off", doc.installed ? tr("doc attivo") : tr("doc non installato")] },
     { id: "preferenze", group: "Generale", label: "Lingua e notifiche", mark: "globe", state: () => [null, LANGS[LANG]] },
   ];
@@ -9215,7 +9221,7 @@ function renderCloudLogin() {
   }
   app.replaceChildren(h("div", { class: "login" },
     h("div", { class: "login-inner" },
-      h("img", { class: "login-icon", src: "/assets/icon-192.png", alt: "" }),
+      h("img", { class: "login-icon", src: panelAsset("icon-192.png"), alt: "" }),
       h("h1", {}, "Cora"),
       h("p", { class: "login-sub" }, "Computer-Operating Resident Agents"),
       h("div", { class: "login-card" },
@@ -9258,7 +9264,7 @@ function renderLogin() {
   });
   app.replaceChildren(h("div", { class: "login" },
     h("div", { class: "login-inner" },
-      h("img", { class: "login-icon", src: "/assets/icon-192.png", alt: "" }),
+      h("img", { class: "login-icon", src: panelAsset("icon-192.png"), alt: "" }),
       h("h1", {}, "Cora"),
       h("p", { class: "login-sub" }, "Computer-Operating Resident Agents"),
       form,
@@ -9956,7 +9962,7 @@ async function boot() {
   }
   connectEvents();
   render();
-  navigator.serviceWorker?.register("/sw.js").catch(() => {});
+  navigator.serviceWorker?.register(panelWorker).catch(() => {});
 }
 
 // A tapped notification opens the right chat in the running app.
