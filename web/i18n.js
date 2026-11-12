@@ -3111,3 +3111,5 @@ Object.assign(EN, {
 Object.assign(EN, { "Eventuali link di condivisione, anche dei livelli superiori, esporranno i file in chiaro. Con un link pubblico chiunque potrà leggerli.": "Any share links, including links on parent levels, will expose the plaintext files. With a public link, anyone can read them." });
 
 Object.assign(EN, { "Apri cartella": "Open folder", "Connessione interrotta. La conversione non è stata completata e la cartella cifrata è intatta. Puoi riprovare.": "Connection interrupted. Conversion was not completed and the encrypted folder is intact. You can retry." });
+
+Object.assign(EN, { "Cartella bloccata in questa pagina, ma la memoria del browser non è stata cancellata. Riprova il lucchetto prima di ricaricare.": "The folder is locked on this page, but browser memory was not cleared. Retry the lock before reloading.", "La memoria del browser non è stata cancellata. Riprova Esci prima di chiudere la pagina.": "Browser memory was not cleared. Retry Log out before closing the page." });

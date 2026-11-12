@@ -90,10 +90,11 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); removal.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = !remember.checked; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
   const lockButton = btn("", { icon: "lock", cls: "sm art-lock", title: tr("Blocca e dimentica accesso"), onclick: () => run(async () => {
     lockButton.disabled = true;
-    try { await forgetPassword(user, personal.id); }
+    let forgotten = false;
+    try { await forgetPassword(user, personal.id); forgotten = true; }
     finally {
       remember.checked = false; savedPasskey = null;
-      lock(); updatePasskeyLabels(); lockButton.hidden = true; lockButton.disabled = false; ui.changed?.();
+      lock(); updatePasskeyLabels(); lockButton.hidden = forgotten; lockButton.disabled = false; ui.changed?.();
     }
   }) }); lockButton.hidden = !remember.checked;
   const run = async (fn) => { status.textContent = ""; try { await fn(); } catch (error) { status.textContent = tr(error.message); } };

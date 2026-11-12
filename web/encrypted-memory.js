@@ -29,6 +29,7 @@ const scope = (user, folder) => JSON.stringify([user, folder]);
 const generationKey = (user, folder) => JSON.stringify(folder ? [user, folder, "generation"] : [user]);
 const revocationKey = (user, folder) => "cora.encrypted.revocation." + generationKey(user, folder);
 const revocations = (user, folder) => [localStorage.getItem(revocationKey(user)), localStorage.getItem(revocationKey(user, folder))];
+const revoke = (user, folder) => { try { localStorage.setItem(revocationKey(user, folder), crypto.randomUUID()); return true; } catch { return false; } };
 const currentRecord = (user, folder, record) => JSON.stringify(record.revocations || [null, null]) === JSON.stringify(revocations(user, folder));
 
 async function fingerprint(method) {
@@ -37,8 +38,9 @@ async function fingerprint(method) {
 export async function forgetPassword(user, folder) {
   if (!canRememberPassword() || !user) return;
   const id = scope(user, folder); scopeEpochs.set(id, (scopeEpochs.get(id) || 0) + 1);
-  localStorage.setItem(revocationKey(user, folder), crypto.randomUUID());
-  await access("readwrite", store => { store.put(crypto.randomUUID(), generationKey(user, folder)); return store.delete(id); });
+  const revoked = revoke(user, folder);
+  try { await access("readwrite", store => { store.put(crypto.randomUUID(), generationKey(user, folder)); return store.delete(id); }); }
+  catch (error) { if (!revoked) throw Error("Cartella bloccata in questa pagina, ma la memoria del browser non è stata cancellata. Riprova il lucchetto prima di ricaricare."); throw error; }
 }
 async function storeRemembered(user, folder, method, password, mode) {
   if (!canRememberPassword() || !user || !["password", "passkey"].includes(method.kind) || !password) throw Error("Memoria del browser non disponibile.");
@@ -97,9 +99,10 @@ export async function rememberedAccessMethod(user, folder, methods) {
 export async function forgetUserPasswords(user) {
   if (!canRememberPassword() || !user) return;
   userEpochs.set(user, (userEpochs.get(user) || 0) + 1);
-  localStorage.setItem(revocationKey(user), crypto.randomUUID());
-  await access("readwrite", store => {
+  const revoked = revoke(user);
+  try { await access("readwrite", store => {
     const request = store.openCursor();
     request.onsuccess = () => { const cursor = request.result; if (!cursor) { store.put(crypto.randomUUID(), generationKey(user)); return; } try { if (JSON.parse(cursor.key)[0] === user) cursor.delete(); } catch { cursor.delete(); } cursor.continue(); };
-  });
+  }); }
+  catch (error) { if (!revoked) throw Error("La memoria del browser non è stata cancellata. Riprova Esci prima di chiudere la pagina."); throw error; }
 }
