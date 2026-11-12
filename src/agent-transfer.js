@@ -155,9 +155,7 @@ export class AgentTransfer {
     const personality = scrub(agent.personality || "");
     const core = scrub(agent.core || "");
     const now = this.now();
-    const routines = this.store.routines(agent.id).filter((routine) => !routine.archivedAt)
-      .filter((routine) => routine.kind !== "reminder" || (Date.parse(routine.runAt) > now && !routine.lastRunAt))
-      .slice(0, LIMITS.routines).map((routine) => {
+    const routines = this.liveRoutines(agent, now).slice(0, LIMITS.routines).map((routine) => {
         const name = scrub(routine.name), prompt = scrub(routine.prompt);
         const removed = merge(name.removed, prompt.removed);
         return { id: routine.id, ...routineSpec(routine), name: name.text, prompt: prompt.text, enabled: routine.enabled, removed, include: true };
@@ -452,6 +450,77 @@ export class AgentTransfer {
     this.staged.delete(id);
     this.activity({ type: "agent", agentId: agent.id, text: `importato ${agent.name} da ${staged.source === "file" ? "file" : staged.source}: ${created.routines} routine, ${created.memories} ricordi, ${created.procedures} procedure` });
     return { agent: this.store.agent(agent.id), created, notes };
+  }
+
+  /* ---------- duplicate ---------- */
+  /** Whether a copy with the same owner already reads the original's memories through the owner's memory. */
+  sharesMemory(agent) {
+    return Boolean(this.knowledge?.ownerMemory && !agent.sealed && agent.brainSource !== "external");
+  }
+
+  /** What Duplicate copies: export and import in one step, inside the space, so nothing is scrubbed. */
+  duplicateView(agent) {
+    const now = this.now();
+    const routines = this.liveRoutines(agent, now);
+    const shared = this.sharesMemory(agent);
+    return {
+      suggestion: this.freeName(agent.name),
+      routines: routines.length,
+      memories: shared ? 0 : this.store.memories(agent.id).length,
+      sharedMemory: shared,
+      core: Boolean(agent.core),
+      avatar: Boolean(agent.avatarUpload),
+      externalBrain: agent.brainSource === "external",
+    };
+  }
+
+  liveRoutines(agent, now = this.now()) {
+    return this.store.routines(agent.id).filter((routine) => !routine.archivedAt)
+      .filter((routine) => routine.kind !== "reminder" || (Date.parse(routine.runAt) > now && !routine.lastRunAt));
+  }
+
+  /**
+   * A new agent in the same space: same identity, card, owners, channels and routines (switched off on the
+   * same channels), its own copy of the memory unless the owner's memory already gives it; switched off,
+   * without the original's subscription, key, bots, mailbox, desktop, diary or traces.
+   */
+  async duplicate(agent, user, { name = "" } = {}, { prepare = (body) => body } = {}) {
+    const wanted = cleanText(name, 32).replace(/[\r\n]/g, " ").trim() || this.freeName(agent.name);
+    if (this.store.agents().some((other) => other.name.toLowerCase() === wanted.toLowerCase())) throw new TransferError("Esiste già un agente con questo nome: scegline un altro.", 409);
+    const notes = [];
+    let body = {
+      name: wanted, avatarSeed: agent.avatarSeed || agent.id, color: agent.color, personality: agent.personality, character: agent.character,
+      gender: agent.gender, voice: agent.voice, voiceLanguage: agent.voiceLanguage, chattiness: agent.chattiness,
+      tools: agent.tools, think: agent.think, effort: agent.effort, model: agent.model, ollamaHost: agent.ollamaHost,
+      ownerIds: agent.ownerIds, coOwnerIds: agent.coOwnerIds, brainOwnerId: agent.brainOwnerId || user.id, sealed: agent.sealed,
+      channelIds: agent.channelIds, platformsOff: agent.platformsOff, enabled: false,
+    };
+    if (agent.brainSource === "external") notes.push("brain");
+    try { body = prepare(body) || body; } catch { notes.push("model"); body = { ...body, model: "" }; }
+    let copy;
+    try { copy = this.store.createAgent(body); } catch (error) {
+      if (!body.model) throw new TransferError(error.message);
+      notes.push("model");
+      try { copy = this.store.createAgent({ ...body, model: "" }); } catch (again) { throw new TransferError(again.message); }
+    }
+    const created = { routines: 0, memories: 0, sharedMemory: this.sharesMemory(agent) };
+    try {
+      if (agent.avatarUpload) this.store.setAvatarImage(copy.id, this.store.avatar(agent.id));
+      if (agent.core) this.store.setCore(copy.id, agent.core, "duplicate");
+      for (const routine of this.liveRoutines(agent)) {
+        this.store.createRoutine(copy.id, { kind: routine.kind, name: routine.name, prompt: routine.prompt, channelId: routine.channelId, enabled: false, ...(routine.kind === "reminder" ? { runAt: routine.runAt } : { schedule: routine.schedule }) });
+        created.routines += 1;
+      }
+      if (!created.sharedMemory) for (const memory of this.store.memories(agent.id)) {
+        this.store.addMemory(copy.id, memory.text, "duplicate", { pinned: memory.pinned, by: "duplicate" });
+        created.memories += 1;
+      }
+    } catch (error) {
+      this.store.deleteAgent(copy.id);
+      throw new TransferError(`Duplicazione annullata: ${error.message}`, error.status || 400);
+    }
+    this.activity({ type: "agent", agentId: copy.id, text: `duplicato ${agent.name} in ${copy.name}: ${created.routines} routine, ${created.sharedMemory ? "memoria condivisa" : `${created.memories} ricordi`}` });
+    return { agent: this.store.agent(copy.id), created, notes };
   }
 
   stagedFor(user, id) {
