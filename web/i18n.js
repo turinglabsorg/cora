@@ -68,6 +68,12 @@ export const EN = {
   "proposto": "proposed",
   "interrotta": "interrupted",
 
+
+  "Valuta congedi e progressi nella conversazione. Legge gli scambi e gli esiti, senza strumenti.": "Reviews departures and progress using exchanges and outcomes, without tools.",
+  "Scambi tra agenti": "Agent exchanges",
+  "Continuano finché il lavoro avanza. Il Decisore ferma le ripetizioni senza progressi.": "Continue while work advances. The decision model stops repetition without progress.",
+  "Senza tetto fisso": "No fixed cap",
+  "Controllo progressi · obiettivi {goals}": "Progress checks · goals {goals}",
   "Accetta": "Accept",
   "Rimuovi": "Remove",
   "Esporta": "Export",

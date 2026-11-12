@@ -8816,7 +8816,7 @@ function renderSettings() {
     drawAccount(settings.decisionModel);
     model.querySelector("select").setAttribute("aria-label", tr("Modello del decisore"));
     model.querySelector("input").setAttribute("aria-label", tr("ID del modello del decisore"));
-    const modelRow = setRow("Modello del decisore", "Interpreta i congedi dalla conversazione. Scegli un modello piccolo: legge solo gli ultimi scambi, senza strumenti.", h("div", { class: "stack-sm" }, model, account), { stack: true });
+    const modelRow = setRow("Modello del decisore", "Valuta congedi e progressi nella conversazione. Legge gli scambi e gli esiti, senza strumenti.", h("div", { class: "stack-sm" }, model, account), { stack: true });
     model.addEventListener("change", () => {
       const value = pickedOf(model);
       if (!value) return;
@@ -8862,7 +8862,7 @@ function renderSettings() {
   };
   page("regia", panel({ icon: "sliders", title: "Regia", hint: "I turni degli agenti e la continuità delle conversazioni." },
     setRows(
-      numberRow("maxAgentTurns", "Messaggi tra agenti", "Quanti messaggi si scambiano dopo ogni messaggio umano, prima di fermarsi.", 0, 40),
+      setRow("Scambi tra agenti", "Continuano finché il lavoro avanza. Il Decisore ferma le ripetizioni senza progressi.", h("span", { class: "badge" }, tr("Senza tetto fisso"))),
       numberRow("maxRepliesPerRound", "Risposte per giro", "Quanti agenti parlano insieme.", 1, 6),
       numberRow("historySize", "Messaggi di contesto", "Quanta chat rileggono prima di rispondere.", 5, 100),
       idleRow, goalRow)), decisionPanel());
@@ -8919,7 +8919,7 @@ function renderSettings() {
     { id: "server", group: "Intelligenza", label: "Account del server", mark: "monitor", state: () => [null, settings.useResidentSubscriptions ? tr("in uso per chi non sceglie") : tr("non usati")] },
     ...providers.map((provider) => ({ id: provider, group: "Intelligenza", label: SUBSCRIPTION_NAMES[provider], mark: SUBSCRIPTION_ICONS[provider], state: () => providerState(provider) })),
     { id: "chiavi-api", group: "Intelligenza", label: "Chiavi API", mark: "key", state: () => [null, tr("{count} chiavi salvate", { count: CONNECTION_KEYS.filter(([provider]) => S.data.keys?.[provider]).length })] },
-    { id: "regia", group: "Agenti", label: "Regia", mark: "sliders", state: () => [null, tr("{turns} messaggi · obiettivi {goals}", { turns: S.data.settings.maxAgentTurns, goals: tr(S.data.settings.goalMode ? "accesi" : "spenti") })] },
+    { id: "regia", group: "Agenti", label: "Regia", mark: "sliders", state: () => [null, tr("Controllo progressi · obiettivi {goals}", { goals: tr(S.data.settings.goalMode ? "accesi" : "spenti") })] },
     { id: "modelli", group: "Agenti", label: "Modelli e sonno", mark: "chip", state: () => {
       const known = S.data.models.find((item) => item.id === S.data.settings.defaultModel);
       return [known && known.usable !== false ? null : "warn", S.data.settings.defaultModel || tr("nessun modello")];
