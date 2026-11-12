@@ -548,7 +548,8 @@ test("the Lovable card offers quick access with a new tab and a paste field", as
   await node.readyConnectors;
   const detail = node.querySelector(".connector-detail");
   assert.match(detail.textContent, /Accesso rapido/);
-  assert.match(detail.textContent, /App OAuth del workspace/);
+  assert.match(detail.textContent, /App OAuth/);
+  assert.match(detail.textContent, /Chiave API/);
   assert.match(detail.textContent, /127\.0\.0\.1/);
   assert.doesNotMatch(detail.textContent, /\[object Object\]/);
   node.querySelectorAll("button").find((button) => /Apri Lovable/.test(button.textContent)).click();

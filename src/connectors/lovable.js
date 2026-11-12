@@ -519,7 +519,7 @@ export const lovable = {
       },
       {
         id: "oauth",
-        label: "App OAuth del workspace",
+        label: "App OAuth",
         ready: "app",
         intro: "Un client OAuth registrato nel tuo workspace Lovable: dopo il consenso Lovable torna direttamente su Cora.",
         notice: "Lo registra un admin o il proprietario del workspace. Gli scope progetti e workspace richiedono un piano Business o Enterprise.",

@@ -3142,7 +3142,6 @@ Object.assign(EN, {
   "Vale 15 minuti. Cora ne usa solo il codice monouso, poi salva i token nella cassaforte come CORA_LOVABLE_TOKEN.": "Valid for 15 minutes. Cora uses only its one-time code, then keeps the tokens in the vault as CORA_LOVABLE_TOKEN.",
   "Indirizzo della pagina di arrivo": "Address of the landing page",
   "Completa il collegamento": "Complete the connection",
-  "App OAuth del workspace": "Workspace OAuth app",
   "Un client OAuth registrato nel tuo workspace Lovable: dopo il consenso Lovable torna direttamente su Cora.": "An OAuth client registered in your Lovable workspace: after consent Lovable returns straight to Cora.",
   "Lo registra un admin o il proprietario del workspace. Gli scope progetti e workspace richiedono un piano Business o Enterprise.": "A workspace admin or owner registers it. Project and workspace scopes need a Business or Enterprise plan.",
   "Il client OAuth": "The OAuth client",
