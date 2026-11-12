@@ -2768,7 +2768,7 @@ function agentForm(agent, { only = "", knowledge = null } = {}) {
     ...platformsOn().map((kind) => [kind, TRANSPORTS[kind].label, TRANSPORTS[kind].icon, "Account e collegamento", [kind === "slack" ? slackAccount(agent) : kind === "telegram" ? telegramAccount(agent) : discordAccount(agent)]]),
     ["github", "GitHub", "github", "App e repository", [githubAccount(agent)]],
     ["duplica", "Duplica", "copy", "Una copia in questo spazio", [duplicatePane]],
-    ["esporta", "Esporta", "download", "File o link per un altro spazio", [exportPane]],
+    ["esporta", "Esporta", "download", "File o link per un altro spazio", [exportPane, exportPane.filePanel, exportPane.linkPanel]],
   ];
   controls = sectionWorkspace({ title: "Impostazioni", base: `#/agent/${agent.id}/impostazioni`, current: route()[3], entries,
     onSelect: (id) => { form.hidden = !["identita", "carattere", "ascolto", "voce"].includes(id); if (id === "esporta") void exportPane.load(); if (id === "duplica") void duplicatePane.load(); } });
@@ -8133,7 +8133,12 @@ function transferGroup(title, hint, items, { label, detail, key = "id" }) {
 function agentExportPane(agent) {
   const body = h("div", { class: "stack" }, h("p", { class: "muted", role: "status" }, "Caricamento…"));
   let loaded = false;
-  const node = panel({ icon: "download", title: "Esporta agente", hint: tr("{name} in un file o in un link, senza dati personali.", { name: agent.name }) }, body);
+  const node = panel({ icon: "sliders", title: "Esporta agente", hint: tr("{name} in un file o in un link, senza dati personali.", { name: agent.name }) }, body);
+  const fileBody = h("div", { class: "stack" });
+  const linkBody = h("div", { class: "stack" });
+  node.filePanel = panel({ icon: "download", title: "File da caricare", hint: "Lo carichi tu in Agenti → Importa, in questo o in un altro spazio." }, fileBody);
+  node.linkPanel = panel({ icon: "link", title: "Link da mandare", hint: "Lo mandi a chi lo importa: lo incolla in Agenti → Importa." }, linkBody);
+  node.filePanel.hidden = node.linkPanel.hidden = true;
   node.load = async () => {
     if (loaded) return;
     loaded = true;
@@ -8169,8 +8174,8 @@ function agentExportPane(agent) {
       } catch (error) { toast(error.message, true); }
       download.disabled = false;
     } });
-    const days = h("select", { "aria-label": tr("Durata del link") }, [1, 7, 30].map((n) => h("option", { value: n, selected: n === 7 }, tr(n === 1 ? "1 giorno" : "{n} giorni", { n }))));
-    const downloads = h("select", { "aria-label": tr("Download consentiti") }, [1, 3, 5, 10, 20].map((n) => h("option", { value: n, selected: n === 1 }, tr(n === 1 ? "1 download" : "{n} download", { n }))));
+    const days = h("select", { "aria-label": tr("Vale per") }, [1, 7, 30].map((n) => h("option", { value: n, selected: n === 7 }, tr(n === 1 ? "1 giorno" : "{n} giorni", { n }))));
+    const downloads = h("select", { "aria-label": tr("Si può usare") }, [1, 3, 5, 10, 20].map((n) => h("option", { value: n, selected: n === 1 }, tr(n === 1 ? "1 volta" : "{n} volte", { n }))));
     const fresh = h("div", { class: "transfer-fresh", hidden: true });
     const links = h("div", { class: "transfer-links" });
     const drawLinks = (list) => {
@@ -8184,13 +8189,13 @@ function agentExportPane(agent) {
           else revoke.disabled = false;
         } });
         return h("div", { class: "transfer-link" }, icon("link"),
-          h("span", { class: "grow" }, h("b", {}, tr("{used} di {max} download", { used: link.downloads, max: link.maxDownloads })),
+          h("span", { class: "grow" }, h("b", {}, tr("Usato {used} volte su {max}", { used: link.downloads, max: link.maxDownloads })),
             h("small", {}, tr("scade il {when}", { when: new Date(link.expiresAt).toLocaleString(LOCALE) }), raw(` · ${link.counts.routines} ${tr("routine")} · ${link.counts.memories} ${tr("ricordi")}`))), revoke);
       }));
       links.hidden = !shown.length;
     };
     drawLinks(data.links);
-    const share = btn("Crea link", { icon: "link", onclick: async () => {
+    const share = btn("Crea link", { icon: "link", cls: "primary", onclick: async () => {
       share.disabled = true;
       const made = await guard(api(`/api/agents/${agent.id}/export/links`, { method: "POST", body: { choice: choice(), days: Number(days.value), downloads: Number(downloads.value) } }), "Link creato");
       share.disabled = false;
@@ -8205,8 +8210,15 @@ function agentExportPane(agent) {
       routines, memories, procedures,
       needs.length ? setRow("Da configurare all'arrivo", "Solo i nomi: i valori dei segreti e gli account restano qui.", h("span", { class: "transfer-needs" }, needs), { stack: true }) : null,
       h("p", { class: "notice" }, icon("lock"), h("span", {}, h("b", {}, tr("Non esce mai: ")), tr("diario, messaggi, tracce, proprietari e permessi, canali, abbonamenti e chiavi, bot, casella email, GitHub, desktop, artefatti e valori dei segreti. Email, telefoni, id, IP, link con token e nomi delle persone dello spazio vengono oscurati."))),
-      h("div", { class: "transfer-actions" }, download, h("span", { class: "spacer" }), days, downloads, share),
-      fresh, links].filter(Boolean));
+    ].filter(Boolean));
+    fileBody.replaceChildren(h("div", { class: "transfer-actions" }, h("code", { class: "transfer-file-name" }, data.fileName), h("span", { class: "spacer" }), download));
+    linkBody.replaceChildren(
+      setRows(
+        setRow("Vale per", "Dopo, il link non si apre più.", days),
+        setRow("Si può usare", "Ogni import consuma un uso.", downloads)),
+      h("div", { class: "transfer-actions" }, h("span", { class: "spacer" }), share),
+      fresh, links);
+    node.filePanel.hidden = node.linkPanel.hidden = false;
   };
   return node;
 }

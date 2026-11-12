@@ -2629,6 +2629,8 @@ input.thread-search { height: 38px; }
 .transfer-needs .tag.on { border-color: var(--amber-line); color: var(--amber); }
 .transfer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .transfer-actions select { width: auto; }
+.transfer-file-name { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; border: 0; background: none; color: var(--muted); font-family: var(--mono); font-size: 13px; }
+.transfer-fresh[hidden], .transfer-links[hidden] { display: none; }
 .transfer-fresh { display: flex; flex-direction: column; gap: 8px; }
 .transfer-fresh p { margin: 0; }
 .transfer-links { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
