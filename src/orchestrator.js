@@ -292,7 +292,8 @@ export class Orchestrator {
       agents = agents.filter((agent, index) => access[index].status === "fulfilled" && access[index].value);
     }
     const focus = state?.focus || this.engagements[channelId];
-    return agents.map((agent) => ({ id: agent.id, engaged: Boolean(focus?.ids.includes(agent.id)) }));
+    const reachable = new Set(agents.map((agent) => agent.id));
+    return this.store.agents().map((agent) => ({ id: agent.id, reachable: reachable.has(agent.id), engaged: Boolean(focus?.ids.includes(agent.id)) }));
   }
 
   async unreachableColleagues(agent, channelId, text) {
@@ -300,7 +301,7 @@ export class Orchestrator {
     const called = (this.brain.agentDirectory?.(agent) || []).filter((other) => other.id !== agent.id && colleagueCalled(text, other.name));
     if (!called.length) return [];
     const reachable = await this.conversationAgents(channelId);
-    return called.filter((other) => !reachable.some((entry) => entry.id === other.id));
+    return called.filter((other) => !reachable.some((entry) => entry.id === other.id && entry.reachable));
   }
 
   isOwner(userId) {

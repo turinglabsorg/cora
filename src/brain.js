@@ -284,7 +284,7 @@ export class Brain {
     if (!channelId || !this.conversationAgents) return directory;
     const reachable = await this.conversationAgents(channelId);
     return directory.map((entry) => ({ ...entry, conversation: {
-      channelId, reachable: reachable.some((other) => other.id === entry.id),
+      channelId, reachable: reachable.some((other) => other.id === entry.id && other.reachable),
       engaged: reachable.some((other) => other.id === entry.id && other.engaged),
     } }));
   }

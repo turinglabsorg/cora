@@ -4292,6 +4292,8 @@ async function fakePhone() {
 
 
 describe("conversation colleague reachability", () => {
+  before(() => waitFor(() => app.orchestrator.state(CHANNEL).loaded, { what: "initial Discord history recovery" }));
+
   async function fixture(t) {
     const threadId = "1599000000000000901";
     discord.dispatch("THREAD_CREATE", { id: threadId, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Reachability" });
@@ -4303,6 +4305,8 @@ describe("conversation colleague reachability", () => {
     ];
     const agents = [];
     t.after(async () => {
+      await quiet();
+      await Promise.all([...app.orchestrator.states.values()].map((state) => state.loading));
       discord.state.privateTo.delete(threadId);
       app.orchestrator.states.delete(threadId);
       delete app.orchestrator.engagements[threadId];
@@ -4336,6 +4340,7 @@ describe("conversation colleague reachability", () => {
     discord.state.privateTo.set(threadId, "reach-sender");
     directory = await app.brain.conversationDirectory(sender, threadId);
     assert.equal(entry(receiver.id).reachable, false, "engagement cannot override Discord read permissions");
+    assert.equal(entry(receiver.id).engaged, true, "losing read access does not invent a departure");
     const prompt = app.brain.systemPrompt(sender, { place: "Discord", computer: false, colleagues: directory });
     assert.doesNotMatch(prompt, /ReachReceiver|ReachElsewhere/);
     assert.match(prompt, /Colleghi in questa conversazione/);
@@ -4383,7 +4388,7 @@ describe("conversation colleague reachability", () => {
     discord.dispatch("THREAD_CREATE", { id: target, guild_id: GUILD, parent_id: CHANNEL, type: 11, name: "Restricted destination" });
     await sleep(120);
     t.after(() => { discord.state.privateTo.delete(target); app.orchestrator.states.delete(target); });
-    assert.ok((await app.orchestrator.conversationAgents(threadId)).some((item) => item.id === receiver.id));
+    assert.ok((await app.orchestrator.conversationAgents(threadId)).some((item) => item.id === receiver.id && item.reachable));
     discord.state.privateTo.set(target, "reach-sender");
     const before = discord.state.botPosts.length;
     await assert.rejects(app.orchestrator.postDirect(sender, state, target, "@ReachReceiver please verify."), /Message not sent: ReachReceiver/);
@@ -4407,9 +4412,9 @@ describe("conversation colleague reachability", () => {
     const canRead = app.bots.canRead;
     t.after(() => { app.bots.canRead = canRead; });
     app.bots.canRead = async (agent, id) => { if (agent.name === "ReachReceiver") throw new Error("transport unavailable"); return canRead.call(app.bots, agent, id); };
-    assert.ok(!(await app.orchestrator.conversationAgents(threadId)).some((item) => item.id !== sender.id && app.store.agent(item.id)?.name === "ReachReceiver"), "failed probes never advertise a reachable bot");
+    assert.ok(!(await app.orchestrator.conversationAgents(threadId)).some((item) => item.reachable && item.id !== sender.id && app.store.agent(item.id)?.name === "ReachReceiver"), "failed probes never advertise a reachable bot");
     state.mainBlind = true; state.heardFrom.add(sender.id);
-    assert.deepEqual((await app.orchestrator.conversationAgents(threadId)).map((item) => item.id), [sender.id]);
+    assert.deepEqual((await app.orchestrator.conversationAgents(threadId)).filter((item) => item.reachable).map((item) => item.id), [sender.id]);
   });
 });
 
