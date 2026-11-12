@@ -6013,6 +6013,35 @@ describe("talking with the agents", () => {
     assert.equal(result.text, "Updated state checked.");
   });
 
+  test("a previous completion confirmation cannot cover work resumed after a colleague result", async (t) => {
+    const originalRun = app.llm.runAgent, originalShell = app.boxes.shell;
+    t.after(() => { app.llm.runAgent = originalRun; app.boxes.shell = originalShell; });
+    let incoming = [], calls = 0;
+    app.boxes.shell = async () => ({ code: 0, output: "Next stage prepared." });
+    app.llm.runAgent = async ({ execute, prompt }) => {
+      calls++;
+      if (calls === 1) {
+        await execute("list_routines", {});
+        return { text: "Preparazione conclusa; manca il controllo del collega." };
+      }
+      assert.match(prompt, /Prima di chiudere/);
+      if (calls === 2) {
+        incoming.push({ id: "new-result-after-confirmation", kind: "agent", authorName: "Pino", addressed: [olga.id],
+          content: "Verification passed. The requester can continue the next stage.", at: Date.now() });
+        for (let index = 0; index < 4; index++) await execute("list_routines", {});
+        await execute("shell", { command: "prepare-next-stage" });
+        return { text: "Esito ricevuto; restano i passaggi successivi." };
+      }
+      await execute("shell", { command: "complete-next-stage" });
+      return { text: "Next stage completed and verified." };
+    };
+    const result = await app.brain.loop({ agent: { ...olga, model: "codex/test-model" }, mode: "chat",
+      channel: { id: "duplicate-confirmation-refresh", place: "isolated task" }, user: "Complete the stages after the review.",
+      inbox: () => incoming.splice(0), computer: true, task: true, maxSteps: 30, deadline: Date.now() + 30000, images: [] });
+    assert.ok(calls >= 3, "new results and resumed work require a fresh completion confirmation");
+    assert.equal(result.text, "Next stage completed and verified.");
+  });
+
   test("Cora harness: a long task frees the channel for the others, still gets new messages, and picks up again after a restart", async () => {
     intentions = (body) => JSON.stringify({ intent: lastUserText(body).includes("Pino, ci sei?") ? "continue" : "update" });
     app.orchestrator.releaseAfterMs = 300;

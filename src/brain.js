@@ -867,6 +867,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     let changed = 0;
     const looked = new Set();
     let looping = false;
+    let confirmed = false;
     let progressCalls = 0;
     let loopReviewCalls = 0;
     let loopEvidenceStart = 0;
@@ -892,6 +893,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
         if (LOOKUP_TOOLS.has(name) || /^(linear|asana)_(get_|list_|search_|teams$|workspaces$)/.test(name)) recent.splice(index, 1);
       }
       looping = false;
+      confirmed = false;
     };
     // What the agent really did, in one line each: the goal check reads this, not its promises.
     const did = [];
@@ -1039,6 +1041,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       const ok = !output.text.startsWith("error:");
       if (looping && ok && allowed && !repeated && !halted && !MEMORY_TOOLS.has(name) && !TALK_TOOLS.has(name)) {
         looping = false;
+        confirmed = false;
         trace.add({ type: "note", text: `Lavoro ripreso con ${name}: riattivo la verifica di completamento.` });
       }
       this.log?.({
@@ -1207,7 +1210,6 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
      * or after asking the owner something.
      */
     let nudges = 0;
-    let confirmed = false;
     const verdict = (raw) => {
       if (halted || !task || !worked || looping || asked || nudges >= NUDGES || Date.now() > deadline - 20000) return null;
       const text = cleanReply(raw, agent);
