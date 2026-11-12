@@ -63,7 +63,6 @@ const STATIC = {
   "/assets/encrypted-memory.js": ["encrypted-memory.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-crypto.js": ["encrypted-crypto.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-files.js": ["encrypted-files.js", "text/javascript; charset=utf-8"],
-  "/assets/encrypted-chat.js": ["encrypted-chat.js", "text/javascript; charset=utf-8"],
 };
 const CSP = [
   "default-src 'self'",

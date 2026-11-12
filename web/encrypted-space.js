@@ -2,7 +2,6 @@ import { encryptionRemoval } from "./encrypted-conversion.js";
 import { passkeyChoice } from "./encrypted-passkeys.js";
 import { canRememberPassword, rememberPassword, recalledPassword, forgetPassword, rememberAccess, recalledAccess, rememberedAccessMethod } from "./encrypted-memory.js";
 import { createFolderKeys, protectBundle, unlockBundle, encryptDocument, decryptDocument, proveAccess, documentId, credentialName } from "./encrypted-crypto.js";
-import { encryptedConversations } from "./encrypted-chat.js";
 import { encryptedFileBrowser, downloadEncryptedFile, uploadEncryptedFile } from "./encrypted-files.js";
 export { createFolderKeys, protectBundle, unlockBundle, encryptDocument, decryptDocument, proveAccess, to64, from64 } from "./encrypted-crypto.js";
 
@@ -87,7 +86,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   remembered = null;
   remember.addEventListener("change", () => { if (!remember.checked) run(async () => { await forgetPassword(user, personal.id); savedPasskey = null; updatePasskeyLabels(); lockButton.hidden = !bundle; ui.changed?.(); }); });
   const files = h("div", { class: "stack-sm" }), methods = h("div", { class: "stack-sm" }), requests = h("div", { class: "stack-sm" }), sharing = h("div", { class: "stack-sm" });
-  const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); removal.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = !remember.checked; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
+  const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); removal.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = !remember.checked; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
   const lockButton = btn("", { icon: "lock", cls: "sm art-lock", title: tr("Blocca e dimentica accesso"), onclick: () => run(async () => {
     lockButton.disabled = true;
     let forgotten = false;
@@ -102,7 +101,6 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const refresh = async () => { data = await api(`/api/encrypted/folders/${folder.id}`); await draw(); ui.changed?.(); };
   const fileControls = encryptedFileBrowser(ui, { api, folder: folder.id, path: ui.path || folder.path || folder.title, dir: ui.dir || "", state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }), documents: () => data.documents, canWrite: () => data.canWrite, refresh, persist: (doc, name, body) => persist(doc, name, body),
     decrypt: (opened, doc) => decryptDocument(opened, doc.envelope, `cora:${folder.id}:${doc.id}:${doc.version}`), select: (doc) => { selected = doc; drawRequestState(); }, go: (next) => { location.hash = `#/artefatti/${folder.id}/file${next ? `/${next.split("/").map(encodeURIComponent).join("/")}` : ""}`; } });
-  const conversations = encryptedConversations(ui, { api, folder: folder.id, agents, defaultModel: ui.defaultModel, state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }) });
   const removal = encryptionRemoval(ui, { folder: folder.id, state: () => ({ bundle, method: chosenMethod }), complete: async () => { await forgetPassword(user, personal.id); lock(); reload(); } });
   const persist = async (doc, name, body) => {
     const version = doc?.version || 0, docId = doc?.id || documentId();
@@ -184,7 +182,6 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const locked = h("div", { class: "stack", hidden: true });
   async function draw() {
     drawAudit(); fileControls.updateAccess();
-    if (bundle) await conversations.refresh();
     if (bundle) await fileControls.refresh();
     let requestButton = null, shareButton = null;
     const registry = data.canManage ? await api("/api/encrypted/passkeys") : { passkeys: [] };
@@ -303,7 +300,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     audit.replaceChildren(panel({ icon: "clock", title: "Registro", hint: "Chi ha sbloccato, letto, salvato e condiviso, con metodo ed esito. Nessun contenuto né chiave." }, h("ol", { class: "log-list" }, rows.length ? rows : h("li", { class: "log-row" }, h("span", { class: "grow log-text" }, tr("Ancora niente da registrare."))))));
   }
   drawAudit();
-  const panes = { file: files, conversazioni: conversations.element, accessi: requests, condivisione: sharing, registro: audit, cifratura: methods,
+  const panes = { file: files, accessi: requests, condivisione: sharing, registro: audit, cifratura: methods,
     ...(ui.permissions ? { permessi: ui.permissions() } : {}), ...(ui.folderSettings && data.canManage ? { impostazioni: ui.folderSettings() } : {}) };
   const pane = h("div", { class: "stack" });
   locked.append(pane);
@@ -313,7 +310,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     if (key === "file") fileControls.setDir(dir);
     if (key === "cifratura") methods.selectSection?.(location.hash.split("?")[0].split("/")[4] || "");
   };
-  root.tabs = () => [["file", "File", "file", data.documents.filter((d) => d.kind !== "chat").length], ["conversazioni", "Conversazioni", "chat"], ["accessi", "Accessi", "spark"], ["condivisione", "Condivisione", "link"], ["registro", "Registro", "clock"],
+  root.tabs = () => [["file", "File", "file", data.documents.filter((d) => d.kind !== "chat").length], ["accessi", "Accessi", "spark"], ["condivisione", "Condivisione", "link"], ["registro", "Registro", "clock"],
     ...(panes.permessi ? [["permessi", "Permessi", "shield"]] : []), ["cifratura", "Cifratura", "key"], ...(panes.impostazioni ? [["impostazioni", "Impostazioni", "sliders"]] : [])];
   root.lockButton = lockButton;
   root.openRemembered = () => autoRemembered && (!data.accessGrant || data.accessGrant.state === "accepted") ? unlockWith(savedPasskey ? personal.methods.find(method => method.id === savedPasskey) : null, true) : Promise.resolve();
