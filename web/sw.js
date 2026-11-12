@@ -1,3 +1,5 @@
+const build = new URL(self.location.href).searchParams.get("build");
+const panelIcon = build && /^[a-f0-9]{16}$/.test(build) ? `/assets/v/${build}/icon-192.png` : "/assets/icon-192.png";
 // Cora's service worker: shows the agents' push notifications and opens the right chat on tap.
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -11,8 +13,8 @@ self.addEventListener("push", (event) => {
   }
   event.waitUntil(self.registration.showNotification(data.title || "Cora", {
     body: data.body || "",
-    icon: "/assets/icon-192.png",
-    badge: "/assets/icon-192.png",
+    icon: panelIcon,
+    badge: panelIcon,
     tag: data.tag || undefined,
     renotify: Boolean(data.tag),
     data: { url: data.url || "/" },

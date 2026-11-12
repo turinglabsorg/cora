@@ -2646,3 +2646,15 @@ input.thread-search { height: 38px; }
   .transfer-actions .spacer { display: none; }
   .transfer-actions > .btn.primary { width: 100%; }
 }
+
+.encrypted-used-folders { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; }
+.encrypted-used-folders a { color: var(--amber); font-size: 12px; overflow-wrap: anywhere; }
+.encrypted-confirm { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; box-sizing: border-box; color: var(--text); background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg); padding: 24px; box-shadow: 0 24px 80px #000a; }
+.encrypted-confirm::backdrop { background: #000b; }
+.encrypted-confirm p { margin: 16px 0; color: var(--muted); line-height: 1.6; }
+.encrypted-confirm .row { justify-content: flex-end; flex-wrap: wrap; }
+
+.encrypted-passkey-registry .encrypted-credential-row.set-row:has(> .set-control) { grid-template-columns: minmax(0, 1fr) minmax(100px, 30%); gap: 12px; }
+.encrypted-credential-row .set-control { align-items: stretch; width: 100%; }
+.encrypted-credential-row .set-control > select { min-width: 0; width: 100%; max-width: 100%; }
+.encrypted-credential-row .set-control > .btn { width: 100%; min-height: 40px; white-space: normal; font-size: 10px; padding: 8px; }

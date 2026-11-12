@@ -22,8 +22,9 @@ async function wrappingKey(folder, item, password = "", create = false, signal, 
   }
   if (!navigator.credentials || !window.PublicKeyCredential) throw Error("Questo browser non supporta le passkey.");
   let seed, credential;
+  const enrolling = create && !item.credentialId;
   try {
-    if (create) {
+    if (enrolling) {
       seed = random(32);
       credential = await credentialRequest("create", { publicKey: { challenge: random(32), rp: { name: name ? "Cora · " + name : "Cora · Spazio cifrato", id: location.hostname }, user: { id: seed, name: `${credentialName(folder, name)} · ${item.label || "Passkey"} · ${item.salt.slice(0, 8)}`, displayName: `${name || folder} · ${item.label || "Passkey"}` }, pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", userVerification: "required" }, attestation: "none", ...(item.derivation === "handle-v1" ? {} : { extensions: { prf: {} } }) } }, signal);
       if (!credential) throw Error("Creazione della passkey annullata.");
@@ -32,7 +33,7 @@ async function wrappingKey(folder, item, password = "", create = false, signal, 
     }
     const compatible = item.derivation === "handle-v1";
     let output, authenticatorData;
-    if (compatible && create) {
+    if (compatible && enrolling) {
       output = seed;
       authenticatorData = credential.response.getAuthenticatorData();
     } else {
@@ -49,17 +50,22 @@ async function wrappingKey(folder, item, password = "", create = false, signal, 
     } finally { new Uint8Array(output).fill(0); }
   } finally { seed?.fill(0); }
 }
-export async function protectBundle(folder, bundle, kind, password = "", label = "", derivation = "auto", signal, name = "") {
-  const method = { kind, label, ...(kind === "passkey" ? { derivation } : {}), salt: to64(random(32)), iv: to64(random(12)), ...(kind === "password" ? { iterations: 600000 } : {}) };
+export async function protectBundle(folder, bundle, kind, password = "", label = "", derivation = "auto", signal, name = "", existing = null) {
+  const method = { kind, label, ...(kind === "passkey" ? { derivation: existing?.derivation || derivation, ...(existing ? { credentialId: existing.credentialId } : {}) } : {}), salt: to64(random(32)), iv: to64(random(12)), ...(kind === "password" ? { iterations: 600000 } : {}) };
   const key = await wrappingKey(folder, method, password, true, signal, name);
   method.ciphertext = to64(await crypto.subtle.encrypt({ name: "AES-GCM", iv: from64(method.iv), additionalData: wrapAad(folder, method) }, key, encoder.encode(JSON.stringify(bundle))));
   return method;
 }
-export async function createFolderKeys(folder, kind, password, label = "", derivation = "auto", signal, name = "") {
+export async function createPasskey(label = "Passkey", signal) {
+  const item = { kind: "passkey", label, derivation: "auto", salt: to64(random(32)) };
+  await wrappingKey("personal-passkey", item, "", true, signal, label);
+  return { credentialId: item.credentialId, derivation: item.derivation, label };
+}
+export async function createFolderKeys(folder, kind, password, label = "", derivation = "auto", signal, name = "", existing = null) {
   const rsa = await crypto.subtle.generateKey({ name: "RSA-OAEP", modulusLength: 3072, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["encrypt", "decrypt"]);
   const signing = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
   const bundle = { v: 1, folder, privateKey: await crypto.subtle.exportKey("jwk", rsa.privateKey), signingKey: await crypto.subtle.exportKey("jwk", signing.privateKey) };
-  return { publicKey: await crypto.subtle.exportKey("jwk", rsa.publicKey), signingKey: await crypto.subtle.exportKey("jwk", signing.publicKey), methods: [await protectBundle(folder, bundle, kind, password, label, derivation, signal, name)] };
+  return { publicKey: await crypto.subtle.exportKey("jwk", rsa.publicKey), signingKey: await crypto.subtle.exportKey("jwk", signing.publicKey), methods: [await protectBundle(folder, bundle, kind, password, label, derivation, signal, name, existing)] };
 }
 export async function unlockBundle(folder, method, password = "", signal) {
   try {

@@ -1,3 +1,5 @@
+import { encryptionRemoval } from "./encrypted-conversion.js";
+import { passkeyChoice } from "./encrypted-passkeys.js";
 import { canRememberPassword, rememberPassword, recalledPassword, forgetPassword, rememberAccess, recalledAccess, rememberedAccessMethod } from "./encrypted-memory.js";
 import { createFolderKeys, protectBundle, unlockBundle, encryptDocument, decryptDocument, proveAccess, documentId, credentialName } from "./encrypted-crypto.js";
 import { encryptedConversations } from "./encrypted-chat.js";
@@ -12,6 +14,7 @@ export function encryptedSetting(ui, agent = null) {
     const name = agent ? "encryptedOnly" : "enabled";
     const toggle = switchInput(name, agent ? "Solo sessioni cifrate" : "Cifratura obbligatoria", state[name], agent ? (state.requiredBySpace ? "Obbligatoria per tutto lo spazio. Questo agente non può lavorare su file in chiaro." : "Solo sessioni cifrate. Shell, memoria e connettori esclusi.") : "Da quando è attiva, tutti i nuovi contenuti devono essere cifrati. Lo storico resta accessibile e non viene convertito. Quando è spenta, la cifratura personale resta disponibile.");
     const input = toggle.querySelector("input"); input.disabled = agent ? state.requiredBySpace : !state.canManage;
+    if (!agent) { input.setAttribute("aria-label", tr("Cifratura obbligatoria")); const label = toggle.querySelector(".switch-text"); label?.remove(); }
     const status = h("p", { class: "muted", role: "status" });
     input.addEventListener("change", async () => {
       input.disabled = true;
@@ -20,7 +23,7 @@ export function encryptedSetting(ui, agent = null) {
       finally { input.disabled = agent ? state.requiredBySpace : !state.canManage; }
     });
     const migration = h("div", { class: "encryption-warning", hidden: Boolean(agent) || !state.required || !Object.keys(state.plaintext || {}).length, role: "note" }, h("div", { class: "stack-sm" }, h("strong", {}, "Cifratura obbligatoria attiva: lo storico contiene ancora dati in chiaro."), h("p", {}, "Lo storico resta accessibile. I nuovi contenuti devono essere cifrati; nessun dato precedente viene convertito automaticamente."), btn("Apri gli artefatti", { href: "#/artefatti", cls: "sm ghost" })));
-    box.replaceChildren(...(migration ? [migration] : []), setRows(setRow(agent ? "Documenti" : "Documenti e sessioni", agent ? "Sblocco temporaneo dal pannello, indipendente da Sigillato." : "La cifratura personale è sempre disponibile. L’obbligo generale non può essere aggirato dalle impostazioni degli utenti o degli agenti.", toggle, { stack: true })), status);
+    box.replaceChildren(...(migration ? [migration] : []), setRows(setRow(agent ? "Documenti" : "Cifratura obbligatoria", agent ? "Sblocco temporaneo dal pannello, indipendente da Sigillato." : "Da quando è attiva, tutti i nuovi contenuti devono essere cifrati. Lo storico resta accessibile e non viene convertito. Quando è spenta, la cifratura personale resta disponibile.", toggle, { stack: Boolean(agent) })), status);
   }).catch((error) => box.replaceChildren(h("p", { role: "alert" }, error.message), btn("Riprova", { onclick: () => box.replaceChildren(encryptedSetting(ui, agent)) })));
   return agent ? box : panel({ icon: "lock", title: "Spazio cifrato" }, box);
 }
@@ -28,29 +31,36 @@ function credentialAccount(ui, folder) {
   return ui.h("input", { class: "encrypted-credential-name", type: "text", name: "username", autocomplete: "username", readonly: true, value: credentialName(folder.id, folder.title || folder.path), "aria-label": ui.tr("Nome nel gestore password") });
 }
 export function encryptedSetup(ui, folder, reload) {
-  const { h, btn, api, panel, tr } = ui;
-  const account = credentialAccount(ui, folder);
+  const { h, btn, api, panel, tr, sectionWorkspace } = ui;
   const password = h("input", { name: "password", type: "password", autocomplete: "new-password", minlength: 14, "aria-label": tr("Password della cartella"), placeholder: tr("Almeno 14 caratteri") });
   const again = h("input", { name: "password-confirmation", type: "password", autocomplete: "new-password", "aria-label": tr("Ripeti la password"), placeholder: tr("Ripeti la password") });
   const status = h("p", { role: "status", class: "muted" });
-  let setupController = null;
-  const cancelSetup = h("button", { class: "btn ghost", hidden: true, onclick: () => setupController?.abort() }, "Annulla");
-  const create = async (kind, derivation = "auto") => {
-    setupController = new AbortController(); cancelSetup.hidden = false;
-    for (const b of root.querySelectorAll("button")) b.disabled = true;
-    cancelSetup.disabled = false;
+  let controller = null;
+  const cancel = btn("Annulla", { cls: "ghost", onclick: () => controller?.abort() }); cancel.hidden = true;
+  const create = async (kind, label = "", existing = null) => {
+    if (controller) return;
+    controller = new AbortController(); cancel.hidden = false;
+    for (const control of root.querySelectorAll("button,input,select")) control.disabled = true;
+    cancel.disabled = false;
     try {
       if (kind === "password" && password.value !== again.value) throw Error("Le password non coincidono.");
-      const payload = await createFolderKeys(folder.id, kind, password.value, kind === "passkey" ? "Passkey" : "", derivation, setupController.signal, folder.title || folder.path);
-      if (setupController.signal.aborted) throw new DOMException("", "AbortError");
+      const payload = await createFolderKeys(folder.id, kind, password.value, label, "auto", controller.signal, folder.title || folder.path, existing);
+      if (controller.signal.aborted) throw new DOMException("", "AbortError");
       password.value = ""; again.value = "";
       await api(`/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: payload }); reload();
     } catch (error) { status.textContent = tr(error.name === "AbortError" ? "Creazione annullata. Puoi riprovare." : error.message); }
-    finally { setupController = null; cancelSetup.hidden = true; for (const b of root.querySelectorAll("button")) b.disabled = false; }
+    finally { controller = null; cancel.hidden = true; for (const control of root.querySelectorAll("button,input,select")) control.disabled = false; }
   };
-  const root = panel({ icon: "lock", title: "Spazio cifrato", hint: "Solo per cartelle vuote. Ogni cartella ha chiavi proprie; i file esistenti non vengono convertiti." },
-    h("p", { class: "muted" }, "Se perdi tutti i metodi di sblocco, i documenti sono irrecuperabili."),
-    h("form", { class: "stack-sm encrypted-enrollment", onsubmit: event => { event.preventDefault(); create("password"); } }, account, password, again, h("p", { class: "muted" }, "Il metodo viene scelto automaticamente. Se il gestore non supporta la protezione avanzata, la sicurezza dipende dalla protezione del gestore stesso. Le chiavi non vengono inviate a Cora."), h("div", { class: "row encrypted-enrollment-actions" }, btn("Proteggi con password", { cls: "primary", icon: "lock", type: "submit" }), btn("Crea passkey", { icon: "key", onclick: () => create("passkey") })), cancelSetup), status);
+  const passkeys = h("div", { class: "stack-sm" });
+  const drawPasskeys = async () => {
+    const registry = await api("/api/encrypted/passkeys");
+    passkeys.replaceChildren(passkeyChoice(ui, { existing: registry.passkeys, initial: new URLSearchParams(location.hash.split("?")[1] || "").get("passkey") || "", onCreate: label => create("passkey", label), onReuse: item => create("passkey", item.label, item) }));
+  };
+  const root = h("div", { class: "stack" }, h("p", { class: "muted" }, "Solo per cartelle vuote. Ogni cartella ha chiavi proprie; i file esistenti non vengono convertiti."), h("p", { class: "muted" }, "Se perdi tutti i metodi di sblocco, i documenti sono irrecuperabili."), sectionWorkspace({ title: "Cifratura", base: `#/artefatti/${folder.id}/cifratura`, current: location.hash.split("?")[0].split("/")[4] || "", entries: [
+    ["passkeys", "Passkeys", "key", "Passkey nuove o già salvate", [panel({ icon: "key", title: "Passkeys" }, passkeys)]],
+    ["passwords", "Passwords", "lock", "Password di questa cartella", [panel({ icon: "lock", title: "Passwords" }, h("form", { class: "stack-sm encrypted-enrollment", onsubmit: event => { event.preventDefault(); create("password"); } }, credentialAccount(ui, folder), password, again, btn("Aggiungi password", { icon: "plus", type: "submit" })))]]
+  ] }), cancel, status);
+  drawPasskeys().catch(error => { status.textContent = tr(error.message); });
   return root;
 }
 
@@ -73,10 +83,11 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   catch { status.textContent = tr("Memoria del browser non disponibile. Puoi sbloccare normalmente."); }
   if (remembered) { password.value = remembered.password; remember.checked = true; }
   if (savedPasskey) remember.checked = true;
+  const autoRemembered = Boolean(remembered || savedPasskey);
   remembered = null;
   remember.addEventListener("change", () => { if (!remember.checked) run(async () => { await forgetPassword(user, personal.id); savedPasskey = null; updatePasskeyLabels(); lockButton.hidden = !bundle; ui.changed?.(); }); });
   const files = h("div", { class: "stack-sm" }), methods = h("div", { class: "stack-sm" }), requests = h("div", { class: "stack-sm" }), sharing = h("div", { class: "stack-sm" });
-  const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = !remember.checked; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
+  const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); removal.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = !remember.checked; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
   const lockButton = btn("", { icon: "lock", cls: "sm art-lock", title: tr("Blocca e dimentica accesso"), onclick: () => run(async () => {
     lock();
     await forgetPassword(user, personal.id);
@@ -88,6 +99,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const fileControls = encryptedFileBrowser(ui, { api, folder: folder.id, path: ui.path || folder.path || folder.title, dir: ui.dir || "", state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }), documents: () => data.documents, canWrite: () => data.canWrite, refresh, persist: (doc, name, body) => persist(doc, name, body),
     decrypt: (opened, doc) => decryptDocument(opened, doc.envelope, `cora:${folder.id}:${doc.id}:${doc.version}`), select: (doc) => { selected = doc; drawRequestState(); }, go: (next) => { location.hash = `#/artefatti/${folder.id}/file${next ? `/${next.split("/").map(encodeURIComponent).join("/")}` : ""}`; } });
   const conversations = encryptedConversations(ui, { api, folder: folder.id, agents, defaultModel: ui.defaultModel, state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }) });
+  const removal = encryptionRemoval(ui, { folder: folder.id, state: () => ({ bundle, method: chosenMethod }), complete: async () => { await forgetPassword(user, personal.id); lock(); reload(); } });
   const persist = async (doc, name, body) => {
     const version = doc?.version || 0, docId = doc?.id || documentId();
     const cipher = await encryptDocument(data.folder.publicKey, JSON.stringify({ title: name, content: body }), `cora:${folder.id}:${docId}:${version + 1}`);
@@ -96,7 +108,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   let drawRequestState = () => {};
   files.append(fileControls.element);
   const cancelUnlock = h("button", { class: "btn ghost", hidden: true, onclick: () => unlockController?.abort() }, "Annulla sblocco");
-  const unlockWith = (method = null) => run(async () => {
+  const unlockWith = (method = null, automatic = false) => run(async () => {
     if (unlockController) return;
     unlockController = new AbortController(); const signal = unlockController.signal;
     for (const button of unlock.querySelectorAll("button")) button.disabled = true;
@@ -107,6 +119,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
       if (method) {
         chosenMethod = method;
         if (remember.checked && savedPasskey === method.id) opened = (await recalledAccess(user, personal.id, personal.methods))?.bundle;
+        if (!opened && automatic) throw Error("L’accesso ricordato non è più disponibile. Sblocca normalmente.");
         if (!opened) opened = await unlockBundle(personal.id, method, "", signal);
       }
       else {
@@ -170,18 +183,25 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     if (bundle) await conversations.refresh();
     if (bundle) await fileControls.refresh();
     let requestButton = null, shareButton = null;
-    const addPassword = h("input", { name: "password", type: "password", autocomplete: "new-password", placeholder: tr("Nuova password · almeno 14 caratteri"), "aria-label": tr("Nuova password") });
-    const methodName = h("input", { type: "text", maxlength: 80, placeholder: tr("Nome, es. telefono personale"), "aria-label": tr("Nome del metodo") });
-    const addMethod = async (kind, derivation = "auto") => {
-      const label = methodName.value.trim() || (kind === "passkey" ? "Passkey" : "Password") + " " + (data.folder.methods.filter((m) => m.kind === kind).length + 1);
-      const item = await protectBundle(folder.id, bundle, kind, addPassword.value, label, derivation, undefined, folder.title || folder.path);
+    const registry = data.canManage ? await api("/api/encrypted/passkeys") : { passkeys: [] };
+    const addPassword = h("input", { name: "password", type: "password", autocomplete: "new-password", minlength: 14, placeholder: tr("Nuova password · almeno 14 caratteri"), "aria-label": tr("Nuova password") });
+    const passwordName = h("input", { type: "text", maxlength: 80, placeholder: tr("Nome della password"), "aria-label": tr("Nome della password") });
+    const addMethod = async (kind, label, existing = null) => {
+      const item = await protectBundle(folder.id, bundle, kind, kind === "password" ? addPassword.value : "", label, "auto", undefined, folder.title || folder.path, existing);
       addPassword.value = "";
       await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { add: item, proof: await proof("methods") } }); lock(); reload();
     };
-    methods.replaceChildren(panel({ icon: "key", title: "Metodi di sblocco", hint: "Password e più passkey possono convivere. Aggiungi il metodo alternativo prima di rimuovere quello precedente." },
-      h("div", { class: "rows" }, data.folder.methods.map((item) => h("div", { class: "row-item" }, h("span", { class: "grow" }, raw(item.label), h("small", { class: "muted" }, raw(" · " + (item.kind === "passkey" ? tr(item.derivation === "handle-v1" ? "Protezione del gestore" : "Protezione avanzata") : item.kind)))), btn("Rimuovi", { cls: "ghost danger", disabled: data.folder.methods.length === 1, onclick: () => run(async () => {
-        await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { remove: item.id, proof: await proof("methods") } }); lock(); reload();
-      }) })))), h("form", { class: "stack-sm encrypted-add-method", onsubmit: event => { event.preventDefault(); run(() => addMethod("password")); } }, credentialAccount(ui, folder), methodName, addPassword, h("p", { class: "muted" }, "Il metodo viene scelto automaticamente. Se il gestore non supporta la protezione avanzata, la sicurezza dipende dalla protezione del gestore stesso. Le chiavi non vengono inviate a Cora."), h("div", { class: "row" }, btn("Aggiungi password", { icon: "plus", type: "submit" }), btn("Aggiungi passkey", { icon: "key", onclick: () => run(() => addMethod("passkey")) })))));
+    const rows = kind => h("div", { class: "rows" }, data.folder.methods.filter(item => item.kind === kind).map(item => h("div", { class: "row-item" }, h("span", { class: "grow set-text" }, h("b", {}, raw(item.label)), item.kind === "passkey" ? h("small", { class: "muted" }, tr(item.derivation === "handle-v1" ? "Protezione del gestore" : "Protezione avanzata")) : null), btn("Rimuovi", { cls: "sm ghost danger", disabled: !data.canManage || data.folder.methods.length === 1, onclick: () => run(async () => {
+      await api(`/api/encrypted/folders/${folder.id}/methods`, { method: "PUT", body: { remove: item.id, proof: await proof("methods") } }); lock(); reload();
+    }) }))));
+    const hint = "Aggiungi un metodo alternativo prima di rimuovere quello precedente.";
+    const methodWorkspace = sectionWorkspace({ title: "Cifratura", base: `#/artefatti/${folder.id}/cifratura`, current: location.hash.split("?")[0].split("/")[4] || "", entries: [
+      ["passkeys", "Passkeys", "key", "Passkey nuove o già salvate", [panel({ icon: "key", title: "Passkeys", hint }, rows("passkey"), passkeyChoice(ui, { existing: registry.passkeys.filter(item => !data.folder.methods.some(method => method.credentialId === item.credentialId)), initial: new URLSearchParams(location.hash.split("?")[1] || "").get("passkey") || "", onCreate: label => addMethod("passkey", label), onReuse: item => addMethod("passkey", item.label, item) }))]],
+      ["passwords", "Passwords", "lock", "Password di questa cartella", [panel({ icon: "lock", title: "Passwords", hint }, rows("password"), h("form", { class: "stack-sm", onsubmit: event => { event.preventDefault(); run(() => addMethod("password", passwordName.value.trim() || "Password")); } }, credentialAccount(ui, folder), passwordName, addPassword, btn("Aggiungi password", { icon: "plus", type: "submit" }))) ]],
+      ...(data.canManage ? [["rimuovi", "Rimuovi cifratura", "lock", "Conserva file e versioni in chiaro", [removal.element]]] : [])
+    ] });
+    methods.replaceChildren(methodWorkspace);
+    methods.selectSection = section => methodWorkspace.selectSection(section, false);
     const agent = h("select", { "aria-label": tr("Agente") }, agents.map((a) => h("option", { value: a.id }, raw(a.name))));
     const operation = h("select", { "aria-label": tr("Operazione") }, h("option", { value: "read" }, "Lettura e analisi"), h("option", { value: "edit" }, "Proposta di modifica"));
     const instruction = h("textarea", { rows: 3, "aria-label": tr("Istruzione privata"), placeholder: tr("Istruzione privata per questa sessione…") });
@@ -264,7 +284,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   }
   const audit = h("div", { class: "stack-sm" });
   const AUDIT_ICON = { unlock: "key", read: "eye", configure: "sliders", methods: "key", write: "edit", export: "download", share: "link", incoming: "link", grant: "shield", request: "shield", session: "shield", delete: "trash" };
-  const AUDIT_VERB = { unlock: "ha sbloccato la cartella", read: "ha aperto i documenti", configure: "ha attivato la cifratura", methods: "ha cambiato i metodi di sblocco", write: "ha salvato una versione", export: "ha esportato un documento", share: "ha proposto una copia cifrata", incoming: "ha ricevuto una copia cifrata", grant: "ha cambiato un accesso cifrato", request: "ha chiesto un accesso temporaneo", session: "sessione privata", delete: "ha eliminato" };
+  const AUDIT_VERB = { unlock: "ha sbloccato la cartella", read: "ha aperto i documenti", configure: "ha attivato la cifratura", methods: "ha cambiato i metodi di sblocco", write: "ha salvato una versione", export: "ha esportato un documento", share: "ha proposto una copia cifrata", incoming: "ha ricevuto una copia cifrata", grant: "ha cambiato un accesso cifrato", request: "ha chiesto un accesso temporaneo", session: "sessione privata", decrypt: "ha rimosso la cifratura", delete: "ha eliminato" };
   const OUTCOME = { success: "", denied: "rifiutato", accepted: "accettato", revoked: "revocato", proposed: "proposto", declined: "rifiutato", interrupted: "interrotta" };
   const methodName = (value) => { const id = String(value || "").split(/[:-]/).at(-1); const method = personal.methods.find((m) => m.id === id) || data.folder.methods?.find((m) => m.id === id); return method ? method.label : ""; };
   function drawAudit() {
@@ -287,10 +307,12 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
     const key = panes[tab] ? tab : "file";
     pane.replaceChildren(panes[key]);
     if (key === "file") fileControls.setDir(dir);
+    if (key === "cifratura") methods.selectSection?.(location.hash.split("?")[0].split("/")[4] || "");
   };
   root.tabs = () => [["file", "File", "file", data.documents.filter((d) => d.kind !== "chat").length], ["conversazioni", "Conversazioni", "chat"], ["accessi", "Accessi", "spark"], ["condivisione", "Condivisione", "link"], ["registro", "Registro", "clock"],
     ...(panes.permessi ? [["permessi", "Permessi", "shield"]] : []), ["cifratura", "Cifratura", "key"], ...(panes.impostazioni ? [["impostazioni", "Impostazioni", "sliders"]] : [])];
   root.lockButton = lockButton;
+  root.openRemembered = () => autoRemembered && (!data.accessGrant || data.accessGrant.state === "accepted") ? unlockWith(savedPasskey ? personal.methods.find(method => method.id === savedPasskey) : null, true) : Promise.resolve();
   root.show(current, ui.dir || "");
   let idle = null;
   const touch = () => { clearTimeout(idle); idle = setTimeout(lock, 5 * 60000); };

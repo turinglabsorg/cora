@@ -3,6 +3,7 @@ import { createContext, runInContext } from "node:vm";
 import { EN } from "../web/i18n.js";
 import * as character from "../src/character.js";
 import * as encryptedMemory from "../web/encrypted-memory.js";
+import * as encryptedPasskeys from "../web/encrypted-passkeys.js";
 import * as encryptedSpace from "../web/encrypted-space.js";
 
 class Element {
@@ -148,7 +149,7 @@ export function panelHarness({ source, fetch, hash = "", language = "it" }) {
   document.getElementById = () => app;
   const location = { hash };
   const context = createContext({
-    EN, ...character, ...encryptedSpace, ...encryptedMemory, Node: Element, document, fetch, FormData,
+    EN, ...character, ...encryptedSpace, ...encryptedMemory, ...encryptedPasskeys, Node: Element, document, fetch, FormData,
     navigator: { language }, location,
     history: { replaceState(_state, _title, url) { location.hash = String(url); } },
     localStorage: { getItem: () => language },

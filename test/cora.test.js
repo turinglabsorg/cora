@@ -3716,6 +3716,8 @@ describe("agents in Discord", () => {
       assert.equal(current.headers.get("cache-control"), "public, max-age=31536000, immutable", `${name} is kept for good under its build`);
       assert.equal(await current.text(), await fetch(`${base}/assets/${name}`).then((response) => response.text()), `${name} is the same file`);
     }
+    const manifest = await fetch(`${base}/assets/v/${build}/manifest.webmanifest`).then(response => response.json());
+    for (const item of manifest.icons) assert.ok(item.src.startsWith(`/assets/v/${build}/`), "installed app icons use the same build");
     const old = await fetch(`${base}/assets/v/0123456789abcdef/app.js`);
     assert.equal(old.status, 200, "a page still open on an older build gets the current file");
     assert.equal(old.headers.get("cache-control"), "no-store", "never cached under the old address");
@@ -9485,4 +9487,26 @@ test("general encryption enforcement overrides agent opt-out and preserves optio
   const restored = (await f.request(f.alice, agentPath)).data;
   assert.equal(restored.encryptedOnly, false); assert.equal(restored.requiredBySpace, false);
   assert.equal((await f.request(f.alice, `/api/encrypted/folders/${folder.id}`)).status, 200);
+});
+
+
+test("personal passkey metadata is private and plaintext conversion requires folder ownership and confirmation", async t => {
+  const f = await knowledgeWorld(); t.after(f.close);
+  const credentialId = randomBytes(32).toString("base64url");
+  assert.equal((await f.request(f.alice, "/api/encrypted/passkeys", { method: "POST", body: { credentialId, derivation: "prf-v1", label: "Personal authenticator", privateKey: "ignored" } })).status, 201);
+  const own = (await f.request(f.alice, "/api/encrypted/passkeys")).data;
+  assert.equal(own.passkeys[0].credentialId, credentialId); assert.doesNotMatch(JSON.stringify(own), /privateKey/);
+  for (const actor of [f.bob, f.admin]) assert.equal((await f.request(actor, "/api/encrypted/passkeys")).data.passkeys.length, 0);
+  const panel = panelHarness({ hash: "#/settings/cifratura", language: "en", fetch: (path, options) => fetch(f.base + path, { ...options, headers: { ...options?.headers, ...f.alice.headers } }) });
+  panel.run(`S.data = ${JSON.stringify((await f.request(f.alice, "/api/state")).data)}`);
+  panel.run("renderSettings()");
+  await waitFor(() => panel.app.textContent.includes("Personal authenticator"), { what: "the person's passkey registry" });
+  assert.match(panel.app.textContent, /Passkeys/);
+  assert.equal(panel.app.querySelectorAll("details").some(node => node.textContent.includes("Personal authenticator")), false, "personal encryption settings stay open");
+  const folder = (await f.request(f.alice, "/api/artifacts/folders", { method: "POST", body: { path: "synthetic/confirmed-conversion" } })).data;
+  const keys = await createFolderKeys(folder.id, "password", "synthetic confirmed conversion password");
+  await f.request(f.alice, `/api/encrypted/folders/${folder.id}/configure`, { method: "POST", body: keys });
+  assert.equal((await f.request(f.alice, `/api/encrypted/folders/${folder.id}/decrypt-start`, { method: "POST", body: {} })).status, 400);
+  assert.equal((await f.request(f.bob, `/api/encrypted/folders/${folder.id}/decrypt-start`, { method: "POST", body: { confirm: true } })).status, 404);
+  assert.equal(f.app.store.value(`encryptedFolder:${folder.id}`), true);
 });

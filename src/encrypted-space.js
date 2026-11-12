@@ -1,3 +1,4 @@
+import { EncryptedConversion } from "./encrypted-conversion.js";
 import { createHash, createPublicKey, createCipheriv, publicEncrypt, randomBytes, verify, constants } from "node:crypto";
 
 const instances = new WeakMap();
@@ -7,12 +8,16 @@ const fail = (status, message) => { throw Object.assign(new Error(message), { st
 const OPS = new Set(["read", "edit", "chat"]);
 const MAX_BYTES = 2 * 1024 * 1024;
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS encrypted_passkeys (owner TEXT NOT NULL, credential TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(owner, credential));
 CREATE TABLE IF NOT EXISTS encrypted_folders (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS encrypted_folders_owner ON encrypted_folders(owner);
 CREATE TABLE IF NOT EXISTS encrypted_documents (id TEXT NOT NULL, folder TEXT NOT NULL, version INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(id, version));
 CREATE INDEX IF NOT EXISTS encrypted_documents_folder ON encrypted_documents(folder, id, version);
 CREATE TABLE IF NOT EXISTS encrypted_requests (id TEXT PRIMARY KEY, folder TEXT NOT NULL, owner TEXT NOT NULL, agent TEXT NOT NULL, state TEXT NOT NULL, expires INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS encrypted_requests_folder ON encrypted_requests(folder, state);
 CREATE INDEX IF NOT EXISTS encrypted_requests_owner ON encrypted_requests(owner, state, expires);
 CREATE TABLE IF NOT EXISTS encrypted_inbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL, folder TEXT NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS encrypted_inbox_folder ON encrypted_inbox(folder);
 CREATE INDEX IF NOT EXISTS encrypted_inbox_recipient ON encrypted_inbox(recipient, folder);
 CREATE TABLE IF NOT EXISTS encrypted_file_uploads (id TEXT PRIMARY KEY, folder TEXT NOT NULL, owner TEXT NOT NULL, state TEXT NOT NULL, expires INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS encrypted_file_uploads_folder ON encrypted_file_uploads(folder, state);
@@ -20,6 +25,7 @@ CREATE INDEX IF NOT EXISTS encrypted_file_uploads_owner ON encrypted_file_upload
 CREATE INDEX IF NOT EXISTS encrypted_file_uploads_expiry ON encrypted_file_uploads(state, expires);
 CREATE TABLE IF NOT EXISTS encrypted_file_chunks (upload TEXT NOT NULL, chunk INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(upload, chunk));
 CREATE TABLE IF NOT EXISTS encrypted_folder_grants (id TEXT PRIMARY KEY, folder TEXT NOT NULL, recipient TEXT NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS encrypted_folder_grants_target ON encrypted_folder_grants(json_extract(data, '$.target'));
 CREATE UNIQUE INDEX IF NOT EXISTS encrypted_folder_grants_recipient ON encrypted_folder_grants(folder, recipient);
 CREATE TABLE IF NOT EXISTS encrypted_audit (seq INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS encrypted_audit_owner ON encrypted_audit(owner, seq);
@@ -66,7 +72,7 @@ export function encryptedSpaceFor(store, options = {}) {
 export class EncryptedSpace {
   constructor({ store, llm, knowledge, artifacts }) {
     Object.assign(this, { store, llm, knowledge, artifacts });
-    store.db.exec(SCHEMA); this.challenges = new Map(); this.running = new Map(); this.failures = new Map(); this.pruneUploads();
+    store.db.exec(SCHEMA); this.conversion = new EncryptedConversion(this); this.challenges = new Map(); this.running = new Map(); this.failures = new Map(); this.pruneUploads();
     for (const row of store.db.prepare("SELECT * FROM encrypted_requests WHERE state = 'running'").all()) {
       const req = parse(row); this.saveRequest({ ...req, state: "interrupted" }); this.audit(req.owner, "session", req, "interrupted");
     }
@@ -160,6 +166,22 @@ export class EncryptedSpace {
     }
     return { enabled: this.enabled, required: this.enabled, requiredSince: this.store.value("encryptionRequiredSince", 0), available: true, canManage: user.role === "owner", ...(user.role === "owner" ? { plaintext: this.plaintextState() } : {}) };
   }
+  registerPasskey(user, input, legacy = false) {
+    const credentialId = b64(input.credentialId, 16, 1024);
+    if (!["prf-v1", "handle-v1"].includes(input.derivation)) fail(400, "Derivazione passkey non supportata.");
+    const old = parse(this.store.db.prepare("SELECT data FROM encrypted_passkeys WHERE owner = ? AND credential = ?").get(user.id, credentialId));
+    if (old && old.derivation !== input.derivation) fail(409, "La protezione di questa passkey non può cambiare.");
+    if (old) return old;
+    const item = { credentialId, derivation: input.derivation, label: String(input.label || "Passkey").slice(0, 80), createdAt: legacy ? null : Date.now() };
+    this.store.db.prepare("INSERT INTO encrypted_passkeys(owner, credential, data) VALUES (?, ?, ?)").run(user.id, credentialId, JSON.stringify(item));
+    return item;
+  }
+  passkeys(user) {
+    const folders = this.store.db.prepare("SELECT data FROM encrypted_folders WHERE owner = ?").all(user.id).map(parse).filter(folder => this.store.artifactFolder(folder.id));
+    for (const folder of folders) for (const item of folder.methods.filter(method => method.kind === "passkey")) this.registerPasskey(user, item, true);
+    const passkeys = this.store.db.prepare("SELECT data FROM encrypted_passkeys WHERE owner = ? ORDER BY rowid").all(user.id).map(parse).map(item => ({ ...item, folders: folders.filter(folder => folder.methods.some(method => method.credentialId === item.credentialId)).map(folder => ({ id: folder.id, title: this.store.artifactFolder(folder.id).title, path: this.store.artifactFolder(folder.id).path })) }));
+    return { passkeys, folders: this.store.artifactFolders().filter(folder => (folder.ownerId || folder.createdBy?.id) === user.id).map(folder => ({ id: folder.id, title: folder.title, path: folder.path, encrypted: encryptedFolder(this.store, folder.id) })) };
+  }
   agentSettings(agentId, user, changes) {
     const agent = this.store.agent(agentId);
     if (!agent || !this.knowledge.canManage(agent, user)) fail(404, "Agente non disponibile.");
@@ -178,6 +200,7 @@ export class EncryptedSpace {
     if (this.store.artifactCommits(folderId, { limit: 1 }).length || this.store.artifactShares(folderId).length) fail(409, "Crea una cartella vuota: i file e i link esistenti non vengono convertiti automaticamente.");
     if (!Array.isArray(input.methods) || input.methods.length < 1 || input.methods.length > 12) fail(400, "Abilita almeno un metodo di sblocco.");
     const folder = { id: folderId, owner: user.id, revision: 1, publicKey: publicKey(input.publicKey, "rsa"), signingKey: publicKey(input.signingKey, "ec"), methods: input.methods.map(method), acceptShares: false };
+    for (const item of folder.methods.filter(method => method.kind === "passkey")) this.registerPasskey(user, item);
     this.writeFolder(folder); this.store.setValue(`encryptedFolder:${folderId}`, true);
     this.audit(user.id, "configure", folder); return folder;
   }
@@ -209,6 +232,7 @@ export class EncryptedSpace {
       if (folder.methods.length >= 12) fail(409, "Troppi metodi di sblocco.");
       const next = method(input.add);
       if (next.kind === "passkey" && folder.methods.some((m) => m.credentialId === next.credentialId)) fail(409, "Passkey già presente.");
+      if (next.kind === "passkey") this.registerPasskey(user, next);
       folder.methods.push(next);
     } else if (input.remove) {
       if (!folder.methods.some((m) => m.id === input.remove)) fail(404, "Metodo non disponibile.");

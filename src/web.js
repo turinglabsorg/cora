@@ -50,12 +50,15 @@ const STATIC = {
   "/assets/i18n.js": ["i18n.js", "text/javascript; charset=utf-8"],
   "/assets/styles.css": ["styles.css", "text/css; charset=utf-8"],
   "/assets/favicon.svg": ["favicon.svg", "image/svg+xml"],
+  "/assets/manifest.webmanifest": ["manifest.webmanifest", "application/manifest+json"],
   "/manifest.webmanifest": ["manifest.webmanifest", "application/manifest+json"],
   "/assets/icon-192.png": ["icon-192.png", "image/png"],
   "/assets/icon-512.png": ["icon-512.png", "image/png"],
   "/assets/apple-touch-icon.png": ["apple-touch-icon.png", "image/png"],
   "/sw.js": ["sw.js", "text/javascript; charset=utf-8"],
   "/assets/send.js": ["send.js", "text/javascript; charset=utf-8"],
+  "/assets/encrypted-conversion.js": ["encrypted-conversion.js", "text/javascript; charset=utf-8"],
+  "/assets/encrypted-passkeys.js": ["encrypted-passkeys.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-space.js": ["encrypted-space.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-memory.js": ["encrypted-memory.js", "text/javascript; charset=utf-8"],
   "/assets/encrypted-crypto.js": ["encrypted-crypto.js", "text/javascript; charset=utf-8"],
@@ -510,13 +513,20 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (actingUser) throw new HttpError(403, "Lo sblocco richiede la sessione personale del browser.");
       const body = method === "GET" || method === "DELETE" ? {} : await readJson(req, 4 * 1024 * 1024);
       if (path === "/api/encrypted/settings" && ["GET", "PUT"].includes(method)) return send(res, 200, encrypted.settings(user, method === "PUT" ? body : null));
+      if (path === "/api/encrypted/passkeys" && method === "GET") return send(res, 200, encrypted.passkeys(user));
+      if (path === "/api/encrypted/passkeys" && method === "POST") return send(res, 201, encrypted.registerPasskey(user, body));
       if (path === "/api/encrypted/folders" && method === "GET") return send(res, 200, { folders: store.artifactFolders().filter(folder => { try { encrypted.folder(folder.id, user); return true; } catch { return false; } }).map(folder => ({ id: folder.id, title: folder.title })) });
       if (path === "/api/encrypted/recipients" && method === "GET") return send(res, 200, encrypted.recipients(user));
       const agentMatch = /^\/api\/encrypted\/agents\/([\w-]+)$/.exec(path);
       if (agentMatch && ["GET", "PUT"].includes(method)) return send(res, 200, encrypted.agentSettings(agentMatch[1], user, method === "PUT" ? body : null));
-      const folderMatch = /^\/api\/encrypted\/folders\/(af_[a-f0-9]{12})(?:\/(configure|challenge|methods|documents|requests|read|share|receive|export|grants|file-start|file-share-start|file-chunk|file-finish|file-cancel))?$/.exec(path);
+      const folderMatch = /^\/api\/encrypted\/folders\/(af_[a-f0-9]{12})(?:\/(configure|challenge|methods|documents|requests|read|share|receive|export|grants|file-start|file-share-start|file-chunk|file-finish|file-cancel|decrypt-start|decrypt-source|decrypt-chunk|decrypt-finish|decrypt-cancel))?$/.exec(path);
       if (folderMatch) {
         const [, folderId, action] = folderMatch;
+        if (action === "decrypt-start" && method === "POST") return send(res, 201, encrypted.conversion.start(folderId, user, body));
+        if (action === "decrypt-source" && method === "GET") return send(res, 200, encrypted.conversion.source(folderId, user, url.searchParams.get("conversion"), Number(url.searchParams.get("item"))));
+        if (action === "decrypt-chunk" && method === "PUT") return send(res, 200, encrypted.conversion.chunk(folderId, user, body));
+        if (action === "decrypt-finish" && method === "POST") return send(res, 200, await encrypted.conversion.finish(folderId, user, body));
+        if (action === "decrypt-cancel" && method === "POST") return send(res, 200, encrypted.conversion.cancel(folderId, user, body.conversion));
         if (!action && method === "GET") return send(res, 200, encrypted.documents(folderId, user));
         if (action === "grants" && method === "POST") return send(res, 200, encrypted.grantAccess(folderId, user, body));
         if (action === "documents" && method === "GET") {
