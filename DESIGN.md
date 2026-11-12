@@ -325,7 +325,7 @@ The existing encrypted Files rail includes a file/folder upload panel above the 
 
 Encrypted folders retain the native Permissions and Settings tabs. Folder permissions and encrypted key delivery remain visibly separate; pending recipients unlock their personal encrypted folder to accept a grant. Never imply that revocation retrieves exported copies or keys. Read-only access disables all persistence/upload controls.
 
-The Conversations rail uses the existing panels, status text, wrapping rows and inert, wrapping preformatted content. Keep the full temporary model-access boundary visible above the composer. Chat entry offers a folder selector and a clear path back to ordinary history. Lock clears previews, messages and drafts and revokes running requests. Conversation history is ciphertext; never render encrypted reasoning into the ordinary trace log.
+Encrypted folders use the standard artifact shell with Files, Access, Sharing, Log, Permissions, Encryption and Settings. They have no manual conversation tab, composer or Agent Chat launcher. Legacy links return to Files or ordinary Agent Chat. Retained legacy records are storage, not a new thread interface; do not render their reasoning into ordinary trace history.
 
 ## Automatic passkey setup
 

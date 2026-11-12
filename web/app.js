@@ -1,6 +1,5 @@
 import { encryptedPasskeySettings } from "./encrypted-passkeys.js";
 import { forgetUserPasswords } from "./encrypted-memory.js";
-import { encryptedChatLauncher } from "./encrypted-chat.js";
 import { encryptedSetting, encryptedSetup, encryptedFolderPanel } from "./encrypted-space.js";
 import { EN } from "./i18n.js";
 import { CHARACTER_DEFAULT, CHARACTER_TRAITS, characterSheet, characterStyle, characterType, shouldWriteCharacter } from "./character.js";
@@ -4004,6 +4003,8 @@ function renderNew() {
 }
 
 async function renderAgent() {
+  const [, legacyAgent, legacyTab, legacyChat] = route();
+  if (legacyTab === "chat" && legacyChat === "cifrata") history.replaceState(null, "", `#/agent/${legacyAgent}/chat`);
   const view = location.hash;
   S.live = null;
   const [, id, requested = "impostazioni", sub] = route();
@@ -4050,10 +4051,7 @@ async function renderAgent() {
   else if (tab === "routine") body = await routineTab(agent, routines);
   else if (tab === "desktop") body = await desktopTab(agent);
   else if (tab === "attivita") body = activityTab(agent);
-  else if (tab === "chat") {
-    const encrypted = await api(`/api/encrypted/agents/${agent.id}`);
-    body = sub === "cifrata" || (encrypted.encryptedOnly && sub !== "storico") ? await encryptedChatLauncher(encryptedUI(), agent) : [h("div", { class: "row end" }, btn("Chat cifrata", { icon: "lock", href: `#/agent/${agent.id}/chat/cifrata` })), await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent })];
-  }
+  else if (tab === "chat") body = await chatPanel(`web-${agent.id}`, { placeholder: tr("Scrivi a {name}…", { name: agent.name }), hint: agent.enabled ? null : "È muto: accendilo per parlarci.", isCurrent });
   else if (tab === "ragionamento") body = sub ? await traceDetail(agent, sub, isCurrent) : await tracesTab(agent, isCurrent);
   else if (tab === "cervello") body = brainTab(agent);
   else if (tab === "email") body = await agentEmailTab(agent, isCurrent);
@@ -6227,7 +6225,9 @@ function renderArtifacts() {
   // A level of the paths (clienti, clienti/acme) opens like a directory: what is inside, a link for all of it.
   const level = id === "in" ? artifactDir(route().slice(2)) : "";
   if (id && id !== "in") {
-    const tab = view || "file", dir = view === "file" || !view ? artifactDir(route().slice(3)) : artifactDir(String(new URLSearchParams(location.hash.split("?")[1] || "").get("in") || "").split("/"));
+    const legacyConversation = view === "conversazioni";
+    if (legacyConversation) history.replaceState(null, "", artifactDirHref(id, ""));
+    const tab = legacyConversation ? "file" : view || "file", dir = legacyConversation ? "" : view === "file" || !view ? artifactDir(route().slice(3)) : artifactDir(String(new URLSearchParams(location.hash.split("?")[1] || "").get("in") || "").split("/"));
     // An unlocked encrypted folder keeps its key in the mounted view: moving between its tabs and folders must not remount it.
     if (S.encryptedView?.id === id && S.encryptedView.alive()) return S.encryptedView.navigate(tab, dir);
     return renderArtifactFolder(id, tab, dir);
