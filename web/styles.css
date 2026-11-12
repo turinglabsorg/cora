@@ -2597,3 +2597,8 @@ input.thread-search { height: 38px; }
   .page-head.art-enc-head { align-items: center; }
   .page-head.art-enc-head .page-actions { padding-top: 0; }
 }
+
+.encrypted-remember { align-self: flex-end; min-height: 28px; gap: 6px; font-size: 12px; color: var(--muted); }
+.encrypted-remember input { width: 14px; height: 14px; }
+.encrypted-unlock-options { justify-content: flex-end; }
+.encrypted-unlock .encrypted-unlock-options > .btn { width: auto; flex: none; margin: 0; }

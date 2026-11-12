@@ -65,24 +65,23 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const passwordMethods = personal.methods.filter(m => m.kind === "password"), passkeyMethods = personal.methods.filter(m => m.kind === "passkey");
   const user = ui.currentUser?.id;
   const password = h("input", { name: "password", type: "password", autocomplete: "current-password", placeholder: tr("Password della cartella"), "aria-label": tr("Password della cartella") });
-  const remember = h("input", { type: "checkbox", disabled: !canRememberPassword() || !user });
-  const rememberRow = h("label", { class: "encrypted-remember" }, remember, h("span", {}, "Ricorda accesso in questo browser"));
-  const rememberHint = h("small", { class: "muted" }, "Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci.");
+  const remember = h("input", { type: "checkbox", "aria-label": tr("Ricorda accesso in questo browser"), "aria-description": tr("Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci."), disabled: !canRememberPassword() || !user });
+  const rememberRow = h("label", { class: "encrypted-remember", title: tr("Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci.") }, h("span", {}, "Ricorda accesso"), remember);
+  const rememberHint = h("small", { class: "muted", hidden: true }, "Solo su un dispositivo fidato. Resta in questo browser fino a Dimentica o Esci.");
   let remembered = null, savedPasskey = null;
   try { remembered = await recalledPassword(user, personal.id, personal.methods); savedPasskey = await rememberedAccessMethod(user, personal.id, personal.methods); }
   catch { status.textContent = tr("Memoria del browser non disponibile. Puoi sbloccare normalmente."); }
   if (remembered) { password.value = remembered.password; remember.checked = true; }
   if (savedPasskey) remember.checked = true;
   remembered = null;
-  const forget = btn("Dimentica accesso", { cls: "sm ghost", onclick: () => run(async () => {
-    await forgetPassword(user, personal.id); password.value = ""; remember.checked = false; savedPasskey = null; forget.hidden = true; updatePasskeyLabels();
-    status.textContent = tr("Accesso dimenticato in questo browser.");
-  }) });
-  forget.hidden = !remember.checked;
-  remember.addEventListener("change", () => { if (!remember.checked) run(async () => { await forgetPassword(user, personal.id); savedPasskey = null; forget.hidden = true; updatePasskeyLabels(); }); });
+  remember.addEventListener("change", () => { if (!remember.checked) run(async () => { await forgetPassword(user, personal.id); savedPasskey = null; updatePasskeyLabels(); lockButton.hidden = !bundle; ui.changed?.(); }); });
   const files = h("div", { class: "stack-sm" }), methods = h("div", { class: "stack-sm" }), requests = h("div", { class: "stack-sm" }), sharing = h("div", { class: "stack-sm" });
-  const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = true; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
-  const lockButton = btn("", { icon: "lock", cls: "sm art-lock", title: tr("Blocca cartella"), onclick: () => lock() }); lockButton.hidden = true;
+  const lock = () => { sessionEpoch++; for (const id of activeRequests) api(`/api/encrypted/requests/${id}`, { method: "DELETE" }).catch(() => {}); activeRequests.clear(); conversations.clear(); fileControls.clear(); unlockController?.abort(); bundle = null; chosenMethod = null; selected = null; password.value = ""; lockButton.hidden = !remember.checked; ui.changed?.(); methods.replaceChildren(); requests.replaceChildren(); sharing.replaceChildren(); unlock.hidden = false; locked.hidden = true; status.textContent = tr("Cartella bloccata."); };
+  const lockButton = btn("", { icon: "lock", cls: "sm art-lock", title: tr("Blocca e dimentica accesso"), onclick: () => run(async () => {
+    lock();
+    await forgetPassword(user, personal.id);
+    remember.checked = false; savedPasskey = null; password.value = ""; updatePasskeyLabels(); lockButton.hidden = true; ui.changed?.();
+  }) }); lockButton.hidden = !remember.checked;
   const run = async (fn) => { status.textContent = ""; try { await fn(); } catch (error) { status.textContent = tr(error.message); } };
   const proof = (intent) => proveAccess(api, folder.id, bundle, chosenMethod, intent);
   const refresh = async () => { data = await api(`/api/encrypted/folders/${folder.id}`); await draw(); };
@@ -139,8 +138,9 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
           if (method) { await rememberAccess(user, personal.id, method, personalOpened); savedPasskey = method.id; }
           else { await rememberPassword(user, personal.id, personal.methods.find(m => m.id === chosenPassword), candidate); savedPasskey = null; }
         } else { await forgetPassword(user, personal.id); savedPasskey = null; }
-        forget.hidden = !remember.checked; updatePasskeyLabels();
+        updatePasskeyLabels();
       } catch { status.textContent = tr("Cartella sbloccata. Non è stato possibile ricordare l’accesso in questo browser."); }
+      if (signal.aborted) { bundle = null; return; }
       password.value = ""; unlock.hidden = true; locked.hidden = false; lockButton.hidden = false; ui.changed?.();
     } catch (error) { bundle = null; chosenMethod = null; throw error; }
     finally {
@@ -163,7 +163,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   const passkeys = h("div", { class: "stack-sm encrypted-passkey-actions" }, passkeyButtons);
   const unlock = panel({ icon: "lock", title: "Sblocca la cartella", cls: "encrypted-unlock" + (!passwordMethods.length && passkeyMethods.length === 1 ? " encrypted-passkey-only" : ""), hint: data.accessGrant ? "Sblocca la tua cartella personale per accettare e aprire l’accesso condiviso. I permessi restano separati dalle chiavi." : "La chiave viene aperta solo in questo browser. Non viene inviata al server." },
     !passwordMethods.length && passkeyMethods.length ? h("div", { class: "encrypted-passkey-mark", "aria-hidden": true }, ui.icon?.("face")) : null,
-    passwordForm, h("div", { class: "stack-sm encrypted-unlock-footer" }, passkeys, rememberRow, rememberHint, h("div", { class: "row encrypted-unlock-options" }, forget, cancelUnlock)));
+    passwordForm, h("div", { class: "stack-sm encrypted-unlock-footer" }, passkeys, rememberRow, rememberHint, h("div", { class: "row encrypted-unlock-options" }, cancelUnlock)));
   const locked = h("div", { class: "stack", hidden: true });
   async function draw() {
     drawAudit(); fileControls.updateAccess();

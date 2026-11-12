@@ -1,6 +1,8 @@
 // English for the panel. The UI is written in Italian; keys are the Italian texts,
 // with {placeholders} for the parts that change.
 export const EN = {
+  "Blocca e dimentica accesso": "Lock and forget access",
+  "Ricorda accesso": "Remember access",
   "Apri cartella": "Open folder",
   "Ricorda accesso in questo browser": "Remember access in this browser",
   "Dimentica accesso": "Forget access",
