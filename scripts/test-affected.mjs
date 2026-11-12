@@ -38,7 +38,7 @@ const AREAS = [
   { name: "sealed agents", paths: [/^test\/sealed(?:-box|-artifacts|-network)?\.test\.js$/], files: ["sealed", "sealed-box", "sealed-artifacts", "sealed-network"], cora: [] },
   { name: "panel", paths: [/^web\/(app|i18n|index|sw)\.(js|html)$/, /^web\/styles\.css$/, /^src\/web\.js$/], ...PANEL },
   { name: "hermes keys", paths: [/^src\/(hermes-keys|credentials)\.js$/], files: ["hermes-keys", "deepseek", "connections"], cora: ["what runs the models"] },
-  { name: "connectors", paths: [/^src\/connectors\//, /^test\/google-connector-fixtures\.js$/], files: ["key-connectors", "connections"], cora: ["external configuration MCP returns a browser handoff", "Linear workspace"] },
+  { name: "connectors", paths: [/^src\/connectors\//, /^test\/google-connector-fixtures\.js$/, /^test\/lovable-fixtures\.js$/], files: ["key-connectors", "connections", "connector-lovable"], cora: ["external configuration MCP returns a browser handoff", "Linear workspace"] },
   { name: "artifacts", paths: [/^src\/(artifacts|share-host|share-drive)\.js$/], files: ["artifacts", "artifact-shares", "cloud"], cora: ["artifact "] },
   { name: "vault", paths: [/^src\/(vault|secrets|send-pages)\.js$/, /^web\/send\.js$/], files: ["vault"], cora: [] },
   { name: "voice", paths: [/^src\/voice\.js$/], files: ["voice"], cora: ["voice "] },
