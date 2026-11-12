@@ -1,4 +1,5 @@
 import { keyHint } from "./key-hint.js";
+import { panelAssets } from "./panel-assets.js";
 import { encryptedSpaceFor, encryptedFolder } from "./encrypted-space.js";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -213,6 +214,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
   // The panel frames a PDF from the space's own preview host, never from its own origin.
   const shareDomain = artifacts?.shareSuffix ? artifacts.shareSuffix.split(".").slice(1).join(".") : "";
   const framedCsp = shareDomain ? CSP.replace("frame-src 'self'", `frame-src 'self' https://*.${shareDomain}`) : CSP;
+  const assets = panelAssets(WEB_DIR, STATIC);
   // The manifest of an agent's GitHub App is posted to GitHub straight from the panel.
   const panelCsp = github ? framedCsp.replace("form-action 'self'", `form-action 'self' ${new URL(github.webBase).origin}`) : framedCsp;
   // The vault's pages for people outside the panel: a request to fill, a send to open.
@@ -942,6 +944,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       return send(res, 200, {
         settings: store.settings,
         encryptionRequired: encrypted.enabled,
+        build: assets.build(),
         currentUser: user,
         access: { hosted: Boolean(cloud), canManage: user.role === "owner" },
         transport: channels.active,
@@ -2313,14 +2316,13 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (url.pathname.startsWith("/github/") && github && (req.method === "GET" || req.method === "HEAD")) return await githubReturn(res, url);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (url.pathname.startsWith("/box/")) return await proxyBox(req, res);
-      const file = STATIC[url.pathname];
-      if (file && (req.method === "GET" || req.method === "HEAD")) {
-        const body = readFileSync(join(WEB_DIR, file[0]));
-        return send(res, 200, body, {
-          "Content-Type": file[1],
+      const file = req.method === "GET" || req.method === "HEAD" ? assets.resolve(url.pathname) : null;
+      if (file) {
+        return send(res, 200, file.body, {
+          "Content-Type": file.type,
           "Content-Security-Policy": panelCsp,
           "X-Frame-Options": "SAMEORIGIN",
-          "Cache-Control": "no-cache",
+          "Cache-Control": file.cache,
         });
       }
       throw new HttpError(404, "not found");
