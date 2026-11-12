@@ -2584,7 +2584,7 @@ input.thread-search { height: 38px; }
 .encrypted-passkey-only .encrypted-passkey-actions { margin-top: auto; }
 
 @media (max-width: 600px) {
-  .encrypted-passkey-only { min-height: max(360px, calc(var(--app-h, 100dvh) - 200px)); }
+  .encrypted-passkey-only { min-height: max(340px, calc(var(--app-h, 100dvh) - 280px)); }
 }
 
 .encrypted-passkey-only .encrypted-unlock-footer { margin-top: auto; gap: 12px; }
