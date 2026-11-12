@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { toolFor } from "../src/connectors/index.js";
-import { lovable, rpcAnswer } from "../src/connectors/lovable.js";
+import { defaultOf, lovable, rpcAnswer, settleWorkspaces } from "../src/connectors/lovable.js";
 import { fakeLovable, LOVABLE_PROJECT, LOVABLE_TOKEN } from "./lovable-fixtures.js";
 
 /** The same request KeyConnectors gives a tool: status, JSON, headers and the raw text. */
@@ -114,4 +114,41 @@ test("a workspace API key travels in the Lovable-API-Key header", async (t) => {
   const me = await run("lovable_me");
   assert.equal(me.user.email, "seb@example.test");
   assert.ok(l.state.keyed >= 2, "initialize and the call carry the key header");
+});
+
+test("the default workspace survives a reconnection, a lone workspace is the default and a vanished one is dropped", () => {
+  const two = [{ id: "ws1", name: "NoCodeLab", role: "owner" }, { id: "ws2", name: "TheHoost Projects", role: "collaborator" }];
+  const fresh = settleWorkspaces({ account: "sara@example.test", workspace: "NoCodeLab, TheHoost Projects", workspaces: two });
+  assert.deepEqual([fresh.defaultWorkspace, fresh.workspace], ["", "NoCodeLab, TheHoost Projects"], "with several, nobody guesses");
+  const kept = settleWorkspaces({ workspaces: two, workspace: "x" }, { defaultWorkspace: "ws2" });
+  assert.deepEqual([kept.defaultWorkspace, kept.workspace], ["ws2", "TheHoost Projects"]);
+  assert.equal(settleWorkspaces({ workspaces: [two[0]] }, { defaultWorkspace: "ws2" }).defaultWorkspace, "ws1", "the only workspace left becomes the default");
+  assert.equal(settleWorkspaces({ workspaces: two }, { defaultWorkspace: "gone" }).defaultWorkspace, "");
+  assert.equal(defaultOf({ defaultWorkspace: "ws2", workspaces: two }).name, "TheHoost Projects");
+  assert.equal(defaultOf({ defaultWorkspace: "gone", workspaces: two }), null);
+});
+
+test("agents see the default workspace in the tools, may leave it out, and may name a workspace instead of its id", () => {
+  const record = { account: "sara@example.test", defaultWorkspace: "ws1", workspaces: [{ id: "ws1", name: "NoCodeLab" }, { id: "ws2", name: "TheHoost Projects" }, { id: "ws3", name: "Twin" }, { id: "ws4", name: "twin" }] };
+  const listProjects = toolFor("lovable_list_projects");
+  const dressed = lovable.dress({ name: listProjects.name, description: listProjects.description, parameters: listProjects.parameters }, record);
+  assert.match(dressed.description, /Default workspace: NoCodeLab \(ws1\); leave workspace out/);
+  assert.equal(dressed.parameters.required, undefined, "workspace is no longer required");
+  assert.match(dressed.parameters.properties.workspace.description, /default NoCodeLab/);
+  assert.deepEqual(listProjects.parameters.required, ["workspace"], "the shared definition is not changed");
+  const project = toolFor("lovable_get_project");
+  assert.equal(lovable.dress({ name: project.name, description: "x", parameters: project.parameters }, record).description, "x", "tools without a workspace stay as they are");
+  assert.match(toolFor("lovable_me").description(record), /default workspace NoCodeLab \(ws1\)/);
+
+  assert.equal(lovable.prepare(listProjects, {}, record).workspace, "ws1");
+  assert.equal(lovable.prepare(listProjects, { workspace: "thehoost projects" }, record).workspace, "ws2");
+  assert.equal(lovable.prepare(listProjects, { workspace: "ws2" }, record).workspace, "ws2");
+  assert.throws(() => lovable.prepare(listProjects, { workspace: "Twin" }, record), /more than one workspace is called Twin: pass its id \(ws3, ws4\)/);
+  assert.equal(lovable.prepare(toolFor("lovable_create_project"), { initial_message: "x" }, record).workspace, "ws1", "a new project goes to the default workspace");
+
+  const none = { ...record, defaultWorkspace: "" };
+  const unchosen = lovable.dress({ name: listProjects.name, description: "x", parameters: listProjects.parameters }, none);
+  assert.match(unchosen.description, /has 4 workspaces and the owner chose no default/);
+  assert.deepEqual(unchosen.parameters.required, ["workspace"]);
+  assert.deepEqual(lovable.prepare(listProjects, {}, none), {});
 });

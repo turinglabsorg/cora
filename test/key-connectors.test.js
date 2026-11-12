@@ -514,6 +514,48 @@ test("Lovable quick access registers Cora as a loopback client and connects from
   assert.deepEqual(connectors.toolsFor(f.agent), []);
 });
 
+test("Lovable: the owner picks the default workspace among the account's, agents use it and the list can be read again", async (t) => {
+  const f = await lovableWorld(t);
+  const connectors = f.app.keyConnectors;
+  f.l.state.workspaces = [{ id: "ws1", name: "NoCodeLab", role: "owner" }, { id: "ws2", name: "TheHoost Projects", role: "collaborator" }];
+  const state = new URL((await f.call("/api/connectors/keys/lovable/authorize?mode=quick", { method: "POST" })).data.url).searchParams.get("state");
+  const done = await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "quick", returned: `${LOVABLE_LOOPBACK}?code=good-code&state=${state}` } });
+  assert.equal(done.status, 200, JSON.stringify(done.data));
+  assert.deepEqual(done.data.record.workspaces, f.l.state.workspaces);
+  assert.equal(done.data.record.defaultWorkspace, "", "two workspaces: no guess");
+  await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { agents: [f.agent.id] } });
+  assert.deepEqual(connectors.toolsFor(f.agent).find((tool) => tool.name === "lovable_list_projects").parameters.required, ["workspace"]);
+  assert.match((await connectors.runTool(f.agent, "lovable_list_projects")).text, /^error: workspace is required/);
+
+  const wrong = await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { defaultWorkspace: "elsewhere" } });
+  assert.equal(wrong.status, 400);
+  const picked = await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { defaultWorkspace: "ws2" } });
+  assert.equal(picked.status, 200);
+  assert.deepEqual([picked.data.record.defaultWorkspace, picked.data.record.workspace, picked.data.record.agents], ["ws2", "TheHoost Projects", [f.agent.id]], "picking a workspace leaves the agents alone");
+  const tool = connectors.toolsFor(f.agent).find((item) => item.name === "lovable_list_projects");
+  assert.equal(tool.parameters.required, undefined);
+  assert.match(tool.description, /Default workspace: TheHoost Projects \(ws2\)/);
+  assert.equal(JSON.parse((await connectors.runTool(f.agent, "lovable_list_projects")).text).projects[0].workspace_id, "ws2");
+  assert.equal(JSON.parse((await connectors.runTool(f.agent, "lovable_list_projects", { workspace: "nocodelab" })).text).projects[0].workspace_id, "ws1");
+
+  f.l.state.workspaces = [...f.l.state.workspaces, { id: "ws3", name: "People Obsessed", role: "member" }];
+  const refreshed = await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { refreshWorkspaces: true } });
+  assert.equal(refreshed.status, 200, JSON.stringify(refreshed.data));
+  assert.deepEqual([refreshed.data.record.workspaces.length, refreshed.data.record.defaultWorkspace], [3, "ws2"]);
+  f.l.state.workspaces = f.l.state.workspaces.filter((item) => item.id !== "ws2");
+  const gone = await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { refreshWorkspaces: true } });
+  assert.deepEqual([gone.data.record.defaultWorkspace, gone.data.record.workspace], ["", "NoCodeLab, People Obsessed"], "a workspace the account left is no longer the default");
+  const cleared = await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { defaultWorkspace: "ws3" } });
+  assert.equal(cleared.data.record.defaultWorkspace, "ws3");
+  assert.equal((await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { defaultWorkspace: "" } })).data.record.defaultWorkspace, "");
+
+  const old = connectors.records().map((item) => item.service === "lovable" ? { ...item, workspaces: undefined, defaultWorkspace: undefined, workspace: "NoCodeLab, People Obsessed" } : item);
+  connectors.save(old);
+  assert.equal((await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { defaultWorkspace: "ws1" } })).status, 400, "a record from before has to load its list first");
+  assert.equal((await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { refreshWorkspaces: true } })).data.record.workspaces.length, 2);
+  assert.equal((await f.call("/api/connectors/keys/lovable", { method: "PUT", body: { defaultWorkspace: "ws1" } })).data.record.workspace, "NoCodeLab");
+});
+
 test("Lovable through a workspace OAuth client returns to Cora's callback", async (t) => {
   const f = await lovableWorld(t);
   const connectors = f.app.keyConnectors;
@@ -561,6 +603,34 @@ test("the Lovable card offers quick access with a new tab and a paste field", as
   node.querySelectorAll("button").find((button) => /Completa il collegamento/.test(button.textContent)).click();
   await waitFor(() => f.app.keyConnectors.record("lovable")?.status === "connected" && /CORA_LOVABLE_TOKEN/.test(node.textContent));
   assert.match(node.textContent, /scollega e ricollega/);
+});
+
+test("the connected Lovable card picks the default workspace from a select and loads the list for older connections", async (t) => {
+  const f = await lovableWorld(t);
+  f.l.state.workspaces = [{ id: "ws1", name: "NoCodeLab", role: "owner" }, { id: "ws2", name: "TheHoost Projects", role: "collaborator" }];
+  const state = new URL((await f.call("/api/connectors/keys/lovable/authorize?mode=quick", { method: "POST" })).data.url).searchParams.get("state");
+  await f.call("/api/connectors/keys/lovable", { method: "POST", body: { mode: "quick", returned: `${LOVABLE_LOOPBACK}?code=good-code&state=${state}` } });
+  const connectors = f.app.keyConnectors;
+  connectors.save(connectors.records().map((item) => item.service === "lovable" ? { ...item, workspaces: undefined } : item));
+  const panel = panelHarness({ hash: "#/settings/connettori/lovable", fetch: async (path, options = {}) => {
+    const response = await f.call(path, { method: options.method || "GET", body: options.body ? JSON.parse(options.body) : undefined });
+    return { ok: response.status < 400, status: response.status, json: async () => response.data };
+  } });
+  const node = panel.run("(() => {const node = connectorsPane(); app.append(node); return node;})()");
+  await node.readyConnectors;
+  assert.match(node.textContent, /Workspace predefinito/);
+  assert.match(node.textContent, /seb@example\.test/);
+  const pick = () => node.querySelectorAll("select").find((select) => select.getAttribute("aria-label") === "Workspace predefinito");
+  const locked = () => pick().getAttribute("disabled") === "" || pick().disabled === true;
+  assert.equal(locked(), true, "nothing to pick before the list is loaded");
+  node.querySelectorAll("button").find((button) => /Carica i workspace/.test(button.textContent)).click();
+  await waitFor(() => pick() && !locked() && pick().querySelectorAll("option").length === 3);
+  assert.deepEqual(pick().querySelectorAll("option").map((option) => option.textContent), ["Nessuno: l'agente lo sceglie ogni volta", "NoCodeLab · proprietario", "TheHoost Projects · collaboratore"]);
+  assert.match(node.textContent, /L'account vede 2 workspace/);
+  pick().value = "ws2";
+  pick().dispatch("change");
+  await waitFor(() => connectors.record("lovable").defaultWorkspace === "ws2" && pick()?.value === "ws2");
+  assert.equal(connectors.record("lovable").workspace, "TheHoost Projects");
 });
 
 test("Lovable connects with a workspace API key checked on the MCP server", async (t) => {

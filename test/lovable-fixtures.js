@@ -6,7 +6,7 @@ export const LOVABLE_PROJECT = "0b7c2d4e-1111-4222-8333-944455556666";
 /** A small Lovable: the MCP server (sessions, JSON and SSE answers), its OAuth endpoints and an upload target. */
 export async function fakeLovable(t, { token = LOVABLE_TOKEN } = {}) {
   const calls = [], tokens = [], registrations = [], uploads = [];
-  const state = { sessions: new Set(), serial: 0, expireNext: false, access: token, refreshed: 0 };
+  const state = { sessions: new Set(), serial: 0, expireNext: false, access: token, refreshed: 0, workspaces: [{ id: "ws1", name: "Dopamina" }] };
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -50,8 +50,9 @@ export async function fakeLovable(t, { token = LOVABLE_TOKEN } = {}) {
     if (message.method === "tools/list") return json(200, { jsonrpc: "2.0", id: message.id, result: { tools: [{ name: "grep_files", description: "Search committed files", inputSchema: { type: "object", properties: { project_id: { type: "string" }, query: { type: "string" } }, required: ["project_id", "query"] } }] } });
     if (message.method !== "tools/call") return json(200, { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } });
     const { name, arguments: args = {} } = message.params;
-    if (name === "get_me") return ok({ user: { id: "u1", email: "seb@example.test", name: "Seb" }, workspaces: [{ id: "ws1", name: "Dopamina" }] });
-    if (name === "list_workspaces") return ok({ workspaces: [{ id: "ws1", name: "Dopamina" }], pagination: {} });
+    if (name === "get_me") return ok({ user: { id: "u1", email: "seb@example.test", name: "Seb" }, workspaces: state.workspaces });
+    if (name === "list_workspaces") return ok({ workspaces: state.workspaces, pagination: {} });
+    if (name === "list_projects") return ok({ projects: [{ id: LOVABLE_PROJECT, workspace_id: args.workspace_id }], pagination: {} });
     if (name === "get_project") return json(200, { jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: JSON.stringify({ id: args.project_id, editor_url: `https://lovable.dev/projects/${args.project_id}`, preview_url: "https://preview.lovable.app", latest_commit_sha: "abc123" }) }, { type: "image", mimeType: "image/png", data: Buffer.from("PNGDATA").toString("base64") }] } });
     if (name === "send_message") return sse({ content: [{ type: "text", text: JSON.stringify({ message_id: "m1", status: args.wait === false ? "running" : "completed", plan_mode: Boolean(args.plan_mode) }) }] });
     if (name === "get_diff") return ok({ diff: "--- a/src/App.tsx\n+++ b/src/App.tsx\n+dark mode" });

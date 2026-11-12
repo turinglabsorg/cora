@@ -208,7 +208,7 @@ export class KeyConnectors {
       this.vaultReady();
       await this.vault.put({ name: meta.secret, value: token, description: `Connettore Lovable · chiave API${checked.workspace ? ` del workspace ${checked.workspace}` : ""}`, agents, by: this.by(user) });
       this.access.delete(meta.secret);
-      next = { ...base, ...checked, status: "connected", mode: "key" };
+      next = { ...base, ...this.settled(service, checked, previous), status: "connected", mode: "key" };
     } else if (input.mode === "oauth" && ["linear", "asana", "lovable"].includes(service)) {
       const app = this.appInput(input, service);
       this.vaultReady();
@@ -394,7 +394,7 @@ export class KeyConnectors {
     await this.vault.put({ name: meta.secret, value: JSON.stringify(bundle), description: `Connettore ${meta.name} · token OAuth${checked.account ? ` di ${checked.account}` : ""}`, agents, by: this.by(user) });
     this.access.set(meta.secret, bundle);
     const quick = pending.mode === "quick" ? { mode: "quick", appSecrets: [this.quickClientName(service)] } : { mode: "oauth" };
-    const next = { ...(previous || {}), service, agents, ...checked, status: "connected", ...quick, connectedBy: user.id, connectedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), id: previous?.id || `kc_${randomBytes(6).toString("hex")}` };
+    const next = { ...(previous || {}), service, agents, ...this.settled(service, checked, previous), status: "connected", ...quick, connectedBy: user.id, connectedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), id: previous?.id || `kc_${randomBytes(6).toString("hex")}` };
     this.save([...this.records().filter((item) => item.service !== service), next]);
     this.log({ type: "connector", text: `connettore ${meta.name}: autorizzato con OAuth (${user.name})` });
     return next;
@@ -421,6 +421,54 @@ export class KeyConnectors {
     const pending = refresh();
     this.refreshing.set(name, pending);
     try { return await pending; } finally { if (this.refreshing.get(name) === pending) this.refreshing.delete(name); }
+  }
+
+  /** What a connector keeps of a fresh identification, given the record it replaces (Lovable: workspaces and the default). */
+  settled(service, checked, previous) {
+    const connector = CONNECTORS.find((item) => item.id === service);
+    return connector?.settle ? connector.settle(checked, previous) : checked;
+  }
+
+  /** The owner picks the workspace agents use when they name none; empty clears it. */
+  updateDefaultWorkspace(service, workspace, user) {
+    const records = this.records();
+    const record = records.find((item) => item.id === this.record(service)?.id);
+    if (!record || record.status !== "connected") throw new KeyConnectorError("Connettore non collegato.", 404);
+    const id = clean(workspace, 120);
+    if (id && !(record.workspaces || []).some((item) => item.id === id)) throw new KeyConnectorError("Questo account non vede quel workspace: aggiorna l'elenco e riprova.");
+    record.defaultWorkspace = id;
+    const chosen = (record.workspaces || []).find((item) => item.id === id);
+    record.workspace = chosen?.name || (record.workspaces || []).map((item) => item.name).filter(Boolean).join(", ").slice(0, 120);
+    record.updatedAt = new Date().toISOString();
+    this.save(records);
+    this.log({ type: "connector", text: `connettore ${KEY_SERVICES[service].name}: workspace predefinito ${chosen?.name || "nessuno"} (${user.name})` });
+    return record;
+  }
+
+  /** Reads the account's workspaces again with the stored token (they change when the account joins or leaves one). */
+  async refreshWorkspaces(service) {
+    const connector = CONNECTORS.find((item) => item.id === service);
+    const record = this.record(service);
+    if (!connector?.settle || !record || record.status !== "connected") throw new KeyConnectorError("Connettore non collegato.", 404);
+    this.vaultReady();
+    let token;
+    try {
+      token = record.mode === "oauth" || record.mode === "quick" ? (await this.oauthAccess(connector, record)).access_token : this.vault.value(this.store.vaultSecret(this.tokenName(connector, record))).toString("utf8");
+    } catch (error) { throw new KeyConnectorError(clean(error.message, 300) || `${connector.name} va autorizzato di nuovo.`, 409); }
+    const request = async (url, options) => {
+      const answer = await this.call(url, options);
+      if (answer.status < 200 || answer.status >= 300) throw new KeyConnectorError(`${connector.name} non ha confermato l'account.`, 502);
+      return answer;
+    };
+    let checked;
+    try { checked = await connector.oauth.identify({ access: token, request, api: this.api(), mode: record.mode }); }
+    catch (error) { throw error instanceof KeyConnectorError ? error : new KeyConnectorError(`${connector.name}: ${clean(error.message, 300)}`, 502); }
+    const records = this.records();
+    const current = records.find((item) => item.id === record.id && item.status === "connected");
+    if (!current) throw new KeyConnectorError("Connettore scollegato nel frattempo.", 409);
+    Object.assign(current, this.settled(service, checked, current), { updatedAt: new Date().toISOString() });
+    this.save(records);
+    return current;
   }
 
   updateAgents(service, agents, user, connectionId = "") {
@@ -458,7 +506,7 @@ export class KeyConnectors {
       const records = connected.filter((record) => record.service === connector.id && this.allowed(record, connector, agent));
       if (!records.length) return [];
       return (connector.tools || []).map((tool) => {
-        const definition = toolDefinition(tool, records[0]);
+        const definition = connector.dress ? connector.dress(toolDefinition(tool, records[0]), records[0]) : toolDefinition(tool, records[0]);
         if (connector.id !== "linear") return definition;
         const workspaces = records.map((record) => record.workspace);
         const identity = records.map((record) => `${record.workspace}: ${record.mode === "oauth" ? "your name and avatar via the OAuth app" : `acting as ${record.account || "the key owner"}`}`).join("; ");
@@ -527,6 +575,7 @@ export class KeyConnectors {
       const current = this.records().find((item) => item.id === record.id && item.status === "connected");
       if (!current || !this.allowed(current, connector, agent)) throw new Error(`you are not authorised for ${connector.name}`);
       const dressed = this.store.agent?.(agent.id) || agent;
+      if (connector.prepare) args = connector.prepare(tool, args || {}, current);
       const base = { token, request, api: this.api(), record, agent: { id: agent.id, name: dressed.name || agent.name || "", avatarUrl: dressed.avatarUrl || "" }, readFile, writeFile };
       result = { data: await tool.run(args || {}, connector.context ? connector.context(base) : base) };
     } catch (error) {

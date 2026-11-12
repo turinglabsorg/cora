@@ -2141,6 +2141,9 @@ a.share-stats:hover { color: var(--amber); }
 .connector-card-action { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line-strong); font-size: 13px; color: var(--amber); }
 .connector-empty { grid-column: 1 / -1; display: grid; justify-items: start; gap: 12px; padding: 28px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); background: var(--well); }
 .connector-empty > .ico { color: var(--amber); }
+.connector-workspace-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.connector-workspace-pick select { flex: 1 1 260px; min-width: 0; max-width: 100%; min-height: 44px; }
+.connector-workspace-pick .btn { flex: none; min-height: 44px; }
 .connector-empty h3, .connector-empty p { margin: 0; }
 .connector-empty p { color: var(--muted); }
 .connector-back { align-self: flex-start; }

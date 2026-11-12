@@ -597,7 +597,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog({ origin: connectorOrigin(req) }), keyConnectors: keyConnectors.view(), canManage, record });
       }
       if (method === "PUT") {
-        const record = keyConnectors.updateAgents(keyConnector[1], (await readJson(req, 8000)).agents, user, url.searchParams.get("connection") || "");
+        const body = await readJson(req, 8000);
+        let record;
+        if (body.refreshWorkspaces) record = await keyConnectors.refreshWorkspaces(keyConnector[1]);
+        if (body.defaultWorkspace !== undefined) record = keyConnectors.updateDefaultWorkspace(keyConnector[1], body.defaultWorkspace, user);
+        if (body.agents !== undefined || !record) record = keyConnectors.updateAgents(keyConnector[1], body.agents, user, url.searchParams.get("connection") || "");
         return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog({ origin: connectorOrigin(req) }), keyConnectors: keyConnectors.view(), canManage, record });
       }
       if (method === "DELETE") { keyConnectors.disconnect(keyConnector[1], user, url.searchParams.get("connection") || ""); return send(res, 200, { ok: true }); }

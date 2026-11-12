@@ -34,6 +34,52 @@ const fileRefs = (value) => {
   return items.length ? items : undefined;
 };
 
+/** The workspace the owner chose for the agents, when it is still one the account belongs to. */
+export function defaultOf(record) {
+  const id = record?.defaultWorkspace;
+  if (!id) return null;
+  const known = Array.isArray(record.workspaces) ? record.workspaces : [];
+  return known.find((item) => item.id === id) || (known.length ? null : { id, name: "" });
+}
+
+/** After a (re)connection: keep the owner's choice if the account still has it; a lone workspace is the default by itself. */
+export function settleWorkspaces(checked, previous = null) {
+  const workspaces = Array.isArray(checked.workspaces) ? checked.workspaces : [];
+  const kept = previous?.defaultWorkspace && workspaces.some((item) => item.id === previous.defaultWorkspace) ? previous.defaultWorkspace : "";
+  const defaultWorkspace = kept || (workspaces.length === 1 ? workspaces[0].id : "");
+  const chosen = workspaces.find((item) => item.id === defaultWorkspace);
+  return { ...checked, workspaces, defaultWorkspace, workspace: chosen?.name || checked.workspace || "" };
+}
+
+const takesWorkspace = (tool) => Boolean(tool?.parameters?.properties?.workspace);
+
+/** The agent-facing definition with the default workspace: workspace becomes optional and the description names it. */
+function dress(definition, record) {
+  const chosen = defaultOf(record);
+  const known = Array.isArray(record?.workspaces) ? record.workspaces : [];
+  if (!takesWorkspace(definition) || (!chosen && known.length < 2)) return definition;
+  const note = chosen
+    ? ` Default workspace: ${chosen.name || chosen.id} (${chosen.id}); leave workspace out to use it, pass another id or name only when the person asks for that workspace.`
+    : ` This account has ${known.length} workspaces and the owner chose no default: pass workspace (id or name from lovable_list_workspaces) on every call.`;
+  const properties = { ...definition.parameters.properties, workspace: { type: "string", description: `workspace id or name from lovable_list_workspaces${chosen ? `; default ${chosen.name || chosen.id}` : ""}` } };
+  const { required: before = [], ...schema } = definition.parameters;
+  const required = before.filter((name) => !(chosen && name === "workspace"));
+  return { ...definition, description: `${definition.description}${note}`, parameters: { ...schema, properties, ...(required.length ? { required } : {}) } };
+}
+
+/** Before a call: no workspace means the default; a workspace name becomes its id. */
+function prepare(tool, args, record) {
+  if (!takesWorkspace(tool)) return args;
+  const given = text(args?.workspace, 200);
+  const known = Array.isArray(record?.workspaces) ? record.workspaces : [];
+  if (!given) return defaultOf(record) ? { ...args, workspace: defaultOf(record).id } : args;
+  if (known.some((item) => item.id === given)) return args;
+  const named = known.filter((item) => item.name && item.name.toLowerCase() === given.toLowerCase());
+  if (named.length === 1) return { ...args, workspace: named[0].id };
+  if (named.length > 1) fail(`more than one workspace is called ${given}: pass its id (${named.map((item) => item.id).join(", ")})`);
+  return args;
+}
+
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 /** A project id from an id or any Lovable URL that carries it. */
@@ -158,7 +204,7 @@ const waitTimeout = (args, fallback = 180) => {
 const TOOLS = [
   {
     name: "lovable_me",
-    description: (record) => `Lovable${record.account ? `, acting as ${record.account}` : ""}. Start here: the connected account and its workspaces. Cora adds and renews the token for every Lovable tool; you never see it. Lovable's own agent writes the code: you send it instructions and verify the diff.`,
+    description: (record) => `Lovable${record.account ? `, acting as ${record.account}` : ""}${defaultOf(record) ? `, default workspace ${defaultOf(record).name || defaultOf(record).id} (${defaultOf(record).id})` : ""}. Start here: the connected account and its workspaces. Cora adds and renews the token for every Lovable tool; you never see it. Lovable's own agent writes the code: you send it instructions and verify the diff.`,
     parameters: { type: "object", properties: {} },
     run: (_args, ctx) => ctx.lovable.tool("get_me"),
   },
@@ -475,10 +521,13 @@ export const lovable = {
     async identify({ access, request, api, mode }) {
       const me = await client({ token: access, request, api, record: { mode } }).tool("get_me");
       const user = me?.user || me?.profile || me;
-      const workspaces = Array.isArray(me?.workspaces) ? me.workspaces : [];
+      const workspaces = (Array.isArray(me?.workspaces) ? me.workspaces : [])
+        .map((item) => defined({ id: text(item?.id, 120), name: text(item?.name, 120), role: text(item?.role || item?.membership?.role, 40) || undefined }))
+        .filter((item) => item.id).slice(0, 200);
       return {
-        workspace: String(workspaces.map((item) => item?.name).filter(Boolean).join(", ") || "").slice(0, 120),
+        workspace: String(workspaces.map((item) => item.name).filter(Boolean).join(", ") || "").slice(0, 120),
         account: String(user?.email || user?.name || user?.display_name || user?.username || "").slice(0, 120),
+        workspaces,
       };
     },
   },
@@ -486,6 +535,7 @@ export const lovable = {
     icon: "spark",
     description: "Gli agenti creano, modificano e pubblicano app su Lovable.",
     meta: "Lovable · App",
+    workspacePicker: true,
     intro: "Gli agenti creano progetti Lovable, chiedono modifiche al suo agente, ne leggono il codice e le differenze, gestiscono il database e pubblicano. Lavorano con il tuo account Lovable e usano i tuoi crediti.",
     writes: { oauth: "Il tuo account Lovable: progetti, messaggi e pubblicazioni risultano fatti da te.", key: "Il tuo account Lovable: progetti, messaggi e pubblicazioni risultano fatti da te." },
     modes: [
@@ -540,5 +590,8 @@ export const lovable = {
     ],
   },
   tools: TOOLS,
+  settle: settleWorkspaces,
+  dress,
+  prepare,
   context(ctx) { return { ...ctx, lovable: client(ctx) }; },
 };

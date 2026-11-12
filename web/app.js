@@ -3463,6 +3463,28 @@ function connectorsPane() {
     return card;
   };
 
+  // The account may belong to many workspaces: the owner picks the one agents use when they name none.
+  const workspacePicker = (service, record) => {
+    const known = Array.isArray(record.workspaces) ? record.workspaces : null;
+    const status = h("p", { class: "muted", role: "status" });
+    const roles = { owner: "proprietario", admin: "admin", member: "membro", collaborator: "collaboratore", viewer: "lettore" };
+    const select = h("select", { "aria-label": tr("Workspace predefinito"), disabled: !data.canManage || !known?.length },
+      h("option", { value: "" }, tr(known?.length ? "Nessuno: l'agente lo sceglie ogni volta" : "Elenco da caricare")),
+      (known || []).map((item) => h("option", { value: item.id, selected: item.id === record.defaultWorkspace }, `${item.name || item.id}${item.role ? ` · ${tr(roles[item.role] || item.role)}` : ""}`)));
+    const save = async (body, done) => {
+      select.disabled = true; refresh.disabled = true;
+      try { await api(connectorPath(service.id, record), { method: "PUT", body }); await load(); toast(tr(done)); }
+      catch (error) { status.className = "err-text"; status.textContent = tr(error.message); select.value = record.defaultWorkspace || ""; select.disabled = !data.canManage || !known?.length; refresh.disabled = !data.canManage; }
+    };
+    select.addEventListener("change", () => save({ defaultWorkspace: select.value }, "Workspace predefinito salvato"));
+    const refresh = btn(known ? "Aggiorna elenco" : "Carica i workspace", { icon: "refresh", cls: "ghost", disabled: !data.canManage, onclick: () => save({ refreshWorkspaces: true }, "Elenco dei workspace aggiornato") });
+    const hint = !known
+      ? tr("Carica l'elenco dei workspace di questo account, poi scegli quello che gli agenti usano.")
+      : known.length === 1 ? tr("L'account vede un solo workspace: gli agenti usano quello.")
+        : tr("L'account vede {count} workspace. Gli agenti usano questo quando non ne indicano un altro; senza, devono sceglierlo a ogni chiamata.", { count: known.length });
+    return setRow("Workspace predefinito", hint, h("div", { class: "stack-sm connector-workspace" }, h("div", { class: "connector-workspace-pick" }, select, refresh), status), { stack: true });
+  };
+
   const connectedPanel = (service, record) => {
     const feedback = h("p", { class: "muted", role: "status" });
     const disconnect = armedButton("Scollega", "Conferma scollegamento", { icon: "power", onconfirm: async () => {
@@ -3473,7 +3495,9 @@ function connectorsPane() {
     return connectedCard(`${service.id}:${record.id || record.workspace || "default"}`, { icon: service.icon, title: service.id === "linear" ? raw(record.workspace) : service.name, hint: tr(service.meta), actions: tag("Collegato", "ok") },
       h("p", {}, tr(service.intro)),
       setRows(
-        setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, ` · ${record.account}`) : null), tag("Collegato", "ok")),
+        ...(service.workspacePicker
+          ? [setRow("Account collegato", h("span", {}, raw(record.account || "—")), tag("Collegato", "ok")), workspacePicker(service, record)]
+          : [setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, ` · ${record.account}`) : null), tag("Collegato", "ok"))]),
         record.mode === "oauth" || record.mode === "quick"
           ? setRow("Autorizzazione", h("span", {}, "Token OAuth nella cassaforte come ", h("code", {}, raw(record.secretName || service.secret)), ". Cora lo rinnova da solo quando scade.", record.mode === "quick" ? h("small", { class: "muted" }, " ", tr("Per autorizzare di nuovo con l'accesso rapido, scollega e ricollega.")) : null), record.mode === "quick" ? null : authorizeButton(service, "Autorizza di nuovo", record))
           : setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, raw(record.secretName || service.secret)), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
