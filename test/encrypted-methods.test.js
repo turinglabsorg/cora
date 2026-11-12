@@ -132,3 +132,25 @@ test("a personal folder cannot discard the key still protecting another folder's
   assert.equal(f.app.store.value(`encryptedFolder:${x.folder}`), true);
   assert.equal(f.app.store.db.prepare("SELECT COUNT(*) AS n FROM encrypted_folder_grants WHERE id = ?").get(grant.id).n, 1);
 });
+
+test("plaintext confirmation covers inherited links and refuses permission or share changes during conversion", async t => {
+  const x = await setup(t), { artifacts, store } = x.f.app;
+  await uploadEncryptedFile({ ...x, file: new File(["PREFIX LINK CONTENT"], "proof.txt") });
+  artifacts.shareSuffix = "fixture.usecora.space";
+  const publicLink = () => artifacts.createShare("ag:synthetic", { label: "conversion-" + randomBytes(6).toString("hex"), access: { mode: "public" }, createdBy: { kind: "user", id: x.f.alice.user.id, name: "alice" } });
+  let changed = false, added;
+  const newShare = async (url, options) => { const result = await x.api(url, options); if (!changed && url.endsWith("/decrypt-chunk")) { changed = true; added = publicLink(); } return result; };
+  await assert.rejects(convertEncryptedFolder({ ...x, api: newShare }), e => e.status === 409);
+  assert.equal(store.value(`encryptedFolder:${x.folder}`), true); assert.equal(artifacts.groupTree(store.artifactShare(added.id)).tree.size, 0);
+  changed = false;
+  const permissions = async (url, options) => { const result = await x.api(url, options); if (!changed && url.endsWith("/decrypt-chunk")) { changed = true; const folder = store.artifactFolder(x.folder); store.writeArtifactFolder({ ...folder, memberAccess: { default: "none", users: { [x.f.bob.user.id]: "read" } } }); } return result; };
+  await assert.rejects(convertEncryptedFolder({ ...x, api: permissions }), e => e.status === 409);
+  assert.equal(store.value(`encryptedFolder:${x.folder}`), true); assert.equal(store.artifactCommits(x.folder).length, 0);
+  changed = false;
+  const inherited = async (url, options) => { const result = await x.api(url, options); if (!changed && url.endsWith("/decrypt-chunk")) { changed = true; artifacts.updateLevelAccess("synthetic", { default: "none", users: { [x.f.bob.user.id]: "write" } }, x.f.alice.user); } return result; };
+  await assert.rejects(convertEncryptedFolder({ ...x, api: inherited }), e => e.status === 409);
+  assert.equal(store.value(`encryptedFolder:${x.folder}`), true); assert.equal(store.artifactCommits(x.folder).length, 0);
+  const result = await convertEncryptedFolder(x); assert.equal(result.versions, 1);
+  const tree = artifacts.groupTree(store.artifactShare(added.id)).tree, item = tree.get("method-conversion/proof.txt");
+  assert.ok(item); assert.equal(artifacts.readObject(item.sha).toString(), "PREFIX LINK CONTENT");
+});

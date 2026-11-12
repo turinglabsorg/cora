@@ -78,6 +78,7 @@ export function encryptionRemoval(ui, options) {
   dialog.append(h("h2", { id: "encryption-removal-title" }, "Rimuovere la cifratura?"),
     h("p", {}, "Tutti i file e tutte le versioni vengono decifrati nel browser e salvati in chiaro. Conversazioni e ragionamenti diventano file JSON, senza essere inviati sui canali."),
     h("p", {}, "Si applicheranno i normali permessi della cartella: le persone e gli agenti autorizzati potranno leggere i contenuti senza passkey. Le altre cartelle che usano la stessa passkey restano cifrate."),
+    h("p", {}, "Eventuali link di condivisione, anche dei livelli superiori, esporranno i file in chiaro. Con un link pubblico chiunque potrà leggerli."),
     h("p", {}, "Gli originali cifrati vengono rimossi soltanto dopo il salvataggio verificato di tutte le versioni. Se annulli prima del salvataggio finale o si verifica un errore, restano intatti."), status,
     h("div", { class: "row" }, cancel, confirm));
   const root = panel({ icon: "lock", title: "Rimuovi cifratura", hint: "Salva questa cartella in chiaro, conservando contenuti e versioni. L’obbligo generale di cifratura deve essere spento." }, btn("Rimuovi cifratura", { cls: "danger", icon: "lock", onclick: () => { status.textContent = ""; dialog.showModal(); } }), dialog);

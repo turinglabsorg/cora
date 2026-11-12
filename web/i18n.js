@@ -3107,3 +3107,5 @@ Object.assign(EN, {
   "Accessi e modifiche": "Access and changes"
 
 });
+
+Object.assign(EN, { "Eventuali link di condivisione, anche dei livelli superiori, esporranno i file in chiaro. Con un link pubblico chiunque potrà leggerli.": "Any share links, including links on parent levels, will expose the plaintext files. With a public link, anyone can read them." });

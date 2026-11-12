@@ -31,6 +31,10 @@ export class EncryptedConversion {
   snapshot(folder) {
     const values = [this.store.db.prepare("SELECT data FROM encrypted_folders WHERE id = ?").get(folder)?.data || ""];
     for (const table of ["encrypted_documents", "encrypted_requests", "encrypted_inbox", "encrypted_folder_grants", "encrypted_file_uploads"]) values.push(this.store.db.prepare(`SELECT data FROM ${table} WHERE folder = ? ORDER BY rowid`).all(folder));
+    const base = this.store.artifactFolder(folder);
+    const shares = this.store.artifactShares().filter(share => share.folderId === folder || (share.prefix && base.path.startsWith(share.prefix + "/"))).sort((a, b) => a.id.localeCompare(b.id)).map(share => ({ ...share, grantsFolder: share.prefix ? this.artifacts.groupGrants(share, base) : true }));
+    const inherited = Object.fromEntries(Object.entries(this.store.value("artifactLevelAccess", {}) || {}).filter(([path]) => base.path.startsWith(path + "/")));
+    values.push({ folder: base, shares, inherited });
     return hash(JSON.stringify(values));
   }
   allowed(folder, user) {
