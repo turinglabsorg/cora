@@ -84,7 +84,7 @@ export async function encryptedFolderPanel(ui, folder, current, agents, reload) 
   }) }); lockButton.hidden = !remember.checked;
   const run = async (fn) => { status.textContent = ""; try { await fn(); } catch (error) { status.textContent = tr(error.message); } };
   const proof = (intent) => proveAccess(api, folder.id, bundle, chosenMethod, intent);
-  const refresh = async () => { data = await api(`/api/encrypted/folders/${folder.id}`); await draw(); };
+  const refresh = async () => { data = await api(`/api/encrypted/folders/${folder.id}`); await draw(); ui.changed?.(); };
   const fileControls = encryptedFileBrowser(ui, { api, folder: folder.id, path: ui.path || folder.path || folder.title, dir: ui.dir || "", state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }), documents: () => data.documents, canWrite: () => data.canWrite, refresh, persist: (doc, name, body) => persist(doc, name, body),
     decrypt: (opened, doc) => decryptDocument(opened, doc.envelope, `cora:${folder.id}:${doc.id}:${doc.version}`), select: (doc) => { selected = doc; drawRequestState(); }, go: (next) => { location.hash = `#/artefatti/${folder.id}/file${next ? `/${next.split("/").map(encodeURIComponent).join("/")}` : ""}`; } });
   const conversations = encryptedConversations(ui, { api, folder: folder.id, agents, defaultModel: ui.defaultModel, state: () => ({ bundle, method: chosenMethod, publicKey: data.folder.publicKey }) });
