@@ -351,3 +351,15 @@ Encrypted folders expose no Conversations tab or manual chat composer. `web/encr
 ## Duplicate-call recovery and completion
 
 A local duplicate-call refusal must not suppress completion checks for the rest of a productive task. A successful, allowed, different non-talk/non-memory tool restores the normal and goal checks. Relevant updates and recovery invalidate any earlier completion confirmation. Relevant admitted colleague messages and updated/continued human instructions refresh only lookup signatures in the duplicate window; shell commands and other side-effect signatures stay protected. This does not reset an independent progress pause, stop, departure, authorization or real dependency. Scoped integration cases cover goal/plain completion, fresh colleague reads, foreign reports, duplicate side effects and departure.
+
+
+## Firecrawl connector
+
+`src/connectors/firecrawl/index.js` owns Firecrawl's provider contract. The card is
+rendered from `/api/connectors`, agent actions use Cora's MCP, and the backend holds
+the credentials. OAuth uses common dynamic public-client registration and PKCE in
+`KeyConnectors`; `remote-mcp.js` is shared with Lovable. Tool definitions and nested
+schemas come from the connected server; grants, execution and disconnect use the
+existing connector authorization boundary. Tests in `test/connector-firecrawl.test.js`
+and the `Firecrawl connector` integration group cover discovery, key checks, OAuth,
+rotation/revocation, credit/rate refusals and the panel.

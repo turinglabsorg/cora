@@ -2,6 +2,7 @@ import { asana } from "./asana.js";
 import { canva } from "./canva.js";
 import { google } from "./google.js";
 import { linear } from "./linear.js";
+import { firecrawl } from "./firecrawl/index.js";
 import { lovable } from "./lovable.js";
 
 /**
@@ -9,7 +10,7 @@ import { lovable } from "./lovable.js";
  * each card and each form from what the module declares: to add a connector, write
  * its module next to these and list it here (see README.md).
  */
-export const CONNECTORS = [google, linear, asana, canva, lovable];
+export const CONNECTORS = [google, linear, asana, canva, lovable, firecrawl];
 
 /** The connectors that a person connects with a key or an app's credentials. */
 export const KEY_SERVICES = Object.fromEntries(CONNECTORS.filter((connector) => (connector.kind || "key") === "key")
@@ -18,10 +19,10 @@ export const KEY_SERVICES = Object.fromEntries(CONNECTORS.filter((connector) => 
 const BY_TOOL = new Map(CONNECTORS.flatMap((connector) => (connector.tools || []).map((tool) => [tool.name, { connector, tool }])));
 
 /** The connector that owns a tool name, or null. */
-export function connectorForTool(name) { return BY_TOOL.get(name)?.connector || null; }
+export function connectorForTool(name) { return BY_TOOL.get(name)?.connector || CONNECTORS.find((connector) => connector.resolveTool?.(name)) || null; }
 
 /** The action a tool name runs, or null. */
-export function toolFor(name) { return BY_TOOL.get(name)?.tool || null; }
+export function toolFor(name) { return BY_TOOL.get(name)?.tool || connectorForTool(name)?.resolveTool?.(name) || null; }
 
 /** The agent-facing definition of one action: name, description and JSON Schema. */
 export function toolDefinition(tool, record) {

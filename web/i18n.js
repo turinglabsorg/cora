@@ -3206,3 +3206,40 @@ Object.assign(EN, {
   "Scegli come collegare Lovable: accesso rapido, chiave API o app OAuth.": "Choose how to connect Lovable: quick access, API key or OAuth app.",
   "Lovable non risponde. Riprova tra poco.": "Lovable does not answer. Try again shortly.",
 });
+
+Object.assign(EN, {
+  "Gli agenti cercano sul web e leggono pagine, siti e documenti.": "Agents search the web and read pages, sites and documents.",
+  "Firecrawl · Web": "Firecrawl · Web",
+  "Gli agenti usano Firecrawl con il piano e i crediti del team che colleghi. Gli strumenti disponibili dipendono dal tuo account.": "Agents use Firecrawl with the connected team's plan and credits. Available tools depend on your account.",
+  "Il team Firecrawl scelto durante il consenso.": "The Firecrawl team selected during consent.",
+  "Il team a cui appartiene la chiave API.": "The team that owns the API key.",
+  "Collega account": "Connect account",
+  "Accedi a Firecrawl, scegli il team e autorizza Cora. Torni qui automaticamente.": "Sign in to Firecrawl, choose the team and authorize Cora. You return here automatically.",
+  "Ricerche, estrazioni e altre azioni usano i crediti del team. I monitoraggi ricorrenti si avviano solo su tua richiesta.": "Searches, extractions and other actions use team credits. Recurring monitors start only at your request.",
+  "Il tuo account Firecrawl": "Your Firecrawl account",
+  "Apri Firecrawl": "Open Firecrawl",
+  "Collega una chiave API del tuo team Firecrawl. Cora la verifica e la conserva nella cassaforte.": "Connect an API key from your Firecrawl team. Cora verifies it and keeps it in the vault.",
+  "Scollegare una chiave da Cora rimuove l'accesso degli agenti. Per revocarla anche su Firecrawl, eliminala dalle impostazioni del servizio.": "Disconnecting a key from Cora removes agent access. To revoke it on Firecrawl too, delete it in the service settings.",
+  "Crea una chiave nelle ": "Create a key in ",
+  "impostazioni Firecrawl": "Firecrawl settings",
+  " e inseriscila qui.": " and enter it here.",
+  "Chiave API di Firecrawl": "Firecrawl API key",
+  "Scegli il collegamento con account o chiave API.": "Choose account sign-in or an API key.",
+  "Incolla la chiave API di Firecrawl.": "Paste the Firecrawl API key.",
+  "Firecrawl non ha confermato la chiave. Controllala e riprova.": "Firecrawl did not confirm the key. Check it and try again.",
+  "Scollega Firecrawl prima di cambiare il tipo di accesso.": "Disconnect Firecrawl before changing the sign-in method.",
+  "L'indirizzo di ritorno è cambiato: scollega il connettore e riprova.": "The callback address changed: disconnect the connector and try again.",
+  "Collegamento account non avviato. Riparti da Connettori.": "Account sign-in has not started. Return to Connectors.",
+  "Cora non conosce il suo indirizzo pubblico.": "Cora does not know its public address.",
+  "Collegamento annullato. Riparti da Connettori.": "Connection cancelled. Return to Connectors.",
+  "Il servizio non ha confermato la revoca. Riprova lo scollegamento.": "The service did not confirm revocation. Try disconnecting again.",
+});
+
+Object.assign(EN, {
+  "Revoca da completare": "Revocation pending",
+  "Accesso rimosso, revoca da completare": "Access removed, revocation pending",
+  "Riprova revoca": "Retry revocation",
+  "Il servizio non ha confermato la revoca. Gli agenti non hanno più accesso.": "The service did not confirm revocation. Agents no longer have access.",
+  "L'accesso degli agenti è stato rimosso. Il servizio non ha ancora confermato la revoca del collegamento.": "Agent access has been removed. The service has not yet confirmed revocation of the connection.",
+  "Completa la revoca prima di collegare di nuovo il servizio.": "Complete revocation before connecting the service again.",
+});

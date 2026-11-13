@@ -16,8 +16,8 @@ export class KeyConnectorError extends Error {
 const clean = (value, max = 400) => String(value ?? "").trim().slice(0, max);
 
 export class KeyConnectors {
-  constructor({ store, vault = null, google = null, log = () => {}, linearApi = "https://api.linear.app/graphql", asanaApi = "https://app.asana.com/api/1.0", canvaApi = "https://api.canva.com/rest/v1", lovableApi = "https://mcp.lovable.dev/", oauthUrls = {}, fetch: fetchImpl = fetch }) {
-    Object.assign(this, { store, vault, google, log, linearApi, asanaApi, canvaApi, lovableApi, oauthUrls, fetch: fetchImpl });
+  constructor({ store, vault = null, google = null, log = () => {}, linearApi = "https://api.linear.app/graphql", asanaApi = "https://app.asana.com/api/1.0", canvaApi = "https://api.canva.com/rest/v1", lovableApi = "https://mcp.lovable.dev/", firecrawlApi = "https://mcp.firecrawl.dev/v2/mcp", firecrawlOAuthApi = "", firecrawlRestApi = "https://api.firecrawl.dev/v2", oauthUrls = {}, fetch: fetchImpl = fetch }) {
+    Object.assign(this, { store, vault, google, log, linearApi, asanaApi, canvaApi, lovableApi, firecrawlApi, firecrawlOAuthApi, firecrawlRestApi, oauthUrls, fetch: fetchImpl });
     // OAuth authorisations under way: nonce → who started it, the PKCE verifier and where Google-style callbacks return.
     this.pending = new Map();
     // Access tokens renewed from a stored refresh token, until they expire.
@@ -26,7 +26,7 @@ export class KeyConnectors {
     this.linearQueue = Promise.resolve();
   }
 
-  api() { return { linear: this.linearApi, asana: this.asanaApi, canva: this.canvaApi, lovable: this.lovableApi }; }
+  api() { return { linear: this.linearApi, asana: this.asanaApi, canva: this.canvaApi, lovable: this.lovableApi, firecrawl: this.firecrawlApi, firecrawlOAuth: this.firecrawlOAuthApi, firecrawlRest: this.firecrawlRestApi }; }
 
   /** A module's OAuth endpoints, which a test may point elsewhere. */
   oauthOf(service) {
@@ -113,7 +113,8 @@ export class KeyConnectors {
         return (active.length ? active : [{ service, status: "new", mode: "key", agents: [] }]).map((item) => ({ ...item, name: KEY_SERVICES.linear.name, appConfigured: this.linearAppReady(item) }));
       }
       const record = records.find((item) => item.service === service && !item.disconnected);
-      return record ? { ...record, name: KEY_SERVICES[service].name } : { service, name: KEY_SERVICES[service].name, status: "new", agents: [] };
+      const { remoteTools, ...visible } = record || {};
+      return record ? { ...visible, name: KEY_SERVICES[service].name } : { service, name: KEY_SERVICES[service].name, status: "new", agents: [] };
     });
   }
 
@@ -192,6 +193,7 @@ export class KeyConnectors {
     if (!meta) throw new KeyConnectorError("Connettore sconosciuto.", 404);
     if (service === "linear") return this.linearWrite(() => this.connectLinear(input, user, connectionId));
     const previous = this.record(service);
+    if (previous?.status === "revocation_pending") throw new KeyConnectorError("Completa la revoca prima di collegare di nuovo il servizio.", 409);
     const agents = previous?.agents || [];
     const base = { service, agents, connectedBy: user.id, connectedAt: new Date().toISOString() };
     let next;
@@ -200,7 +202,20 @@ export class KeyConnectors {
       if (!returned) throw new KeyConnectorError("Premi «Apri Lovable», accetta, poi incolla qui l'indirizzo della pagina di arrivo.");
       return this.finishPasted(service, returned, user);
     }
-    if (service === "lovable" && input.mode === "key") {
+    const module = CONNECTORS.find((item) => item.id === service);
+    if (module.checkKey) {
+      if (input.mode !== "key") throw new KeyConnectorError("Scegli il collegamento con account o chiave API.");
+      const token = clean(input.token, 4000);
+      if (!token) throw new KeyConnectorError(`Incolla la chiave API di ${meta.name}.`);
+      if (previous?.status === "connected" && previous.mode !== "key") throw new KeyConnectorError(`Scollega ${meta.name} prima di cambiare il tipo di accesso.`, 409);
+      this.vaultReady();
+      let checked;
+      try { checked = await module.checkKey({ token, request: this.call.bind(this), api: this.api() }); }
+      catch { throw new KeyConnectorError(`${meta.name} non ha confermato la chiave. Controllala e riprova.`); }
+      await this.vault.put({ name: meta.secret, value: token, description: `Connettore ${meta.name} · chiave API`, agents, by: this.by(user) });
+      this.access.delete(meta.secret);
+      next = { ...base, ...checked, status: "connected", mode: "key" };
+    } else if (service === "lovable" && input.mode === "key") {
       const token = clean(input.token, 4000);
       if (!token) throw new KeyConnectorError("Incolla la chiave API del workspace Lovable.");
       if (previous?.status === "connected" && previous.mode !== "key") throw new KeyConnectorError("Scollega Lovable prima di cambiare il tipo di accesso.", 409);
@@ -246,24 +261,35 @@ export class KeyConnectors {
   quickClientName(service) { return `${KEY_SERVICES[service].secret}_QUICK_CLIENT_ID`; }
 
   /** Quick access registers Cora as a public loopback client the first time, then reuses it. */
-  async quickClient(service, user) {
+  async quickClient(service, user, redirectUri = "") {
     const oauth = this.oauthOf(service);
-    if (!oauth?.loopback || !oauth.register) throw new KeyConnectorError("Questo connettore non ha l'accesso rapido.", 404);
-    const name = this.quickClientName(service);
+    if (!(oauth?.loopback || redirectUri) || !oauth.register) throw new KeyConnectorError("Questo connettore non ha l'accesso rapido.", 404);
+    const name = oauth.dynamicRegistration ? `${KEY_SERVICES[service].secret}_CLIENT_ID` : this.quickClientName(service);
     const stored = this.store.vaultSecret(name);
-    if (stored) return this.vault.value(stored).toString("utf8");
+    if (stored) {
+      const value = this.vault.value(stored).toString("utf8");
+      if (!oauth.dynamicRegistration) return value;
+      const client = JSON.parse(value);
+      if (client.redirectUri !== redirectUri) throw new KeyConnectorError("L'indirizzo di ritorno è cambiato: scollega il connettore e riprova.", 409);
+      return client.id;
+    }
     let response;
     try {
-      response = await this.fetch(oauth.register, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ client_name: "Cora", redirect_uris: [oauth.loopback], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none", scope: (oauth.scopes || []).join(" ") }), signal: AbortSignal.timeout(20000) });
+      response = await this.fetch(oauth.register, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ client_name: "Cora", redirect_uris: [redirectUri || oauth.loopback], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none", scope: (oauth.scopes || []).join(" ") }), signal: AbortSignal.timeout(20000) });
     } catch { throw new KeyConnectorError(`${KEY_SERVICES[service].name} non risponde. Riprova tra poco.`, 502); }
     let data = null;
     try { data = await response.json(); } catch { data = null; }
     if (!response.ok || !data?.client_id) throw new KeyConnectorError(`${KEY_SERVICES[service].name} non ha registrato Cora${data?.error_description ? `: ${clean(data.error_description, 300)}` : "."}`, 502);
-    await this.vault.put({ name, value: String(data.client_id), description: `Connettore ${KEY_SERVICES[service].name} · client pubblico dell'accesso rapido`, agents: [], by: this.by(user) });
+    await this.vault.put({ name, value: oauth.dynamicRegistration ? JSON.stringify({ id: String(data.client_id), redirectUri }) : String(data.client_id), description: `Connettore ${KEY_SERVICES[service].name} · client pubblico dell'accesso rapido`, agents: [], by: this.by(user) });
     return String(data.client_id);
   }
 
   appCredentials(service, record = null) {
+    if (this.oauthOf(service)?.dynamicRegistration) {
+      const stored = this.store.vaultSecret(`${KEY_SERVICES[service].secret}_CLIENT_ID`);
+      if (!stored) throw new KeyConnectorError("Collegamento account non avviato. Riparti da Connettori.", 409);
+      return { clientId: JSON.parse(this.vault.value(stored).toString("utf8")).id, clientSecret: "" };
+    }
     if (record?.mode === "quick") {
       const stored = this.store.vaultSecret(this.quickClientName(service));
       if (!stored) throw new KeyConnectorError("Accesso rapido non registrato: riparti da «Apri Lovable».", 409);
@@ -281,7 +307,18 @@ export class KeyConnectors {
     const oauth = this.oauthOf(service);
     if (!oauth) throw new KeyConnectorError("Questo connettore non ha un'autorizzazione OAuth.", 404);
     if (mode === "quick") return this.beginQuick(service, user);
-    const record = this.selectedRecord(service, connectionId);
+    let record = this.selectedRecord(service, connectionId);
+    if (record?.status === "revocation_pending") throw new KeyConnectorError("Completa la revoca prima di collegare di nuovo il servizio.", 409);
+    if (oauth.dynamicRegistration) {
+      if (!redirectUri) throw new KeyConnectorError("Cora non conosce il suo indirizzo pubblico.", 409);
+      if (record?.status === "connected" && record.mode !== "oauth") throw new KeyConnectorError(`Scollega ${KEY_SERVICES[service].name} prima di cambiare il tipo di accesso.`, 409);
+      this.vaultReady();
+      await this.quickClient(service, user, redirectUri);
+      if (!record) {
+        record = { id: `kc_${randomBytes(6).toString("hex")}`, service, agents: [], status: "app", mode: "oauth", appSecrets: [`${KEY_SERVICES[service].secret}_CLIENT_ID`], connectedBy: user.id, appVersion: randomBytes(12).toString("hex") };
+        this.save([...this.records(), record]);
+      }
+    }
     if (service === "linear") {
       if (!this.linearAppReady(record)) throw new KeyConnectorError("Salva prima l'app Linear.", 409);
       if (connectionId && record.mode !== "oauth") throw new KeyConnectorError("Questo workspace usa una chiave personale.", 409);
@@ -373,7 +410,8 @@ export class KeyConnectors {
     if (!user || user.blocked) throw new KeyConnectorError("Accesso non autorizzato.", 403);
     if (error || !code) throw new KeyConnectorError("Autorizzazione annullata.");
     this.vaultReady();
-    const source = service === "linear" ? this.selectedRecord(service, pending.connectionId) : pending.mode === "quick" ? { mode: "quick" } : null;
+    const source = service === "linear" || this.oauthOf(service)?.dynamicRegistration ? this.selectedRecord(service, pending.connectionId) : pending.mode === "quick" ? { mode: "quick" } : null;
+    if (this.oauthOf(service)?.dynamicRegistration && (!source || source.id !== pending.connectionId)) throw new KeyConnectorError("Collegamento annullato. Riparti da Connettori.", 409);
     if (source && source.appVersion !== pending.appVersion) throw new KeyConnectorError("L'app è cambiata durante l'autorizzazione. Riparti dal collegamento.", 409);
     const data = await this.tokenCall(service, { grant_type: "authorization_code", code: String(code), redirect_uri: pending.redirectUri, code_verifier: pending.verifier }, source);
     const bundle = this.bundle(null, data);
@@ -382,13 +420,14 @@ export class KeyConnectors {
       if (answer.status < 200 || answer.status >= 300) throw new KeyConnectorError(`${KEY_SERVICES[service].name} non ha confermato l'account.`, 502);
       return answer;
     };
-    const checked = await this.oauthOf(service).identify({ access: bundle.access_token, request, api: this.api() });
+    const checked = await this.oauthOf(service).identify({ access: bundle.access_token, request, api: this.api(), tokenData: data });
     if (service === "linear") return this.linearWrite(() => {
       const current = this.selectedRecord(service, pending.connectionId);
       if (current.appVersion !== pending.appVersion) throw new KeyConnectorError("L'app è cambiata durante l'autorizzazione. Riparti dal collegamento.", 409);
       return this.saveLinearConnection(checked, "oauth", JSON.stringify(bundle), user, pending.connectionId);
     });
     const previous = this.record(service);
+    if (this.oauthOf(service)?.dynamicRegistration && (!previous || previous.id !== source.id || previous.appVersion !== source.appVersion)) throw new KeyConnectorError("Collegamento annullato. Riparti da Connettori.", 409);
     const agents = previous?.agents || [];
     const meta = KEY_SERVICES[service];
     await this.vault.put({ name: meta.secret, value: JSON.stringify(bundle), description: `Connettore ${meta.name} · token OAuth${checked.account ? ` di ${checked.account}` : ""}`, agents, by: this.by(user) });
@@ -412,7 +451,7 @@ export class KeyConnectors {
       try { data = await this.tokenCall(connector.id, { grant_type: "refresh_token", refresh_token: stored.refresh_token }, record); }
       catch { throw new Error(`${connector.name} did not renew the authorisation: the owner authorises it again in Connettori`); }
       const bundle = this.bundle(stored, data);
-      const current = this.records().find((item) => item.id === record.id && item.status === "connected");
+      const current = this.records().find((item) => item.id === record.id && ["connected", "revocation_pending"].includes(item.status));
       if (!current || current.connectedAt !== record.connectedAt || current.appVersion !== record.appVersion || !this.store.vaultSecret(name)) throw new Error(`${connector.name} was disconnected during renewal`);
       await this.vault.put({ name, value: JSON.stringify(bundle), agents: current.agents || [], by: this.store.vaultSecret(name)?.createdBy || null, source: "connector" });
       this.access.set(name, bundle);
@@ -428,6 +467,7 @@ export class KeyConnectors {
     const selected = this.selectedRecord(service, connectionId);
     const record = records.find((item) => item.id === selected?.id);
     if (!record) throw new KeyConnectorError("Connettore non collegato.", 404);
+    if (record.status === "revocation_pending") throw new KeyConnectorError("Completa la revoca prima di collegare di nuovo il servizio.", 409);
     if (!Array.isArray(agents) || agents.some((id) => !this.store.agent(id))) throw new KeyConnectorError("Scegli agenti validi.");
     record.agents = [...new Set(agents.map(String))];
     record.updatedAt = new Date().toISOString();
@@ -436,15 +476,29 @@ export class KeyConnectors {
     return record;
   }
 
-  disconnect(service, user = null, connectionId = "") {
+  async disconnect(service, user = null, connectionId = "") {
     const record = this.selectedRecord(service, connectionId);
     if (!record) throw new KeyConnectorError("Connettore non collegato.", 404);
+    const oauth = this.oauthOf(service);
+    if (oauth?.revoke && record.mode === "oauth" && ["connected", "revocation_pending"].includes(record.status)) {
+      this.save(this.records().map((item) => item.id === record.id ? { ...item, status: "revocation_pending", agents: [], updatedAt: new Date().toISOString() } : item));
+      this.vaultReady().update(this.tokenName(KEY_SERVICES[service], record), { agents: [] }, user ? this.by(user) : null);
+      for (const [nonce, pending] of this.pending) if (pending.service === service) this.pending.delete(nonce);
+      const name = this.tokenName(KEY_SERVICES[service], record);
+      const renewal = this.refreshing.get(name);
+      if (renewal) { try { await renewal; } catch { /* revocation still uses the latest stored token */ } }
+      const bundle = this.access.get(name) || JSON.parse(this.vault.value(this.store.vaultSecret(name)).toString("utf8"));
+      let response;
+      try { response = await this.fetch(oauth.revoke, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: bundle.refresh_token || bundle.access_token, token_type_hint: bundle.refresh_token ? "refresh_token" : "access_token" }).toString(), signal: AbortSignal.timeout(20000) }); } catch { /* handled below without provider bodies */ }
+      if (!response?.ok) return { revocationPending: true };
+    }
+    for (const [nonce, pending] of this.pending) if (pending.service === service) this.pending.delete(nonce);
     const remaining = this.records().filter((item) => item.id !== record.id);
     this.save(remaining);
     const secretName = this.tokenName(KEY_SERVICES[service], record);
     this.access.delete(secretName);
     this.access.delete(service);
-    const names = [record.status === "connected" ? secretName : null, ...(service === "linear" && record.mode !== "oauth" ? [] : record.appSecrets || KEY_SERVICES[service].appSecrets || [])].filter(Boolean);
+    const names = [["connected", "revocation_pending"].includes(record.status) ? secretName : null, ...(service === "linear" && record.mode !== "oauth" ? [] : record.appSecrets || KEY_SERVICES[service].appSecrets || [])].filter(Boolean);
     for (const name of names) { try { this.vault?.remove(name, user ? this.by(user) : null); } catch { /* the value is already gone */ } }
     this.log({ type: "connector", text: `connettore ${KEY_SERVICES[service].name}: scollegato` });
   }
@@ -457,7 +511,7 @@ export class KeyConnectors {
     return google.concat(CONNECTORS.filter((connector) => connector.kind !== "google").flatMap((connector) => {
       const records = connected.filter((record) => record.service === connector.id && this.allowed(record, connector, agent));
       if (!records.length) return [];
-      return (connector.tools || []).map((tool) => {
+      return (connector.toolsFor ? connector.toolsFor(records[0]) : connector.tools || []).map((tool) => {
         const definition = toolDefinition(tool, records[0]);
         if (connector.id !== "linear") return definition;
         const workspaces = records.map((record) => record.workspace);

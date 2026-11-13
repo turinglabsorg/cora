@@ -23,6 +23,8 @@ that is not authorised for a connector does not even see its tool.
 | `linear.js` | Linear: a personal API key; 15 `linear_` actions (issues, comments, projects, cycles, labels, states) and `linear_graphql`. |
 | `asana.js` | Asana: a personal access token or an OAuth app; 17 `asana_` actions (tasks, subtasks, sections, comments, attachments, projects) and `asana_api`. |
 | `canva.js` | Canva: an OAuth integration authorised by the owner; 20 `canva_` actions (designs, exports, uploads, folders, brand templates, comments) and `canva_api`. |
+| `firecrawl/index.js` | Firecrawl: the official remote MCP server, with API key or dynamically registered OAuth; exact tools and schemas discovered on connection, scoped to the selected team. |
+| `remote-mcp.js` | Shared JSON/SSE transport, sessions, recovery and image files for Lovable and Firecrawl. |
 | `lovable.js` | Lovable: the official MCP server (`mcp.lovable.dev`), reached by Cora as an MCP client with the owner's OAuth token; 31 `lovable_` actions (projects, the project agent's messages, diffs and files, knowledge, skills, database, deploy, analytics, uploads) and `lovable_mcp`. |
 | `google.js` | Google: accounts connected through Cora's OAuth broker (`GoogleConnector`); 14 `gmail_` actions (send, reply, search, read, attachments, labels, archive, drafts) and `gmail_api`. |
 
@@ -189,3 +191,35 @@ it once on a 404, and reads the JSON-RPC answer from JSON or from the SSE stream
 action is still one Cora tool with its own schema; the generic tool calls any server tool
 by name and lists them with `tools/list`. `request` answers `headers` and `text` besides
 `status` and `data` for this.
+
+## Dynamic remote MCP connectors
+
+Firecrawl lives in `firecrawl/index.js`. It supplies provider URLs, account/card copy,
+credential verification, tool discovery and authorization guidance. It does not own
+panel routes or an OAuth implementation. `KeyConnectors` supports a module's
+`checkKey`, `toolsFor(record)` and `resolveTool(name)` hooks; the registry routes the
+provider's namespace and execution checks the saved, verified catalog again. Exact
+JSON schemas are retained, including nested fields. Reconnect to refresh availability.
+No tool appears before an owner grants that connected account to an agent.
+
+`oauth.dynamicRegistration` reuses the public-client registration path with the
+actual Cora callback URI, PKCE and the existing cookie/nonce checks. The client ID
+and tokens remain in the vault. Refreshes are serialized and rotated refresh tokens
+are saved before reuse. An optional `oauth.revoke` removes local agent access immediately and then revokes the refresh token; failed
+remote revocation remains visible and retryable with agents disabled.
+Disconnecting cancels pending callbacks. API keys are removed from Cora; users revoke
+them separately in the provider dashboard.
+
+Both Lovable and Firecrawl use `remote-mcp.js`: initialization, JSON/SSE replies,
+strict RPC-id matching, session caching, one retry after a session 404, and image
+files on the authorized agent desktop. Credit/rate refusals are never replayed.
+Firecrawl's module marks monitors, crawl, agent, interaction and monitor deletion
+with their authorization and credit implications. Connecting a service is not
+authorization to start recurring jobs.
+
+Official contracts: [MCP](https://docs.firecrawl.dev/mcp-server),
+[tools](https://docs.firecrawl.dev/mcp-server/tools),
+[authentication](https://docs.firecrawl.dev/authentication),
+[OAuth](https://docs.firecrawl.dev/oauth). OAuth tokens target the MCP resource,
+not the REST API. Keyless search/scrape/parse can verify the shared transport;
+account sign-in and paid tools still require an owner-authorized account check.
