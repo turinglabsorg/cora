@@ -3236,6 +3236,8 @@ Object.assign(EN, {
 });
 
 Object.assign(EN, {
+  "Revoca ancora in attesa.": "Revocation is still pending.",
+  "Toglie subito l'accesso agli agenti e revoca il collegamento.": "Immediately removes agent access and revokes the connection.",
   "Revoca da completare": "Revocation pending",
   "Accesso rimosso, revoca da completare": "Access removed, revocation pending",
   "Riprova revoca": "Retry revocation",
