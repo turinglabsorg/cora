@@ -15,8 +15,8 @@ export class EmailError extends Error {
 }
 
 export class EmailChannel {
-  constructor({ store, boxes, channels, orchestrator, instanceUrl = "", key, log = () => {}, googleConnector = null }) {
-    Object.assign(this, { store, boxes, channels, orchestrator, instanceUrl, key, log, googleConnector });
+  constructor({ store, boxes, channels, orchestrator, instanceUrl = "", key, log = () => {}, googleConnector = null, mailDomains = null }) {
+    Object.assign(this, { store, boxes, channels, orchestrator, instanceUrl, key, log, googleConnector, mailDomains });
     this.jobs = new Map();
     this.processing = new Map();
     this.hooks = new Map();
@@ -56,6 +56,14 @@ export class EmailChannel {
       if (!["draft", "auto", ...(agent ? ["inherit"] : [])].includes(input.replyMode)) throw new EmailError("Modalità di risposta non valida.");
       out.replyMode = input.replyMode;
     }
+    if (input.resendSender !== undefined && agent) {
+      out.resendSender = null;
+      if (input.resendSender !== null) {
+        const sender = this.mailDomains.sender(agent, input.resendSender);
+        out.resendSender = { local: sender.local, domainId: sender.domainId };
+      }
+      out.senderId = out.resendSender ? "resend" : "";
+    }
     if (input.senderId !== undefined && agent) out.senderId = String(input.senderId);
     if (input.reportChannelId !== undefined) out.reportChannelId = String(input.reportChannelId).trim().slice(0, 120);
     if (input.instructions !== undefined) out.instructions = String(input.instructions).trim().slice(0, 8000);
@@ -74,13 +82,16 @@ export class EmailChannel {
   }
   async update(input, agent = null) {
     const patch = this.clean(input, agent);
-    if (patch.senderId) this.googleConnector.identity(agent, patch.senderId);
     if (patch.reportChannelId) await this.checkChannel(patch.reportChannelId, agent);
+    if (patch.senderId) this.identity(agent, patch.senderId, { ...this.overrides(agent), ...patch });
     const previous = agent ? this.overrides(agent) : this.settings;
     if ((!agent && patch.enabled && !previous.enabled) || (patch.mode && patch.mode !== "manual" && patch.mode !== previous.mode)) patch.enabledAt = new Date().toISOString();
     this.store.setValue(agent ? `emailRules:${agent.id}` : "emailChannel", { ...previous, ...patch });
     this.log({ type: "settings", ...(agent ? { agentId: agent.id } : {}), text: "regole del canale E-mail aggiornate" });
     return agent ? this.view(agent) : this.view();
+  }
+  identity(agent, id, rules = this.overrides(agent)) {
+    return id === "resend" ? this.mailDomains.sender(agent, rules.resendSender) : this.googleConnector.identity(agent, id);
   }
   async checkChannel(id, agent = null) {
     const listed = agent ? this.channels.listFor(agent) : this.channels.list();
@@ -104,7 +115,11 @@ export class EmailChannel {
   }
   view(agent = null) {
     if (!agent) return { settings: this.settings, channels: this.channels.list(), agents: this.store.agents().map((item) => ({ id: item.id, name: item.name, ...this.summary(item), status: this.store.value(`emailStatus:${item.id}`, null) })) };
-    return { senders: this.googleConnector?.forAgent(agent) || [], overrides: this.overrides(agent), effective: this.effective(agent), destination: this.destination(agent), channels: this.channels.listFor(agent), summary: this.summary(agent), recent: this.recent(agent), status: this.store.value(`emailStatus:${agent.id}`, null) };
+    const senders = [...(this.googleConnector?.forAgent(agent) || [])];
+    if (this.overrides(agent).resendSender) {
+      try { senders.push(this.identity(agent, "resend")); } catch {}
+    }
+    return { senders, resendDomains: this.mailDomains?.senderDomains() || [], overrides: this.overrides(agent), effective: this.effective(agent), destination: this.destination(agent), channels: this.channels.listFor(agent), summary: this.summary(agent), recent: this.recent(agent), status: this.store.value(`emailStatus:${agent.id}`, null) };
   }
   mailboxes(agent) {
     const mailbox = this.store.value(`agentMailbox:${agent.id}`, null);
@@ -212,6 +227,8 @@ export class EmailChannel {
   async read(agent, id) {
     const row = this.store.db.prepare("SELECT data,mailbox,direction FROM agent_mail WHERE agent_id=? AND id=?").get(agent.id, id);
     if (!row) throw new EmailError("Email non trovata.", 404);
+    const data = JSON.parse(row.data);
+    if (row.direction === "sent" && data.provider === "resend") return { ...data, body: data.body_text || data.body_html };
     return this.boxes.mailCommand(agent, { action: row.direction === "draft" ? "readDraft" : "read", mailbox: row.mailbox, id });
   }
   async draft(agent, message, { invocation } = {}) {
@@ -224,7 +241,7 @@ export class EmailChannel {
   }
   async compose(agent, message, token, track, from = "") {
     const mailbox = this.mailboxes(agent)[0], own = this.overrides(agent);
-    if (!from && own.senderId) from = this.googleConnector.identity(agent, own.senderId).email;
+    if (!from && own.senderId) from = this.identity(agent, own.senderId).email;
     const compose = { text: message.body_text || "", html: message.body_html || "", signature: own.signature || `${agent.name}\n${from || mailbox}`,
       email: from || mailbox, avatar: this.store.avatar(agent.id).toString("base64"), track,
       image_url: `${this.instanceUrl}/mail/media/${token}.png`, pixel_url: `${this.instanceUrl}/mail/media/${token}.gif` };
@@ -237,7 +254,7 @@ export class EmailChannel {
   }
   async send(agent, message, { requester, invocation } = {}) {
     const policy = this.effective(agent), senderId = message.sender_id || policy.senderId || "";
-    const external = senderId ? this.googleConnector.identity(agent, senderId) : null;
+    const external = senderId ? this.identity(agent, senderId) : null;
     const mailbox = external?.email || this.mailboxes(agent)[0];
     if (!mailbox) throw new EmailError("Email non disponibile.");
     if (!["owner", "authorized"].includes(requester?.kind) && !(invocation && policy.enabled && policy.mode === "auto" && policy.replyMode === "auto" && this.eligible(agent, invocation))) throw new EmailError("L'invio richiede la richiesta di un utente autorizzato.", 403);
@@ -257,14 +274,14 @@ export class EmailChannel {
     const current = this.store.agent(agent.id), latest = this.effective(agent);
     if (!current?.enabled || !current.tools || !requester && (!latest.enabled || latest.mode !== "auto" || latest.replyMode !== "auto" || !this.eligible(current, invocation))) throw new EmailError("L'autorizzazione email è cambiata. Invio annullato.", 403);
     const at = new Date().toISOString(), id = `sending_${token}`;
-    const data = { id, mailbox, from: mailbox, to: message.to, subject: message.subject, receivedAt: at, sourceId, senderId };
+    const data = { id, mailbox, from: mailbox, to: message.to, subject: message.subject, receivedAt: at, sourceId, senderId, ...(senderId === "resend" ? { provider: "resend", body_text: prepared.text, body_html: prepared.html } : {}) };
     this.store.db.prepare("INSERT INTO agent_mail(agent_id,mailbox,id,direction,at,data,status,token,tracked,signature) VALUES(?,?,?,?,?,?,?,?,?,?)").run(agent.id, mailbox, id, "sent", at, JSON.stringify(data), "sending", token, Number(track), Buffer.from(prepared.png, "base64"));
     try {
       const outgoing = { ...message, body_text: prepared.text, body_html: prepared.html, ...(invocation ? { in_reply_to: invocation.messageId, references: invocation.references, auto_submitted: "auto-replied" } : {}) };
-      const result = external ? await this.googleConnector.send(agent, senderId, outgoing) : await this.boxes.mailCommand(agent, { action: "send", mailbox, message: outgoing });
+      const result = senderId === "resend" ? await this.mailDomains.send(agent, outgoing, mailbox) : external ? await this.googleConnector.send(agent, senderId, outgoing) : await this.boxes.mailCommand(agent, { action: "send", mailbox, message: outgoing });
       data.id = result.message_id;
       this.store.db.prepare("UPDATE agent_mail SET id=?,data=?,status='sent' WHERE agent_id=? AND mailbox=? AND id=?").run(data.id, JSON.stringify(data), agent.id, mailbox, id);
-      return { id: data.id, status: "sent", tracked: track };
+      return { id: data.id, status: "sent", tracked: track, from: mailbox, provider: senderId === "resend" ? "resend" : external ? "google" : "ambox" };
     } catch (error) {
       this.store.db.prepare("UPDATE agent_mail SET status='uncertain' WHERE agent_id=? AND mailbox=? AND id=?").run(agent.id, mailbox, id);
       throw new EmailError("Invio non confermato. Controlla la posta inviata prima di riprovare.", 502);

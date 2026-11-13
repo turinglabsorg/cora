@@ -74,6 +74,11 @@ export async function mailWorld(t = null) {
     }
     const account = state.accounts.get(token);
     if (!account || state.refuse) return send(403, { error: "fixture-provider-secret-do-not-expose" });
+    if (url.pathname === "/emails" && req.method === "POST") {
+      if (!state.providerSent) state.providerSent = [];
+      state.providerSent.push({ account: token === keyA ? "alpha" : "beta", ...body });
+      return send(200, { id: `provider-${++serial}` });
+    }
     if (url.pathname === "/domains" && req.method === "GET") return send(200, { data: account.domains, has_more: false });
     if (url.pathname === "/domains" && req.method === "POST") {
       const domain = { id: `resend-domain-${++serial}`, name: body.name, status: "not_started", capabilities: { sending: "enabled", receiving: "disabled" }, records: [
@@ -87,7 +92,9 @@ export async function mailWorld(t = null) {
       const domain = account.domains.find((item) => item.id === match[1]);
       if (!domain) return send(404, {});
       if (req.method === "PATCH") Object.assign(domain.capabilities, body.capabilities);
+      if (req.method === "GET" && state.domainCheckRefuse) return send(503, { error: "fixture-provider-secret-do-not-expose" });
       if (state.dnsReady.has(domain.name)) { domain.status = "verified"; for (const record of domain.records) record.status = "verified"; }
+      if (state.receivingPending?.has(domain.name)) for (const record of domain.records) if (record.record === "Receiving") record.status = "not_started";
       return send(200, domain);
     }
     if (url.pathname === "/webhooks" && req.method === "GET") return send(200, { data: account.hooks, has_more: false });

@@ -663,6 +663,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario aggiunge domini email.");
       return send(res, 201, await mailDomains.addDomain(await readJson(req, 4096)));
     }
+    const mailDomainConfig = /^\/api\/mail\/domains\/(md_[a-f0-9]{16})$/.exec(path);
+    if (mailDomainConfig && ["PUT", "DELETE"].includes(method)) {
+      if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia i domini email.");
+      return send(res, 200, method === "DELETE" ? await mailDomains.removeDomain(mailDomainConfig[1]) : await mailDomains.updateDomain(mailDomainConfig[1], await readJson(req, 4096)));
+    }
     const mailDomain = /^\/api\/mail\/domains\/(md_[a-f0-9]{16})\/(check|verify)$/.exec(path);
     if (mailDomain && method === "POST") {
       if (user.role !== "owner") throw new HttpError(403, "Solo il proprietario verifica i domini email.");
