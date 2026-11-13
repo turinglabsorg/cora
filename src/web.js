@@ -1868,7 +1868,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (!owner && body.memberAccess !== undefined) throw new HttpError(403, "solo il proprietario cambia l'accesso del team");
       const folder = artifacts.createFolder({
         path: body.path, title: body.title, description: body.description, kind: body.kind, writers: body.writers,
-        policy: owner ? body.policy : "review", reviewers: owner ? body.reviewers : [], memberAccess: owner ? body.memberAccess : undefined, createdBy: by,
+        policy: owner ? body.policy : null, reviewers: owner ? body.reviewers : [], memberAccess: owner ? body.memberAccess : undefined, createdBy: by,
       });
       return send(res, 201, artifacts.folderView(folder));
     }
@@ -1989,7 +1989,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       throw new HttpError(405, "method not allowed");
     }
     // A level of the paths (clienti, clienti/acme): what is inside it, and links that serve all of it.
-    match = /^\/api\/artifacts\/level(?:\/(shares|events|access))?$/.exec(path);
+    match = /^\/api\/artifacts\/level(?:\/(shares|events|access|settings))?$/.exec(path);
     if (match) {
       const level = String(url.searchParams.get("path") || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
       if (!level || store.artifactFolderByPath(level)) throw new HttpError(404, "livello non trovato");
@@ -2001,6 +2001,11 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (!canShare) throw new HttpError(403, "condivide un livello solo chi rivede almeno una delle sue cartelle");
         const body = await readJson(req, 32768);
         return send(res, 201, artifacts.createShare(id, { label: body.label, view: body.view, access: body.access, commit: body.commit, expiresAt: body.expiresAt, root: body.root, createdBy: by }));
+      }
+      if (match[1] === "settings" && method === "PUT") {
+        const settings = artifacts.updateLevelPolicy(level, await readJson(req, 4096), user);
+        activity({ type: "artifact", text: `${by.name} ha cambiato la pubblicazione del livello ${level}` });
+        return send(res, 200, settings);
       }
       if (match[1] === "access" && method === "PUT") {
         const access = artifacts.updateLevelAccess(level, await readJson(req, 65536), user);
@@ -2018,6 +2023,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         canShare,
         canManage: artifacts.canManageGroup(level, user),
         access: artifacts.canManageGroup(level, user) ? artifacts.levelAccess(level, user) : null,
+        settings: artifacts.canManageGroup(level, user) ? artifacts.levelPolicy(level, user) : null,
         managed: inside.filter((folder) => artifacts.canManage(folder, user)).length,
         people: canShare || artifacts.canManageGroup(level, user) ? store.sharingPeople(user) : [],
         shareHosting: Boolean(artifacts.shareSuffix),

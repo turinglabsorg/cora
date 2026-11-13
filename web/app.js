@@ -6202,9 +6202,9 @@ const pathSlug = (text) => String(text || "").toLowerCase().normalize("NFD").rep
  * each level, then the folder's own name. Folders hold files and never other folders,
  * so a level offers only groups, and a name already used there is refused.
  */
-function folderPathPicker(folders) {
+function folderPathPicker(folders, initial = "") {
   const paths = folders.map((folder) => folder.path);
-  const groups = [];
+  const groups = initial ? initial.split("/") : [];
   let leaf = "";
   let leafTouched = false;
   let open = null;
@@ -6282,8 +6282,9 @@ function renderArtifacts() {
   if (id === "segreti") return renderSecrets();
   if (id && view === "c" && commitId) return renderArtifactCommit(id, commitId);
   // A level of the paths (clienti, clienti/acme) opens like a directory: what is inside, a link for all of it.
-  const level = id === "in" ? artifactDir(route().slice(2)) : "";
-  if (id && id !== "in") {
+  const level = id === "in" ? artifactDir(route().slice(2)) : id === "livello" ? artifactDir((route()[2] || "").split(/%2f/i)) : "";
+  const levelSection = id === "livello" ? route()[3] || "" : "";
+  if (id && !["in", "livello"].includes(id)) {
     const legacyConversation = view === "conversazioni";
     if (legacyConversation) history.replaceState(null, "", artifactDirHref(id, ""));
     const tab = legacyConversation ? "file" : view || "file", dir = legacyConversation ? "" : view === "file" || !view ? artifactDir(route().slice(3)) : artifactDir(String(new URLSearchParams(location.hash.split("?")[1] || "").get("in") || "").split("/"));
@@ -6295,7 +6296,7 @@ function renderArtifacts() {
   let data = null;
   let creating = new URLSearchParams(location.hash.split("?")[1] || "").get("encrypt") === "1";
   const search = h("input", { type: "search", placeholder: tr("Cerca tra le cartelle…"), "aria-label": tr("Cerca tra le cartelle"), autocomplete: "off" });
-  const newButton = btn("Nuova cartella", { icon: "plus", cls: "primary", onclick: () => { creating = !creating; draw(); if (creating) body.querySelector(".art-new input")?.focus(); } });
+  const newButton = btn("Nuova cartella", { icon: "plus", cls: "primary", onclick: () => { creating = !creating; if (level) workspace?.selectSection("cartelle"); draw(); if (creating) body.querySelector(".art-new input")?.focus(); } });
   search.addEventListener("input", () => drawList());
   const list = h("div", { class: "art-groups" });
 
@@ -6333,10 +6334,11 @@ function renderArtifacts() {
         kind.value = key;
         for (const button of kinds.children) { button.classList.toggle("on", button === event.currentTarget); button.setAttribute("aria-checked", String(button === event.currentTarget)); }
       } }, icon(name), label)));
-    const where = folderPathPicker(data.folders);
+    const where = folderPathPicker(data.folders, level);
     const title = h("input", { type: "text", name: "title", placeholder: tr("Report trimestrali di Acme"), maxlength: 80, required: true });
     title.addEventListener("input", () => where.fromTitle(title.value));
-    const direct = data.canManage ? switchInput("direct", "Pubblica subito", false, "Senza revisione: ogni caricamento va in onda appena arriva.") : null;
+    const direct = data.canManage ? field("Pubblicazione degli agenti", h("select", { name: "policy", "aria-label": tr("Pubblicazione della nuova cartella") },
+      [["inherit", "Eredita dal livello"], ["review", "Con revisione"], ["direct", "Pubblica subito"]].map(([value, label]) => h("option", { value }, label)))) : null;
     const form = h("form", { class: "art-new stack" },
       field("Titolo", title),
       field("Dove va", where.node, "scegli un gruppo per livello, o creane uno; il nome della cartella viene dal titolo"),
@@ -6349,7 +6351,7 @@ function renderArtifacts() {
       const values = new FormData(form);
       const wrong = where.problem();
       if (wrong) return toast(wrong, true);
-      const created = await guard(api("/api/artifacts/folders", { method: "POST", body: { path: where.value(), title: values.get("title"), description: values.get("description"), kind: kind.value, policy: values.get("direct") ? "direct" : "review" } }), "Cartella creata");
+      const created = await guard(api("/api/artifacts/folders", { method: "POST", body: { path: where.value(), title: values.get("title"), description: values.get("description"), kind: kind.value, policy: ["direct", "review"].includes(values.get("policy")) ? values.get("policy") : null } }), "Cartella creata");
       if (created) location.hash = `#/artefatti/${created.id}${data.encryptionRequired || new URLSearchParams(location.hash.split("?")[1] || "").get("encrypt") === "1" ? "/cifratura" : ""}`;
     });
     return panel({ icon: "folder", title: "Nuova cartella", hint: "Gli agenti la trovano nel brain e con artifact_folders: scrivi bene cosa ci va." }, form);
@@ -6357,7 +6359,8 @@ function renderArtifacts() {
 
   function draw() {
     if (level) {
-      body.replaceChildren(...[data.encryptionRequired && data.legacyFolders ? encryptionWarning() : null, creating ? newFolderForm() : null, data.folders.length > 6 ? h("div", { class: "art-search" }, search) : null, list, levelAccess, levelShares].filter(Boolean));
+      foldersPane.replaceChildren(...[data.encryptionRequired && data.legacyFolders ? encryptionWarning() : null, creating ? newFolderForm() : null, h("div", { class: "art-search" }, search), list].filter(Boolean));
+      if (!workspace) body.replaceChildren(foldersPane);
       drawList();
       return;
     }
@@ -6389,13 +6392,18 @@ function renderArtifacts() {
     drawList();
   }
 
+  const foldersPane = h("div", { class: "stack" });
   const levelShares = h("div", { class: "stack art-level-shares" });
+  const levelAccess = h("div", { class: "stack art-level-access" });
+  const levelSettings = h("div", { class: "stack" });
+  let workspace = null;
+  let sharing = false;
   async function loadLevelShares() {
     let info;
-    try { info = await api(`/api/artifacts/level?${new URLSearchParams({ path: level })}`); } catch (error) { levelShares.replaceChildren(); return; }
-    accessButton.style.display = info.canManage ? "" : "none";
-    levelAccess.replaceChildren(...(info.canManage && granting ? [artifactLevelAccess(info, level)] : []));
-    if (!info.shareHosting) { shareButton.style.display = "none"; levelShares.replaceChildren(); return; }
+    try { info = await api(`/api/artifacts/level?${new URLSearchParams({ path: level })}`); }
+    catch (error) { levelAccess.replaceChildren(empty("alert", error.message)); levelSettings.replaceChildren(empty("alert", error.message)); return; }
+    levelAccess.replaceChildren(info.canManage ? artifactLevelAccess(info, level) : empty("shield", "I permessi li cambia il proprietario."));
+    levelSettings.replaceChildren(info.canManage ? artifactLevelSettings(info, level) : empty("shield", "Le impostazioni le cambia il proprietario."));
     const prefix = `${level}/`;
     const shareData = {
       folder: { id: `ag:${level}`, path: level, title: level.split("/").at(-1), kind: "files", group: true },
@@ -6403,21 +6411,23 @@ function renderArtifacts() {
       tree: info.folders.filter((folder) => folder.served).map((folder) => ({ path: `${folder.path.slice(prefix.length)}/*` })),
     };
     const served = info.folders.filter((folder) => folder.served).length;
-    shareButton.style.display = info.canShare && info.shareHosting ? "" : "none";
-    const [form, links] = artifactShares(shareData, "", {
+    const sharesView = artifactShares(shareData, "", {
       createUrl: `/api/artifacts/level/shares?${new URLSearchParams({ path: level })}`,
       reload: () => { sharing = false; return loadLevelShares(); },
       note: info.canShare ? tr(served === info.folders.length ? "Il link serve tutte le {count} cartelle di questo livello, e anche quelle che ci metterai dopo." : "Il link serve le {count} cartelle di questo livello che rivedi tu.", { count: served }) : "",
     });
-    levelShares.replaceChildren(...[sharing ? form : null, info.shares.length || sharing ? links : null].filter(Boolean));
+    const [form, links] = Array.isArray(sharesView) ? sharesView : [null, sharesView];
+    levelShares.replaceChildren(...[info.canShare && info.shareHosting ? btn("Nuovo link", { icon: "plus", cls: "primary", onclick: () => { sharing = !sharing; loadLevelShares(); } }) : null, sharing ? form : null, links].filter(Boolean));
+    if (!workspace) {
+      workspace = sectionWorkspace({ title: "Artefatti", base: `#/artefatti/livello/${encodeURIComponent(level)}`, current: levelSection, entries: [
+        ["cartelle", "Cartelle", "folder", "Le cartelle di questo livello", foldersPane],
+        ["permessi", "Permessi", "shield", "Accesso dei membri del team", levelAccess],
+        ["condivisione", "Condivisione", "link", "Link per questo livello", levelShares],
+        ...(info.canManage ? [["impostazioni", "Impostazioni", "sliders", "Pubblicazione degli agenti", levelSettings]] : []),
+      ] });
+      body.replaceChildren(workspace);
+    }
   }
-  const levelAccess = h("div", { class: "stack art-level-access" });
-  let granting = false;
-  const accessButton = btn("Permessi", { icon: "shield", onclick: () => { granting = !granting; loadLevelShares(); } });
-  accessButton.style.display = "none";
-  let sharing = false;
-  const shareButton = btn("Condividi", { icon: "link", onclick: () => { sharing = !sharing; loadLevelShares().then(() => { if (sharing) levelShares.querySelector(".share-new input")?.focus(); }); } });
-  shareButton.style.display = "none";
 
   async function load() {
     try {
@@ -6431,7 +6441,7 @@ function renderArtifacts() {
   const crumbs = level ? artifactTrail(artifactLevelSteps(`${level}/`)) : null;
   shell(level
     ? [crumbs,
-      pageHead(raw(parts.at(-1)), tr("Le cartelle e i livelli dentro {path}. Puoi condividerlo tutto con un solo link.", { path: `${level}/` }), [accessButton, shareButton, newButton]), body]
+      pageHead(raw(parts.at(-1)), tr("Le cartelle e i livelli dentro {path}. Puoi condividerlo tutto con un solo link.", { path: `${level}/` }), [newButton]), body]
     : [pageHead("Artefatti", "Quello che gli agenti fanno sui loro computer, con tutte le versioni. Ogni caricamento è un commit e va in onda solo quando lo approvi.", [newButton]), body],
   { title: level ? parts.at(-1) : "Artefatti", back: level ? artifactLevelHref(parts.slice(0, -1).join("/")) : "", mode: level ? "artifacts" : "" });
   load();
@@ -7453,6 +7463,31 @@ function artifactLevelAccess(info, level) {
   return node;
 }
 
+function artifactLevelSettings(info, level) {
+  let saved = info.settings;
+  const select = h("select", { "aria-label": tr("Pubblicazione degli agenti") },
+    [["inherit", "Eredita"], ["review", "Con revisione"], ["direct", "Pubblica subito"]].map(([value, label]) => h("option", { value }, label)));
+  const status = h("p", { class: "muted small", role: "status", "aria-live": "polite" });
+  const source = h("p", { class: "muted small" });
+  const draw = () => {
+    select.value = saved.policy || "inherit";
+    source.textContent = saved.level ? tr("Regola effettiva da {path}: {policy}", { path: `${saved.level}/`, policy: tr(saved.effective === "direct" ? "Pubblica subito" : "Con revisione") }) : tr("Senza una regola ereditata, ogni cartella mantiene la propria impostazione.");
+  };
+  select.addEventListener("change", async () => {
+    select.disabled = true;
+    status.textContent = tr("Salvataggio…"); status.classList.remove("err-text");
+    try {
+      saved = await api(`/api/artifacts/level/settings?${new URLSearchParams({ path: level })}`, { method: "PUT", body: { policy: select.value === "inherit" ? null : select.value } });
+      status.textContent = tr("Salvato");
+    } catch (error) { status.textContent = error.message; status.classList.add("err-text"); }
+    finally { draw(); select.disabled = false; }
+  });
+  draw();
+  return panel({ icon: "sliders", title: "Impostazioni", hint: tr("Vale per le tue cartelle sotto {path}/, presenti e future.", { path: level }) },
+    setRows(setRow("Pubblicazione degli agenti", "Pubblica subito autorizza i caricamenti senza revisione. Una regola più specifica nel livello o nella cartella ha precedenza.", h("div", { class: "stack-sm" }, select, source, status), { stack: true })),
+    h("p", { class: "muted small" }, "Gli agenti autorizzati si scelgono nei Permessi delle singole cartelle. Le cartelle cifrate mantengono il proprio percorso protetto."));
+}
+
 /** Who pushes, who reviews, whether it waits: rows that save as they change. */
 function artifactPermissions(data, { settings = false } = {}) {
   const { folder } = data;
@@ -7481,9 +7516,20 @@ function artifactPermissions(data, { settings = false } = {}) {
   const description = h("textarea", { rows: 3, maxlength: 600, disabled: !editable, "aria-label": tr("Cosa ci va") }, raw(folder.description || ""));
   const descriptionRow = setRow("Cosa ci va", "Gli agenti lo leggono per decidere dove mettere le cose: finisce anche nel brain.", description, { stack: true });
   description.addEventListener("change", () => save({ description: description.value }, descriptionRow));
-  const direct = h("label", { class: "switch" }, h("input", { type: "checkbox", checked: folder.policy === "direct", disabled: !data.canManage }), h("span", { class: "rocker" }));
-  const directRow = setRow("Pubblica subito", data.canManage ? "Spento: ogni caricamento aspetta che tu o un revisore lo approviate. Acceso: va in onda appena arriva." : "Lo decide il proprietario.", direct);
-  direct.querySelector("input").addEventListener("change", (event) => save({ policy: event.target.checked ? "direct" : "review" }, directRow));
+  const direct = h("select", { "aria-label": tr("Pubblicazione della cartella"), disabled: !data.canManage },
+    [["inherit", "Eredita dal livello"], ["review", "Con revisione"], ["direct", "Pubblica subito"]].map(([value, label]) => h("option", { value, selected: value === (folder.policyOverride ? folder.localPolicy : "inherit") }, label)));
+  const policySource = h("div", { class: "stack-sm" });
+  const drawPolicy = () => {
+    direct.value = folder.policyOverride ? folder.localPolicy : "inherit";
+    policySource.replaceChildren(folder.policyLevel ? h("a", { href: `#/artefatti/livello/${encodeURIComponent(folder.policyLevel)}/impostazioni`, class: "small" }, raw(tr("Dal livello {path}: {policy}", { path: `${folder.policyLevel}/`, policy: tr(folder.policy === "direct" ? "Pubblica subito" : "Con revisione") }))) : h("span", { class: "small muted" }, tr("Regola effettiva: {policy}", { policy: tr(folder.policy === "direct" ? "Pubblica subito" : "Con revisione") })));
+  };
+  const directRow = setRow("Pubblica subito", data.canManage ? "Scegli se i caricamenti degli agenti vanno in onda subito o aspettano una revisione. Eredita segue il livello superiore." : "Lo decide il proprietario.", h("div", { class: "stack-sm" }, direct, policySource), { stack: true });
+  drawPolicy();
+  direct.addEventListener("change", async () => {
+    direct.disabled = true;
+    await save({ policy: direct.value === "inherit" ? null : direct.value }, directRow);
+    drawPolicy(); direct.disabled = !data.canManage;
+  });
   const everyone = folder.writers.includes("*");
   const writers = h("div", { class: "set-switches" },
     h("label", { class: "switch" }, h("input", { type: "checkbox", value: "*", checked: everyone, disabled: !editable }), h("span", { class: "rocker" }), h("span", { class: "switch-text" }, "Tutti gli agenti", h("small", {}, "anche quelli che arriveranno"))),

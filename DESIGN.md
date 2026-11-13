@@ -369,3 +369,8 @@ Each managed domain’s existing disclosure contains an autosaved, labelled Doma
 
 
 The existing Email → Sending and signature sender panel includes a Send-only sender on Resend disclosure. Use labelled local-name and verified-domain controls, an explicit Set sender action and a Remove sender action. The existing sender picker shows the assigned address. Explain that the receiving mailbox stays the same and replies use it when active; without a mailbox, replies cannot be received. Keep feedback with this form and preserve the existing section rail and recap. Sending from this identity uses its actual Resend account; never label it as the agent’s incoming mailbox.
+
+
+## Artifact level settings
+
+Artifact path levels use `sectionWorkspace()` for Folders, Permissions, Sharing and owner-only Settings. Legacy `#/artefatti/in/<path>` links still open the level; section routes use `#/artefatti/livello/<encoded path>/<section>`. Settings has one autosaved publication select: Inherit, Review or Publish immediately. State the scope (the current owner's existing and future descendant folders), nearest-rule precedence and the effective source. Keep named agent writers in each folder's Permissions. Folder Settings exposes the same inheritance choice, effective policy and a link to its source level. Disable saving controls until the request completes and retain the accepted value with a visible error after failure. Encrypted and sealed folders retain their separate authorization rules.

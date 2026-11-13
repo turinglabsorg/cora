@@ -238,3 +238,15 @@ test("the collector keeps every file a commit points at and drops the rest after
   assert.equal(artifacts.hasObject(orphan), false);
   assert.equal(artifacts.hasObject(sha("keep")), true);
 });
+
+test("artifact level policy is shared by the space owner identities on legacy shared spaces", () => {
+  const { artifacts } = desktops();
+  const folder = artifacts.createFolder({ path: "crm/legacy-shared/report" });
+  artifacts.updateLevelPolicy("crm", { policy: "direct" }, OWNER);
+  const cloudOwner = { id: "cloud-owner", role: "owner" };
+  assert.equal(artifacts.levelPolicy("crm", cloudOwner).policy, "direct");
+  assert.equal(artifacts.folderView(folder).policy, "direct");
+  artifacts.updateLevelPolicy("crm", { policy: "review" }, cloudOwner);
+  assert.equal(artifacts.levelPolicy("crm", OWNER).policy, "review");
+  assert.equal(artifacts.folderView(folder).policy, "review");
+});
