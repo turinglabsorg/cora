@@ -3,6 +3,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { createFolderKeys, encryptDocument } from "../web/encrypted-space.js";
 import { googleConnectorFixture } from "./google-connector-fixtures.js";
 import { EmailChannel } from "../src/email-channel.js";
+import { firecrawlWorld } from "./firecrawl-fixtures.js";
 import { mailWorld } from "./mail-fixtures.js";
 import { knowledgeWorld } from "./knowledge-fixtures.js";
 import { invitationWorld } from "./invitation-fixtures.js";
@@ -9780,4 +9781,26 @@ test("personal passkey metadata is private and plaintext conversion requires fol
   assert.equal((await f.request(f.alice, `/api/encrypted/folders/${folder.id}/decrypt-start`, { method: "POST", body: {} })).status, 400);
   assert.equal((await f.request(f.bob, `/api/encrypted/folders/${folder.id}/decrypt-start`, { method: "POST", body: { confirm: true } })).status, 404);
   assert.equal(f.app.store.value(`encryptedFolder:${folder.id}`), true);
+});
+
+
+test("Firecrawl connector completes the HTTP OAuth callback and exposes only granted server tools", async (t) => {
+  const f = await firecrawlWorld(t);
+  const start = await f.call("/api/connectors/keys/firecrawl/authorize", { method: "POST" });
+  assert.equal(start.status, 200);
+  const consent = new URL(start.data.url);
+  const state = consent.searchParams.get("state");
+  const target = new URL(consent.searchParams.get("redirect_uri"));
+  target.searchParams.set("state", state); target.searchParams.set("code", "fixture-code");
+  const callback = await fetch(target, { headers: { Cookie: start.headers.get("set-cookie").split(";")[0] } });
+  assert.equal(callback.status, 200);
+  assert.match(await callback.text(), /Firecrawl autorizzato/);
+  assert.deepEqual(f.connectors.toolsFor(f.agent), []);
+  assert.equal((await f.call("/api/connectors/keys/firecrawl", { method: "PUT", body: { agents: [f.agent.id] }, asMember: true })).status, 403);
+  await f.call("/api/connectors/keys/firecrawl", { method: "PUT", body: { agents: [f.agent.id] } });
+  const result = await executeTool({ name: "firecrawl_search", args: { query: "Cora" } }, { agent: f.agent, store: f.app.store, connectors: f.connectors, vault: f.app.vault, requester: { kind: "owner", id: "u1" } });
+  assert.match(result.text, /Cora/);
+  await f.call("/api/connectors/keys/firecrawl", { method: "DELETE" });
+  assert.deepEqual(f.connectors.toolsFor(f.agent), []);
+  assert.equal(f.remote.revocations.length, 1);
 });

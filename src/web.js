@@ -600,7 +600,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         const record = keyConnectors.updateAgents(keyConnector[1], (await readJson(req, 8000)).agents, user, url.searchParams.get("connection") || "");
         return send(res, 200, { ...googleConnector.view(user), catalog: connectorCatalog({ origin: connectorOrigin(req) }), keyConnectors: keyConnectors.view(), canManage, record });
       }
-      if (method === "DELETE") { keyConnectors.disconnect(keyConnector[1], user, url.searchParams.get("connection") || ""); return send(res, 200, { ok: true }); }
+      if (method === "DELETE") { const result = await keyConnectors.disconnect(keyConnector[1], user, url.searchParams.get("connection") || ""); return send(res, 200, { ok: true, ...result }); }
       throw new HttpError(405, "Metodo non supportato.");
     }
     if (path === "/api/connectors/google" && method === "POST") {

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { mcpClient } from "./remote-mcp.js";
 import { count, defined, fail, list, localFile, FILE_PARAMS, text } from "./tooling.js";
 
 /**
@@ -14,14 +14,9 @@ import { count, defined, fail, list, localFile, FILE_PARAMS, text } from "./tool
  * access on any plan, where Cora registers itself as a loopback client and the owner
  * pastes back the address Lovable sent the browser to.
  */
-const PROTOCOL = "2025-06-18";
 const SCOPES = ["offline", "projects:read", "projects:write", "workspaces:read", "workspaces:write"];
 const RESOURCE = "https://mcp.lovable.dev";
 export const LOVABLE_LOOPBACK = "http://127.0.0.1:53682/cora/lovable/callback";
-
-/** MCP sessions per token: initialised once, reused until they expire. */
-const sessions = new Map();
-const SESSION_MS = 10 * 60000;
 
 const PROJECT = { type: "string", description: "project id, or its lovable.dev/projects URL" };
 const WORKSPACE = { type: "string", description: "workspace id from lovable_list_workspaces" };
@@ -51,30 +46,6 @@ const idOf = (value, what) => {
   if (!/^[A-Za-z0-9_.:-]+$/.test(id)) fail(`${what} is a Lovable id`);
   return id;
 };
-const header = (headers, name) => {
-  if (!headers) return "";
-  if (typeof headers.get === "function") return headers.get(name) || "";
-  const key = Object.keys(headers).find((item) => item.toLowerCase() === name);
-  return key ? String(headers[key]) : "";
-};
-
-/** The JSON-RPC answer inside a Streamable HTTP response: plain JSON, or the matching event of an SSE stream. */
-export function rpcAnswer({ data, text: body, headers }, id) {
-  if (data && typeof data === "object") return Array.isArray(data) ? data.find((item) => item?.id === id) || data[0] : data;
-  const raw = typeof body === "string" ? body : "";
-  if (!raw || !/event-stream/i.test(header(headers, "content-type")) && !/^\s*(event|data|id|:)/m.test(raw)) return null;
-  let found = null;
-  for (const block of raw.split(/\r?\n\r?\n/)) {
-    const payload = block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).replace(/^ /, "")).join("\n");
-    if (!payload) continue;
-    let message;
-    try { message = JSON.parse(payload); } catch { continue; }
-    if (message && (message.id === id || (found === null && ("result" in message || "error" in message)))) found = message;
-    if (message?.id === id) break;
-  }
-  return found;
-}
-
 const refusal = (status, data) => {
   const said = data?.error_description || data?.error?.message || data?.message || (typeof data?.error === "string" ? data.error : "");
   const detail = said ? `: ${String(said).slice(0, 1200)}` : "";
@@ -84,70 +55,11 @@ const refusal = (status, data) => {
   fail(`Lovable answered ${status || "nothing"}${detail}`);
 };
 
-/** The MCP client a tool works with: Cora's token, a session per token, one tools/call per action. */
+export { rpcAnswer } from "./remote-mcp.js";
+
 export function client({ token, request, api, writeFile = null, record = null }) {
-  const endpoint = api.lovable;
-  const key = createHash("sha256").update(`${endpoint}\n${token}`).digest("hex").slice(0, 32);
-  let serial = 0;
-  const post = (message, session = "", timeout = 30000) => request(endpoint, {
-    method: "POST",
-    headers: { ...(record?.mode === "key" ? { "Lovable-API-Key": token } : { Authorization: `Bearer ${token}` }), "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": PROTOCOL, ...(session ? { "Mcp-Session-Id": session } : {}) },
-    body: message, timeout,
-  });
-  const open = async () => {
-    const cached = sessions.get(key);
-    if (cached && cached.expires > Date.now()) return cached.id;
-    const id = ++serial;
-    const answer = await post({ jsonrpc: "2.0", id, method: "initialize", params: { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: "Cora", version: "1.0.0" } } });
-    if (answer.status < 200 || answer.status >= 300) refusal(answer.status, answer.data);
-    const reply = rpcAnswer(answer, id);
-    if (!reply?.result) fail(`Lovable did not open the MCP session${reply?.error?.message ? `: ${reply.error.message}` : ""}`);
-    const session = header(answer.headers, "mcp-session-id");
-    await post({ jsonrpc: "2.0", method: "notifications/initialized" }, session);
-    for (const [name, item] of sessions) if (item.expires < Date.now()) sessions.delete(name);
-    sessions.set(key, { id: session, expires: Date.now() + SESSION_MS });
-    return session;
-  };
-  const rpc = async (method, params, timeout) => {
-    for (let attempt = 0; ; attempt += 1) {
-      const session = await open();
-      const id = ++serial;
-      const answer = await post({ jsonrpc: "2.0", id, method, params }, session, timeout);
-      // An expired session answers 404: open a new one once.
-      if (answer.status === 404 && session && attempt === 0) { sessions.delete(key); continue; }
-      if (answer.status < 200 || answer.status >= 300) { if (answer.status === 401) sessions.delete(key); refusal(answer.status, answer.data); }
-      const reply = rpcAnswer(answer, id);
-      if (!reply) fail("Lovable gave no answer to the call");
-      if (reply.error) fail(`Lovable: ${String(reply.error.message || reply.error.code || "error").slice(0, 1500)}`);
-      sessions.set(key, { id: session, expires: Date.now() + SESSION_MS });
-      return reply.result ?? {};
-    }
-  };
-  /** Calls one Lovable tool and answers its structured result; images go to the agent's computer. */
-  const tool = async (name, args = {}, { timeout = 60000 } = {}) => {
-    const result = await rpc("tools/call", { name, arguments: defined(args) }, timeout);
-    const content = Array.isArray(result.content) ? result.content : [];
-    const words = content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
-    if (result.isError) fail(`Lovable: ${words.slice(0, 2000) || "the tool failed"}`);
-    let data = result.structuredContent;
-    if (data === undefined && words) { try { data = JSON.parse(words); } catch { data = { text: words }; } }
-    const images = content.filter((part) => part.type === "image" && part.data);
-    if (images.length) {
-      const saved = [];
-      for (const [index, image] of images.entries()) {
-        if (!writeFile) break;
-        const extension = (String(image.mimeType || "image/png").split("/")[1] || "png").replace(/[^a-z0-9]/gi, "").slice(0, 5) || "png";
-        const path = `/home/agent/work/lovable/${name}-${Date.now()}-${index + 1}.${extension}`;
-        try { await writeFile(path, Buffer.from(image.data, "base64")); saved.push(path); } catch { /* the text answer is still useful */ }
-      }
-      data = { ...(data && typeof data === "object" && !Array.isArray(data) ? data : { result: data }), images: saved.length ? saved : `${images.length} image(s) not saved` };
-    }
-    for (const part of content.filter((item) => item.type === "resource_link" || item.type === "resource")) {
-      data = { ...(data && typeof data === "object" && !Array.isArray(data) ? data : { result: data }), resources: [...(data?.resources || []), defined({ uri: part.uri || part.resource?.uri, name: part.name, text: part.resource?.text?.slice(0, 20000) })] };
-    }
-    return data ?? {};
-  };
-  return { rpc, tool };
+  return mcpClient({ name: "Lovable", id: "lovable", endpoint: api.lovable, request, writeFile, refusal,
+    headers: record?.mode === "key" ? { "Lovable-API-Key": token } : { Authorization: `Bearer ${token}` } });
 }
 
 const waitTimeout = (args, fallback = 180) => {

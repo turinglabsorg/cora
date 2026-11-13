@@ -30,6 +30,7 @@ const PANEL = {
 
 // Each area: the paths it owns, the test files that cover it and the cora.test.js groups (name prefixes).
 const AREAS = [
+  { name: "Firecrawl connector", paths: [/^src\/connectors\/firecrawl\//, /^src\/connectors\/remote-mcp\.js$/, /^test\/firecrawl-fixtures\.js$/, /^test\/connector-firecrawl\.test\.js$/], files: ["connector-firecrawl", "connector-lovable", "key-connectors"], cora: ["Firecrawl connector"] },
   { name: "panel assets", paths: [/^src\/panel-assets\.js$/], files: [], cora: ["panel auth", "agents in Discord"] },
   { name: "agent progress", paths: [/^src\/agent-progress\.js$/], files: ["agent-progress"], cora: ["talking with the agents"] },
   { name: "thread topics", paths: [/^src\/thread-topics\.js$/], files: ["thread-topics"], cora: ["talking with the agents"] },

@@ -233,6 +233,8 @@ Connected Linear, Asana, Canva and Google accounts use native `details` cards, c
 
 Linear detail lists one panel per workspace, titled with its verified name, with its own agent checkboxes and disconnect confirmation. An OAuth app awaiting approval has its own compact panel with the expected workspace name, authorization, edit and remove actions on a wrapping horizontal row. Connector action rows never use the page-level `wrap` class. Use 12px/16px panel padding, 10px body gaps and 34px pending-app actions. Edit replaces that exact app panel in place, focuses its form and keeps the expected workspace; Cancel restores the card without writes. The editor shows the callback and credential fields, keeping the first-time setup guide and authorization action on their appropriate views. Add another workspace opens a separate inline form; every connection owns its app credentials and token. Never reuse another workspace’s grants.
 
+OAuth disconnect removes agent access immediately. If the provider does not confirm revocation, keep a compact warning card with **Revocation pending**, a short explanation and **Retry revocation**. Do not show agent grants or new-connection controls until the pending revocation completes.
+
 ## External agents through MCP
 
 Settings → External agents (MCP), in the Connectors group, keeps personal access separate from the service catalog. Show the actual caller's name, endpoint, HTTP transport and Bearer header placeholder. Reuse setting rows, mono read-only fields and 44px copy controls. Explain that the client keeps the person's current permissions and private sharing boundaries.

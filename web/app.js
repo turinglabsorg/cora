@@ -3393,6 +3393,7 @@ function connectorsPane() {
     if (!record || record.status === "new") return { connected: false, status: "Da collegare" };
     if (record.status === "connected") return { connected: true, status: record.workspace || "Collegato" };
     if (record.status === "app") return { connected: false, status: "App pronta" };
+    if (record.status === "revocation_pending") return { connected: false, status: "Revoca da completare" };
     if (record.status === "quick") return { connected: false, status: "Da collegare" };
     return { connected: false, status: "Non serve" };
   };
@@ -3467,20 +3468,20 @@ function connectorsPane() {
     const feedback = h("p", { class: "muted", role: "status" });
     const disconnect = armedButton("Scollega", "Conferma scollegamento", { icon: "power", onconfirm: async () => {
       disconnect.disabled = true;
-      try { await api(connectorPath(service.id, record), { method: "DELETE" }); await load(); toast("Connettore scollegato"); }
+      try { const result = await api(connectorPath(service.id, record), { method: "DELETE" }); await load(); toast(result.revocationPending ? "Accesso rimosso, revoca da completare" : "Connettore scollegato"); }
       catch (error) { toast(error.message, true); disconnect.disabled = false; }
     } });
     return connectedCard(`${service.id}:${record.id || record.workspace || "default"}`, { icon: service.icon, title: service.id === "linear" ? raw(record.workspace) : service.name, hint: tr(service.meta), actions: tag("Collegato", "ok") },
       h("p", {}, tr(service.intro)),
       setRows(
-        setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, ` · ${record.account}`) : null), tag("Collegato", "ok")),
+        setRow("Workspace", h("span", {}, raw(record.workspace || record.account || "—"), record.account && record.workspace ? h("small", {}, raw(record.account)) : null), tag("Collegato", "ok")),
         record.mode === "oauth" || record.mode === "quick"
           ? setRow("Autorizzazione", h("span", {}, "Token OAuth nella cassaforte come ", h("code", {}, raw(record.secretName || service.secret)), ". Cora lo rinnova da solo quando scade.", record.mode === "quick" ? h("small", { class: "muted" }, " ", tr("Per autorizzare di nuovo con l'accesso rapido, scollega e ricollega.")) : null), record.mode === "quick" ? null : authorizeButton(service, "Autorizza di nuovo", record))
           : setRow("Chiave", h("span", {}, "Nella cassaforte come ", h("code", {}, raw(record.secretName || service.secret)), ". Gli agenti autorizzati la prendono da lì, senza vederla.")),
         service.writes ? setRow("Chi firma", tr(record.mode === "oauth" || record.mode === "quick" ? service.writes.oauth : service.writes.key)) : null,
         service.tools?.length ? setRow("Strumenti degli agenti", h("span", { class: "connector-tools" }, "Gli agenti autorizzati hanno uno strumento di Cora per ogni azione, e Cora aggiunge la chiave a ogni chiamata: ", ...service.tools.flatMap((name, index) => [index ? ", " : "", h("code", {}, name)]), ".")) : null,
         setRow("Agenti autorizzati", "Solo gli agenti spuntati possono usare questo connettore.", agentChoices(record, service.id), { stack: true }),
-        setRow("Scollega", "Toglie la chiave dalla cassaforte e l'accesso agli agenti.", disconnect)),
+        setRow("Scollega", "Toglie subito l'accesso agli agenti e revoca il collegamento.", disconnect)),
       feedback);
   };
 
@@ -3573,6 +3574,21 @@ function connectorsPane() {
       feedback);
   };
 
+  const revocationPanel = (service, record) => {
+    const feedback = h("p", { role: "status", class: "connector-feedback" });
+    const retry = btn("Riprova revoca", { icon: "power", cls: "primary", disabled: !data.canManage, onclick: async () => {
+      retry.disabled = true;
+      try {
+        const result = await api(connectorPath(service.id, record), { method: "DELETE" });
+        if (result.revocationPending) { feedback.textContent = tr("Revoca ancora in attesa."); retry.disabled = !data.canManage; }
+        else { await load(); toast("Connettore scollegato"); }
+      } catch (error) { feedback.textContent = tr(error.message); retry.disabled = !data.canManage; }
+    } });
+    return panel({ icon: service.icon, title: service.name, hint: tr(service.meta), actions: tag("Revoca da completare", "warn") },
+      h("p", {}, "L'accesso degli agenti è stato rimosso. Il servizio non ha ancora confermato la revoca del collegamento."),
+      h("div", { class: "row connector-actions" }, retry), feedback);
+  };
+
   const keyDetail = (id) => {
     const service = serviceOf(id);
     const record = keyRecord(id);
@@ -3595,7 +3611,7 @@ function connectorsPane() {
         ? h("div", { class: "stack" }, h("div", { class: "row end" }, btn("Annulla", { cls: "ghost", onclick: () => { linearSetupOpen = false; linearEditingId = ""; draw(); } })), keyForm(service, null))
         : h("div", { class: "row end" }, btn("Collega un altro workspace", { icon: "plus", cls: "primary", disabled: !data.canManage, onclick: () => { linearSetupOpen = true; linearEditingId = ""; draw(); } }))];
     }
-    return [back(), record?.status === "connected" ? connectedPanel(service, record) : keyForm(service)];
+    return [back(), record?.status === "revocation_pending" ? revocationPanel(service, record) : record?.status === "connected" ? connectedPanel(service, record) : keyForm(service)];
   };
 
   const googleDetail = () => {
