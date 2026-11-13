@@ -83,3 +83,121 @@ test("model CLIs do not inherit any Resend account key", () => {
   process.env[name] = "fixture-only";
   try { assert.equal(name in childEnv(), false); } finally { delete process.env[name]; }
 });
+
+test("domain configuration supports send-only, restoration and removal without touching provider domains", async (t) => {
+  const { app, state, keyA, call } = await mailWorld(t);
+  const account = (await call("/api/mail/accounts", { method: "POST", body: { name: "Azienda", key: keyA } })).data;
+  assert.equal((await call("/api/mail/domains", { method: "POST", body: { name: "invalid.test", accountId: account.id, mode: "other" } })).status, 400);
+  const domain = (await call("/api/mail/domains", { method: "POST", body: { name: "send.azienda.test", accountId: account.id, mode: "send-only" } })).data;
+  const provider = state.accounts.get(keyA).domains.find((item) => item.id === domain.resendId);
+  assert.equal(domain.mode, "send-only");
+  assert.equal(provider.capabilities.receiving, "disabled");
+  assert.equal(state.routes.has(domain.name), false, "send-only never activates an inbound relay route");
+  assert.equal(domain.ready, false);
+  state.dnsReady.add(domain.name);
+  state.receivingPending = new Set([domain.name]);
+  const verified = (await call(`/api/mail/domains/${domain.id}/verify`, { method: "POST" })).data;
+  assert.equal(verified.ready, true);
+  assert.equal(verified.relayReady, false);
+  assert.equal(verified.records.find((record) => record.record === "Receiving").status, "not_started");
+  state.receivingPending.clear();
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "PUT", asMember: true, body: { mode: "send-receive" } })).status, 403);
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "DELETE", asMember: true })).status, 403);
+  const restored = (await call(`/api/mail/domains/${domain.id}`, { method: "PUT", body: { mode: "send-receive" } })).data;
+  assert.equal(restored.ready, true);
+  assert.equal(restored.relayReady, true);
+  assert.equal(provider.capabilities.receiving, "enabled");
+  state.refuse = true;
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "PUT", body: { mode: "send-only" } })).status, 400);
+  assert.equal(app.mailDomains.data().domains[0].mode, "send-receive");
+  state.refuse = false;
+  state.domainCheckRefuse = true;
+  const incomplete = (await call(`/api/mail/domains/${domain.id}`, { method: "PUT", body: { mode: "send-only" } })).data;
+  assert.equal(incomplete.mode, "send-only");
+  assert.equal(incomplete.ready, false);
+  assert.ok(incomplete.error);
+  assert.doesNotMatch(JSON.stringify(incomplete), /fixture-provider-secret/);
+  assert.equal(provider.capabilities.receiving, "disabled");
+  state.domainCheckRefuse = false;
+  const changed = (await call(`/api/mail/domains/${domain.id}/check`, { method: "POST" })).data;
+  assert.equal(changed.ready, true);
+  assert.equal(provider.capabilities.receiving, "disabled");
+  const restarted = new MailDomains({ ...app.mailDomains, tokenFor: (name) => app.mailDomains.tokenFor(name) });
+  assert.equal(restarted.view().domains.find((item) => item.id === domain.id).mode, "send-only");
+  state.refuse = true;
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "DELETE" })).data.removed, true, "a disconnected account cannot prevent removing unused Cora configuration");
+  assert.equal(app.mailDomains.view().domains.some((item) => item.id === domain.id), false);
+  assert.equal(state.accounts.get(keyA).domains.includes(provider), true, "provider domain is preserved");
+  assert.equal(app.mailDomains.data().accounts.length, 1);
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "DELETE" })).status, 404);
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "PUT", body: { mode: "send-receive" } })).status, 404);
+});
+
+test("domain removal and send-only refuse current, retained and default mailbox domains", async (t) => {
+  const { app, state, keyA, call } = await mailWorld(t);
+  const account = (await call("/api/mail/accounts", { method: "POST", body: { name: "Azienda", key: keyA } })).data;
+  const domain = (await call("/api/mail/domains", { method: "POST", body: { name: "posta.azienda.test", accountId: account.id } })).data;
+  const agent = app.store.createAgent({ name: "Fixture", tools: false });
+  for (const mailbox of [{ email: `nico@${domain.name}` }, { email: "nico@usecora.space", previousEmails: [`old@${domain.name}`] }]) {
+    app.store.setValue(`agentMailbox:${agent.id}`, mailbox);
+    for (const method of ["PUT", "DELETE"]) {
+      const result = await call(`/api/mail/domains/${domain.id}`, { method, ...(method === "PUT" ? { body: { mode: "send-only" } } : {}) });
+      assert.equal(result.status, 409, JSON.stringify(result.data));
+    }
+    assert.equal(state.accounts.get(keyA).domains[0].capabilities.receiving, "enabled");
+    assert.deepEqual(app.store.value(`agentMailbox:${agent.id}`), mailbox);
+  }
+  app.store.setValue(`agentMailbox:${agent.id}`, { email: "nico@usecora.space" });
+  app.mailDomains.defaultDomain = domain.name;
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "DELETE" })).status, 409);
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "PUT", body: { mode: "send-only" } })).status, 409);
+});
+
+test("send-only domains cannot be provisioned as receiving agent mailboxes", async (t) => {
+  const { app, state, keyA, call } = await mailWorld(t);
+  const account = (await call("/api/mail/accounts", { method: "POST", body: { name: "Azienda", key: keyA } })).data;
+  const domain = (await call("/api/mail/domains", { method: "POST", body: { name: "send.azienda.test", accountId: account.id, mode: "send-only" } })).data;
+  state.dnsReady.add(domain.name);
+  await call(`/api/mail/domains/${domain.id}/verify`, { method: "POST" });
+  const agent = app.store.createAgent({ name: "Fixture", tools: true });
+  let provisions = 0;
+  app.mailDomains.boxes = { assignMailbox: async () => { provisions++; } };
+  const result = await call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: "nico", domain: domain.name } });
+  assert.equal(result.status, 409);
+  assert.equal(provisions, 0);
+});
+
+test("an in-flight mailbox assignment protects domain configuration and releases its guard after failure", async (t) => {
+  const { app, state, keyA, call } = await mailWorld(t);
+  const account = (await call("/api/mail/accounts", { method: "POST", body: { name: "Azienda", key: keyA } })).data;
+  const domain = (await call("/api/mail/domains", { method: "POST", body: { name: "posta.azienda.test", accountId: account.id } })).data;
+  state.dnsReady.add(domain.name);
+  const agent = app.store.createAgent({ name: "Fixture", enabled: true, tools: true });
+  let release, entered;
+  const waiting = new Promise((resolve) => { entered = resolve; });
+  app.mailDomains.boxes = { assignMailbox: async () => { entered(); await new Promise((resolve) => { release = resolve; }); throw new Error("fixture provisioning failure"); } };
+  const assignment = call(`/api/agents/${agent.id}/mailbox`, { method: "PUT", body: { local: "nico", domain: domain.name } });
+  await waiting;
+  for (const method of ["DELETE", "PUT"]) assert.equal((await call(`/api/mail/domains/${domain.id}`, { method, ...(method === "PUT" ? { body: { mode: "send-only" } } : {}) })).status, 409);
+  release();
+  assert.equal((await assignment).status, 502);
+  assert.equal((await call(`/api/mail/domains/${domain.id}`, { method: "DELETE" })).status, 200);
+});
+
+
+test("pending tracking never blocks verified domain sending", async (t) => {
+  const { app, state, keyA, call } = await mailWorld(t);
+  const account = (await call("/api/mail/accounts", { method: "POST", body: { name: "Studio", key: keyA } })).data;
+  const domain = (await call("/api/mail/domains", { method: "POST", body: { name: "studio.test", accountId: account.id, mode: "send-only" } })).data;
+  const provider = state.accounts.get(keyA).domains.find((item) => item.id === domain.resendId);
+  provider.status = "partially_verified";
+  for (const record of provider.records) if (["DKIM", "SPF"].includes(record.record)) record.status = "verified";
+  provider.records.push({ record: "Tracking", name: "click", type: "CNAME", value: "tracking.example.test", status: "pending" });
+  const checked = (await call(`/api/mail/domains/${domain.id}/check`, { method: "POST" })).data;
+  assert.equal(checked.status, "partially_verified");
+  assert.equal(checked.ready, true);
+  assert.equal(app.mailDomains.senderDomains().some((item) => item.id === domain.id), true);
+  provider.records.find((record) => record.record === "DKIM").status = "pending";
+  assert.equal((await call(`/api/mail/domains/${domain.id}/check`, { method: "POST" })).data.ready, false);
+  assert.equal(app.mailDomains.senderDomains().some((item) => item.id === domain.id), false);
+});

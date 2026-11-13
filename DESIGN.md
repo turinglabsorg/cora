@@ -359,3 +359,11 @@ Remembered access opens the folder directly after mounting, for passwords and bo
 Remove encryption uses a native modal dialog with the existing panel, text and danger tokens (`.encrypted-confirm`). Its copy names every file/version, JSON exports of conversations/reasoning and the normal folder permissions that will apply, including share links on parent levels and the exposure through public links. Cancel/Escape stop preparation; the final atomic save disables cancellation. Progress stays inside the modal. A failed operation preserves the encrypted folder and offers retry; plaintext is shown only after the complete verified cutover.
 
 The personal passkey registry keeps one association action on the right of each row. Folder selection opens a native dialog with a full-width selector and the selected folder's complete title and path below it, wrapping at narrow widths. The action opens the folder; credential association still requires confirmation inside that folder.
+
+
+## Domain usage and removal
+
+Each managed domain’s existing disclosure contains an autosaved, labelled Domain use selector: Send and receive or Send only. Show Send only in the closed summary, omit receiving checks and inbound MX instructions in that mode, and retain sending records including any SPF MX record. Sending readiness is independent of inbound relay readiness. Agent mailbox selectors offer only ready receive-enabled domains. Use the existing two-click armed Remove from Cora action and explain that the Resend domain, account and DNS remain. Default domains and current, retained or activating agent addresses have server-enforced guards with visible inline errors and restored controls on failure. Keep the existing domain layout and tokens on desktop and phone.
+
+
+The existing Email → Sending and signature sender panel includes a Send-only sender on Resend disclosure. Use labelled local-name and verified-domain controls, an explicit Set sender action and a Remove sender action. The existing sender picker shows the assigned address. Explain that the receiving mailbox stays the same and replies use it when active; without a mailbox, replies cannot be received. Keep feedback with this form and preserve the existing section rail and recap. Sending from this identity uses its actual Resend account; never label it as the agent’s incoming mailbox.

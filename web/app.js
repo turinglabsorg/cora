@@ -3260,7 +3260,7 @@ async function agentEmailTab(agent, isCurrent = () => true) {
     ready ? h("p", { class: "muted" }, "L'agente usa questo indirizzo quando gli chiedi di inviare posta.") : null);
   if (!data.available) return agentEmailWorkspace(agent, [identity, panel({ icon: "info", title: "Email non disponibile" }, h("p", {}, "Il servizio email non è ancora configurato per questo spazio."))]);
   const local = h("input", { type: "text", name: "local", required: true, minlength: 3, maxlength: 32, pattern: "[a-z0-9][a-z0-9\\-]{1,30}[a-z0-9]", autocomplete: "off", autocapitalize: "none", spellcheck: false, "aria-label": "Nome dell'indirizzo", value: ready ? mailbox.email.split("@")[0] : agent.name.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32), placeholder: "nico" });
-  const usable = data.domains.filter((domain) => domain.ready);
+  const usable = data.domains.filter((domain) => domain.ready && domain.mode !== "send-only");
   const domain = h("select", { name: "domain", required: true, "aria-label": "Dominio email" }, usable.map((item) => h("option", { value: item.name, selected: ready && mailbox.email.endsWith(`@${item.name}`) }, raw(item.name))));
   const feedback = h("p", { class: "mail-feedback", role: "status" });
   const submit = btn(ready ? "Cambia indirizzo" : "Attiva email", { icon: "check", type: "submit", cls: "primary", disabled: !data.canCustomize || !usable.length });
@@ -3773,6 +3773,7 @@ function emailChannelPane(agent = null, onSections = null, isCurrent = null) {
           feedback.textContent = tr("Regole email aggiornate");
           toast("Regole email aggiornate");
           if (agent) destination.textContent = tr("Resoconti: {channel}", { channel: data.destination?.name || tr("Scegli un canale") });
+          return true;
         } catch (error) {
           feedback.textContent = tr(error.message); feedback.classList.add("err-text"); toast(error.message, true);
           if (input) {
@@ -3825,9 +3826,24 @@ function emailChannelPane(agent = null, onSections = null, isCurrent = null) {
         if (rules.senderId && !data.senders?.some((item) => item.id === rules.senderId)) sender.append(h("option", { value: rules.senderId, selected: true }, "Account da ricollegare"));
         sender.value = rules.senderId || "";
         sender.addEventListener("change", () => save({ senderId: sender.value }, sender));
+        const sendingLocal = h("input", { type: "text", required: true, minlength: 3, maxlength: 32, pattern: "[a-z0-9][a-z0-9\\-]{1,30}[a-z0-9]", autocapitalize: "none", spellcheck: false, value: rules.resendSender?.local || agent.name.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 32), "aria-label": tr("Nome del mittente solo invio"), disabled: !data.canManage });
+        const sendingDomain = h("select", { "aria-label": tr("Dominio del mittente solo invio"), disabled: !data.canManage || !data.resendDomains?.length }, (data.resendDomains || []).map((domain) => h("option", { value: domain.id, selected: rules.resendSender?.domainId === domain.id }, raw(domain.name))));
+        const sendingSubmit = btn("Imposta mittente solo invio", { type: "submit", icon: "check", cls: "primary", disabled: !data.canManage || !data.resendDomains?.length });
+        const sendingFeedback = h("p", { role: "status", class: "mail-feedback" });
+        const sendingForm = h("form", { class: "stack-sm", onsubmit: async (event) => {
+          event.preventDefault(); sendingFeedback.textContent = "";
+          const saved = await save({ resendSender: { local: sendingLocal.value, domainId: sendingDomain.value } }, sendingSubmit);
+          if (saved) await load(); else sendingFeedback.textContent = feedback.textContent;
+        } }, field("Nome del mittente solo invio", sendingLocal), field("Dominio del mittente solo invio", sendingDomain),
+          h("p", { class: "muted" }, "Invia tramite l'account Resend del dominio. La casella dell'agente resta invariata. Le risposte arrivano alla sua casella, se attiva; altrimenti non può riceverle."),
+          !data.resendDomains?.length ? h("p", { class: "muted" }, "Verifica prima l'invio di un dominio in Impostazioni → Domini.") : null,
+          sendingFeedback, h("div", { class: "row" }, sendingSubmit,
+            rules.resendSender && data.canManage ? btn("Rimuovi mittente solo invio", { icon: "trash", cls: "ghost", onclick: async (event) => { const saved = await save({ resendSender: null }, event.currentTarget); if (saved) await load(); else sendingFeedback.textContent = feedback.textContent; } }) : null));
         content.push(panel({ icon: "send", title: "Mittente delle email", hint: "Usa la sua casella oppure un account esterno autorizzato." }, sender,
+          h("details", { open: Boolean(rules.resendSender) }, h("summary", {}, "Mittente solo invio su Resend"), sendingForm),
+          h("a", { href: "#/settings/domini", class: "muted" }, "Gestisci domini"),
           h("a", { href: "#/settings/connettori", class: "muted" }, "Gestisci connettori")));
-        const signature = h("textarea", { rows: 3, maxlength: 1500, "aria-label": "Testo della firma", value: rules.signature || `${agent.name}\n${agent.mailbox?.email || ""}`, disabled: !data.canManage });
+        const signature = h("textarea", { rows: 3, maxlength: 1500, "aria-label": "Testo della firma", value: rules.signature || `${agent.name}\n${data.senders?.find((item) => item.id === rules.senderId)?.email || agent.mailbox?.email || ""}`, disabled: !data.canManage });
         signature.addEventListener("change", () => save({ signature: signature.value }, signature));
         const preview = h("div", { class: "email-signature-preview", role: "status" });
         content.push(panel({ icon: "edit", title: "Firma come immagine", hint: "Il suo avatar, il nome e i dettagli: la stessa firma nelle email HTML." }, field("Testo della firma", signature),
@@ -3882,7 +3898,7 @@ function emailRecap(agent, initial) {
       status?.error ? h("p", { class: "err-text", role: "status" }, raw(tr(status.error))) : h("p", { class: "muted" }, status?.checkedAt ? tr("Ultimo controllo: {date}", { date: new Date(status.checkedAt).toLocaleString(LANG) }) : "Il primo controllo partirà automaticamente."),
       status?.partial ? h("p", { class: "muted" }, "Sono mostrate le email più recenti.") : "",
       h("div", { class: "email-ledger" }, messages.length ? messages.map((item) => h("article", { class: "email-ledger-row" },
-        h("div", { class: "email-ledger-main" }, icon(item.direction === "received" ? "mail" : "send"), h("div", {}, h("strong", {}, raw(item.subject || tr("Senza oggetto"))), h("p", { class: "muted" }, raw(item.direction === "received" ? item.from : (item.to || []).join(", "))))),
+        h("div", { class: "email-ledger-main" }, icon(item.direction === "received" ? "mail" : "send"), h("div", {}, h("strong", {}, raw(item.subject || tr("Senza oggetto"))), h("p", { class: "muted" }, raw(item.direction === "received" ? item.from : (item.to || []).join(", "))), item.provider === "resend" ? h("small", { class: "muted" }, tr("Mittente: {email} · Resend", { email: item.from })) : null)),
         h("div", { class: "email-ledger-meta" }, tag(item.opened ? "Apertura rilevata" : stateLabel[item.status] || "Ricevuta", item.opened ? "ok" : ["error", "interrupted", "uncertain"].includes(item.status) ? "agent" : ""), h("time", { datetime: item.at }, raw(new Date(item.at).toLocaleString(LANG))),
           item.direction === "sent" && !item.opened ? h("small", { class: "muted" }, item.tracked ? "Nessuna apertura rilevata" : "Tracking disattivato") : null))) : h("p", { class: "muted" }, "Nessuna email da mostrare.")));
   }
@@ -3894,13 +3910,13 @@ function mailDomainChecks(domain, account) {
   const records = domain.records || [];
   const sending = records.filter((item) => ["DKIM", "SPF"].includes(item.record));
   const receiving = records.filter((item) => item.record === "Receiving");
-  const sent = domain.status === "verified" && sending.length && sending.every((item) => item.status === "verified");
+  const sent = domain.capabilities?.sending === "enabled" && sending.some((item) => item.record === "DKIM") && sending.some((item) => item.record === "SPF") && sending.every((item) => item.status === "verified");
   const received = domain.capabilities?.receiving === "enabled" && receiving.length && receiving.every((item) => item.status === "verified");
   const checks = [
     [account?.ready, "Account Resend", "Collega e verifica l'account che gestisce il dominio."],
     [sent, sent ? "Invio verificato" : "Verifica invio", "Aggiungi i record DKIM e SPF nel DNS, poi verifica."],
-    [received, received ? "Ricezione verificata" : "Verifica ricezione", "Aggiungi il record MX di ricezione nel DNS."],
-    [domain.ready && domain.relayReady, "Pronto per gli agenti", "Completa le verifiche per assegnare indirizzi su questo dominio."],
+    ...(domain.mode === "send-only" ? [] : [[received, received ? "Ricezione verificata" : "Verifica ricezione", "Aggiungi il record MX di ricezione nel DNS."]]),
+    [domain.ready && (domain.mode === "send-only" || domain.relayReady), domain.mode === "send-only" ? "Pronto per inviare" : "Pronto per gli agenti", domain.mode === "send-only" ? "Completa la verifica di invio. La ricezione resta disattivata." : "Completa le verifiche per assegnare indirizzi su questo dominio."],
   ];
   let current = false;
   return h("ol", { class: "mail-checks" }, checks.map(([done, title, hint], index) => {
@@ -3942,19 +3958,36 @@ function mailDomainsPane() {
           data.canManage ? btn("Verifica account", { icon: "refresh", cls: "sm ghost", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/accounts/${account.id}/check`, { method: "POST" })) }) : null),
         account.error ? h("p", { class: "err-text" }, raw(tr(account.error))) : null,
         data.canManage ? h("details", {}, h("summary", {}, "Sostituisci chiave"), accountForm(account)) : null) : null;
-      const domainCards = data.domains.map((domain) => panel({ cls: "mail-domain-card", icon: "globe", title: raw(domain.name), hint: raw(domain.legacy ? domain.accountName : `Resend · ${domain.accountName}`), actions: tag(domain.ready ? "Pronto" : "Da completare", domain.ready ? "ok" : "agent") },
+      const modePicker = (value) => h("select", { "aria-label": tr("Uso del dominio") },
+        h("option", { value: "send-receive", selected: value !== "send-only" }, "Invio e ricezione"),
+        h("option", { value: "send-only", selected: value === "send-only" }, "Solo invio"));
+      const domainControls = (domain) => {
+        const mode = modePicker(domain.mode);
+        if (domain.name === data.defaultDomain) return h("p", { class: "muted" }, "Il dominio predefinito di Cora deve restare disponibile per invio e ricezione.");
+        mode.addEventListener("change", () => act(mode, async () => {
+          try { await api(`/api/mail/domains/${domain.id}`, { method: "PUT", body: { mode: mode.value } }); }
+          catch (error) { mode.value = domain.mode || "send-receive"; throw error; }
+        }));
+        const remove = armedButton("Rimuovi da Cora", "Conferma rimozione", { cls: "ghost", onconfirm: () => act(remove, () => api(`/api/mail/domains/${domain.id}`, { method: "DELETE" })) });
+        return h("div", { class: "stack" }, field("Uso del dominio", mode),
+          h("p", { class: "muted" }, "Solo invio disattiva la ricezione su Resend. Dopo la verifica, assegna il mittente in Email → Invio e firma dell’agente. Non serve il record MX di ricezione."),
+          h("div", { class: "row" }, remove), h("p", { class: "muted" }, "La rimozione scollega il dominio da Cora. Il dominio su Resend, l'account e i record DNS restano. Gli indirizzi e i mittenti assegnati sono protetti."));
+      };
+      const domainCards = data.domains.map((domain) => panel({ cls: "mail-domain-card", icon: "globe", title: raw(domain.name), hint: raw(domain.legacy ? domain.accountName : `Resend · ${domain.accountName}${domain.mode === "send-only" ? ` · ${tr("Solo invio")}` : ""}`), actions: tag(domain.ready ? "Pronto" : "Da completare", domain.ready ? "ok" : "agent") },
         domain.legacy ? h("p", { class: "muted" }, "Dominio di Cora, già disponibile per gli agenti.") : h("div", { class: "stack" },
           accountRow(data.accounts.find((account) => account.id === domain.accountId)),
+          data.canManage ? domainControls(domain) : h("p", { class: "muted" }, domain.mode === "send-only" ? "Solo invio" : "Invio e ricezione"),
           mailDomainChecks(domain, data.accounts.find((account) => account.id === domain.accountId)),
           domain.error ? h("p", { class: "err-text", role: "alert" }, raw(tr(domain.error))) : null,
           domain.records?.length ? h("details", { class: "mail-dns", open: !domain.ready }, h("summary", {}, "Record DNS da configurare"), h("p", { class: "muted" }, "Copia questi valori nel pannello DNS del dominio. La verifica può richiedere la propagazione dei record."),
-            h("div", { class: "mail-records" }, domain.records.map((record) => h("article", { class: "mail-record" }, h("header", {}, h("b", {}, raw(`${record.record === "Receiving" ? tr("Ricezione") : record.record} · ${record.type}`)), tag(record.status === "verified" ? "Verificato" : "Da verificare", record.status === "verified" ? "ok" : "agent")),
+            h("div", { class: "mail-records" }, domain.records.filter((record) => domain.mode !== "send-only" || record.record !== "Receiving").map((record) => h("article", { class: "mail-record" }, h("header", {}, h("b", {}, raw(`${record.record === "Receiving" ? tr("Ricezione") : record.record} · ${record.type}`)), tag(record.status === "verified" ? "Verificato" : "Da verificare", record.status === "verified" ? "ok" : "agent")),
               h("dl", {}, h("dt", {}, "Nome"), h("dd", {}, h("code", {}, raw(record.name || "@")), emailCopy(record.name || "@", "Copia")), h("dt", {}, "Valore"), h("dd", {}, h("code", {}, raw(record.value)), emailCopy(record.value, "Copia")), record.priority !== undefined ? [h("dt", {}, "Priorità"), h("dd", {}, raw(String(record.priority)))] : null))))) : null,
           data.canManage ? h("div", { class: "row" }, btn("Verifica DNS", { icon: "check", cls: "primary", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/domains/${domain.id}/verify`, { method: "POST" })) }), btn("Aggiorna", { icon: "refresh", cls: "ghost", onclick: (event) => act(event.currentTarget, () => api(`/api/mail/domains/${domain.id}/check`, { method: "POST" })) })) : null)));
       for (const [index, card] of domainCards.entries()) card.dataset.settingsUnconfigured = String(!data.domains[index].ready);
       let addDomain = null;
       if (data.canManage) {
         const name = h("input", { type: "text", required: true, placeholder: "posta.azienda.it", maxlength: 253, autocapitalize: "none", spellcheck: false });
+        const mode = modePicker("send-receive");
         let selectingAccount = false, pendingAccount = "";
         const readyAccounts = data.accounts.filter((item) => item.ready);
         const account = h("select", { required: true, "aria-label": tr("Account Resend") }, readyAccounts.map((item) => h("option", { value: item.id }, raw(item.name))), h("option", { value: "new" }, "Collega un nuovo account"));
@@ -3975,7 +4008,7 @@ function mailDomainsPane() {
         const accountStep = h("div", { class: "stack mail-domain-account-step", hidden: true },
           h("span", { class: "label" }, "2 · Account Resend"), field("Account Resend", account), newAccount,
           data.accounts.filter((item) => !item.ready).map((item) => accountRow(item)),
-          h("p", { class: "mail-domain-note" }, icon("info"), "Se il dominio riceve già posta altrove, usa un sottodominio dedicato: cambiare i record MX cambia dove arrivano le email."), submit);
+          h("p", { class: "mail-domain-note" }, icon("info"), "Per invio e ricezione, usa un sottodominio dedicato se la posta arriva già altrove: cambiare i record MX cambia dove arrivano le email."), submit);
         addDomain = panel({ icon: "plus", title: "Aggiungi dominio", hint: "Prima il dominio, poi il suo account Resend." }, h("form", { class: "stack", onsubmit: (event) => {
           event.preventDefault();
           if (accountStep.hidden) { next.click(); return; }
@@ -3993,9 +4026,9 @@ function mailDomainsPane() {
               if (!checked.ready) throw new Error(checked.error || tr("Verifica prima il collegamento dell'account Resend."));
               pendingAccount = "";
             }
-            await api("/api/mail/domains", { method: "POST", body: { name: requestedDomain, accountId } });
+            await api("/api/mail/domains", { method: "POST", body: { name: requestedDomain, accountId, mode: mode.value } });
           });
-        } }, h("span", { class: "label" }, "1 · Dominio"), field("Dominio", name), next, accountStep));
+        } }, h("span", { class: "label" }, "1 · Dominio"), field("Dominio", name), field("Uso del dominio", mode), h("p", { class: "muted" }, "Solo invio mantiene la ricezione presso il tuo provider attuale. Non cambiare i suoi record MX."), next, accountStep));
         addDomain.dataset.settingsUnconfigured = String(!domainCards.length);
       }
       slot.replaceChildren(feedback, ...domainCards, ...(addDomain ? [addDomain] : []));
