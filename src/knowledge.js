@@ -11,7 +11,9 @@ import { ownerRoom, roomAgentId } from "./rooms.js";
 const MAX_BYTES = 2 * 1024 * 1024;
 const privateNetworks = new BlockList();
 for (const [network, prefix] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4]]) privateNetworks.addSubnet(network, prefix, "ipv4");
-for (const [network, prefix] of [["::", 128], ["::1", 128], ["::ffff:0:0", 96], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["2001:db8::", 32]]) privateNetworks.addSubnet(network, prefix, "ipv6");
+for (const [network, prefix] of [["::", 128], ["::1", 128], ["64:ff9b::", 96], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["2001:db8::", 32]]) privateNetworks.addSubnet(network, prefix, "ipv6");
+const mappedIpv4 = new BlockList();
+mappedIpv4.addSubnet("::ffff:0:0", 96, "ipv6");
 
 export class KnowledgeError extends Error {
   constructor(message, status = 409) { super(message); this.status = status; }
@@ -27,6 +29,10 @@ export function knowledgeUrl(value, { allowLocal = false } = {}) {
 
 export function publicKnowledgeAddress(address) {
   const family = isIP(address);
+  if (family === 6 && mappedIpv4.check(address, "ipv6")) {
+    const [high, low] = new URL(`http://[${address}]`).hostname.slice(1, -1).split(":").slice(-2).map((group) => parseInt(group, 16));
+    return publicKnowledgeAddress([high >> 8, high & 255, low >> 8, low & 255].join("."));
+  }
   return Boolean(family && !privateNetworks.check(address, family === 4 ? "ipv4" : "ipv6"));
 }
 

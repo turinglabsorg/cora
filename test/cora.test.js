@@ -1587,7 +1587,8 @@ test("an external agent Brain is the exclusive read-only source across prompts, 
   assert.match((await executeTool({ name: "recall", args: { query: "Nimbus" } }, ctx)).text, /fonte del Brain è cambiata/);
   assert.equal(app.store.memories(id).length, 1);
   assert.equal(app.store.agent(id).core, "INTERNAL_CORE_CANARY");
-  for (const address of ["127.0.0.1", "169.254.169.254", "100.64.0.1", "::1", "::ffff:127.0.0.1"]) assert.equal(publicKnowledgeAddress(address), false);
+  for (const address of ["127.0.0.1", "169.254.169.254", "100.64.0.1", "10.1.2.3", "192.168.1.1", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "fd00::1", "fe80::1"]) assert.equal(publicKnowledgeAddress(address), false, address);
+  for (const address of ["187.127.204.73", "104.20.23.154", "185.199.108.133", "139.59.154.158", "::ffff:187.127.204.73", "2a02:4780:5e:9714::1", "2606:4700:10::6814:179a"]) assert.equal(publicKnowledgeAddress(address), true, address);
   const denied = new ExternalBrain({ url: () => "https://127.0.0.1/brain" });
   await assert.rejects(denied.pages(), /Internet pubblico/);
 });
