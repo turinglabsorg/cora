@@ -16,32 +16,44 @@ export function progressWindows(traces) {
   }));
 }
 
-export async function assessProgress({ llm, settings, agent, channelId, request, windows, signal }) {
+export async function assessProgress({ llm, settings, agent, channelId, request, windows, signal, timeoutMs = 20000, onAttempt = () => {} }) {
   if (windows.length < 2) return { loop: false, available: true, reason: "", evidence: [] };
   const messages = [{ role: "system", content: SYSTEM }, { role: "user", content: JSON.stringify({
     agent: { id: agent.id, name: agent.name }, channelId, language: settings.language || "it",
     request: String(request || "").slice(-3000), windows,
   }) }];
-  const deadline = Date.now() + 20000;
+  const attempts = [];
+  const record = (model, status, started) => {
+    const attempt = { model, status, elapsedMs: Date.now() - started };
+    attempts.push(attempt);
+    onAttempt(attempt);
+  };
   for (const { model, subscriptionId, credentialId } of decisionChain(settings)) {
     signal?.throwIfAborted();
-    const timeoutMs = deadline - Date.now();
-    if (timeoutMs <= 0) break;
+    const started = Date.now();
+    let reviewSignal;
     try {
-      const reviewSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]);
+      reviewSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]);
       const out = await recoverHarness.run(null, () => noteChildPid.run(null, () => llm.isAgentic(model)
         ? llm.runAgent({ model, subscriptionId: subscriptionId || undefined, credentialId: credentialId || "", system: SYSTEM, prompt: messages[1].content, tools: [], execute: null, timeoutMs, effort: "low", signal: reviewSignal })
         : llm.chat({ model, subscriptionId: subscriptionId || undefined, credentialId: credentialId || "", messages, tools: [], effort: "low", signal: reviewSignal })));
-      const data = parseJsonObject(out.text);
-      if (typeof data?.loop !== "boolean") continue;
+      let data;
+      try { data = parseJsonObject(out.text); }
+      catch { record(model, "invalid_verdict", started); continue; }
+      if (typeof data?.loop !== "boolean") { record(model, "invalid_verdict", started); continue; }
       const ids = new Set(windows.map((item) => item.id));
       const evidence = [...new Set(Array.isArray(data.evidence) ? data.evidence.filter((id) => ids.has(id)) : [])];
       const reason = String(data.reason || "").trim().slice(0, 400);
-      if (data.loop && (evidence.length < 2 || !reason)) continue;
-      return { loop: data.loop, available: true, reason, evidence, model, usage: out.usage };
-    } catch {
+      if (data.loop && (evidence.length < 2 || !reason)) { record(model, "invalid_evidence", started); continue; }
+      record(model, "accepted", started);
+      return { loop: data.loop, available: true, reason, evidence, model, usage: out.usage, attempts };
+    } catch (error) {
       signal?.throwIfAborted();
+      const status = reviewSignal?.aborted ? "timeout"
+        : /auth|subscription da collegare|not logged in|401|403/i.test(error.message || "") ? "authentication"
+        : /429|quota|rate.?limit|credits/i.test(error.message || "") ? "rate_limit" : "error";
+      record(model, status, started);
     }
   }
-  return { loop: false, available: false, reason: "", evidence: [] };
+  return { loop: false, available: false, reason: "", evidence: [], attempts };
 }

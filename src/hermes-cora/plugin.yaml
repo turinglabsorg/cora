@@ -1,0 +1,4 @@
+name: cora-tools
+version: 1.0.0
+description: Cora's authorized tools with native image results.
+kind: backend

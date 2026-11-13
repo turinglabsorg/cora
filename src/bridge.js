@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import http from "node:http";
+import { imageMime } from "./images.js";
 
 /**
  * Loopback HTTP endpoint that the MCP server (spawned by the Claude Code or
@@ -63,7 +64,7 @@ export class ToolBridge {
       if (!run.tools.some((tool) => tool.name === name)) return reply(200, { text: `error: the tool ${name} is not available now` });
       try {
         const out = await run.execute(name, body.arguments && typeof body.arguments === "object" ? body.arguments : {});
-        return reply(200, { text: out.text, image: out.image || null, ...(out.mimeType ? { mimeType: out.mimeType } : {}) });
+        return reply(200, { text: out.text, image: out.image || null, ...(out.image ? { mimeType: out.mimeType || imageMime(out.image) } : {}) });
       } catch (error) {
         return reply(200, { text: `error: ${error.message}` });
       }
