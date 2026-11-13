@@ -115,6 +115,7 @@ export class Artifacts {
     // "--<space>.<domain>": where shares answer, when this space is reached through the cloud.
     this.shareSuffix = shareSuffix;
     this.store = store;
+    this.migratePublicationPolicies();
     this.boxes = boxes;
     this.companyBrain = companyBrain;
     this.webPush = push;
@@ -128,6 +129,18 @@ export class Artifacts {
     mkdirSync(join(this.dir, "tmp"), { recursive: true, mode: 0o700 });
     // A transfer cut short by a restart leaves a half-written file behind.
     for (const name of readdirSync(join(this.dir, "tmp"))) rmSync(join(this.dir, "tmp", name), { force: true });
+  }
+
+  migratePublicationPolicies() {
+    if (this.store.value("artifactPublicationPolicyVersion", 0) >= 1) return;
+    this.store.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const folder of this.store.artifactFolders()) {
+        if (folder.policy === "direct" && !Object.hasOwn(folder, "policyOverride")) this.store.writeArtifactFolder({ ...folder, policyOverride: true });
+      }
+      this.store.setValue("artifactPublicationPolicyVersion", 1);
+      this.store.db.exec("COMMIT");
+    } catch (error) { this.store.db.exec("ROLLBACK"); throw error; }
   }
 
   /** The disk the artifacts live on: its size and what is free, or null where it cannot be read. */
@@ -375,6 +388,46 @@ export class Artifacts {
     return this.levelAccess(level, user);
   }
 
+  inheritedPolicy(folder) {
+    if (folder.sealedAgentId || encryptedFolder(this.store, folder.id)) return null;
+    const all = this.store.value("artifactLevelPolicies", {}) || {};
+    const parts = folder.path.split("/");
+    for (let depth = parts.length - 1; depth >= 1; depth -= 1) {
+      const level = parts.slice(0, depth).join("/");
+      for (const [ownerId, rule] of Object.entries(all[level] || {})) {
+        if (["direct", "review"].includes(rule.policy) && ((ownerId === "space" && !this.knowledge?.ownerMemory) || this.canManage(folder, this.store.panelUser(ownerId)))) return { policy: rule.policy, level };
+      }
+    }
+    return null;
+  }
+
+  publishingPolicy(folder) {
+    if (encryptedFolder(this.store, folder.id)) return "review";
+    return (!folder.policyOverride && this.inheritedPolicy(folder)?.policy) || folder.policy;
+  }
+
+  levelPolicy(path, user) {
+    const own = this.store.value("artifactLevelPolicies", {})?.[path]?.[this.knowledge?.ownerMemory ? user.id : "space"];
+    const sample = this.groupFolders(path).find((folder) => this.canManage(folder, user) && !folder.sealedAgentId && !encryptedFolder(this.store, folder.id));
+    const inherited = sample ? this.inheritedPolicy({ ...sample, path: `${path}/policy-probe` }) : null;
+    return { policy: own?.policy || null, effective: inherited?.policy || null, level: inherited?.level || "" };
+  }
+
+  updateLevelPolicy(path, changes, user) {
+    const level = this.cleanGroup(path);
+    if (!this.canManageGroup(level, user)) throw new ArtifactError("solo il proprietario cambia la pubblicazione del livello", 403);
+    if (!changes || !Object.hasOwn(changes, "policy") || ![null, "direct", "review"].includes(changes.policy)) throw new ArtifactError("scegli pubblicazione immediata, revisione o eredita");
+    const all = { ...(this.store.value("artifactLevelPolicies", {}) || {}) };
+    all[level] = { ...(all[level] || {}) };
+    const ownerKey = this.knowledge?.ownerMemory ? user.id : "space";
+    if (changes.policy === null) delete all[level][ownerKey];
+    else all[level][ownerKey] = { policy: changes.policy, updatedAt: Date.now() };
+    if (!Object.keys(all[level]).length) delete all[level];
+    this.store.setValue("artifactLevelPolicies", all);
+    this.syncBrain();
+    return this.levelPolicy(level, user);
+  }
+
   canReadMember(folder, user) {
     return ["read", "write"].includes(this.memberPermission(folder, user));
   }
@@ -395,7 +448,8 @@ export class Artifacts {
     return { default: value.default, users: Object.fromEntries(users) };
   }
 
-  createFolder({ path, title = "", description = "", kind = "files", policy = "review", writers = ["*"], reviewers = [], memberAccess, createdBy, requestedBy = null }) {
+  createFolder({ path, title = "", description = "", kind = "files", policy = null, writers = ["*"], reviewers = [], memberAccess, createdBy, requestedBy = null }) {
+    if (![null, "direct", "review"].includes(policy)) throw new ArtifactError("scegli pubblicazione immediata, revisione o eredita");
     const clean = String(path || "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
     if (!validFolderPath(clean)) throw new ArtifactError("il percorso di una cartella è fatto di parole minuscole e trattini separate da /, fino a sei livelli: clienti/acme/report-q3");
     for (const other of this.store.artifactFolders()) {
@@ -412,6 +466,7 @@ export class Artifacts {
       description: String(description || "").trim().slice(0, 600),
       kind: kind === "site" ? "site" : "files",
       policy: createdBy?.kind === "agent" ? "review" : policy === "direct" ? "direct" : "review",
+      policyOverride: createdBy?.kind !== "agent" && ["direct", "review"].includes(policy),
       writers: sealedAgentId ? [sealedAgentId] : this.cleanWriters(writers),
       ...(sealedAgentId ? { sealedAgentId, ownerId: creator.brainOwnerId || "" } : {}),
       reviewers: this.cleanReviewers(reviewers),
@@ -475,7 +530,7 @@ export class Artifacts {
     const next = this.updateFolder(folder.id, changes, { role: owner ? "owner" : "member", name: requester.name });
     const said = [changes.writers ? `possono caricare ${next.writers.includes("*") ? "tutti gli agenti" : this.writersText(next)}` : "", changes.policy ? (next.policy === "direct" ? "si pubblica subito" : "ogni caricamento aspetta una revisione") : "", changes.title || changes.description ? "titolo e descrizione" : ""].filter(Boolean).join("; ");
     this.log({ type: "artifact", agentId: agent.id, text: `${agent.name} ha cambiato ${folder.path} per ${requester.name || "chi l'ha chiesto"}: ${said}` });
-    return `${folder.path} updated. Who may push: ${this.writersText(next)}. Publishing: ${next.policy === "direct" ? "published at once" : "each push waits for a reviewer"}. Title: ${next.title}.`;
+    return `${folder.path} updated. Who may push: ${this.writersText(next)}. Publishing: ${this.publishingPolicy(next) === "direct" ? "published at once" : "each push waits for a reviewer"}. Title: ${next.title}.`;
   }
 
   cleanReviewers(reviewers) {
@@ -493,7 +548,11 @@ export class Artifacts {
     if (changes.kind !== undefined) next.kind = changes.kind === "site" ? "site" : "files";
     if (changes.writers !== undefined) next.writers = this.cleanWriters(changes.writers);
     if (this.canManage(folder, user)) {
-      if (changes.policy !== undefined) next.policy = changes.policy === "direct" ? "direct" : "review";
+      if (changes.policy !== undefined) {
+        if (![null, "direct", "review"].includes(changes.policy)) throw new ArtifactError("scegli pubblicazione immediata, revisione o eredita");
+        next.policyOverride = changes.policy !== null;
+        next.policy = changes.policy === "direct" ? "direct" : "review";
+      }
       if (changes.reviewers !== undefined) next.reviewers = this.cleanReviewers(changes.reviewers);
       if (changes.memberAccess !== undefined) next.memberAccess = this.cleanMemberAccess(changes.memberAccess);
     } else if (changes.memberAccess !== undefined) {
@@ -524,7 +583,8 @@ export class Artifacts {
     const commits = this.store.artifactCommits(folder.id, { limit: 200 });
     const head = folder.head ? commits.find((commit) => commit.id === folder.head) || this.store.artifactCommit(folder.head) : null;
     return {
-      id: folder.id, path: folder.path, title: folder.title, description: folder.description, kind: folder.kind, policy: folder.policy,
+      id: folder.id, path: folder.path, title: folder.title, description: folder.description, kind: folder.kind, policy: this.publishingPolicy(folder),
+      localPolicy: folder.policy, policyOverride: Boolean(folder.policyOverride), policyLevel: !folder.policyOverride ? this.inheritedPolicy(folder)?.level || "" : "",
       ...(folder.ownerId ? { ownerId: folder.ownerId } : {}),
       writers: folder.writers, reviewers: folder.reviewers, createdBy: folder.createdBy, requestedBy: folder.requestedBy,
       memberAccess: folder.memberAccess || { default: "write", users: {} },
@@ -754,7 +814,7 @@ export class Artifacts {
       this.store.writeArtifactCommit(commit);
       if (pending) this.store.writeArtifactCommit({ ...pending, status: "superseded", supersededBy: commit.id });
       let published = null;
-      if (folder.policy === "direct") published = this.publishLocked(folder, commit, { by: { kind: "agent", id: agent.id, name: agent.name } });
+      if (this.publishingPolicy(this.store.artifactFolder(folder.id)) === "direct") published = this.publishLocked(folder, commit, { by: { kind: "agent", id: agent.id, name: agent.name } });
       const final = this.store.artifactCommit(commit.id);
       this.announce(folder, final, { agent, channelId, published: final.status === "published" });
       return { folder, commit: final, published, manifest, send, files, created };
@@ -936,7 +996,7 @@ export class Artifacts {
         : `PROPOSED, waiting for review by ${this.reviewerNames(folder)}: it is NOT served yet. Do not say it is published.`;
     const lines = [
       status,
-      created ? `new folder ${folder.path}: ${folder.writers.includes("*") ? "every agent may push to it" : `${this.writersText(folder)} may push to it`}; ${folder.policy === "direct" ? "pushes are published at once" : "each push waits for a reviewer"}. Who may push changes with artifact_folder_update.` : "",
+      created ? `new folder ${folder.path}: ${folder.writers.includes("*") ? "every agent may push to it" : `${this.writersText(folder)} may push to it`}; ${this.publishingPolicy(folder) === "direct" ? "pushes are published at once" : "each push waits for a reviewer"}. Who may push changes with artifact_folder_update.` : "",
       `commit ${short(commit.id)} «${commit.message}» — ${counts}.`,
       `sent ${send.length} file(s), ${Math.round(commit.sent / 1024)} KB; the rest the server already had.`,
       manifest.skipped.length ? `skipped: ${manifest.skipped.slice(0, 8).map((item) => `${item.path} (${item.why})`).join(", ")}${manifest.skipped.length > 8 ? "…" : ""}` : "",
@@ -1456,7 +1516,7 @@ export class Artifacts {
       ? folders.map((folder) => [
         `- **${folder.path}** — ${folder.title}${folder.kind === "site" ? " (sito)" : ""}`,
         folder.description ? `  Cosa ci va: ${folder.description}` : "",
-        `  ${folder.policy === "direct" ? "Si pubblica subito" : "Ogni push aspetta una revisione"}; possono caricare: ${folder.writers.includes("*") ? "tutti gli agenti" : folder.writers.map((id) => this.store.agent(id)?.name).filter(Boolean).join(", ") || "nessun agente"}.`,
+        `  ${this.publishingPolicy(folder) === "direct" ? "Si pubblica subito" : "Ogni push aspetta una revisione"}; possono caricare: ${folder.writers.includes("*") ? "tutti gli agenti" : folder.writers.map((id) => this.store.agent(id)?.name).filter(Boolean).join(", ") || "nessun agente"}.`,
         folder.requestedBy?.name ? `  Decisa con ${folder.requestedBy.name}.` : "",
       ].filter(Boolean).join("\n")).join("\n")
       : "Ancora nessuna cartella.";
