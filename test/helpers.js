@@ -721,12 +721,7 @@ const handle = async () => {
       if (control.tool) add({ role: "assistant", content: "Prima controllo.", reasoning: control.thinking || "Penso.", tool_calls: JSON.stringify([{ id: "call_1", type: "function", function: { name: "mcp__cora__" + control.tool, arguments: JSON.stringify(control.args || {}) } }]) });
       hermes = { db, session, add };
     }
-    if ((argv[argv.indexOf("-t") + 1] || "").split(",").includes("cora")) {
-      server = {
-        command: pick(/^    command: (.*)$/m), args: [pick(/^      - (.*)$/m)],
-        env: { CORA_BRIDGE_URL: fill(pick(/CORA_BRIDGE_URL: (.*)$/m)), CORA_BRIDGE_TOKEN: fill(pick(/CORA_BRIDGE_TOKEN: (.*)$/m)) },
-      };
-    }
+
   } else if (flavor === "grok") {
     // Grok reads its MCP servers from config.toml in GROK_HOME and fills \${...} from its own environment.
     const toml = fs.readFileSync(path.join(process.env.GROK_HOME, "config.toml"), "utf8");
@@ -807,6 +802,13 @@ const handle = async () => {
     record.output = call.result.content[0].text;
     record.content = call.result.content;
     child.kill();
+  }
+  if (flavor === "hermes" && control.tool && (argv[argv.indexOf("-t") + 1] || "").split(",").includes("cora")) {
+    const bridge = async (route, body) => (await fetch(process.env.CORA_BRIDGE_URL + route, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + process.env.CORA_BRIDGE_TOKEN }, body: JSON.stringify(body) })).json();
+    record.tools = (await bridge("/tools/list", {})).tools.map((tool) => tool.name);
+    const output = await bridge("/tools/call", { name: control.tool, arguments: control.args || {} });
+    record.output = output.text;
+    record.content = [{ type: "text", text: output.text }, ...(output.image ? [{ type: "image", data: output.image, mimeType: output.mimeType }] : [])];
   }
   fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(record) + "\\n");
   if (control.exitBeforeReply) process.exit(control.exitBeforeReply);

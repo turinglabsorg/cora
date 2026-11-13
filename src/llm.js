@@ -1,6 +1,6 @@
 import { recoverHarness } from "./thread-sessions.js";
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -667,7 +667,7 @@ export class LLM {
    * A full agent turn on a subscription CLI. `tools` are cora's tool definitions,
    * `execute(name, args)` runs one of them; both reach the CLI through MCP.
    */
-  async runAgent({ model, subscriptionId, credentialId = "", system, prompt, tools, execute, timeoutMs, onStep, onUsage, effort = "", goal = "", signal, host = "" }) {
+  async runAgent({ model, subscriptionId, credentialId = "", system, prompt, tools, execute, timeoutMs, onStep, onUsage, effort = "", goal = "", signal, host = "", vision = false }) {
     const { provider, name } = splitModel(model);
     subscriptionId ||= this.subscriptions?.defaultId(provider);
     if (isSubscriptionProvider(provider) && (!this.subscriptions || !subscriptionId)) throw new Error("subscription da collegare");
@@ -706,7 +706,7 @@ export class LLM {
             const window = await this.contextLength(`ollama/${endpoint.model}`, endpoint.baseUrl.replace(/\/v1$/, ""));
             if (window && window < HERMES_MIN_CONTEXT) throw new Error(`hermes/${endpoint.model}: ${HERMES_TOO_SHORT} (ne ha ${Math.round(window / 1024)}K)`);
           }
-          return await runHermes({ bin: this.hermes.bin, ...options, home: endpoint.home, baseUrl: endpoint.baseUrl, model: endpoint.model, apiKey: endpoint.key });
+          return await runHermes({ bin: this.hermes.bin, ...options, home: `${endpoint.home}-${createHash("sha256").update(`${endpoint.model}:${Boolean(vision)}`).digest("hex").slice(0, 12)}`, baseUrl: endpoint.baseUrl, model: endpoint.model, apiKey: endpoint.key, vision });
         }
         if (provider === "deepseek") {
           const apiKey = credentialId ? (this.credentials?.secret(credentialId) || "") : this.deepseek.key;

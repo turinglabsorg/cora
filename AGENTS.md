@@ -363,3 +363,10 @@ schemas come from the connected server; grants, execution and disconnect use the
 existing connector authorization boundary. Tests in `test/connector-firecrawl.test.js`
 and the `Firecrawl connector` integration group cover discovery, key checks, OAuth,
 rotation/revocation, credit/rate refusals and the panel.
+
+
+## Progress-judge fallbacks and Hermes images
+
+`assessProgress()` grants each configured judge an independent 20-second deadline. `progress-review` activity events contain model/status/duration only; provider output is excluded. Failed, malformed and unsupported loop verdicts remain distinct from a confirmed loop. A pause after exhausted decisions is explicitly attributed to Cora and retains safe attempt metadata. Owner cancellation prevents fallback calls.
+
+Hermes loads `src/hermes-cora/` as its only Cora toolset. The plugin calls the existing per-run authenticated bridge and returns `_multimodal` results with actual image content instead of MCP `MEDIA:` text references. Vision is passed from the selected model's capabilities into the Hermes configuration. Text-only models receive an explicit limitation. Per-model/vision homes prevent simultaneous runs from rewriting each other's capability settings. No third-party installation, new dependency or host tool is added. Coverage: `test/agent-progress.test.js`, `test/hermes-images.test.js` and the focused Hermes/progress journeys in `test/cora.test.js`.

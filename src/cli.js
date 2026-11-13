@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { noteChildPid } from "./thread-sessions.js";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -317,13 +317,14 @@ function messageStream(onStep) {
  * whose session arrives per run through ${...} placeholders Hermes fills in
  * from the environment. Runs in parallel share it.
  */
-export function hermesConfig({ baseUrl, model, keyed = false }) {
+export function hermesConfig({ baseUrl, model, keyed = false, vision = false }) {
   return [
     "# Written by Cora: Hermes runs Cora's agents with Cora's tools only.",
     "model:",
     "  provider: cora-endpoint",
     `  base_url: ${JSON.stringify(baseUrl)}`,
     `  default: ${JSON.stringify(model)}`,
+    `  supports_vision: ${Boolean(vision)}`,
     "providers:",
     "  cora-endpoint:",
     `    api: ${JSON.stringify(baseUrl)}`,
@@ -331,14 +332,9 @@ export function hermesConfig({ baseUrl, model, keyed = false }) {
     // The key never lands in the file: Hermes expands the variable the run gives it.
     ...(keyed ? ["    api_key: \"${CORA_ENDPOINT_KEY}\""] : []),
     `    default_model: ${JSON.stringify(model)}`,
-    "mcp_servers:",
-    "  cora:",
-    `    command: ${JSON.stringify(process.execPath)}`,
-    "    args:",
-    `      - ${JSON.stringify(MCP_SCRIPT)}`,
-    "    env:",
-    "      CORA_BRIDGE_URL: \"${CORA_BRIDGE_URL}\"",
-    "      CORA_BRIDGE_TOKEN: \"${CORA_BRIDGE_TOKEN}\"",
+    "plugins:",
+    "  enabled:",
+    "    - cora-tools",
     "",
   ].join("\n");
 }
@@ -414,11 +410,21 @@ function hermesSteps({ home, input, since, onStep }) {
  * or memory of the owner's Hermes, the answer on stdout. Its thoughts and steps
  * come from the session it records.
  */
-export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl, apiKey = "", onStep, beforeTool, signal }) {
+export async function runHermes({ bin, model, system, prompt, mcp, toolNames, workDir, timeoutMs, home, baseUrl, apiKey = "", vision = false, onStep, beforeTool, signal }) {
   mkdirSync(workDir, { recursive: true, mode: 0o700 });
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const configFile = join(home, "config.yaml");
-  const config = hermesConfig({ baseUrl, model, keyed: Boolean(apiKey) });
+  const plugin = join(home, "plugins", "cora-tools");
+  mkdirSync(plugin, { recursive: true, mode: 0o700 });
+  for (const file of ["plugin.yaml", "__init__.py"]) {
+    const source = fileURLToPath(new URL(`./hermes-cora/${file}`, import.meta.url));
+    const target = join(plugin, file);
+    if (existsSync(target) && readFileSync(target, "utf8") === readFileSync(source, "utf8")) continue;
+    const temporary = `${target}.${randomBytes(6).toString("hex")}`;
+    copyFileSync(source, temporary);
+    renameSync(temporary, target);
+  }
+  const config = hermesConfig({ baseUrl, model, keyed: Boolean(apiKey), vision });
   let current = "";
   try { current = readFileSync(configFile, "utf8"); } catch {}
   // Only the default model changes between runs, and -m overrides it: rewrite when anything else differs.
@@ -432,7 +438,7 @@ export async function runHermes({ bin, model, system, prompt, mcp, toolNames, wo
   const args = () => streamed
     ? ["chat", "--query-file", "-", "--quiet", "--oneshot", "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify"]
     : ["-z", input, "-m", model, "--provider", "cora-endpoint", "--ignore-rules", "-t", tools ? "cora" : "clarify", "--usage-file", usageFile];
-  const env = { HERMES_HOME: home, ...(apiKey ? { CORA_ENDPOINT_KEY: apiKey } : {}), ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
+  const env = { HERMES_HOME: home, CORA_MODEL_VISION: vision ? "1" : "0", ...(apiKey ? { CORA_ENDPOINT_KEY: apiKey } : {}), ...(tools ? { CORA_BRIDGE_URL: mcp.url, CORA_BRIDGE_TOKEN: mcp.token } : {}) };
   const steps = hermesSteps({ home, input, since: Date.now() / 1000 - 5, onStep });
   const poll = onStep ? setInterval(() => steps.read(), 1000) : null;
   poll?.unref?.();

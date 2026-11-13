@@ -53,3 +53,47 @@ test("evidence windows exclude reasoning, bound payloads and retain actual resul
   const result = progressWindows([{ id: "trace", goal: "g".repeat(2000), output: "x".repeat(2000), steps: [{ type: "thinking", text: "private reasoning" }, ...Array.from({ length: 30 }, (_, i) => ({ type: "tool", name: "shell", args: { command: `stage ${i}` }, result: `Verified stage ${i}` }))] }]);
   assert.equal(result[0].steps.length, 12); assert.equal(result[0].goal.length, 1600); assert.equal(result[0].result.length, 1600); assert.doesNotMatch(JSON.stringify(result), /private reasoning/); assert.match(JSON.stringify(result), /Verified stage 29/);
 });
+
+
+test("a timed-out primary leaves a full independent attempt for its backup", async () => {
+  const calls = [], attempts = [];
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const llm = { isAgentic: () => false, async chat(args) {
+      calls.push(args);
+      if (args.model === settings.decisionModel) return new Promise((_, reject) => args.signal.addEventListener("abort", () => reject(args.signal.reason), { once: true }));
+      assert.equal(args.signal.aborted, false);
+      return { text: '{"loop":false,"reason":"New results.","evidence":[]}' };
+    } };
+    const verdict = await check(llm, { timeoutMs: 15, onAttempt: (attempt) => attempts.push(attempt) });
+    assert.equal(verdict.available, true);
+    assert.deepEqual(calls.map((item) => item.model), ["ollama/judge", "ollama/backup"]);
+    assert.deepEqual(attempts.map((item) => item.status), ["timeout", "accepted"]);
+    assert.deepEqual(verdict.attempts, attempts);
+  } finally { clearInterval(keepAlive); }
+});
+
+test("invalid verdicts and failures have bounded diagnostics without raw provider output", async () => {
+  const marker = "private-provider-content";
+  const llm = fixture(({ model }) => { if (model === settings.decisionModel) return { loop: true, reason: marker, evidence: ["invented"] }; throw new Error("429 " + marker); });
+  const verdict = await check(llm);
+  assert.equal(verdict.available, false);
+  assert.deepEqual(verdict.attempts.map((item) => item.status), ["invalid_evidence", "rate_limit"]);
+  assert.doesNotMatch(JSON.stringify(verdict), new RegExp(marker));
+});
+
+test("owner cancellation during a decision does not start a fallback", async () => {
+  const controller = new AbortController();
+  const llm = fixture(() => { controller.abort(); throw controller.signal.reason; });
+  await assert.rejects(check(llm, { signal: controller.signal }), { name: "AbortError" });
+  assert.equal(llm.calls.length, 1);
+});
+
+
+test("non-JSON replies are recorded as invalid verdicts before trying the backup", async () => {
+  let calls = 0;
+  const llm = { isAgentic: () => false, chat: async () => ({ text: ++calls === 1 ? "I cannot answer as JSON." : '{"loop":false,"reason":"Work advanced.","evidence":[]}' }) };
+  const verdict = await check(llm);
+  assert.equal(verdict.available, true);
+  assert.deepEqual(verdict.attempts.map((item) => item.status), ["invalid_verdict", "accepted"]);
+});

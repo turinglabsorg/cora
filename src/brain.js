@@ -764,6 +764,10 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     return { restart: false, reason: "Decisore di recupero non disponibile.", usage: null };
   }
 
+  progressAttempt(agentId, channelId, attempt) {
+    this.log?.({ type: "progress-review", agentId, channelId, ...attempt, text: `Progress judge ${attempt.model}: ${attempt.status} (${attempt.elapsedMs} ms)` });
+  }
+
   clearProgressPause(agentId, channelId) {
     this.store.setValue(`agentProgressPause:${channelId}:${agentId}`, null);
   }
@@ -771,9 +775,9 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
   saveProgressPause(agent, channelId, verdict) {
     const english = this.store.settings.language === "en";
     const message = verdict.available
-      ? (english ? `${agent.name}: automatic exchanges paused because repeated work made no progress. ${verdict.reason}` : `${agent.name}: scambi automatici sospesi perché il lavoro si ripete senza progressi. ${verdict.reason}`)
-      : (english ? `${agent.name}: automatic exchanges paused because the progress judge and its backups are unavailable. This is not a confirmed loop.` : `${agent.name}: scambi automatici sospesi perché il giudice dei progressi e le sue riserve non sono disponibili. Non è un loop confermato.`);
-    const pause = { at: Date.now(), reason: verdict.available ? "loop" : "judge_unavailable", evidence: verdict.evidence, message: message + (english ? " A new human instruction can resume this agent; colleagues continue independently." : " Una nuova indicazione umana può far riprendere questo agente; i colleghi continuano autonomamente.") };
+      ? (english ? `Cora: automatic exchanges for ${agent.name} paused because repeated work made no progress. ${verdict.reason}` : `Cora: scambi automatici di ${agent.name} sospesi perché il lavoro si ripete senza progressi. ${verdict.reason}`)
+      : (english ? `Cora: automatic exchanges for ${agent.name} paused because the configured progress judges returned no valid verdict. This is not a confirmed loop.` : `Cora: scambi automatici di ${agent.name} sospesi perché nessun giudice dei progressi configurato ha restituito un verdetto valido. Non è un loop confermato.`);
+    const pause = { at: Date.now(), reason: verdict.available ? "loop" : "judge_unavailable", evidence: verdict.evidence, attempts: verdict.attempts || [], message: message + (english ? " A new human instruction can resume this agent; colleagues continue independently." : " Una nuova indicazione umana può far riprendere questo agente; i colleghi continuano autonomamente.") };
     this.store.setValue(`agentProgressPause:${channelId}:${agent.id}`, pause);
     this.log?.({ type: "warning", agentId: agent.id, channelId, text: pause.message });
     return { pause: true, fresh: true, message: pause.message };
@@ -787,7 +791,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const turns = this.store.agentThreadTraces(agent.id, channelId, human?.at || 0, 4).reverse();
     if (turns.length < 2) return { pause: false };
     const verdict = await assessProgress({ llm: this.llm, settings: this.store.settings, agent, channelId,
-      request: `${human?.content || ""}\nCurrent colleague request: ${request?.content || ""}`, windows: progressWindows(turns) });
+      request: `${human?.content || ""}\nCurrent colleague request: ${request?.content || ""}`, windows: progressWindows(turns), onAttempt: (attempt) => this.progressAttempt(agent.id, channelId, attempt) });
     if (verdict.loop || !verdict.available) return this.saveProgressPause(agent, channelId, verdict);
     return { pause: false };
   }
@@ -1078,7 +1082,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
         if (steps.length >= 12) {
           const middle = Math.floor(steps.length / 2);
           const verdict = await assessProgress({ llm: this.llm, settings: this.store.settings, agent, channelId: channel.id,
-            request: goalRequest || user, windows: progressWindows([{ id: "previous", steps: steps.slice(0, middle) }, { id: "current", steps: steps.slice(middle) }]), signal: controller.signal });
+            request: goalRequest || user, windows: progressWindows([{ id: "previous", steps: steps.slice(0, middle) }, { id: "current", steps: steps.slice(middle) }]), signal: controller.signal, onAttempt: (attempt) => this.progressAttempt(agent.id, channel.id, attempt) });
           trace.spent(verdict.usage);
           await settleNews();
           if (activeToolCalls === 1 && !halted && !steering.length && revision === ownerRevision && (verdict.loop || !verdict.available)) {
@@ -1344,6 +1348,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
           return pending;
         };
         const invoke = (input) => this.llm.runAgent({
+          vision: Boolean(caps.vision),
           model, subscriptionId: agent.subscriptionId, credentialId: agent.credentialId || "", system, prompt: input, tools, execute: trackedTool, timeoutMs: Math.max(30000, deadline - Date.now()), onStep: (step) => trace.add(step), effort: effortOf(agent),
           signal: controller.signal, host: agent.ollamaHost || "", onUsage: (usage) => trace.spent(usage),
         });
