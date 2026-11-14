@@ -9548,6 +9548,48 @@ describe("email channel", () => {
     await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
     assert.equal(f.app.email.summary(f.agent).sent, 3);
   });
+
+  test("the image signature takes its own icon, kept apart from the agent's avatar", async (t) => {
+    const f = await emailWorld(t);
+    const solid = (side, rgba) => encodePng(side, side, Buffer.alloc(side * side * 4).fill(Buffer.from(rgba)));
+    const icon = solid(256, [220, 30, 40, 255]), dataUrl = (png) => `data:image/png;base64,${png.toString("base64")}`;
+    const avatar = Buffer.from(f.app.store.avatar(f.agent.id));
+    const seen = [], command = f.app.boxes.mailCommand.bind(f.app.boxes);
+    f.app.boxes.mailCommand = async (agent, request) => { if (request.action === "compose") seen.push(request.compose.avatar); return command(agent, request); };
+    const before = (await f.call(`/api/agents/${f.agent.id}/email`)).data;
+    assert.deepEqual(before.signatureIcon, { custom: false, updatedAt: "" });
+    const previewDefault = (await f.app.email.compose(f.agent, { body_text: "" }, "preview", false)).png;
+    assert.equal(seen.at(-1), avatar.toString("base64"));
+
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email/signature-icon`, { method: "PUT", asMember: true, body: { image: dataUrl(icon) } })).status, 403);
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email/signature-icon`, { method: "PUT", body: { image: "data:image/jpeg;base64,AAAA" } })).status, 400);
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email/signature-icon`, { method: "PUT", body: { image: dataUrl(encodePng(300, 200, Buffer.alloc(300 * 200 * 4))) } })).status, 400);
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email/signature-icon`, { method: "PUT", body: { image: dataUrl(solid(32, [0, 0, 0, 255])) } })).status, 400);
+    assert.equal(f.app.email.customIcon(f.agent), null);
+
+    const saved = await f.call(`/api/agents/${f.agent.id}/email/signature-icon`, { method: "PUT", body: { image: dataUrl(icon) } });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.data.signatureIcon.custom, true);
+    assert.ok(saved.data.signatureIcon.updatedAt);
+    assert.deepEqual(f.app.email.signatureIcon(f.agent), icon);
+    assert.deepEqual(Buffer.from(f.app.store.avatar(f.agent.id)), avatar);
+    assert.equal(f.app.store.agent(f.agent.id).avatarUpload, "");
+
+    const previewCustom = (await f.app.email.compose(f.agent, { body_text: "" }, "preview", false)).png;
+    assert.equal(seen.at(-1), icon.toString("base64"));
+    assert.notEqual(previewCustom, previewDefault);
+    await f.app.email.send(f.agent, { to: ["robin+icon@ambox.dev"], subject: "Icon", body_text: "Hello" }, { requester: { kind: "owner" } });
+    assert.equal(seen.at(-1), icon.toString("base64"));
+    const restarted = new EmailChannel({ store: f.app.store, boxes: f.app.boxes, channels: f.app.channels, orchestrator: f.app.orchestrator, instanceUrl: f.base, key: "fixture-key" });
+    assert.deepEqual(restarted.signatureIcon(f.agent), icon);
+
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email/signature-icon`, { method: "DELETE", asMember: true })).status, 403);
+    const reset = await f.call(`/api/agents/${f.agent.id}/email/signature-icon`, { method: "DELETE" });
+    assert.equal(reset.status, 200);
+    assert.deepEqual(reset.data.signatureIcon, { custom: false, updatedAt: "" });
+    await f.app.email.compose(f.agent, { body_text: "" }, "preview", false);
+    assert.equal(seen.at(-1), avatar.toString("base64"));
+  });
 });
 
 describe("agent character sheet", () => {

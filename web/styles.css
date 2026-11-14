@@ -2100,6 +2100,10 @@ a.share-stats:hover { color: var(--amber); }
 .email-ledger-main strong { font-weight: 600; }
 .email-ledger-main p { margin: 4px 0 0; font-size: 13px; }
 .email-ledger-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; font-size: 11px; color: var(--muted); }
+.email-signature-icon { display: flex; align-items: center; gap: 16px; }
+.email-signature-icon > img { width: 56px; height: 56px; border-radius: 12px; object-fit: cover; flex: none; background: #fff; }
+.email-signature-icon .stack-sm { gap: 8px; min-width: 0; }
+.email-signature-icon p { margin: 0; }
 .email-signature-preview img { display: block; max-width: 100%; height: auto; margin-top: 16px; }
 .email-agent-row { display: flex; align-items: center; gap: 16px; padding: 16px 0; border-top: 1px solid var(--line); }
 .email-agent-row > span { margin-left: auto; font-size: 13px; }
