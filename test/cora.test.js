@@ -2072,7 +2072,17 @@ test("routine workspaces retain independent drafts and archive filters through r
     reminder.dispatch("click", { currentTarget: reminder });
     create.elements.runAt.value = "2050-01-01T09:00";
     sections[0].click();
-    panel.app.querySelector(".routine").querySelectorAll("button").find((node) => node.getAttribute("title") === "Edit").click();
+    const card = panel.app.querySelector(".routine");
+    const toggle = card.querySelector(".routine-toggle");
+    assert.equal(toggle.textContent, "Details");
+    assert.match(card.querySelector(".routine-times").textContent, /paused/);
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(card.querySelector(".routine-detail").hidden, true);
+    toggle.click();
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    assert.equal(card.querySelector(".routine-detail").hidden, false);
+    assert.match(card.querySelector(".routine-detail").textContent, /Check updates\./);
+    card.querySelectorAll("button").find((node) => node.getAttribute("title") === "Edit").click();
     const edit = panel.app.querySelectorAll("form").find((node) => node !== create);
     edit.elements.name.value = "Updated briefing";
     sections[1].click();

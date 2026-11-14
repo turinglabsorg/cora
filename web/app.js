@@ -4383,7 +4383,7 @@ function routineForm(agent, routine = {}, { onCancel, onSaved } = {}) {
   if (routine.channelId && !routine.channelId.startsWith("web") && !S.data.channels.some((channel) => channel.id === routine.channelId)) {
     channelSelect.append(h("option", { value: routine.channelId, selected: true }, tr("{channel} (non attivo)", { channel: channelName(routine.channelId) })));
   }
-  const form = panel({ tag: "form", icon: isNew ? "plus" : "edit", title: isNew ? "Nuova attività" : tr("Modifica «{name}»", { name: routine.name }), hint: "Un compito, quando serve, con un risultato da ritrovare." },
+  const form = panel({ tag: "form", cls: "task-form", icon: isNew ? "plus" : "edit", title: isNew ? "Nuova attività" : tr("Modifica «{name}»", { name: routine.name }), hint: "Un compito, quando serve, con un risultato da ritrovare." },
     setRows(
       isNew ? setRow("Tipo", "Una routine si ripete; un reminder va una volta sola, poi in archivio.", kindPicker, { stack: true })
         : setRow("Tipo", null, badge(kind === "reminder" ? "Reminder" : "Routine", "", "clock")),
@@ -4438,12 +4438,24 @@ async function routineTab(agent, routines) {
     const reminder = routine.kind === "reminder";
     const status = routine.running ? tag("in corso", "agent")
       : routine.lastStatus ? runStatus(routine.lastStatus) : null;
-    return h("div", { class: `routine${routine.enabled ? "" : " paused"}` },
+    const detailsId = `routine-detail-${routine.id}`;
+    const detail = h("div", { class: "routine-detail", id: detailsId }, h("pre", {}, raw(routine.prompt)), routine.lastOutput ? h("pre", {}, raw(routine.lastOutput)) : null);
+    detail.hidden = true;
+    const toggle = h("button", { type: "button", class: "routine-toggle", title: "Compito e ultimo risultato", "aria-expanded": "false", "aria-controls": detailsId, onclick: () => {
+      const open = toggle.getAttribute("aria-expanded") !== "true";
+      toggle.setAttribute("aria-expanded", String(open));
+      detail.hidden = !open;
+    } }, icon("next"), h("span", {}, "Dettagli"));
+    const times = [routine.nextRunAt && routine.enabled ? tr("prossima {time}", { time: fmtTime(routine.nextRunAt, true) }) : "", routine.lastRunAt ? tr("ultima {time}", { time: fmtTime(routine.lastRunAt, true) }) : ""].filter(Boolean);
+    return h("article", { class: `routine${routine.enabled ? "" : " paused"}` },
       h("div", { class: "routine-head" },
         h("span", { class: "panel-ico" }, icon("clock")),
-        h("span", { class: "grow" },
-          h("b", {}, raw(routine.name), routine.enabled ? "" : " · in pausa"),
-          h("span", { class: "row-meta" }, reminder ? "Reminder" : "Routine", h("code", {}, reminder ? taskTime(routine.runAt) : raw(routine.schedule)), "→", raw(channelName(routine.channelId)))),
+        h("div", { class: "routine-title" },
+          h("b", {}, raw(routine.name)),
+          h("span", { class: "row-meta" }, reminder ? "Reminder" : "Routine", h("code", {}, reminder ? taskTime(routine.runAt) : raw(routine.schedule)), "→", raw(channelName(routine.channelId))))),
+      times.length || status || !routine.enabled ? h("div", { class: "row-meta routine-times" }, routine.enabled ? null : tag("in pausa"), status, times.map((text) => h("span", {}, text))) : null,
+      routine.lastVerification?.reason ? h("p", { class: "task-verification" }, raw(routine.lastVerification.reason)) : null,
+      h("div", { class: "routine-foot" }, toggle,
         h("span", { class: "row-actions" },
           btn("", { icon: "play", cls: "sm", title: reminder && ["blocked", "unverified", "error", "interrupted", "stopped"].includes(routine.lastStatus) ? "Riprova" : "Esegui ora", disabled: routine.running, onclick: async () => {
             if (await guard(api(`/api/routines/${routine.id}/run`, { method: "POST" }), "Attività avviata")) scheduleRefresh();
@@ -4455,9 +4467,7 @@ async function routineTab(agent, routines) {
           armedButton("Archivia", "Conferma archiviazione", { cls: "sm", onconfirm: async () => {
             if (await guard(api(`/api/routines/${routine.id}`, { method: "DELETE" }), "Attività archiviata")) { await loadState(); drawTasks(); }
           } }))),
-      h("div", { class: "row-meta" }, status, routine.nextRunAt && routine.enabled ? tr("prossima {time}", { time: fmtTime(routine.nextRunAt, true) }) : "", routine.lastRunAt ? tr(" · ultima {time}", { time: fmtTime(routine.lastRunAt, true) }) : ""),
-      routine.lastVerification?.reason ? h("p", { class: "task-verification" }, raw(routine.lastVerification.reason)) : null,
-      h("details", {}, h("summary", {}, "Compito e ultimo risultato"), h("pre", {}, raw(routine.prompt)), routine.lastOutput ? h("pre", {}, raw(routine.lastOutput)) : null));
+      detail);
   });
   const taskList = h("div", { class: "stack-sm" });
   function drawTasks() {
