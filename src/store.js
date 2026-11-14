@@ -410,6 +410,21 @@ export function decisionChain(settings) {
   });
 }
 
+/**
+ * The models an agent's reply is tried on: its own first, then the space's backups
+ * (the brain's, then the decision maker's), each model and account once.
+ */
+export function replyChain(settings, agent) {
+  const own = { model: agent?.model || settings.defaultModel || "", subscriptionId: agent?.subscriptionId || "", credentialId: agent?.credentialId || "", own: true };
+  const seen = new Set();
+  return [own, ...(settings.brainBackups || []), ...(settings.decisionBackups || [])].filter((entry) => {
+    const key = `${entry.model}|${entry.subscriptionId || ""}|${entry.credentialId || ""}`;
+    if (!entry.model || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function cleanPermissions(list) {
   const seen = new Set();
   const grants = [];

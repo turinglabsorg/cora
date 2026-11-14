@@ -5963,7 +5963,7 @@ function renderBrain() {
         drawAccount(value);
       }
     });
-    const backupsRow = setRow("Modelli di riserva", "Se il modello non risponde (scollegato, crediti finiti), il bibliotecario e il sonno degli agenti provano questi, in ordine.", null, { stack: true });
+    const backupsRow = setRow("Modelli di riserva", "Se il modello non risponde (scollegato, crediti finiti), il bibliotecario e il sonno degli agenti provano questi, in ordine. Valgono anche per le risposte di un agente il cui account non risponde.", null, { stack: true });
     const backupsBox = h("div", { class: "brain-backups" });
     backupsRow.append(h("div", { class: "set-control" }, backupsBox));
     const drawBackups = () => {
@@ -9269,7 +9269,7 @@ function renderSettings() {
         drawAccount(value);
       }
     });
-    const backupsRow = setRow("Modelli di riserva", "Se il decisore non risponde, prova queste riserve in ordine. Modelli e account sono indipendenti dal bibliotecario.", null, { stack: true });
+    const backupsRow = setRow("Modelli di riserva", "Se il decisore non risponde, prova queste riserve in ordine. Modelli e account sono indipendenti dal bibliotecario. Un agente il cui account non risponde prova prima le riserve del bibliotecario, poi queste.", null, { stack: true });
     const backupsBox = h("div", { class: "brain-backups" });
     backupsRow.append(h("div", { class: "set-control" }, backupsBox));
     const drawBackups = () => {
