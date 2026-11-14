@@ -22,6 +22,9 @@ const MAX_CONTENT = 1990;
 export const VOICE_MESSAGE = 1 << 13;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** A gateway that opens but never says Hello is as dead as one that never opens. */
+export const HELLO_TIMEOUT_MS = 20000;
+const REQUEST_TIMEOUT_MS = 30000;
 
 export function splitMessage(text, max = MAX_CONTENT) {
   const chunks = [];
@@ -38,8 +41,9 @@ export function splitMessage(text, max = MAX_CONTENT) {
 }
 
 export class Discord extends EventEmitter {
-  constructor({ token, apiBase, gatewayUrl = "", intents = LISTENER_INTENTS, activity = "" }) {
+  constructor({ token, apiBase, gatewayUrl = "", intents = LISTENER_INTENTS, activity = "", helloTimeoutMs = HELLO_TIMEOUT_MS }) {
     super();
+    this.helloTimeoutMs = helloTimeoutMs;
     this.token = token;
     this.intents = intents;
     this.activity = activity;
@@ -112,7 +116,7 @@ export class Discord extends EventEmitter {
       }
       let response;
       try {
-        response = await fetch(`${this.apiBase}${path}`, options);
+        response = await fetch(`${this.apiBase}${path}`, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       } catch (error) {
         if (attempt === 4) throw new Error(`Discord ${method} ${safePath}: ${error.message}`);
         await sleep(500 * 2 ** attempt);
@@ -153,6 +157,7 @@ export class Discord extends EventEmitter {
     this.seq = null;
     this.retries = 0;
     clearTimeout(this.firstBeat);
+    clearTimeout(this.helloTimer);
     clearInterval(this.heartbeat);
     clearTimeout(this.reconnectTimer);
     // The socket is let go before it closes: its close belongs to a connection that is over, and must not
@@ -190,6 +195,24 @@ export class Discord extends EventEmitter {
     });
     ws.addEventListener("close", (event) => this.onClose(ws, event.code));
     ws.addEventListener("error", () => {});
+    clearTimeout(this.helloTimer);
+    this.helloTimer = setTimeout(() => this.drop(ws, "no Hello from the gateway"), this.helloTimeoutMs);
+  }
+
+  /**
+   * A connection that stopped answering is let go at once and replaced. On a dead
+   * network the closing handshake never completes, so its close event may never
+   * come: waiting for it left the bot "ready" and deaf until a restart. The session
+   * is kept, so the new connection resumes and Discord replays what was missed.
+   */
+  drop(ws, reason) {
+    if (ws !== this.ws || this.stopped) return;
+    clearTimeout(this.firstBeat);
+    clearTimeout(this.helloTimer);
+    clearInterval(this.heartbeat);
+    this.ws = null;
+    try { ws.close(4000); } catch {}
+    this.scheduleReconnect(reason);
   }
 
   send(ws, op, d) {
@@ -202,11 +225,12 @@ export class Discord extends EventEmitter {
     switch (payload.op) {
       case 10: {
         const interval = payload.d.heartbeat_interval;
+        clearTimeout(this.helloTimer);
         clearInterval(this.heartbeat);
         this.acked = true;
         const beat = () => {
           if (!this.acked) {
-            try { ws.close(4000); } catch {}
+            this.drop(ws, "no heartbeat acknowledgement");
             return;
           }
           this.acked = false;
@@ -242,7 +266,7 @@ export class Discord extends EventEmitter {
         this.send(ws, 1, this.seq);
         break;
       case 7:
-        try { ws.close(4000); } catch {}
+        this.drop(ws, "Discord asked to reconnect");
         break;
       case 9:
         if (!payload.d) {
@@ -250,7 +274,7 @@ export class Discord extends EventEmitter {
           this.resumeUrl = null;
           this.seq = null;
         }
-        setTimeout(() => { try { ws.close(4000); } catch {} }, 1000 + Math.random() * 4000);
+        setTimeout(() => this.drop(ws, payload.d ? "session invalidated, resuming" : "session invalidated"), 1000 + Math.random() * 4000);
         break;
       case 0:
         this.dispatch(payload.t, payload.d);
@@ -262,7 +286,9 @@ export class Discord extends EventEmitter {
 
   onClose(ws, code) {
     if (ws !== this.ws) return;
+    this.ws = null;
     clearTimeout(this.firstBeat);
+    clearTimeout(this.helloTimer);
     clearInterval(this.heartbeat);
     if (this.stopped) {
       this.setState("stopped");
@@ -304,6 +330,7 @@ export class Discord extends EventEmitter {
       case "RESUMED":
         this.retries = 0;
         this.setState("ready");
+        this.emit("resumed");
         break;
       case "GUILD_CREATE":
         this.guilds.set(data.id, {

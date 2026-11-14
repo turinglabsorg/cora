@@ -19,6 +19,7 @@ import { Brain } from "./brain.js";
 import { ToolBridge } from "./bridge.js";
 import { Boxes, plainKeys } from "./box.js";
 import { config, resolveDiscordToken } from "./config.js";
+import { logTransitions } from "./connection-log.js";
 import { Discord } from "./discord.js";
 import { LLM } from "./llm.js";
 import { Credentials } from "./credentials.js";
@@ -225,6 +226,7 @@ export function startCora(overrides = {}) {
     orchestrator.onInteraction(interaction).catch((error) => activity({ type: "error", channelId: interaction.channel_id, text: `pulsante: ${error.message}` }));
   });
   discord.on("status", (status) => web.broadcast({ type: "discord", state: status.state, error: status.error }));
+  logTransitions(discord, activity, { type: "discord", label: "Discord" });
   discord.on("warning", (text) => activity({ type: "warning", text }));
   // Long tasks a restart cut short start again once: when Discord is up, or after a while if Cora lives elsewhere.
   let resumed = false;
@@ -237,21 +239,29 @@ export function startCora(overrides = {}) {
     if (ids.length) activity({ type: "settings", text: `riprendo ${ids.length} lavori interrotti dal riavvio` });
   };
   const resumeFallback = setTimeout(resume, 20000);
-  discord.on("ready", () => {
+  // Give the gateway a moment to deliver the servers' channels, then answer what was missed.
+  const catchUpSoon = () => {
     if (stopping) return;
-    activity({ type: "discord", text: `connesso come ${discord.user?.username}` });
-    // Give the gateway a moment to deliver the servers' channels, then answer what was missed.
     clearTimeout(catchUpTimer);
     catchUpTimer = setTimeout(() => {
       if (stopping) return;
       orchestrator.catchUp().catch((error) => activity({ type: "error", text: `recupero messaggi: ${error.message}` }));
       resume();
     }, 3000);
+  };
+  // An agent's bot or app that had to start a new session missed what was written meanwhile.
+  bots.onReconnect = catchUpSoon;
+  skBots.onReconnect = catchUpSoon;
+  discord.on("ready", () => {
+    if (stopping) return;
+    activity({ type: "discord", text: `connesso come ${discord.user?.username}` });
+    catchUpSoon();
   });
   slack.on("message", (event) => {
     orchestrator.onSlackMessage(event).catch((error) => activity({ type: "error", text: `slack: ${error.message}` }));
   });
   slack.on("status", (status) => web.broadcast({ type: "slack", state: status.state, error: status.error }));
+  logTransitions(slack, activity, { type: "slack", label: "Slack" });
   const publishSlackChannels = () => {
     if (stopping) return;
     channels.adoptSlackChannels();
@@ -265,12 +275,7 @@ export function startCora(overrides = {}) {
     if (slack.team?.id && slack.team.id !== store.settings.slackTeamId) store.updateSettings({ slackTeamId: slack.team.id });
     slack.listChannels().catch(() => {});
     syncMainSlackApp().catch(() => {});
-    clearTimeout(catchUpTimer);
-    catchUpTimer = setTimeout(() => {
-      if (stopping) return;
-      orchestrator.catchUp().catch((error) => activity({ type: "error", text: `recupero messaggi: ${error.message}` }));
-      resume();
-    }, 3000);
+    catchUpSoon();
   });
   telegram.on("message", (message) => {
     orchestrator.onTelegramMessage(message).catch((error) => activity({ type: "error", text: `telegram: ${error.message}` }));

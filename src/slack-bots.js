@@ -1,5 +1,6 @@
 import { agentSlug } from "./agent-bots.js";
 import { agentTagline } from "./character.js";
+import { logTransitions } from "./connection-log.js";
 import { Slack, isDirectChannel } from "./slack.js";
 import { ValidationError } from "./store.js";
 
@@ -151,8 +152,12 @@ export class SlackBots {
         if (event.channel_type === "im") this.onDirect?.(agentId, event);
         else this.onGuild?.(event, agentId);
       });
+      let connected = false;
       client.on("ready", () => {
         this.log?.({ type: "slack", agentId, text: `app Slack collegata come @${client.user?.name}` });
+        // Slack never replays what a dead socket missed: after the first connection, history is read back.
+        if (connected) this.onReconnect?.(agentId);
+        connected = true;
         client.listChannels().catch(() => {});
         this.syncApp(this.store.agent(agentId)).catch(() => {});
       });
@@ -167,6 +172,7 @@ export class SlackBots {
           this.log?.({ type: "error", agentId, text: `app Slack: ${status.error}` });
         }
       });
+      logTransitions(client, (item) => this.log?.(item), { type: "slack", agentId, label: "app Slack" });
       client.start();
     }
   }
