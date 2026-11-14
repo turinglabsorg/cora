@@ -7,6 +7,7 @@ import { passKeys, signPass } from "../src/pass.js";
 import { fakeDocker, tempHome, waitFor } from "./helpers.js";
 import { panelHarness } from "./panel.js";
 import { identityCli } from "./subscription-fixtures.js";
+import { codexCredentialStore } from "../src/harnesses.js";
 
 async function fixture(t, { storeSecret, harnesses = ["claude", "codex"] } = {}) {
   const home = tempHome();
@@ -65,6 +66,23 @@ test("resident subscriptions are detected, default for both CLIs, and never rece
   assert.equal(scanned.status, 200);
   assert.equal(scanned.data.length, 2);
   assert.ok(identity.calls().every((call) => call.inheritedKeys.length === 0));
+});
+
+test("a resident Codex account is checked and run through the same credential store", async (t) => {
+  assert.equal(codexCredentialStore(false), 'cli_auth_credentials_store="file"');
+  assert.equal(codexCredentialStore(true), 'cli_auth_credentials_store="auto"');
+  const { app, identity } = await fixture(t);
+  const resident = app.store.residentSubscription("codex");
+  await app.subscriptions.check(resident.id);
+  assert.equal(app.store.subscription(resident.id).status, "ready");
+  const appServer = identity.appServerCalls().filter((call) => call.provider === "codex");
+  assert.ok(appServer.length > 0, "the check opened the Codex app-server");
+  assert.ok(appServer.every((call) => call.argv.includes('cli_auth_credentials_store="auto"')),
+    "the check reads the same store as the turn");
+  const answer = await app.llm.runAgent({ model: "codex/test", tools: [], system: "Test", prompt: "Identity?", timeoutMs: 5000 });
+  assert.match(answer.text, /codex-resident@example.test/);
+  const turn = identity.calls().findLast((call) => call.provider === "codex" && !call.argv.includes("app-server"));
+  assert.ok(turn.argv.includes('cli_auth_credentials_store="auto"'));
 });
 
 test("turning off resident defaults blocks them without falling back from an explicitly selected account", async (t) => {
