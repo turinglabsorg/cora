@@ -391,7 +391,7 @@ export const EN = {
   "Riserva del decisore {number}": "Decision backup {number}",
   "ID della riserva {number}": "Backup model ID {number}",
   "Interpreta i congedi dalla conversazione. Scegli un modello piccolo: legge solo gli ultimi scambi, senza strumenti.": "Interprets conversation dismissals. Choose a small model: it reads only recent exchanges, without tools.",
-  "Se il decisore non risponde, prova queste riserve in ordine. Modelli e account sono indipendenti dal bibliotecario.": "If the decision model does not answer, try these backups in order. Models and accounts are independent of the librarian.",
+  "Se il decisore non risponde, prova queste riserve in ordine. Modelli e account sono indipendenti dal bibliotecario. Un agente il cui account non risponde prova prima le riserve del bibliotecario, poi queste.": "If the decision model does not answer, try these backups in order. Models and accounts are independent of the librarian. An agent whose account cannot answer tries the librarian's backups first, then these.",
   "Nessuna riserva: resta disponibile lo sgancio esplicito dell’agente.": "No backup: the agent can still explicitly end its own participation.",
   "Scelte brevi sulla conversazione, con una configurazione propria.": "Brief conversation decisions, with their own configuration.",
 
@@ -2944,7 +2944,7 @@ export const EN = {
   "Account della riserva": "Backup's account",
   "Chiave dello space": "Space key",
   "Modelli di riserva": "Backup models",
-  "Se il modello non risponde (scollegato, crediti finiti), il bibliotecario e il sonno degli agenti provano questi, in ordine.": "If the model does not answer (disconnected, out of credits), the librarian and the agents' sleep try these, in order.",
+  "Se il modello non risponde (scollegato, crediti finiti), il bibliotecario e il sonno degli agenti provano questi, in ordine. Valgono anche per le risposte di un agente il cui account non risponde.": "If the model does not answer (disconnected, out of credits), the librarian and the agents' sleep try these, in order. They also answer for an agent whose account cannot.",
   "Togli questa riserva": "Remove this backup",
   "Aggiungi riserva": "Add backup",
   "Nessuna riserva: se il modello non risponde, il brain resta fermo.": "No backups: if the model does not answer, the brain stands still.",

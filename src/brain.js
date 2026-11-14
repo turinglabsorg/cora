@@ -6,7 +6,7 @@ import { ThreadState } from "./thread-state.js";
 import { Memory, parseJsonObject } from "./memory.js";
 import { telegramBotAgent, transportOf } from "./channels.js";
 import { SALOTTO, isWebRoom, privateRoom, ownerRoom } from "./rooms.js";
-import { SHARED, TRANSPORTS, decisionChain } from "./store.js";
+import { SHARED, TRANSPORTS, decisionChain, replyChain } from "./store.js";
 import { encryptedOnly, ENCRYPTED_CHAT_TOOLS } from "./encrypted-space.js";
 import { MEMORY_TOOLS, OWN_TOOLS, TOOL_DEFS, executeTool, summarizeArgs } from "./tools.js";
 import { NO_TRACE } from "./traces.js";
@@ -139,6 +139,13 @@ export function asksToStop(text) {
   const value = String(text || "").trim();
   if (/\bbasta che\b/i.test(value)) return false;
   return STOP.test(value) || /(?:^|\b)basta(?:\b|$)/i.test(value);
+}
+
+/** The account cannot answer at all (disconnected, refused, out of quota): another model may. */
+export function accountUnavailable(error) {
+  if (!error || error.name === "AbortError") return false;
+  if (error.code === "GEMINI_QUOTA_EXHAUSTED") return true;
+  return /subscription da collegare|collega la subscription|not logged in|unauthori[sz]ed|invalid.{0,20}(api.?key|token)|\b40[123]\b|quota|usage limit|rate.?limit|credit|insufficient balance/i.test(String(error.message || ""));
 }
 
 export function formatTime(ms, timezone) {
@@ -812,7 +819,31 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     }
   }
 
-  async loop({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, imageMessages = [], task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null, requester = null, replyTo = null, requestAuthorized = false, topics = null }) {
+  /**
+   * One agent turn. When the agent's own account cannot answer before anything was done
+   * (no tool, no message), the same turn runs on the space's backup models in order.
+   */
+  async loop(args) {
+    const chain = replyChain(this.store.settings, args.agent);
+    const failures = [];
+    for (let index = 0; index < chain.length; index++) {
+      const entry = chain[index];
+      const agent = entry.own ? args.agent : { ...args.agent, model: entry.model, subscriptionId: entry.subscriptionId || undefined, credentialId: entry.credentialId || "", ollamaHost: "" };
+      try {
+        const result = await this.loopOn({ ...args, agent });
+        if (failures.length) this.log?.({ type: "warning", agentId: args.agent.id, channelId: args.channel?.id, text: `${args.agent.name} ha risposto con il modello di riserva ${entry.model}: ${failures.join(" · ")}` });
+        return result;
+      } catch (error) {
+        if (!error.untouched || !accountUnavailable(error) || index === chain.length - 1) {
+          if (failures.length) error.message = `${error.message} (riserve provate: ${failures.join(" · ")})`;
+          throw error;
+        }
+        failures.push(`${entry.model}: ${String(error.message).replace(/\s+/g, " ").slice(0, 120)}`);
+      }
+    }
+  }
+
+  async loopOn({ agent, mode, channel, user, computer, postFile, say = null, inbox = null, maxSteps, deadline, images, imageMessages = [], task = false, goalRequest = "", goalContext = "", routine = null, onTrace = null, onMessageHandled = null, requester = null, replyTo = null, requestAuthorized = false, topics = null }) {
     if (encryptedOnly(this.store, agent)) throw Object.assign(new Error("Encrypted-only mode: use the separate encrypted session."), { status: 409 });
     const selectedBrain = this.knowledge ? this.knowledge.forAgent(agent) : agent.brainSource === "external" ? null : this.companyBrain;
     const model = agent.model || this.store.settings.defaultModel;
@@ -926,10 +957,13 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
     const control = { settle: null };
     // Told to stop, an agent stops: no more tools, no more rounds, whatever it has is the answer.
     let halted = false;
+    // Something already happened in this turn: a tool ran or a message went out.
+    let touched = false;
     let lastUpdate = Date.now();
     // The last tool was a say into this conversation: a final "message sent" adds nothing.
     let saidHere = false;
     const sayTracked = say ? async (text, target = channel.id, options = {}) => {
+      touched = true;
       lastUpdate = Date.now();
       progress = String(text);
       const result = await say(text, target, { ...options, replyTo: options.replyTo || replyTo, traceId: trace.id });
@@ -1099,6 +1133,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       return before || steer || review ? { ...output, text: [output.text, before, steer, review].filter(Boolean).join("\n\n") } : output;
     };
     const runTool = (name, args) => {
+      touched = true;
       activeToolCalls++;
       return runToolBody(name, args).finally(() => { activeToolCalls--; });
     };
@@ -1361,7 +1396,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
             error.harnessRecoveryChecked = true;
             controller.signal.throwIfAborted();
             trace.add({ type: "note", text: `Errore harness: ${String(error.message).slice(0, 1000)}`, harnessFailure: { code: error.code || "", exitCode: error.exitCode, signal: error.signal || "", timedOut: Boolean(error.timedOut) } });
-            if (recovered || !replace || halted || asked || blockedWork || error.name === "AbortError" || error.code === "GEMINI_QUOTA_EXHAUSTED") throw error;
+            if (recovered || !replace || halted || asked || blockedWork || error.name === "AbortError" || error.code === "GEMINI_QUOTA_EXHAUSTED" || (!touched && accountUnavailable(error))) throw error;
             const evidence = trace.full();
             evidence.pendingTools = pendingTools.size;
             const decision = await this.harnessRecovery({ agent, error, trace: evidence }, controller.signal);
@@ -1475,6 +1510,7 @@ Su GitHub sei ${github.login}, la tua app, installata su: ${where}. Sul tuo comp
       if (halted) return done(progressPauseText || (stoppedByOwner ? "Mi fermo qui." : "PASS"), 0);
       trace.finish({ status: "error", error: error.message });
       error.traceId = trace.id;
+      error.untouched = !touched;
       throw error;
     } finally {
       closed = true;
