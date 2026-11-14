@@ -27,14 +27,19 @@ that is not authorised for a connector does not even see its tool.
 | `remote-mcp.js` | Shared JSON/SSE transport, sessions, recovery and image files for Lovable and Firecrawl. |
 | `lovable.js` | Lovable: the official MCP server (`mcp.lovable.dev`), reached by Cora as an MCP client with the owner's OAuth token; 31 `lovable_` actions (projects, the project agent's messages, diffs and files, knowledge, skills, database, deploy, analytics, uploads) and `lovable_mcp`. |
 | `google.js` | Google: accounts connected through Cora's OAuth broker (`GoogleConnector`); 14 `gmail_` actions (send, reply, search, read, attachments, labels, archive, drafts) and `gmail_api`. |
+| `google-drive.js` | Google Drive on the same accounts: 16 `drive_` actions (search, file details, read as text, download and export, upload, create Docs/Sheets/Slides/text, rename/move/new version, folders, copy, trash, share/unshare, permissions, comments, shared drives) and `drive_api`. |
 
 Google is `kind: "google"`: its card has its own flow in the panel (one card, several
 accounts, agents chosen per account), and `GoogleConnector` serves its tools, which
-`KeyConnectors` hands over to it. The broker asks Google for `gmail.send`, `gmail.compose`
-and `gmail.modify`; each account keeps the scopes it actually granted, and each `gmail_`
-action declares `needs` (send, draft, read, change): an agent sees an action only when one
-of its accounts allows it. Accounts connected before keep `gmail.send` only until they are
-reconnected.
+`KeyConnectors` hands over to it. What the broker asks Google for is the space's
+`CORA_GOOGLE_CONNECTOR_ACCESS`, a comma list of parts: `send` (`gmail.send`, the default),
+`mail` (`gmail.send`, `gmail.compose`, `gmail.modify`) and `drive` (the whole Drive, `drive`),
+e.g. `mail,drive`. Each account keeps the scopes it actually granted, and each action declares
+`needs` (send, draft, read, change for Gmail; drive, drive_write for Drive): an agent sees an
+action only when one of its accounts allows it. `drive.readonly` gives only the reading Drive
+actions, `drive.file` all of them on the files Cora created. Accounts connected before keep
+their scopes until they are reconnected. Gmail tools take the account as `from`, Drive tools
+as `account`.
 
 ## The panel reads the catalogue from here
 

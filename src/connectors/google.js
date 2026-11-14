@@ -1,12 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
 import { count, defined, fail, list, localFile, text, ToolError } from "./tooling.js";
+import { DRIVE_SCOPES, DRIVE_TOOLS } from "./google-drive.js";
 
 /**
- * Google: Gmail and Google Workspace accounts connected through Cora's OAuth
- * broker. Each account is authorised for chosen agents, who get one tool per
+ * Google: Gmail, Google Workspace and Google Drive accounts connected through Cora's
+ * OAuth broker. Each account is authorised for chosen agents, who get one tool per
  * action. What an account allows depends on what its owner granted Google:
  * gmail.send sends; gmail.compose adds drafts; gmail.modify adds reading,
- * searching, labels, archive and trash. A tool appears only when at least one of
+ * searching, labels, archive and trash; drive reads and changes Google Drive
+ * (drive.readonly only reads it). A tool appears only when at least one of
  * the agent's accounts allows it. Cora takes the refresh token from the vault and
  * renews the access token; the agent never holds either.
  */
@@ -22,13 +24,15 @@ export function capabilities(connection) {
   const granted = new Set(String(connection?.scope || "").split(/\s+/).filter(Boolean));
   const has = (name) => granted.has(GMAIL_SCOPES[name]);
   const read = has("modify") || has("readonly");
-  return { send: has("send") || has("compose") || has("modify"), draft: has("compose") || has("modify"), read, change: has("modify") };
+  const drive = (name) => granted.has(DRIVE_SCOPES[name]);
+  return { send: has("send") || has("compose") || has("modify"), draft: has("compose") || has("modify"), read, change: has("modify"),
+    drive: drive("full") || drive("readonly") || drive("file"), drive_write: drive("full") || drive("file") };
 }
 const canList = (connection) => Object.entries(capabilities(connection)).filter(([, yes]) => yes).map(([name]) => name);
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[a-z]{2,}$/i;
 const ADDRESS = /^(?:"?([^"<>\r\n]{0,200})"?\s*)?<([^\s@<>,;]+@[^\s@<>,;]+\.[a-z]{2,})>$/i;
-const NEEDS = { send: "send", draft: "compose drafts", read: "read the mailbox", change: "change messages and labels" };
+const NEEDS = { send: "send", draft: "compose drafts", read: "read the mailbox", change: "change messages and labels", drive: "use Google Drive", drive_write: "change Google Drive" };
 
 const hash = (value) => createHash("sha256").update(value).digest("base64url");
 const SECRET = (id) => `CORA_GOOGLE_${id.toUpperCase()}`;
@@ -208,7 +212,7 @@ async function labelIds(ctx, names) {
 const TOOLS = [
   {
     name: "gmail_accounts", needs: null,
-    description: (connections) => `Gmail: the accounts the owner connected in Connettori and authorised you on (${connections.map((item) => item.email).join(", ")}), with what each allows: send, draft, read, change.`,
+    description: (connections) => `Google: the accounts the owner connected in Connettori and authorised you on (${connections.map((item) => item.email).join(", ")}), with what each allows: Gmail send, draft, read, change; Google Drive drive (read), drive_write.`,
     async run(args, ctx) { return ctx.connections.map((item) => ({ id: item.id, email: item.email, can: canList(item) })); },
   },
   {
@@ -413,6 +417,7 @@ const TOOLS = [
       return ctx.gmail(method, path, { query: args.query, body: method === "GET" || method === "DELETE" ? undefined : args.body });
     },
   },
+  ...DRIVE_TOOLS,
 ];
 
 export const google = {
@@ -422,17 +427,27 @@ export const google = {
   tools: TOOLS,
   card: {
     icon: "mail",
-    description: "Leggi, cerca, organizza e invia la posta del tuo account Gmail o Google Workspace con gli agenti che scegli.",
-    meta: "Gmail · Google Workspace",
+    description: "Leggi, cerca, organizza e invia la posta e lavora sui file di Google Drive del tuo account Google con gli agenti che scegli.",
+    meta: "Gmail · Google Drive · Google Workspace",
   },
 };
+
+const ACCESS_PARTS = ["mail", "send", "drive"];
+/** The access a space asks the broker for, as "send", "mail", "drive" or a comma list ("mail,drive"); mail already includes send. */
+export function connectorAccess(value) {
+  const parts = new Set(String(value || "").toLowerCase().split(",").map((part) => part.trim()).filter((part) => ACCESS_PARTS.includes(part)));
+  if (parts.has("mail")) parts.delete("send");
+  if (!parts.size) parts.add("send");
+  return ACCESS_PARTS.filter((part) => parts.has(part)).join(",");
+}
+const SERVICE = { gmail: "Gmail", drive: "Google Drive" };
 
 export class ConnectorError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
 }
 export class GoogleConnector {
-  constructor({ store, broker, space, storeSecret, tokenFor, enabled = true, access = "send", api = "https://gmail.googleapis.com/gmail/v1/users/me" }) {
-    Object.assign(this, { store, enabled, mailAccess: access === "mail" ? "mail" : "send", broker: String(broker || "").replace(/\/$/, ""), space, storeSecret, tokenFor, api });
+  constructor({ store, broker, space, storeSecret, tokenFor, enabled = true, access = "send", api = "https://gmail.googleapis.com/gmail/v1/users/me", driveApi = "https://www.googleapis.com/drive/v3" }) {
+    Object.assign(this, { store, enabled, mailAccess: connectorAccess(access), broker: String(broker || "").replace(/\/$/, ""), space, storeSecret, tokenFor, api, driveApi });
     this.pending = new Map(); this.bundles = new Map(); this.access = new Map();
   }
   records() { return this.store.value("googleConnectors", []); }
@@ -452,7 +467,7 @@ export class GoogleConnector {
     const nonce = randomBytes(32).toString("base64url"), verifier = randomBytes(32).toString("base64url");
     this.pending.set(nonce, { userId: user.id, verifier, expires: Date.now() + 900000 });
     const url = new URL(`${this.broker}/connectors/google/start`);
-    url.search = new URLSearchParams({ space: this.space, nonce, challenge: hash(verifier), ...(this.mailAccess === "mail" ? { access: "mail" } : {}) });
+    url.search = new URLSearchParams({ space: this.space, nonce, challenge: hash(verifier), ...(this.mailAccess !== "send" ? { access: this.mailAccess } : {}) });
     return { url: url.href, nonce };
   }
   async relay(path, body) {
@@ -508,28 +523,44 @@ export class GoogleConnector {
   /** The From header: the agent's name and the account's address. */
   fromHeader(agent, connection) { return `${header(agent.name)} <${connection.email}>`; }
 
-  /** One call to the Gmail API of an account, with Cora's access token; a refusal becomes a message the agent can act on. */
-  async gmail(connection, method, path, { query, body, raw, contentType, base } = {}) {
-    const url = new URL(`${base || this.api}${path}`);
+  /** One call to the Gmail or Drive API of an account, with Cora's access token; a refusal becomes a message the agent can act on.
+   * as "bytes" answers the body as it is, as "location" the upload session Google opens; upload goes to the Drive upload host, session to that session. */
+  async request(connection, service, method, path, { query, body, raw, contentType, base, as, headers = {}, upload = false, session = false } = {}) {
+    const name = SERVICE[service] || "Google";
+    let url;
+    if (session) {
+      url = new URL(path);
+      if (url.origin !== new URL(this.driveApi).origin) throw new ToolError("Google Drive answered an upload address on another host");
+    } else url = new URL(`${base || (service === "drive" ? (upload ? this.driveApi.replace("/drive/v3", "/upload/drive/v3") : this.driveApi) : this.api)}${path}`);
     for (const [key, value] of Object.entries(query || {})) {
       for (const item of Array.isArray(value) ? value : [value]) if (item !== undefined && item !== null && item !== "") url.searchParams.append(key, String(item));
     }
     const access = await this.token(connection);
     let response;
     try {
-      response = await fetch(url, { method, headers: { Authorization: `Bearer ${access}`, Accept: "application/json", ...(raw !== undefined ? { "Content-Type": contentType } : body !== undefined ? { "Content-Type": "application/json" } : {}) }, body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(60000) });
+      response = await fetch(url, { method, headers: { Authorization: `Bearer ${access}`, Accept: as === "bytes" ? "*/*" : "application/json", ...(raw !== undefined ? { "Content-Type": contentType } : body !== undefined ? { "Content-Type": "application/json" } : {}), ...headers }, body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(as === "bytes" || raw !== undefined ? 300000 : 60000) });
     } catch {
-      throw new ToolError("Gmail does not answer: try again shortly");
+      throw new ToolError(`${name} does not answer: try again shortly`);
     }
+    if (response.ok && as === "bytes") {
+      const length = Number(response.headers.get("content-length") || 0);
+      if (length > 50 * 1024 * 1024) { await response.body?.cancel(); throw new ToolError(`the file is ${length} bytes: at most ${50 * 1024 * 1024}`); }
+      return { bytes: Buffer.from(await response.arrayBuffer()), type: response.headers.get("content-type") || "" };
+    }
+    if (response.ok && as === "location") { await response.body?.cancel(); return { location: response.headers.get("location") || "" }; }
     let data = null;
     try { data = response.status === 204 ? {} : await response.json(); } catch { data = null; }
     const reason = data?.error?.message ? `: ${String(data.error.message).slice(0, 800)}` : "";
+    const why = String(data?.error?.errors?.[0]?.reason || "");
     if (response.status === 401) { this.access.delete(connection.id); throw new ToolError(`Google refuses ${connection.email}: the owner reconnects it in Connettori`); }
-    if (response.status === 403 && /scope|insufficient/i.test(reason)) throw new ToolError(`${connection.email} did not grant this to Cora${reason}: the owner reconnects it in Connettori and allows reading and drafts`);
-    if (response.status === 429) throw new ToolError("Gmail limits the calls: try again in a minute");
-    if (!response.ok) throw new ToolError(`Gmail answered ${response.status}${reason}`);
+    if (response.status === 403 && (/scope|insufficient/i.test(reason) && !/sufficient permissions? for/i.test(reason))) throw new ToolError(`${connection.email} did not grant this to Cora${reason}: the owner reconnects it in Connettori and allows ${service === "drive" ? "Google Drive" : "reading and drafts"}`);
+    if (response.status === 429 || /rateLimitExceeded/.test(why)) throw new ToolError(`${name} limits the calls: try again in a minute`);
+    if (!response.ok) throw new ToolError(`${name} answered ${response.status}${reason}`);
     return data ?? {};
   }
+
+  gmail(connection, method, path, options) { return this.request(connection, "gmail", method, path, options); }
+  drive(connection, method, path, options) { return this.request(connection, "drive", method, path, options); }
 
   /** Sends a composed message from an account the agent is still authorised on. */
   async deliver(agent, connection, message) {
@@ -562,21 +593,21 @@ export class GoogleConnector {
   async runTool(agent, name, args = {}, { readFile = null, writeFile = null } = {}) {
     const connections = this.forAgent(agent), tool = TOOLS.find((item) => item.name === name);
     if (!connections.length) return { text: "error: you are not authorised on a Google account: the owner picks the agents in the Google card in Connettori" };
-    if (!tool) return { text: `error: ${name} is not a Gmail tool` };
-    const from = String(args.from || "").trim().toLowerCase();
+    if (!tool) return { text: `error: ${name} is not a Google tool` };
+    const from = String(args.account || args.from || "").trim().toLowerCase();
     const able = tool.needs ? connections.filter((item) => capabilities(item)[tool.needs]) : connections;
     const readers = able.filter((item) => capabilities(item).read);
     const guess = !tool.needs ? connections[0] : able.length === 1 ? able[0] : (args.message || args.thread || args.draft) && readers.length === 1 ? readers[0] : null;
     const connection = from ? connections.find((item) => item.id === from || item.email.toLowerCase() === from) : guess;
-    if (!connection) return { text: `error: from is one of ${(from ? connections : able.length ? able : connections).map((item) => item.email).join(", ")}` };
+    if (!connection) return { text: `error: ${name.startsWith("drive_") ? "account" : "from"} is one of ${(from ? connections : able.length ? able : connections).map((item) => item.email).join(", ")}` };
     if (tool.needs && !capabilities(connection)[tool.needs]) return { text: `error: ${connection.email} cannot ${NEEDS[tool.needs]}: Google granted it only ${canList(connection).join(", ") || "nothing"}; the owner reconnects it in Connettori to allow more` };
-    const ctx = { agent, connection, connections, connector: this, readFile, writeFile, gmail: (method, path, options) => this.gmail(connection, method, path, options) };
+    const ctx = { agent, connection, connections, connector: this, readFile, writeFile, gmail: (method, path, options) => this.gmail(connection, method, path, options), drive: (method, path, options) => this.drive(connection, method, path, options) };
     try {
       const out = JSON.stringify(await tool.run(args || {}, ctx) ?? null);
       const LIMIT = 40000;
-      return { text: out.length > LIMIT ? `${out.slice(0, LIMIT)}\n[truncated at ${LIMIT} of ${out.length} characters: ask for fewer messages or a lower max_chars]` : out };
+      return { text: out.length > LIMIT ? `${out.slice(0, LIMIT)}\n[truncated at ${LIMIT} of ${out.length} characters: ask for fewer items or a lower max_chars]` : out };
     } catch (error) {
-      return { text: `error: ${error instanceof ToolError || error instanceof ConnectorError ? error.message : error.message || "Gmail failed"}` };
+      return { text: `error: ${error instanceof ToolError || error instanceof ConnectorError ? error.message : error.message || "Google failed"}` };
     }
   }
 

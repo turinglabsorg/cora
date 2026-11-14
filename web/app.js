@@ -3614,6 +3614,12 @@ function connectorsPane() {
     return [back(), record?.status === "revocation_pending" ? revocationPanel(service, record) : record?.status === "connected" ? connectedPanel(service, record) : keyForm(service)];
   };
 
+  const googleAccess = (scope) => {
+    const granted = new Set(String(scope || "").split(/\s+/)), has = (name) => granted.has(`https://www.googleapis.com/auth/${name}`);
+    const mail = has("gmail.modify") ? "Gmail: lettura e invio" : has("gmail.compose") ? "Gmail: bozze e invio" : has("gmail.send") ? "Gmail: invio" : "";
+    const drive = has("drive") ? "Drive: completo" : has("drive.readonly") ? "Drive: sola lettura" : has("drive.file") ? "Drive: file creati da Cora" : "";
+    return [mail, drive].filter(Boolean).map((part) => tr(part)).join(" · ") || tr("Account Google collegato");
+  };
   const googleDetail = () => {
     const connect = btn(data.connections.length ? "Collega un altro account Google" : "Collega account Google", { icon: "plus", cls: "primary", disabled: !data.canManage || !data.available, onclick: async (event) => {
       const button = event.currentTarget; button.disabled = true;
@@ -3650,16 +3656,16 @@ function connectorsPane() {
         try { await api(`/api/connectors/${connection.id}`, { method: "DELETE" }); await load(); }
         catch (error) { toast(error.message, true); disconnect.disabled = !data.canManage; }
       } });
-      return connectedCard(`google:${connection.id}`, { icon: "mail", title: raw(connection.email), hint: "Account Google collegato", actions: tag("Collegato", "ok") },
+      return connectedCard(`google:${connection.id}`, { icon: "mail", title: raw(connection.email), hint: raw(googleAccess(connection.scope)), actions: tag("Collegato", "ok") },
         h("p", { class: "label" }, "2. Autorizza gli agenti"),
         choices.length ? h("div", { class: "email-folders" }, choices.map((item) => item.node)) : h("p", { class: "muted" }, "Crea un agente per assegnargli questo account."), feedback, senders, setRows(setRow("Scollega", "Toglie l’accesso a questo account Google agli agenti autorizzati.", disconnect)));
     });
     return [back(),
-      (data.connections.length ? (options, ...body) => connectedCard("google:setup", options, ...body) : panel)({ icon: "mail", title: "Google", hint: "Gmail e Google Workspace", actions: tag(data.connections.length ? "Collegato" : "Da collegare", data.connections.length ? "ok" : "agent") },
-        h("p", {}, "Collega Gmail o Google Workspace con Fluxkit per inviare email dal tuo indirizzo."),
+      (data.connections.length ? (options, ...body) => connectedCard("google:setup", options, ...body) : panel)({ icon: "mail", title: "Google", hint: "Gmail, Google Drive e Google Workspace", actions: tag(data.connections.length ? "Collegato" : "Da collegare", data.connections.length ? "ok" : "agent") },
+        h("p", {}, "Collega il tuo account Google con Fluxkit: gli agenti che scegli usano Gmail e Google Drive per quanto Google concede all'account."),
         h("p", { class: "muted" }, "Scegli quali agenti possono usare ogni account. La posta in arrivo di Google resta nel tuo account."),
         data.notice ? h("p", { role: "status" }, raw(tr(data.notice))) : null,
-        setRows(setRow("1. Collega il tuo account", "Accedi su Google e conferma il permesso di invio. Puoi collegare più account.", h("div", { class: "stack-sm" },
+        setRows(setRow("1. Collega il tuo account", "Accedi su Google e conferma i permessi richiesti. Puoi collegare più account.", h("div", { class: "stack-sm" },
           !data.available ? h("p", { role: "status", class: "notice warn" }, "Il collegamento di nuovi account Google non è disponibile in questo spazio. Puoi continuare a usare e gestire gli account già collegati.") : null,
           !data.canManage ? h("p", { class: "muted" }, "Solo il proprietario cambia i connettori.") : null,
           h("div", { class: "row" }, connect)), { stack: true }))),

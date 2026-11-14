@@ -29,7 +29,7 @@ export function toolDefinition(tool, record) {
   return { name: tool.name, description: typeof tool.description === "function" ? tool.description(record) : tool.description, parameters: tool.parameters || { type: "object", properties: {} } };
 }
 
-const IDS = ["task", "issue", "project", "team", "section", "design", "folder", "asset", "thread", "message", "id", "job"];
+const IDS = ["file", "task", "issue", "project", "team", "section", "design", "folder", "asset", "thread", "message", "id", "job"];
 
 /** One line for the activity log: the tool's own summary, or the ids it touches; never a key and never a body. */
 export function summarizeTool(name, args = {}) {
