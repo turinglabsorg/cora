@@ -2074,7 +2074,8 @@ test("routine workspaces retain independent drafts and archive filters through r
     sections[0].click();
     const card = panel.app.querySelector(".routine");
     const toggle = card.querySelector(".routine-toggle");
-    assert.equal(toggle.textContent, "Details");
+    assert.equal(toggle.querySelector(".routine-name").textContent, "Daily briefing");
+    assert.ok(card.querySelector(".routine-detail").querySelector(".routine-actions"), "actions live inside the details");
     assert.match(card.querySelector(".routine-times").textContent, /paused/);
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
     assert.equal(card.querySelector(".routine-detail").hidden, true);
