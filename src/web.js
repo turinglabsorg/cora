@@ -1585,7 +1585,8 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         if (!text) throw new HttpError(400, "messaggio vuoto");
         if (text.length > 3000) throw new HttpError(400, "messaggio troppo lungo (max 3000 caratteri)");
         if (agentId && !store.agent(agentId).enabled) throw new HttpError(409, "l'agente è muto: accendilo dal profilo");
-        return send(res, 201, await orchestrator.onWebMessage({ room, text, user }));
+        const clientId = /^c_[0-9a-f]{16,32}$/.test(String(body.clientId || "")) ? body.clientId : null;
+        return send(res, 201, await orchestrator.onWebMessage({ room, text, user, clientId }));
       }
     }
 

@@ -3023,6 +3023,65 @@ describe("panel auth", () => {
     assert.equal(panel.app.querySelector(".chat-input"), null);
   });
 
+  test("a chat message shows at once, sends once, merges with the server copy and can be resent after a failure", async () => {
+    const posts = [];
+    const panel = panelHarness({ fetch: async (path, options) => {
+      if (path === "/api/rooms/web/messages" && options?.method === "POST") {
+        const gate = Promise.withResolvers();
+        posts.push({ body: JSON.parse(options.body), gate });
+        return gate.promise;
+      }
+      return fetch(`${base}${path}`, { ...options, headers: { ...options?.headers, Cookie: cookie } });
+    } });
+    await panel.run("boot()");
+    await panel.navigate("#/salotto");
+    await waitFor(() => panel.app.querySelector(".chat-input"));
+    const input = panel.app.querySelector(".chat-input");
+    const form = panel.app.querySelector(".chat-compose");
+    const log = panel.app.querySelector(".chat-log");
+    const bubbles = () => log.querySelectorAll(".msg").filter((node) => node.textContent.includes("PRIMO_INVIO"));
+    input.value = "PRIMO_INVIO";
+    form.dispatch("submit");
+    form.dispatch("submit");
+    assert.equal(input.value, "", "the composer empties at once");
+    assert.equal(posts.length, 1, "a second submit of the same message sends nothing");
+    assert.equal(bubbles().length, 1, "the message is in the log before the server answers");
+    assert.ok(bubbles()[0].classList.contains("pending"));
+    assert.match(bubbles()[0].querySelector(".send-state").textContent, /invio/);
+    const { clientId } = posts[0].body;
+    assert.match(clientId, /^c_[0-9a-f]{24}$/);
+    const item = { id: "web_fixture_first", at: Date.now(), authorId: "panel", authorName: "Seb", kind: "owner", agentId: null, content: "PRIMO_INVIO", clientId };
+    panel.run("S.live")({ type: "web-message", room: "web", item });
+    assert.equal(bubbles().length, 1, "the live copy that arrives first takes the place of the draft");
+    assert.ok(!bubbles()[0].classList.contains("pending"));
+    assert.equal(bubbles()[0].getAttribute("data-id"), "web_fixture_first");
+    posts[0].gate.resolve(new Response(JSON.stringify(item), { status: 201 }));
+    await sleep(20);
+    assert.equal(bubbles().length, 1, "the HTTP answer after the live copy adds nothing");
+    assert.equal(bubbles()[0].querySelector(".send-state"), null);
+
+    input.value = "SECONDO_INVIO";
+    form.dispatch("submit");
+    const second = () => log.querySelectorAll(".msg").filter((node) => node.textContent.includes("SECONDO_INVIO"));
+    posts[1].gate.resolve(new Response(JSON.stringify({ error: "rete assente" }), { status: 503 }));
+    await sleep(20);
+    assert.equal(second().length, 1);
+    assert.ok(second()[0].classList.contains("failed"), "a refused send stays visible and marked");
+    const retry = second()[0].querySelector(".retry");
+    assert.ok(retry, "a failed message offers Riprova");
+    retry.click();
+    assert.equal(posts.length, 3);
+    assert.equal(posts[2].body.clientId, posts[1].body.clientId, "the retry is the same message");
+    assert.ok(second()[0].classList.contains("pending"));
+    posts[2].gate.resolve(new Response(JSON.stringify({ id: "web_fixture_second", at: Date.now(), authorId: "panel", authorName: "Seb", kind: "owner", agentId: null, content: "SECONDO_INVIO", clientId: posts[2].body.clientId }), { status: 201 }));
+    await sleep(20);
+    assert.equal(second().length, 1);
+    assert.ok(!second()[0].classList.contains("failed") && !second()[0].classList.contains("pending"));
+    panel.run("S.live")({ type: "web-message", room: "web", item: { id: "web_fixture_second", at: Date.now(), authorId: "panel", authorName: "Seb", kind: "owner", agentId: null, content: "SECONDO_INVIO" } });
+    assert.equal(second().length, 1, "a late live copy of a confirmed message adds nothing");
+    await panel.navigate("#/agenti");
+  });
+
   test("usage captions, months, daily details and statuses follow the panel language", async () => {
     const source = await fetch(`${base}/assets/app.js`).then((response) => response.text());
     for (const [language, expected] of [
@@ -4158,6 +4217,52 @@ describe("agents in Discord", () => {
     assert.equal((await call("/api/rooms/web-nobody/messages")).status, 404);
     assert.equal((await call("/api/traces/tr_0000")).status, 404);
     await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
+  });
+
+  test("a panel message sent twice with the same clientId is stored and answered once", async () => {
+    const created = await call("/api/agents", { method: "POST", body: { name: "Unico", model: "ollama/test-model", chattiness: 0, tools: false } });
+    const room = `web-${created.data.id}`;
+    let calls = 0;
+    replies.set("Unico", () => { calls += 1; return { content: "Ricevuto una volta." }; });
+    const abort = new AbortController();
+    const stream = await fetch(`${base}/api/events`, { headers: { Cookie: cookie }, signal: abort.signal });
+    let events = "";
+    const reading = (async () => {
+      const decoder = new TextDecoder();
+      try { for await (const chunk of stream.body) events += decoder.decode(chunk, { stream: true }); } catch {}
+    })();
+    try {
+      const clientId = "c_0123456789abcdef01234567";
+      const body = { text: "Messaggio da non duplicare", clientId };
+      const [first, second] = await Promise.all([
+        call(`/api/rooms/${room}/messages`, { method: "POST", body }),
+        call(`/api/rooms/${room}/messages`, { method: "POST", body }),
+      ]);
+      assert.equal(first.status, 201);
+      assert.equal(second.status, 201);
+      assert.equal(first.data.id, second.data.id, "the same clientId is the same message");
+      assert.equal(first.data.clientId, clientId);
+      const again = await call(`/api/rooms/${room}/messages`, { method: "POST", body });
+      assert.equal(again.data.id, first.data.id, "a retry after the answer is still the same message");
+      await waitFor(() => events.includes(`"clientId":"${clientId}"`), { what: "the live copy carrying the clientId" });
+      await waitFor(async () => (await call(`/api/rooms/${room}/messages`)).data.messages.some((item) => item.agentId === created.data.id), { what: "Unico's reply" });
+      await quiet();
+      const stored = (await call(`/api/rooms/${room}/messages`)).data.messages;
+      assert.equal(stored.filter((item) => item.content === "Messaggio da non duplicare").length, 1);
+      assert.ok(!stored.some((item) => "clientId" in item), "the clientId is not stored in the history");
+      assert.equal(calls, 1);
+      const bad = await call(`/api/rooms/${room}/messages`, { method: "POST", body: { text: "Senza nome valido", clientId: "<script>" } });
+      assert.equal(bad.status, 201);
+      assert.equal(bad.data.clientId, undefined, "an invalid clientId is ignored");
+      const other = await call(`/api/rooms/${room}/messages`, { method: "POST", body: { text: "Messaggio da non duplicare" } });
+      assert.notEqual(other.data.id, first.data.id, "the same words sent again on purpose are a new message");
+      await quiet();
+    } finally {
+      abort.abort();
+      await reading;
+      replies.delete("Unico");
+      await call(`/api/agents/${created.data.id}`, { method: "DELETE" });
+    }
   });
 
   test("in the salotto the agent called by name answers, live on the panel's event stream", async () => {
