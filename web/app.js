@@ -5845,6 +5845,7 @@ function renderBrain() {
   live.hidden = true;
   let poll = null;
   let snapshot = null;
+  let liveOpen = false;
   const runButton = btn("Aggiorna adesso", { icon: "refresh", cls: "ghost", onclick: async () => {
     runButton.disabled = true;
     const started = await guard(api("/api/brain/run", { method: "POST" }));
@@ -5864,26 +5865,34 @@ function renderBrain() {
       progress.batches ? tr("lotto {batch} di {batches}", progress) : tr("legge note e messaggi nuovi"),
       progress.model ? modelLabel(progress.model, { short: true }) : "",
     ].filter(Boolean).join(" · ") : tr("in coda: parte appena può");
-    const head = h("div", { class: "brain-live-head", role: "status", "aria-live": "polite" },
-      h("span", { class: "subscription-spinner", "aria-hidden": "true" }),
-      h("div", { class: "grow" }, h("b", {}, tr("Il bibliotecario è al lavoro")), h("span", { class: "line" }, line)),
-      h("span", { class: "brain-live-hint" }, tr("in tempo reale")));
-    const keep = [...live.querySelectorAll(".brain-live-scroll")].map((box) => box.scrollHeight - box.scrollTop - box.clientHeight < 40);
-    const events = h("ol", { class: "brain-live-events brain-live-scroll" }, (progress?.events || []).map(brainEventEl));
-    if (!progress?.events?.length) events.append(h("li", { class: "muted" }, tr("Aspetta il primo passo…")));
-    const steps = h("div", { class: "steps-log brain-live-steps brain-live-scroll" });
     const trace = snapshot?.trace;
+    const shown = [];
     let lastHidden = false;
     for (const step of trace?.steps || []) {
       if (step.type === "thinking" && step.hidden && lastHidden) continue;
       lastHidden = step.type === "thinking" && Boolean(step.hidden);
-      steps.append(stepEl(step, Date.parse(trace.startedAt)));
+      shown.push(step);
     }
-    if (!steps.children.length) steps.append(empty("bulb", trace ? "Il modello sta leggendo: il suo ragionamento compare qui appena lo scrive." : "Il ragionamento compare qui quando il bibliotecario chiede al modello."));
+    const logged = progress?.events || [];
+    const latestEvent = logged.at(-1);
+    const latestStep = shown.findLast((step) => step.type !== "tool" && !step.hidden && step.text);
+    const now = latestStep && (!latestEvent || (latestStep.at || 0) >= (latestEvent.at || 0)) ? latestStep.text : latestEvent?.text || "";
+    const toggle = logged.length || shown.length ? h("button", { type: "button", class: "btn ghost sm brain-live-toggle", "aria-expanded": String(liveOpen), onclick: () => { liveOpen = !liveOpen; drawLive(); } },
+      h("span", {}, tr(liveOpen ? "Chiudi" : "Dettagli")), icon("next")) : null;
+    const head = h("div", { class: "brain-live-head", role: "status", "aria-live": "polite" },
+      h("span", { class: "subscription-spinner", "aria-hidden": "true" }),
+      h("div", { class: "grow" },
+        h("span", { class: "brain-live-title" }, h("b", {}, tr("Il bibliotecario è al lavoro")), h("span", { class: "line" }, line)),
+        now ? h("span", { class: "brain-live-now" }, raw(String(now).replace(/\s+/g, " ").slice(0, 200))) : null),
+      toggle);
+    if (!liveOpen || !toggle) { live.replaceChildren(head); return; }
+    const keep = [...live.querySelectorAll(".brain-live-scroll")].map((box) => box.scrollHeight - box.scrollTop - box.clientHeight < 40);
+    const events = logged.length ? h("ol", { class: "brain-live-events brain-live-scroll" }, logged.map(brainEventEl)) : null;
+    const steps = shown.length ? h("div", { class: "steps-log brain-live-steps brain-live-scroll" }, shown.map((step) => stepEl(step, Date.parse(trace.startedAt)))) : null;
     live.replaceChildren(head, h("div", { class: "brain-live-cols" },
-      h("section", {}, h("h3", { class: "label" }, tr("Cosa fa")), events),
-      h("section", {}, h("h3", { class: "label" }, tr("Ragionamento del modello")), steps)));
-    [events, steps].forEach((box, index) => { if (keep[index] ?? true) box.scrollTop = box.scrollHeight; });
+      events ? h("section", {}, h("h3", { class: "label" }, tr("Cosa fa")), events) : null,
+      steps ? h("section", {}, h("h3", { class: "label" }, tr("Ragionamento del modello")), steps) : null));
+    [events, steps].forEach((box, index) => { if (box && (keep[index] ?? true)) box.scrollTop = box.scrollHeight; });
   }
   function watch() {
     clearTimeout(poll);
