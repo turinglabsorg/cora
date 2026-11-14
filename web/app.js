@@ -3862,7 +3862,31 @@ function emailChannelPane(agent = null, onSections = null, isCurrent = null) {
         const signature = h("textarea", { rows: 3, maxlength: 1500, "aria-label": "Testo della firma", value: rules.signature || `${agent.name}\n${data.senders?.find((item) => item.id === rules.senderId)?.email || agent.mailbox?.email || ""}`, disabled: !data.canManage });
         signature.addEventListener("change", () => save({ signature: signature.value }, signature));
         const preview = h("div", { class: "email-signature-preview", role: "status" });
-        content.push(panel({ icon: "edit", title: "Firma come immagine", hint: "Il suo avatar, il nome e i dettagli: la stessa firma nelle email HTML." }, field("Testo della firma", signature),
+        const iconSrc = () => `${endpoint}/signature-icon?v=${encodeURIComponent(data.signatureIcon?.updatedAt || agent.avatarVersion || "")}`;
+        const iconImage = h("img", { src: iconSrc(), alt: tr("Icona della firma"), width: 56, height: 56 });
+        const iconFile = h("input", { type: "file", accept: "image/*", hidden: true });
+        const iconNote = h("p", { class: "muted" }, data.signatureIcon?.custom ? "Icona propria, solo per la firma." : "Usa l'avatar dell'agente.");
+        const iconReset = btn("Usa l'avatar dell'agente", { icon: "refresh", cls: "sm ghost", disabled: !data.canManage, onclick: async (event) => {
+          event.currentTarget.disabled = true;
+          if (await guard(api(`${endpoint}/signature-icon`, { method: "DELETE" }), "Firma con l'avatar dell'agente")) await load();
+          else event.currentTarget.disabled = false;
+        } });
+        iconReset.hidden = !data.signatureIcon?.custom;
+        const iconUpload = btn("Carica icona", { icon: "upgrade", cls: "sm", disabled: !data.canManage, onclick: () => iconFile.click() });
+        iconFile.addEventListener("change", async () => {
+          const chosen = iconFile.files[0];
+          iconFile.value = "";
+          if (!chosen) return;
+          let image;
+          try { image = await squarePng(chosen, 256); } catch { return toast(tr("Questa immagine non si apre"), true); }
+          iconUpload.disabled = true;
+          if (await guard(api(`${endpoint}/signature-icon`, { method: "PUT", body: { image } }), "Icona della firma salvata")) await load();
+          else iconUpload.disabled = false;
+        });
+        content.push(panel({ icon: "edit", title: "Firma come immagine", hint: "Un'icona, il nome e i dettagli: la stessa firma nelle email HTML." },
+          h("div", { class: "field" }, h("span", { class: "label" }, tr("Icona")),
+            h("div", { class: "email-signature-icon" }, iconImage, h("div", { class: "stack-sm" }, iconNote, h("div", { class: "avatar-actions" }, iconUpload, iconReset)), iconFile)),
+          field("Testo della firma", signature),
           btn("Mostra anteprima", { icon: "eye", cls: "ghost", onclick: async (event) => {
             const button = event.currentTarget; button.disabled = true;
             preview.replaceChildren(h("p", { class: "muted" }, "Preparo la firma…"));

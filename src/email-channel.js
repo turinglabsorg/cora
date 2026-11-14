@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { transportOf } from "./channels.js";
+import { pngSize } from "./png.js";
 
 const FOLDERS = ["inbox", "important", "transactional", "notification", "spam", "sent"];
 const MODES = ["manual", "notify", "auto"];
@@ -27,6 +28,7 @@ export class EmailChannel {
       at TEXT NOT NULL, data TEXT NOT NULL, status TEXT NOT NULL, channel_id TEXT NOT NULL DEFAULT '',
       token TEXT UNIQUE, tracked INTEGER NOT NULL DEFAULT 0, opened TEXT, opens INTEGER NOT NULL DEFAULT 0,
       signature BLOB, delivery_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(agent_id, mailbox, id));
+      CREATE TABLE IF NOT EXISTS email_signature_icons (agent_id TEXT PRIMARY KEY, data BLOB NOT NULL, updated_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS agent_mail_recent ON agent_mail(agent_id, at DESC, id);
       CREATE INDEX IF NOT EXISTS agent_mail_pending ON agent_mail(status, agent_id);
       CREATE UNIQUE INDEX IF NOT EXISTS agent_mail_delivery ON agent_mail(agent_id,mailbox,delivery_id) WHERE delivery_id!='';`);
@@ -90,6 +92,24 @@ export class EmailChannel {
     this.log({ type: "settings", ...(agent ? { agentId: agent.id } : {}), text: "regole del canale E-mail aggiornate" });
     return agent ? this.view(agent) : this.view();
   }
+  customIcon(agent) {
+    const row = this.store.db.prepare("SELECT data,updated_at FROM email_signature_icons WHERE agent_id=?").get(agent.id);
+    return row ? { data: Buffer.from(row.data), updatedAt: row.updated_at } : null;
+  }
+  signatureIcon(agent) { return this.customIcon(agent)?.data || this.store.avatar(agent.id); }
+  setSignatureIcon(agent, image) {
+    if (image === null) {
+      this.store.db.prepare("DELETE FROM email_signature_icons WHERE agent_id=?").run(agent.id);
+      this.log({ type: "settings", agentId: agent.id, text: "icona della firma email: torna all'avatar dell'agente" });
+      return this.view(agent);
+    }
+    const size = Buffer.isBuffer(image) && image.length <= 1024 * 1024 ? pngSize(image) : null;
+    if (!size) throw new EmailError("L'icona deve essere un PNG fino a 1 MB.");
+    if (size.width !== size.height || size.width < 64 || size.width > 1024) throw new EmailError("L'icona deve essere quadrata, tra 64 e 1024 pixel.");
+    this.store.db.prepare("INSERT INTO email_signature_icons(agent_id,data,updated_at) VALUES(?,?,?) ON CONFLICT(agent_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at").run(agent.id, image, new Date().toISOString());
+    this.log({ type: "settings", agentId: agent.id, text: "nuova icona della firma email" });
+    return this.view(agent);
+  }
   identity(agent, id, rules = this.overrides(agent)) {
     return id === "resend" ? this.mailDomains.sender(agent, rules.resendSender) : this.googleConnector.identity(agent, id);
   }
@@ -115,11 +135,11 @@ export class EmailChannel {
   }
   view(agent = null) {
     if (!agent) return { settings: this.settings, channels: this.channels.list(), agents: this.store.agents().map((item) => ({ id: item.id, name: item.name, ...this.summary(item), status: this.store.value(`emailStatus:${item.id}`, null) })) };
-    const senders = [...(this.googleConnector?.forAgent(agent) || [])];
+    const senders = [...(this.googleConnector?.forAgent(agent) || [])], custom = this.customIcon(agent);
     if (this.overrides(agent).resendSender) {
       try { senders.push(this.identity(agent, "resend")); } catch {}
     }
-    return { senders, resendDomains: this.mailDomains?.senderDomains() || [], overrides: this.overrides(agent), effective: this.effective(agent), destination: this.destination(agent), channels: this.channels.listFor(agent), summary: this.summary(agent), recent: this.recent(agent), status: this.store.value(`emailStatus:${agent.id}`, null) };
+    return { senders, resendDomains: this.mailDomains?.senderDomains() || [], overrides: this.overrides(agent), effective: this.effective(agent), destination: this.destination(agent), channels: this.channels.listFor(agent), summary: this.summary(agent), recent: this.recent(agent), status: this.store.value(`emailStatus:${agent.id}`, null), signatureIcon: { custom: Boolean(custom), updatedAt: custom?.updatedAt || "" } };
   }
   mailboxes(agent) {
     const mailbox = this.store.value(`agentMailbox:${agent.id}`, null);
@@ -243,7 +263,7 @@ export class EmailChannel {
     const mailbox = this.mailboxes(agent)[0], own = this.overrides(agent);
     if (!from && own.senderId) from = this.identity(agent, own.senderId).email;
     const compose = { text: message.body_text || "", html: message.body_html || "", signature: own.signature || `${agent.name}\n${from || mailbox}`,
-      email: from || mailbox, avatar: this.store.avatar(agent.id).toString("base64"), track,
+      email: from || mailbox, avatar: this.signatureIcon(agent).toString("base64"), track,
       image_url: `${this.instanceUrl}/mail/media/${token}.png`, pixel_url: `${this.instanceUrl}/mail/media/${token}.gif` };
     if (!this.renderers.has(agent.id)) {
       const job = this.boxes.ensureMailRenderer(agent).catch((error) => { this.renderers.delete(agent.id); throw error; });

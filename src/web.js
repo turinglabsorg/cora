@@ -629,7 +629,7 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 200, await email.update(await readJson(req, 20000)));
       }
     }
-    const agentEmail = /^\/api\/agents\/([\w-]+)\/email(?:\/(refresh|signature))?$/.exec(path);
+    const agentEmail = /^\/api\/agents\/([\w-]+)\/email(?:\/(refresh|signature|signature-icon))?$/.exec(path);
     if (agentEmail) {
       const agent = store.agent(agentEmail[1]);
       if (!agent) throw new HttpError(404, "Agente non trovato.");
@@ -637,6 +637,15 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
       if (method === "GET" && agentEmail[2] === "signature") {
         const rendered = await email.compose(agent, { body_text: "" }, "preview", false);
         return send(res, 200, Buffer.from(rendered.png, "base64"), { "Content-Type": "image/png" });
+      }
+      if (agentEmail[2] === "signature-icon") {
+        if (method === "GET") return send(res, 200, email.signatureIcon(agent), { "Content-Type": "image/png", "Cache-Control": "no-cache" });
+        if (method === "PUT" || method === "DELETE") {
+          if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario cambia l'icona della firma.");
+          if (method === "DELETE") return send(res, 200, email.setSignatureIcon(agent, null));
+          const encoded = /^data:image\/png;base64,([A-Za-z0-9+/]+=*)$/.exec(String((await readJson(req, 2 * 1024 * 1024)).image || ""))?.[1];
+          return send(res, 200, email.setSignatureIcon(agent, encoded ? Buffer.from(encoded, "base64") : Buffer.alloc(0)));
+        }
       }
       if (method === "POST" && agentEmail[2] === "refresh") {
         await email.poll(agent);
