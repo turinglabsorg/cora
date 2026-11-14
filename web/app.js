@@ -3922,13 +3922,19 @@ function emailChannelPane(agent = null, onSections = null, isCurrent = null) {
 
 function emailRecap(agent, initial) {
   let data = initial, filter = "all";
+  const canManage = Boolean(initial.canManage);
   const body = h("div", { class: "stack" });
-  const stateLabel = { pending: "In coda", ignored: "Solo ricevuta", notified: "Segnalata", working: "In gestione", processed: "Gestita", stopped: "Fermata", interrupted: "Da verificare", error: "Da verificare", sent: "Inviata", sending: "Invio in corso", uncertain: "Invio da verificare", draft: "Bozza" };
+  const stateLabel = { pending: "In coda", ignored: "Solo ricevuta", notified: "Segnalata", working: "In gestione", processed: "Gestita", stopped: "Fermata", interrupted: "Da verificare", error: "Da verificare", sent: "Inviata", sending: "Invio in corso", uncertain: "Invio da verificare", draft: "Bozza", scheduled: "Programmata", dispatching: "Invio in corso", cancelled: "Invio annullato", failed: "Non inviata" };
   function draw() {
     const summary = data.summary, status = data.status;
     const modes = [["all", "Tutte"], ["received", "Ricevute"], ["sent", "Inviate"], ["draft", "Bozze"]];
     const picker = h("div", { class: "segmented", role: "group", "aria-label": "Filtra email" }, modes.map(([id, label]) => btn(label, { cls: filter === id ? "on" : "", onclick: () => { filter = id; draw(); } })));
-    const messages = data.recent.filter((item) => filter === "all" || item.direction === filter);
+    const messages = data.recent.filter((item) => filter === "all" || item.direction === filter || filter === "sent" && item.direction === "scheduled");
+    const cancel = (item) => btn("Annulla invio", { icon: "close", cls: "sm ghost", onclick: async (event) => {
+      const button = event.currentTarget; button.disabled = true;
+      try { data = await api(`/api/agents/${agent.id}/email/scheduled/${item.id}`, { method: "DELETE" }); toast(tr("Invio programmato annullato")); draw(); }
+      catch (error) { toast(error.message, true); button.disabled = false; }
+    } });
     body.replaceChildren(h("div", { class: "email-totals" }, [[summary.received, "Ricevute"], [summary.sent, "Inviate"], [summary.draft, "Bozze"]].map(([value, label]) => h("div", {}, h("strong", {}, raw(value)), h("span", {}, label)))),
       h("div", { class: "row" }, picker, h("span", { class: "spacer" }), btn("Aggiorna posta", { icon: "refresh", cls: "sm ghost", onclick: async (event) => {
         const button = event.currentTarget; button.disabled = true;
@@ -3938,8 +3944,10 @@ function emailRecap(agent, initial) {
       status?.error ? h("p", { class: "err-text", role: "status" }, raw(tr(status.error))) : h("p", { class: "muted" }, status?.checkedAt ? tr("Ultimo controllo: {date}", { date: new Date(status.checkedAt).toLocaleString(LANG) }) : "Il primo controllo partirà automaticamente."),
       status?.partial ? h("p", { class: "muted" }, "Sono mostrate le email più recenti.") : "",
       h("div", { class: "email-ledger" }, messages.length ? messages.map((item) => h("article", { class: "email-ledger-row" },
-        h("div", { class: "email-ledger-main" }, icon(item.direction === "received" ? "mail" : "send"), h("div", {}, h("strong", {}, raw(item.subject || tr("Senza oggetto"))), h("p", { class: "muted" }, raw(item.direction === "received" ? item.from : (item.to || []).join(", "))), item.provider === "resend" ? h("small", { class: "muted" }, tr("Mittente: {email} · Resend", { email: item.from })) : null)),
-        h("div", { class: "email-ledger-meta" }, tag(item.opened ? "Apertura rilevata" : stateLabel[item.status] || "Ricevuta", item.opened ? "ok" : ["error", "interrupted", "uncertain"].includes(item.status) ? "agent" : ""), h("time", { datetime: item.at }, raw(new Date(item.at).toLocaleString(LANG))),
+        h("div", { class: "email-ledger-main" }, icon(item.direction === "received" ? "mail" : item.direction === "scheduled" ? "clock" : "send"), h("div", {}, h("strong", {}, raw(item.subject || tr("Senza oggetto"))), h("p", { class: "muted" }, raw(item.direction === "received" ? item.from : (item.to || []).join(", "))), item.provider === "resend" ? h("small", { class: "muted" }, tr("Mittente: {email} · Resend", { email: item.from })) : null, item.direction === "scheduled" && item.error ? h("small", { class: "err-text" }, raw(tr(item.error))) : null)),
+        h("div", { class: "email-ledger-meta" }, tag(item.opened ? "Apertura rilevata" : stateLabel[item.status] || "Ricevuta", item.opened ? "ok" : ["error", "interrupted", "uncertain", "failed"].includes(item.status) ? "agent" : item.status === "scheduled" ? "on" : ""), h("time", { datetime: item.at }, raw(new Date(item.at).toLocaleString(LANG))),
+          item.direction === "sent" && item.scheduledFor ? h("small", { class: "muted" }, "Partita all'orario programmato") : null,
+          item.direction === "scheduled" && item.status === "scheduled" && canManage ? cancel(item) : null,
           item.direction === "sent" && !item.opened ? h("small", { class: "muted" }, item.tracked ? "Nessuna apertura rilevata" : "Tracking disattivato") : null))) : h("p", { class: "muted" }, "Nessuna email da mostrare.")));
   }
   draw();

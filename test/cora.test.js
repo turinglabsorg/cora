@@ -9165,8 +9165,8 @@ describe("email channel", () => {
     assert.equal(recap.data.summary.received, 5);
     assert.equal(recap.data.recent.find((item) => item.id === email.id).status, "notified");
     assert.doesNotMatch(JSON.stringify(recap.data), /fixture-mailbox-client-key|BEGIN PRIVATE|Encrypted fixture message/);
-    assert.match((await executeTool({ name: "email_read", args: { id: email.id } }, { agent, email: app.email })).text, /authorized user/);
-    const read = await executeTool({ name: "email_read", args: { id: email.id } }, { agent, email: app.email, requester: { kind: "owner" } });
+    assert.match((await executeTool({ name: "email_read", args: { id: email.id } }, { agent, email: app.email, store: app.store })).text, /authorized user/);
+    const read = await executeTool({ name: "email_read", args: { id: email.id } }, { agent, email: app.email, store: app.store, requester: { kind: "owner" } });
     assert.match(read.text, /Encrypted fixture message/);
     assert.equal((await f.call(`/api/agents/${agent.id}/email`, { method: "PUT", asMember: true, body: { mode: "auto" } })).status, 403);
     const refused = await executeTool({ name: "email_read", args: { id: email.id } }, { agent: { ...agent, id: "ag_other" }, email: app.email });
@@ -9200,7 +9200,7 @@ describe("email channel", () => {
 
   test("an authorized agent persists its report destination and cannot choose an inaccessible channel", async (t) => {
     const f = await emailWorld(t);
-    const ctx = { agent: f.agent, email: f.app.email, postingChannels: f.app.channels.listFor(f.agent) };
+    const ctx = { agent: f.agent, email: f.app.email, store: f.app.store, postingChannels: f.app.channels.listFor(f.agent) };
     const call = { name: "email_settings", args: { channel_id: OTHER_CHANNEL } };
     assert.match((await executeTool(call, ctx)).text, /error:/);
     assert.match((await executeTool(call, { ...ctx, requester: { kind: "owner" }, emailInvocation: { id: "untrusted" } })).text, /error:/);
@@ -9547,6 +9547,84 @@ describe("email channel", () => {
     assert.doesNotMatch(f.state.sent[2].body_html, /\.png/);
     await f.app.email.poll(f.agent); await f.app.email.processing.get(f.agent.id);
     assert.equal(f.app.email.summary(f.agent).sent, 3);
+  });
+
+  test("a scheduled email waits, leaves once at its time, survives a restart and can be cancelled", async (t) => {
+    const f = await emailWorld(t);
+    clearInterval(f.app.email.scheduler);
+    const ctx = { agent: f.agent, email: f.app.email, store: f.app.store };
+    const owner = { ...ctx, requester: { kind: "owner" } };
+    const later = (minutes) => new Date(Date.now() + minutes * 60000).toISOString().replace("Z", "+00:00");
+    const message = (extra = {}) => ({ to: ["robin+scheduled@ambox.dev"], subject: "Later", body_text: "Scheduled body", ...extra });
+    const run = async (call, context) => (await executeTool({ name: call[0], args: call[1] }, context)).text;
+    const refused = async (args, reason, context = owner) => assert.match(await run(["email_send", args], context), reason);
+
+    await refused(message({ send_at: later(30) }), /^error: mailbox access requires an authorized user request/, ctx);
+    await refused(message({ send_at: later(30) }), /^error.*utente autorizzato/, { ...owner, emailInvocation: { id: "untrusted" } });
+    await refused(message({ send_at: new Date(Date.now() - 60000).toISOString() }), /^error.*già passato/);
+    await refused(message({ send_at: "2026-12-01T09:00:00" }), /^error.*fuso orario/);
+    await refused(message({ send_at: "tomorrow at nine" }), /^error.*fuso orario/);
+    await refused(message({ send_at: later(60 * 24 * 400) }), /^error.*un anno/);
+    await refused(message({ send_at: later(30), to: ["not-an-address"] }), /^error.*obbligatori/);
+    assert.equal(f.app.email.summary(f.agent).scheduled, 0);
+
+    const queued = JSON.parse(await run(["email_send", message({ send_at: later(30) })], owner));
+    assert.equal(queued.status, "scheduled");
+    assert.match(queued.id, /^scheduled_[a-f0-9]{24}$/);
+    assert.equal(f.state.sent.length, 0);
+    const listed = f.app.email.view(f.agent);
+    assert.equal(listed.summary.scheduled, 1);
+    const row = listed.recent.find((item) => item.id === queued.id);
+    assert.equal(row.status, "scheduled");
+    assert.equal(row.at, queued.send_at);
+    assert.equal(row.message, undefined);
+    assert.equal(row.requester, undefined);
+    assert.ok(JSON.parse(await run(["email_inbox", {}], owner)).recent.some((item) => item.id === queued.id && item.sendAt === queued.send_at));
+
+    await f.app.email.dispatchDue(Date.now());
+    assert.equal(f.state.sent.length, 0);
+    await Promise.all([f.app.email.dispatchDue(Date.now() + 31 * 60000), f.app.email.dispatchDue(Date.now() + 31 * 60000)]);
+    assert.equal(f.state.sent.length, 1);
+    assert.equal(f.state.sent[0].subject, "Later");
+    assert.match(f.state.sent[0].body_text, /Scheduled body/);
+    const statusOf = (id) => f.app.store.db.prepare("SELECT status FROM agent_mail WHERE id=?").get(id).status;
+    const done = f.app.email.recent(f.agent);
+    assert.equal(statusOf(queued.id), "sent");
+    assert.equal(done.some((item) => item.id === queued.id), false);
+    assert.equal(done.find((item) => item.direction === "sent").scheduledFor, queued.send_at);
+    assert.equal(done.find((item) => item.direction === "sent").scheduledId, queued.id);
+    await f.app.email.dispatchDue(Date.now() + 120 * 60000);
+    assert.equal(f.state.sent.length, 1);
+
+    const second = JSON.parse(await run(["email_send", message({ subject: "Cancel me", send_at: later(45) })], owner));
+    assert.match(await run(["email_cancel", { id: second.id }], ctx), /^error: mailbox access requires an authorized user request/);
+    assert.match(await run(["email_cancel", { id: second.id }], { ...owner, emailInvocation: { id: "untrusted" } }), /^error: cancelling a scheduled email requires/);
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email/scheduled/${second.id}`, { method: "DELETE", asMember: true })).status, 403);
+    const cancelled = await f.call(`/api/agents/${f.agent.id}/email/scheduled/${second.id}`, { method: "DELETE" });
+    assert.equal(cancelled.status, 200);
+    assert.equal(cancelled.data.recent.find((item) => item.id === second.id).status, "cancelled");
+    assert.equal((await f.call(`/api/agents/${f.agent.id}/email/scheduled/${second.id}`, { method: "DELETE" })).status, 409);
+    const third = JSON.parse(await run(["email_send", message({ subject: "Agent cancels", send_at: later(45) })], owner));
+    assert.equal(JSON.parse(await run(["email_cancel", { id: third.id }], { ...ctx, requester: { kind: "authorized" } })).status, "cancelled");
+    await f.app.email.dispatchDue(Date.now() + 60 * 60000);
+    assert.equal(f.state.sent.length, 1);
+
+    const kept = JSON.parse(await run(["email_send", message({ subject: "After restart", send_at: later(50) })], owner));
+    const stuck = JSON.parse(await run(["email_send", message({ subject: "Interrupted", send_at: later(50) })], owner));
+    f.app.store.db.prepare("UPDATE agent_mail SET status='dispatching' WHERE id=?").run(stuck.id);
+    const restarted = new EmailChannel({ store: f.app.store, boxes: f.app.boxes, channels: f.app.channels, orchestrator: f.app.orchestrator, instanceUrl: f.base, key: "fixture-key" });
+    assert.equal(restarted.recent(f.agent).find((item) => item.id === stuck.id).status, "interrupted");
+    await restarted.dispatchDue(Date.now() + 60 * 60000);
+    assert.deepEqual(f.state.sent.map((item) => item.subject), ["Later", "After restart"]);
+    assert.equal(statusOf(kept.id), "sent");
+
+    const blocked = JSON.parse(await run(["email_send", message({ subject: "Agent off", send_at: later(55) })], owner));
+    f.app.store.updateAgent(f.agent.id, { enabled: false });
+    await f.app.email.dispatchDue(Date.now() + 60 * 60000);
+    const failed = f.app.email.recent(f.agent).find((item) => item.id === blocked.id);
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /disattivato/);
+    assert.equal(f.state.sent.length, 2);
   });
 
   test("the image signature takes its own icon, kept apart from the agent's avatar", async (t) => {

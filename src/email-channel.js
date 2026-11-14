@@ -32,7 +32,7 @@ export class EmailChannel {
       CREATE INDEX IF NOT EXISTS agent_mail_recent ON agent_mail(agent_id, at DESC, id);
       CREATE INDEX IF NOT EXISTS agent_mail_pending ON agent_mail(status, agent_id);
       CREATE UNIQUE INDEX IF NOT EXISTS agent_mail_delivery ON agent_mail(agent_id,mailbox,delivery_id) WHERE delivery_id!='';`);
-    store.db.prepare("UPDATE agent_mail SET status='interrupted' WHERE status IN ('working','notifying','sending')").run();
+    store.db.prepare("UPDATE agent_mail SET status='interrupted' WHERE status IN ('working','notifying','sending','dispatching')").run();
   }
 
   get settings() { return { ...defaults, ...this.store.value("emailChannel", {}) }; }
@@ -127,11 +127,15 @@ export class EmailChannel {
     return general.length === 1 ? general[0] : null;
   }
   summary(agent) {
-    return this.store.db.prepare("SELECT direction, COUNT(*) AS count FROM agent_mail WHERE agent_id=? AND direction IN ('received','sent','draft') GROUP BY direction").all(agent.id).reduce((out, row) => ({ ...out, [row.direction]: row.count }), { received: 0, sent: 0, draft: 0 });
+    const totals = this.store.db.prepare("SELECT direction, COUNT(*) AS count FROM agent_mail WHERE agent_id=? AND direction IN ('received','sent','draft') GROUP BY direction").all(agent.id).reduce((out, row) => ({ ...out, [row.direction]: row.count }), { received: 0, sent: 0, draft: 0 });
+    return { ...totals, scheduled: this.store.db.prepare("SELECT COUNT(*) AS count FROM agent_mail WHERE agent_id=? AND direction='scheduled' AND status='scheduled'").get(agent.id).count };
   }
   recent(agent, direction = "") {
-    const filter = ["received", "sent", "draft"].includes(direction) ? direction : "";
-    return this.store.db.prepare("SELECT * FROM agent_mail WHERE agent_id=? AND (?='' OR direction=?) ORDER BY at DESC,id DESC LIMIT 30").all(agent.id, filter, filter).map(({ data, signature, token, tracked, opened, opens, status, channel_id, direction, at }) => ({ ...JSON.parse(data), direction, at, tracked: Boolean(tracked), opened, opens, status, channelId: channel_id }));
+    const filter = ["received", "sent", "draft", "scheduled"].includes(direction) ? direction : "";
+    return this.store.db.prepare("SELECT * FROM agent_mail WHERE agent_id=? AND (?='' OR direction=?) AND NOT (direction='scheduled' AND status='sent') ORDER BY at DESC,id DESC LIMIT 30").all(agent.id, filter, filter).map(({ data, signature, token, tracked, opened, opens, status, channel_id, direction, at }) => {
+      const { message, requester, ...rest } = JSON.parse(data);
+      return { ...rest, direction, at, tracked: Boolean(tracked), opened, opens, status, channelId: channel_id };
+    });
   }
   view(agent = null) {
     if (!agent) return { settings: this.settings, channels: this.channels.list(), agents: this.store.agents().map((item) => ({ id: item.id, name: item.name, ...this.summary(item), status: this.store.value(`emailStatus:${item.id}`, null) })) };
@@ -272,13 +276,17 @@ export class EmailChannel {
     await this.renderers.get(agent.id);
     return this.boxes.mailCommand(agent, { action: "compose", mailbox, compose, files });
   }
-  async send(agent, message, { requester, invocation } = {}) {
+  validMessage(message) {
+    if (!Array.isArray(message.to) || !message.to.length || message.to.length > 30 || message.to.some((email) => !/^[^\s<>@]+@[^\s<>@]+\.[a-z]{2,}$/i.test(email)) || !String(message.subject || "").trim() || !String(message.body_text || message.body_html || "").trim()) throw new EmailError("Destinatario, oggetto e messaggio sono obbligatori.");
+  }
+  async send(agent, message, { requester, invocation, scheduled = null } = {}) {
+    if (message.send_at !== undefined && message.send_at !== null && message.send_at !== "" && !scheduled) return this.schedule(agent, message, { requester, invocation });
     const policy = this.effective(agent), senderId = message.sender_id || policy.senderId || "";
     const external = senderId ? this.identity(agent, senderId) : null;
     const mailbox = external?.email || this.mailboxes(agent)[0];
     if (!mailbox) throw new EmailError("Email non disponibile.");
     if (!["owner", "authorized"].includes(requester?.kind) && !(invocation && policy.enabled && policy.mode === "auto" && policy.replyMode === "auto" && this.eligible(agent, invocation))) throw new EmailError("L'invio richiede la richiesta di un utente autorizzato.", 403);
-    if (!Array.isArray(message.to) || !message.to.length || message.to.length > 30 || message.to.some((email) => !/^[^\s<>@]+@[^\s<>@]+\.[a-z]{2,}$/i.test(email)) || !String(message.subject || "").trim() || !String(message.body_text || message.body_html || "").trim()) throw new EmailError("Destinatario, oggetto e messaggio sono obbligatori.");
+    this.validMessage(message);
     if (!requester && (message.to.length !== 1 || addressOf(message.to[0]) !== addressOf(invocation.from) || message.cc?.length || message.bcc?.length)) throw new EmailError("La risposta automatica può essere inviata solo al mittente.", 403);
     if (!this.instanceUrl) throw new EmailError("L'indirizzo pubblico dello spazio non è ancora pronto.");
     const sourceId = invocation ? `${invocation.mailbox}/${invocation.id}` : "";
@@ -294,7 +302,7 @@ export class EmailChannel {
     const current = this.store.agent(agent.id), latest = this.effective(agent);
     if (!current?.enabled || !current.tools || !requester && (!latest.enabled || latest.mode !== "auto" || latest.replyMode !== "auto" || !this.eligible(current, invocation))) throw new EmailError("L'autorizzazione email è cambiata. Invio annullato.", 403);
     const at = new Date().toISOString(), id = `sending_${token}`;
-    const data = { id, mailbox, from: mailbox, to: message.to, subject: message.subject, receivedAt: at, sourceId, senderId, ...(senderId === "resend" ? { provider: "resend", body_text: prepared.text, body_html: prepared.html } : {}) };
+    const data = { id, mailbox, from: mailbox, to: message.to, subject: message.subject, receivedAt: at, sourceId, senderId, ...(scheduled ? { scheduledFor: scheduled.sendAt, scheduledId: scheduled.id } : {}), ...(senderId === "resend" ? { provider: "resend", body_text: prepared.text, body_html: prepared.html } : {}) };
     this.store.db.prepare("INSERT INTO agent_mail(agent_id,mailbox,id,direction,at,data,status,token,tracked,signature) VALUES(?,?,?,?,?,?,?,?,?,?)").run(agent.id, mailbox, id, "sent", at, JSON.stringify(data), "sending", token, Number(track), Buffer.from(prepared.png, "base64"));
     try {
       const outgoing = { ...message, body_text: prepared.text, body_html: prepared.html, ...(invocation ? { in_reply_to: invocation.messageId, references: invocation.references, auto_submitted: "auto-replied" } : {}) };
@@ -306,6 +314,56 @@ export class EmailChannel {
       this.store.db.prepare("UPDATE agent_mail SET status='uncertain' WHERE agent_id=? AND mailbox=? AND id=?").run(agent.id, mailbox, id);
       throw new EmailError("Invio non confermato. Controlla la posta inviata prima di riprovare.", 502);
     }
+  }
+  async schedule(agent, message, { requester, invocation } = {}) {
+    if (invocation || !["owner", "authorized"].includes(requester?.kind)) throw new EmailError("Programmare un invio richiede la richiesta di un utente autorizzato in chat.", 403);
+    const when = Date.parse(String(message.send_at));
+    if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(String(message.send_at).trim()) || Number.isNaN(when)) throw new EmailError("send_at deve essere una data ISO 8601 con fuso orario, ad esempio 2026-12-01T09:00:00+01:00.");
+    if (when <= Date.now()) throw new EmailError("L'orario di invio è già passato.");
+    if (when > Date.now() + 366 * 86400000) throw new EmailError("Si può programmare al massimo un anno avanti.");
+    this.validMessage(message);
+    const policy = this.effective(agent), senderId = message.sender_id || policy.senderId || "";
+    const mailbox = (senderId ? this.identity(agent, senderId) : null)?.email || this.mailboxes(agent)[0];
+    if (!mailbox) throw new EmailError("Email non disponibile.");
+    const sendAt = new Date(when).toISOString(), id = `scheduled_${randomBytes(12).toString("hex")}`;
+    const { send_at, ...stored } = message;
+    const data = { id, mailbox, from: mailbox, to: message.to, subject: message.subject, receivedAt: new Date().toISOString(), sendAt, senderId, message: { ...stored, ...(senderId ? { sender_id: senderId } : {}) }, requester: { kind: requester.kind } };
+    this.store.db.prepare("INSERT INTO agent_mail(agent_id,mailbox,id,direction,at,data,status) VALUES(?,?,?,?,?,?,?)").run(agent.id, mailbox, id, "scheduled", sendAt, JSON.stringify(data), "scheduled");
+    this.log({ type: "email", agentId: agent.id, text: `email programmata per ${sendAt}: ${String(message.subject).slice(0, 80)}` });
+    return { id, status: "scheduled", send_at: sendAt, from: mailbox, to: message.to };
+  }
+  cancelScheduled(agent, id) {
+    const row = this.store.db.prepare("SELECT data,status FROM agent_mail WHERE agent_id=? AND direction='scheduled' AND id=?").get(agent.id, String(id || ""));
+    if (!row) throw new EmailError("Invio programmato non trovato.", 404);
+    if (row.status !== "scheduled") throw new EmailError("Questo invio non è più in programma.", 409);
+    const data = { ...JSON.parse(row.data), cancelledAt: new Date().toISOString() };
+    const changed = this.store.db.prepare("UPDATE agent_mail SET status='cancelled',data=? WHERE agent_id=? AND direction='scheduled' AND id=? AND status='scheduled'").run(JSON.stringify(data), agent.id, id).changes;
+    if (!changed) throw new EmailError("Questo invio non è più in programma.", 409);
+    this.log({ type: "email", agentId: agent.id, text: `invio programmato annullato: ${String(data.subject).slice(0, 80)}` });
+    return { id, status: "cancelled" };
+  }
+  async dispatchDue(now = Date.now()) {
+    if (this.dispatching) return this.dispatching;
+    this.dispatching = (async () => {
+      const due = this.store.db.prepare("SELECT agent_id,id,data FROM agent_mail WHERE status='scheduled' AND direction='scheduled' AND at<=? ORDER BY at,id LIMIT 20").all(new Date(now).toISOString());
+      for (const row of due) {
+        if (this.stopped) break;
+        if (!this.store.db.prepare("UPDATE agent_mail SET status='dispatching' WHERE agent_id=? AND id=? AND status='scheduled'").run(row.agent_id, row.id).changes) continue;
+        const data = JSON.parse(row.data), agent = this.store.agent(row.agent_id);
+        const finish = (status, extra = {}) => this.store.db.prepare("UPDATE agent_mail SET status=?,data=? WHERE agent_id=? AND id=?").run(status, JSON.stringify({ ...data, ...extra }), row.agent_id, row.id);
+        try {
+          if (!agent?.enabled || !agent.tools) throw new EmailError("L'agente è disattivato o senza strumenti: invio programmato non eseguito.", 403);
+          const result = await this.send(agent, data.message, { requester: data.requester, scheduled: { id: row.id, sendAt: data.sendAt } });
+          finish("sent", { sentId: result.id, sentAt: new Date().toISOString() });
+          this.log({ type: "email", agentId: agent.id, text: `email programmata inviata: ${String(data.subject).slice(0, 80)}` });
+        } catch (error) {
+          const uncertain = error instanceof EmailError && error.status === 502;
+          finish(uncertain ? "uncertain" : "failed", { error: error instanceof EmailError ? error.message : "Invio programmato non riuscito." });
+          this.log({ type: "email", agentId: row.agent_id, text: `invio programmato non riuscito: ${String(data.subject).slice(0, 80)}` });
+        }
+      }
+    })().finally(() => { this.dispatching = null; });
+    return this.dispatching;
   }
   media(token, { preview = false, png = true, head = false } = {}) {
     const row = this.store.db.prepare("SELECT signature,tracked FROM agent_mail WHERE token=?").get(token);
@@ -325,6 +383,7 @@ export class EmailChannel {
     };
     this.timer = setInterval(tick, 60000);
     this.initial = setTimeout(tick, 1500);
+    this.scheduler = setInterval(() => { this.dispatchDue().catch(() => {}); }, 15000);
   }
-  async stop() { this.stopped = true; clearInterval(this.timer); clearTimeout(this.initial); await Promise.allSettled([...this.jobs.values()]); await Promise.allSettled([...this.processing.values()]); }
+  async stop() { this.stopped = true; clearInterval(this.timer); clearTimeout(this.initial); clearInterval(this.scheduler); await Promise.allSettled([...this.jobs.values()]); await Promise.allSettled([...this.processing.values()]); await this.dispatching; }
 }

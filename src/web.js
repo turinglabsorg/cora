@@ -629,6 +629,14 @@ export function createWeb({ config, store, subscriptions, discord, telegram, sla
         return send(res, 200, await email.update(await readJson(req, 20000)));
       }
     }
+    const scheduledEmail = /^\/api\/agents\/([\w-]+)\/email\/scheduled\/(scheduled_[a-f0-9]{24})$/.exec(path);
+    if (scheduledEmail && method === "DELETE") {
+      const agent = store.agent(scheduledEmail[1]);
+      if (!agent) throw new HttpError(404, "Agente non trovato.");
+      if (!knowledge?.ownerMemory && user.role !== "owner") throw new HttpError(403, "Solo il proprietario annulla un invio programmato.");
+      email.cancelScheduled(agent, scheduledEmail[2]);
+      return send(res, 200, email.view(agent));
+    }
     const agentEmail = /^\/api\/agents\/([\w-]+)\/email(?:\/(refresh|signature|signature-icon))?$/.exec(path);
     if (agentEmail) {
       const agent = store.agent(agentEmail[1]);
