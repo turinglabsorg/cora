@@ -4383,7 +4383,7 @@ function routineForm(agent, routine = {}, { onCancel, onSaved } = {}) {
   if (routine.channelId && !routine.channelId.startsWith("web") && !S.data.channels.some((channel) => channel.id === routine.channelId)) {
     channelSelect.append(h("option", { value: routine.channelId, selected: true }, tr("{channel} (non attivo)", { channel: channelName(routine.channelId) })));
   }
-  const form = panel({ tag: "form", icon: isNew ? "plus" : "edit", title: isNew ? "Nuova attività" : tr("Modifica «{name}»", { name: routine.name }), hint: "Un compito, quando serve, con un risultato da ritrovare." },
+  const form = panel({ tag: "form", cls: "task-form", icon: isNew ? "plus" : "edit", title: isNew ? "Nuova attività" : tr("Modifica «{name}»", { name: routine.name }), hint: "Un compito, quando serve, con un risultato da ritrovare." },
     setRows(
       isNew ? setRow("Tipo", "Una routine si ripete; un reminder va una volta sola, poi in archivio.", kindPicker, { stack: true })
         : setRow("Tipo", null, badge(kind === "reminder" ? "Reminder" : "Routine", "", "clock")),
@@ -4414,6 +4414,16 @@ function routineForm(agent, routine = {}, { onCancel, onSaved } = {}) {
 }
 
 const RUN_STATUS = { running: ["in corso", "agent"], completed: ["successo verificato", "ok"], posted: ["pubblicata", "ok"], nothing: ["niente da dire", ""], error: ["errore", "err"], blocked: ["bloccato", "err"], unverified: ["da verificare", "err"], interrupted: ["interrotto", "err"], stopped: ["fermato", ""], skipped: ["in attesa", ""], unknown: ["esito non disponibile", ""] };
+const ROW_STATUS = { running: ["in corso", "agent"], completed: ["verificata", "ok"], posted: ["pubblicata", "ok"], nothing: ["niente da dire", ""], error: ["errore", "err"], blocked: ["bloccata", "err"], unverified: ["da verificare", "err"], interrupted: ["interrotta", "err"], stopped: ["fermata", ""], skipped: ["in attesa", ""], unknown: ["esito non disponibile", ""] };
+function shortTime(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const day = (value) => new Intl.DateTimeFormat("en-CA", { timeZone: S.data?.timezone || "Europe/Rome", year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
+  const today = day(new Date());
+  if (day(date) === today) return fmtTime(iso);
+  if (day(date) === day(new Date(Date.now() + 86400000))) return tr("domani {time}", { time: fmtTime(iso) });
+  return fmtTime(iso, true);
+}
 function runStatus(status) { return tag(...(RUN_STATUS[status] || [status, ""])); }
 function taskTime(iso) {
   return new Intl.DateTimeFormat(LOCALE, { timeZone: S.data.timezone, year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }).format(new Date(iso));
@@ -4436,30 +4446,53 @@ async function routineTab(agent, routines) {
   };
   const items = () => S.data.routines.filter((routine) => routine.agentId === agent.id).sort((a, b) => Date.parse(a.nextRunAt || "9999-01-01") - Date.parse(b.nextRunAt || "9999-01-01")).map((routine) => {
     const reminder = routine.kind === "reminder";
-    const status = routine.running ? tag("in corso", "agent")
-      : routine.lastStatus ? runStatus(routine.lastStatus) : null;
-    return h("div", { class: `routine${routine.enabled ? "" : " paused"}` },
-      h("div", { class: "routine-head" },
-        h("span", { class: "panel-ico" }, icon("clock")),
-        h("span", { class: "grow" },
-          h("b", {}, raw(routine.name), routine.enabled ? "" : " · in pausa"),
-          h("span", { class: "row-meta" }, reminder ? "Reminder" : "Routine", h("code", {}, reminder ? taskTime(routine.runAt) : raw(routine.schedule)), "→", raw(channelName(routine.channelId)))),
-        h("span", { class: "row-actions" },
-          btn("", { icon: "play", cls: "sm", title: reminder && ["blocked", "unverified", "error", "interrupted", "stopped"].includes(routine.lastStatus) ? "Riprova" : "Esegui ora", disabled: routine.running, onclick: async () => {
-            if (await guard(api(`/api/routines/${routine.id}/run`, { method: "POST" }), "Attività avviata")) scheduleRefresh();
-          } }),
-          btn("", { icon: "edit", cls: "sm", title: "Modifica", onclick: () => edit(routine) }),
-          btn("", { icon: routine.enabled ? "pause" : "power", cls: "sm", title: routine.enabled ? "Metti in pausa" : "Riattiva", onclick: async () => {
-            if (await guard(api(`/api/routines/${routine.id}`, { method: "PUT", body: { enabled: !routine.enabled } }))) { await loadState(); drawTasks(); }
-          } }),
-          armedButton("Archivia", "Conferma archiviazione", { cls: "sm", onconfirm: async () => {
-            if (await guard(api(`/api/routines/${routine.id}`, { method: "DELETE" }), "Attività archiviata")) { await loadState(); drawTasks(); }
-          } }))),
-      h("div", { class: "row-meta" }, status, routine.nextRunAt && routine.enabled ? tr("prossima {time}", { time: fmtTime(routine.nextRunAt, true) }) : "", routine.lastRunAt ? tr(" · ultima {time}", { time: fmtTime(routine.lastRunAt, true) }) : ""),
-      routine.lastVerification?.reason ? h("p", { class: "task-verification" }, raw(routine.lastVerification.reason)) : null,
-      h("details", {}, h("summary", {}, "Compito e ultimo risultato"), h("pre", {}, raw(routine.prompt)), routine.lastOutput ? h("pre", {}, raw(routine.lastOutput)) : null));
+    const [stateText, tone] = routine.running ? ["in corso", "agent"]
+      : !routine.enabled ? ["in pausa", "off"]
+      : routine.lastStatus ? (ROW_STATUS[routine.lastStatus] || [routine.lastStatus, ""])
+      : ["mai eseguita", ""];
+    const failed = tone === "err" || routine.lastVerification?.met === false;
+    const detailsId = `routine-detail-${routine.id}`;
+    const when = routine.nextRunAt && routine.enabled ? tr("prossima {time}", { time: shortTime(routine.nextRunAt) }) : "";
+    const facts = reminder || routine.lastRunAt;
+    const retry = reminder && ["blocked", "unverified", "error", "interrupted", "stopped"].includes(routine.lastStatus);
+    const detail = h("div", { class: "routine-detail", id: detailsId },
+      facts ? h("dl", { class: "routine-facts" },
+        reminder ? [h("dt", {}, "Quando"), h("dd", {}, taskTime(routine.runAt))] : null,
+        routine.lastRunAt ? [h("dt", {}, "Ultima"), h("dd", {}, fmtTime(routine.lastRunAt, true), " · ", tr(stateText))] : null) : null,
+      routine.lastVerification?.reason ? h("p", { class: `task-verification${failed ? " err" : ""}` }, raw(routine.lastVerification.reason)) : null,
+      h("div", { class: "routine-actions" },
+        btn(retry ? "Riprova" : "Esegui", { icon: "play", cls: "sm", title: retry ? "Riprova" : "Esegui ora", disabled: routine.running, onclick: async () => {
+          if (await guard(api(`/api/routines/${routine.id}/run`, { method: "POST" }), "Attività avviata")) scheduleRefresh();
+        } }),
+        btn("Modifica", { icon: "edit", cls: "sm", title: "Modifica", onclick: () => edit(routine) }),
+        btn(routine.enabled ? "Pausa" : "Riattiva", { icon: routine.enabled ? "pause" : "power", cls: "sm", title: routine.enabled ? "Metti in pausa" : "Riattiva", onclick: async () => {
+          if (await guard(api(`/api/routines/${routine.id}`, { method: "PUT", body: { enabled: !routine.enabled } }))) { await loadState(); drawTasks(); }
+        } }),
+        armedButton("Archivia", "Conferma archiviazione", { cls: "sm", onconfirm: async () => {
+          if (await guard(api(`/api/routines/${routine.id}`, { method: "DELETE" }), "Attività archiviata")) { await loadState(); drawTasks(); }
+        } })),
+      h("div", { class: "routine-block" }, h("span", {}, "Compito"), h("pre", {}, raw(routine.prompt))),
+      routine.lastOutput ? h("div", { class: "routine-block" }, h("span", {}, "Ultimo risultato"), h("pre", {}, raw(routine.lastOutput))) : null);
+    detail.hidden = true;
+    const toggle = h("button", { type: "button", class: "routine-toggle", title: "Compito e ultimo risultato", "aria-expanded": "false", "aria-controls": detailsId, onclick: () => {
+      const open = toggle.getAttribute("aria-expanded") !== "true";
+      toggle.setAttribute("aria-expanded", String(open));
+      detail.hidden = !open;
+      article.classList.toggle("open", open);
+    } },
+      h("span", { class: `routine-dot ${tone}`, "aria-hidden": "true" }),
+      h("span", { class: "routine-main" },
+        h("b", { class: "routine-name" }, raw(routine.name)),
+        h("span", { class: "routine-times" },
+          h("span", { class: `routine-state ${tone}` }, tr(stateText)),
+          when ? h("span", {}, when) : null,
+          h("span", { class: "routine-where" }, reminder ? tr("Reminder") : raw(routine.schedule), " → ", raw(channelName(routine.channelId)))),
+        failed && routine.lastVerification?.reason ? h("span", { class: "routine-alert" }, raw(routine.lastVerification.reason)) : null),
+      icon("next"));
+    const article = h("article", { class: `routine${routine.enabled ? "" : " paused"}` }, toggle, detail);
+    return article;
   });
-  const taskList = h("div", { class: "stack-sm" });
+  const taskList = h("div", { class: "routine-list" });
   function drawTasks() {
     const rows = items();
     taskList.replaceChildren(...(rows.length ? rows : [empty("clock", "Nessuna attività in programma. Apri Nuova attività per crearne una.")]));
@@ -4471,7 +4504,7 @@ async function routineTab(agent, routines) {
   }
   drawTasks();
   S.taskRefresh = () => { if (taskList.isConnected) drawTasks(); };
-  const scheduled = panel({ icon: "clock", title: "In programma", hint: "Le routine si ripetono. I reminder si archiviano dopo un successo verificato." }, taskList);
+  const scheduled = panel({ icon: "clock", cls: "routine-panel", title: "In programma", hint: "Le routine si ripetono. I reminder si archiviano dopo un successo verificato." }, taskList);
   const create = () => routineForm(agent, {}, { onSaved: () => { createSlot.replaceChildren(create()); saved(); } });
   createSlot.append(create());
   const current = params.get("view") === "archive" ? "archivio" : editing ? "programma" : route()[3];
