@@ -4,7 +4,7 @@ import { resolve as resolvePath, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ValidationError } from "./store.js";
 import { onPath } from "./llm.js";
-import { HARNESSES, SUBSCRIPTION_PROVIDERS } from "./harnesses.js";
+import { HARNESSES, SUBSCRIPTION_PROVIDERS, codexCredentialStore } from "./harnesses.js";
 import { geminiScope, prepareGeminiProfile } from "./gemini-profile.js";
 import { geminiQuotaMessage } from "./gemini-quota.js";
 
@@ -71,7 +71,7 @@ class CodexAccount {
   constructor(bin, env, cwd, onEvent, onExit, resident = false) {
     this.pending = new Map();
     this.id = 0;
-    this.child = spawn(bin, [...(!resident ? ["-c", 'cli_auth_credentials_store="file"'] : []), "-c", 'forced_login_method="chatgpt"', "app-server"], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
+    this.child = spawn(bin, ["-c", codexCredentialStore(resident), "-c", 'forced_login_method="chatgpt"', "app-server"], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
     this.closed = false;
     this.child.stdin.on("error", () => {});
     this.child.stderr.resume();
@@ -656,7 +656,7 @@ export class Subscriptions {
   async readCatalog(provider, record) {
     // Claude keeps Cora's own list: its picker answers aliases and context variants, not the model ids agents run on.
     if (provider === "codex") {
-      const output = await this.catalogCommand(record, [...(!record.resident ? ["-c", 'cli_auth_credentials_store="file"'] : []), "debug", "models"]);
+      const output = await this.catalogCommand(record, ["-c", codexCredentialStore(record.resident), "debug", "models"]);
       const data = JSON.parse(output || "{}");
       return (Array.isArray(data) ? data : data.models || [])
         .filter((model) => model.slug && (model.visibility || "list") === "list")

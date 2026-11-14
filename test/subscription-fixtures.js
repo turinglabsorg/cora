@@ -7,6 +7,7 @@ export function identityCli() {
   const root = mkdtempSync(join(tmpdir(), "cora-identities-"));
   const control = join(root, "control.json");
   const calls = join(root, "calls.jsonl");
+  const appServerCalls = join(root, "app-server.jsonl");
   writeFileSync(control, JSON.stringify({ complete: false }));
   const source = `#!${process.execPath}
 const fs = require("node:fs");
@@ -41,6 +42,7 @@ if (provider === "gemini" && argv.includes("/usage")) {
     setTimeout(() => { save(); process.stdout.write("Signed in.\\n"); }, state().codeDelayMs || 0);
   });
 } else if (argv.includes("app-server")) {
+  fs.appendFileSync(${JSON.stringify(appServerCalls)}, JSON.stringify({ provider, directory, argv, account: saved()?.email, inheritedKeys: Object.keys(process.env).filter((key) => /TOKEN|API_KEY|AUTH_TOKEN/.test(key)) }) + "\\n");
   const input = readline.createInterface({ input: process.stdin });
   input.on("line", (text) => {
     const message = JSON.parse(text);
@@ -114,5 +116,6 @@ if (provider === "gemini" && argv.includes("/usage")) {
     gemini: join(root, "gemini"),
     set: (value) => writeFileSync(control, JSON.stringify(value)),
     calls: () => { try { return readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); } catch { return []; } },
+    appServerCalls: () => { try { return readFileSync(appServerCalls, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); } catch { return []; } },
   };
 }

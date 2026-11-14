@@ -51,6 +51,15 @@ export const HARNESSES = {
 
 export const SUBSCRIPTION_PROVIDERS = Object.keys(HARNESSES);
 
+/**
+ * Where Codex keeps the login. The server's own account lives in the machine's
+ * keyring, an agent's account in its isolated folder: the check, the login and
+ * the turn must read the same store or the account looks disconnected.
+ */
+export function codexCredentialStore(resident) {
+  return `cli_auth_credentials_store="${resident ? "auto" : "file"}"`;
+}
+
 export function isSubscriptionProvider(provider) {
   return Object.hasOwn(HARNESSES, provider);
 }

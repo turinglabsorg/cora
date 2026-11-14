@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { geminiSettings } from "./gemini-profile.js";
+import { codexCredentialStore } from "./harnesses.js";
 import { deepSeekUsage, emptyMeter, mergeMeter } from "./usage.js";
 
 export const MCP_SCRIPT = fileURLToPath(new URL("./mcp-server.js", import.meta.url));
@@ -621,7 +622,7 @@ export async function runCodex({ bin, model, system, prompt, mcp, toolNames, wor
     "-s", "read-only", "-C", workDir, "-m", model, "-o", outFile, "--json",
     "-c", "approval_policy=\"never\"", "-c", "model_reasoning_summary=\"detailed\"",
     "-c", `developer_instructions=${tomlString(CODEX_CORA_INSTRUCTIONS)}`,
-    "-c", `cli_auth_credentials_store="${residentAuth ? "auto" : "file"}"`, "-c", 'forced_login_method="chatgpt"',
+    "-c", codexCredentialStore(residentAuth), "-c", 'forced_login_method="chatgpt"',
     ...(effort ? ["-c", `model_reasoning_effort=${tomlString(effort)}`] : []),
   ];
   for (const feature of CODEX_DISABLED_FEATURES) args.push("--disable", feature);
