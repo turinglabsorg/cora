@@ -3,11 +3,18 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 export const FLUXKIT_GOOGLE_CLIENT_ID = "912240824457-9hjeo5a3tpqg21d8vb4kb8ub661hcljc.apps.googleusercontent.com";
 const GMAIL = "https://www.googleapis.com/auth/gmail.";
 /**
- * What a space asks Google for: "send" (gmail.send only, what the verified app shows) or
- * "mail" (also drafts with gmail.compose, and reading, labels and archive with gmail.modify).
- * The person may leave some out on Google's screen; at least one must be granted.
+ * What a space asks Google for, as a comma list of parts: "send" (gmail.send only, what the
+ * verified app shows), "mail" (also drafts with gmail.compose, and reading, labels and archive
+ * with gmail.modify) and "drive" (the whole Google Drive). The person may leave some out on
+ * Google's screen; at least one must be granted.
  */
-const ACCESS = { send: [`${GMAIL}send`], mail: [`${GMAIL}send`, `${GMAIL}compose`, `${GMAIL}modify`] };
+const ACCESS = { send: [`${GMAIL}send`], mail: [`${GMAIL}send`, `${GMAIL}compose`, `${GMAIL}modify`], drive: ["https://www.googleapis.com/auth/drive"] };
+/** The scopes a signed access asks for; null when it names a part the broker does not know. */
+export function accessScopes(access = "send") {
+  const parts = String(access || "send").split(",");
+  if (parts.length > Object.keys(ACCESS).length || parts.some((part) => !Object.hasOwn(ACCESS, part))) return null;
+  return [...new Set(parts.flatMap((part) => ACCESS[part]))];
+}
 const digest = (value) => createHash("sha256").update(value).digest("base64url");
 const safeEqual = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
 
@@ -32,10 +39,10 @@ export class GoogleConnectorBroker {
   start({ space, nonce, challenge, access = "send" }) {
     if (!this.clientSecret || !this.spaceOrigin(space)) throw new Error("Google connector unavailable");
     if (!/^[A-Za-z0-9_-]{43}$/.test(nonce || "") || !/^[A-Za-z0-9_-]{43}$/.test(challenge || "")) throw new Error("Invalid connector request");
-    if (!Object.hasOwn(ACCESS, access)) throw new Error("Invalid connector request");
+    if (!accessScopes(access)) throw new Error("Invalid connector request");
     const state = this.sign({ kind: "connect", space, nonce, challenge, access, expires: Date.now() + 900000 });
     const url = new URL(this.endpoints.authorize);
-    url.search = new URLSearchParams({ client_id: this.clientId, redirect_uri: this.redirectUri, response_type: "code", scope: ["openid", "email", ...ACCESS[access]].join(" "), state, code_challenge: challenge, code_challenge_method: "S256", access_type: "offline", prompt: "consent select_account" });
+    url.search = new URLSearchParams({ client_id: this.clientId, redirect_uri: this.redirectUri, response_type: "code", scope: ["openid", "email", ...accessScopes(access)].join(" "), state, code_challenge: challenge, code_challenge_method: "S256", access_type: "offline", prompt: "consent select_account" });
     return url.href;
   }
   callback({ state, code, error }) {
@@ -56,8 +63,9 @@ export class GoogleConnectorBroker {
     if (this.used.has(state) || this.used.size > 10000) throw new Error("Connector state already used");
     this.used.set(state, data.expires);
     const token = await this.token({ grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: this.redirectUri });
-    const granted = String(token.scope || "").split(" ").filter((scope) => (ACCESS[data.access] || ACCESS.send).includes(scope));
-    if (!token.refresh_token || !granted.length) throw new Error("Google did not grant email sending");
+    const asked = accessScopes(data.access) || ACCESS.send;
+    const granted = String(token.scope || "").split(" ").filter((scope) => asked.includes(scope));
+    if (!token.refresh_token || !granted.length) throw new Error("Google granted none of the requested access");
     const response = await fetch(this.endpoints.userinfo, { headers: { Authorization: `Bearer ${token.access_token}` }, signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw new Error("Google identity unavailable");
     const identity = await response.json();
