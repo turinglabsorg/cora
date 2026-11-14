@@ -1,4 +1,5 @@
 import { Discord, DIRECT_MESSAGE_INTENTS, LISTENING_INTENTS } from "./discord.js";
+import { logTransitions } from "./connection-log.js";
 import { ValidationError } from "./store.js";
 
 // Application flags meaning the Message Content intent is on (the limited one is for unverified apps).
@@ -183,15 +184,20 @@ export class AgentBots {
         if (this.clients.get(agentId)?.client !== client) return;
         if (raw.guild_id) this.onGuild?.(raw, agentId); else this.onDirect?.(agentId, raw);
       });
+      let connected = false;
       client.on("ready", () => {
         if (this.clients.get(agentId)?.client !== client) return;
         this.log?.({ type: "discord", agentId, text: `bot collegato come ${client.user?.username}` });
+        // A new session after an outage: what was written meanwhile is not replayed, so it is read back.
+        if (connected) this.onReconnect?.(agentId);
+        connected = true;
         this.syncProfile(this.store.agent(agentId));
         this.readFlags(agentId);
       });
       client.on("status", (status) => {
         if (status.state === "error") this.log?.({ type: "error", agentId, text: `bot Discord: ${status.error}` });
       });
+      logTransitions(client, (entry) => this.log?.(entry), { type: "discord", agentId, label: "bot Discord" });
       this.clients.set(agentId, { client, token, messageContent: false });
       client.start();
     }

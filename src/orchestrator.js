@@ -616,8 +616,13 @@ export class Orchestrator {
   async catchUp() {
     if (this.channels.on("slack")) await this.catchUpSlack();
     if (!this.channels.on("discord")) return;
-    for (const channel of this.channels.list().filter((item) => item.kind === "discord")) {
-      const state = this.state(channel.id);
+    // Private channels and their threads may be seen only by the agents' own bots.
+    const ids = new Set(this.channels.list().filter((item) => item.kind === "discord").map((item) => item.id));
+    for (const agent of this.store.agents()) {
+      for (const channel of this.bots?.client(agent.id)?.listChannels(this.store.settings.guildIds) || []) ids.add(channel.id);
+    }
+    for (const id of ids) {
+      const state = this.state(id);
       if (state.running || state.nextRoundAt) continue;
       state.loaded = false;
       state.loading = null;

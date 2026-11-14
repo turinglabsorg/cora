@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import diagnostics from "node:diagnostics_channel";
 import { EventEmitter } from "node:events";
 import { splitMessage } from "./discord.js";
 
@@ -10,6 +12,22 @@ const CODE = "\u0000";
 const MENTION = "\u0002";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A socket that never says hello is dropped and opened again. */
+export const SLACK_HELLO_TIMEOUT_MS = 20000;
+/** Slack pings an open socket every few seconds: this long without a ping or an envelope means it is dead. */
+export const SLACK_PING_SILENCE_MS = 120000;
+/** Where pings cannot be seen, a socket quiet this long is replaced anyway, and what it missed is caught up. */
+export const SLACK_QUIET_SILENCE_MS = 30 * 60 * 1000;
+const WATCH_EVERY_MS = 15000;
+
+/**
+ * The built-in WebSocket answers Slack's pings without telling anyone. The
+ * runtime still announces each ping on a diagnostics channel, inside the async
+ * context the socket was opened in, so every socket hears its own.
+ */
+const socketContext = new AsyncLocalStorage();
+diagnostics.subscribe("undici:websocket:ping", () => socketContext.getStore()?.heard());
 
 /** Slack reads &, < and > as markup, so a message that means them says them. */
 export function escapeSlack(text) {
@@ -49,8 +67,15 @@ export function isDirectChannel(id) {
  * Every agent has an app of its own; the main one keeps the channel catalog.
  */
 export class Slack extends EventEmitter {
-  constructor({ botToken = "", appToken = "", apiBase = "https://slack.com/api", socketUrl = "" } = {}) {
+  constructor({ botToken = "", appToken = "", apiBase = "https://slack.com/api", socketUrl = "", liveness = {} } = {}) {
     super();
+    this.liveness = {
+      helloMs: SLACK_HELLO_TIMEOUT_MS,
+      pingSilenceMs: SLACK_PING_SILENCE_MS,
+      quietSilenceMs: SLACK_QUIET_SILENCE_MS,
+      everyMs: WATCH_EVERY_MS,
+      ...liveness,
+    };
     this.apiBase = apiBase.replace(/\/$/, "");
     this.socketUrl = socketUrl;
     this.channels = new Map();
@@ -99,8 +124,10 @@ export class Slack extends EventEmitter {
     this.stopped = true;
     this.retries = 0;
     clearTimeout(this.reconnectTimer);
+    clearInterval(this.watchdog);
     try { this.ws?.close(1000); } catch {}
     this.ws = null;
+    this.watch = null;
     if (running) this.setState("stopped");
   }
 
@@ -110,9 +137,22 @@ export class Slack extends EventEmitter {
     if (!this.user) await this.identity();
     const url = this.socketUrl || (await this.request("apps.connections.open", {}, { auth: "app" })).url;
     if (this.stopped) return;
-    const ws = new WebSocket(url);
+    const watch = {
+      opened: Date.now(),
+      seen: Date.now(),
+      pinged: false,
+      heard: () => {
+        watch.seen = Date.now();
+        watch.pinged = true;
+      },
+    };
+    const ws = socketContext.run(watch, () => new WebSocket(url));
     this.ws = ws;
+    this.watch = watch;
+    this.hello = false;
+    this.armWatchdog();
     ws.addEventListener("message", (event) => {
+      watch.seen = Date.now();
       let payload;
       try { payload = JSON.parse(typeof event.data === "string" ? event.data : Buffer.from(event.data).toString("utf8")); } catch { return; }
       this.onEnvelope(ws, payload);
@@ -132,15 +172,14 @@ export class Slack extends EventEmitter {
       try { ws.send(JSON.stringify({ envelope_id: envelope.envelope_id })); } catch {}
     }
     if (envelope.type === "hello") {
+      this.hello = true;
       this.retries = 0;
       this.setState("ready");
       this.emit("ready", this.user);
       return;
     }
     if (envelope.type === "disconnect") {
-      try { ws.close(1000); } catch {}
-      this.ws = null;
-      this.scheduleReconnect(`Slack asked to reconnect (${envelope.reason || "unknown"})`);
+      this.drop(ws, `Slack asked to reconnect (${envelope.reason || "unknown"})`, 1000);
       return;
     }
     const event = envelope.payload?.event;
@@ -158,9 +197,37 @@ export class Slack extends EventEmitter {
     if (event.type === "member_joined_channel" && event.user === this.user?.id) this.noteJoined(event.channel).catch(() => {});
   }
 
+  /**
+   * A socket that went silent is let go without waiting for its closing
+   * handshake, which a dead network never completes, and a new one is opened.
+   */
+  armWatchdog() {
+    clearInterval(this.watchdog);
+    this.watchdog = setInterval(() => {
+      const ws = this.ws;
+      const watch = this.watch;
+      if (!ws || !watch || this.stopped) return;
+      const silent = Date.now() - watch.seen;
+      const { helloMs, pingSilenceMs, quietSilenceMs } = this.liveness;
+      if (!this.hello && Date.now() - watch.opened > helloMs) this.drop(ws, "no hello from Slack");
+      else if (watch.pinged && silent > pingSilenceMs) this.drop(ws, `no ping from Slack for ${Math.round(silent / 1000)} s`);
+      else if (silent > quietSilenceMs) this.drop(ws, `socket silent for ${Math.round(silent / 60000)} min`);
+    }, this.liveness.everyMs);
+    this.watchdog.unref?.();
+  }
+
+  drop(ws, reason, code = 4000) {
+    if (ws !== this.ws || this.stopped) return;
+    this.ws = null;
+    this.watch = null;
+    try { ws.close(code); } catch {}
+    this.scheduleReconnect(reason);
+  }
+
   onClose(ws, code) {
     if (ws !== this.ws) return;
     this.ws = null;
+    this.watch = null;
     if (this.stopped) {
       this.setState("stopped");
       return;
