@@ -457,6 +457,8 @@ export const EN = {
   "Accesso revocato.": "Access revoked.",
   "es. Agente di lavoro": "e.g. Work agent",
   "Riprova": "Try again",
+  "invio…": "sending…",
+  "non inviato": "not sent",
   "Tutti": "All",
   "Cerca connettori": "Search connectors",
   "Cerca per nome, servizio o account": "Search by name, service or account",

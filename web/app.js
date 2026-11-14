@@ -4890,27 +4890,52 @@ async function chatPanel(room, { placeholder = "Scrivi…", hint = null, isCurre
   const log = h("div", { class: "chat-log", role: "log", "aria-live": "polite" });
   const working = h("div", { class: "chat-working" });
   const cards = new Map();
-  const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 120;
-  const scroll = () => requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+  // Following: the log stays at its end while it grows, until the reader scrolls up to read.
+  let pinned = true;
+  let frame = 0;
+  const follow = (force = false) => {
+    if (force) pinned = true;
+    if (!pinned || frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (pinned) log.scrollTop = log.scrollHeight;
+    });
+  };
+  log.addEventListener("scroll", () => { pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 80; }, { passive: true });
+  log.addEventListener("load", () => follow(), true);
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => follow()).observe(log);
+  if (typeof MutationObserver !== "undefined") new MutationObserver(() => follow()).observe(log, { childList: true, subtree: true, characterData: true });
+  // Sent from here: in the log at once, then confirmed by the server's copy, which carries the same clientId.
+  const outbox = new Map();
   let answer = null;
+  const settle = (item) => {
+    const sent = item.clientId && outbox.get(item.clientId);
+    if (!sent) return false;
+    outbox.delete(item.clientId);
+    if (seen.has(item.id)) { sent.el.remove(); return true; }
+    seen.add(item.id);
+    sent.el.setAttribute("data-id", item.id);
+    sent.el.classList.remove("pending", "failed");
+    sent.state.remove();
+    const time = sent.el.querySelector("time");
+    if (time) time.textContent = fmtTime(item.at);
+    return true;
+  };
   const add = (item, force = false) => {
-    if (seen.has(item.id)) return;
+    if (settle(item) || seen.has(item.id)) return;
     seen.add(item.id);
     log.querySelector(".empty")?.remove();
-    const stick = force || nearBottom();
     if (item.kind === "owner") log.querySelectorAll(".choices-row").forEach((row) => row.remove());
     log.append(chatMessage(item, (choice) => answer?.(choice)));
-    if (stick) scroll();
+    follow(force);
   };
   const note = (trace) => {
     const agent = S.data.agents.find((entry) => entry.id === trace.agentId);
     const [label] = TRACE_STATUS[trace.status] || [trace.status];
-    const stick = nearBottom();
     log.append(h("a", { class: `chat-note ${trace.status}`, href: `#/agent/${trace.agentId}/ragionamento/${trace.id}` },
       icon(trace.status === "pass" ? "next" : "alert"),
       h("span", {}, raw(`${agent?.name || "?"} ${trace.status === "pass" ? tr("passa") : `· ${tr(label)}${trace.error ? `: ${trace.error}` : ""}`}`)),
       h("b", {}, "perché ›")));
-    if (stick) scroll();
   };
   const card = (trace) => {
     if (trace.kind !== "chat" || cards.has(trace.id)) return;
@@ -4932,7 +4957,7 @@ async function chatPanel(room, { placeholder = "Scrivi…", hint = null, isCurre
   for (const trace of data.running) card(trace);
 
   S.live = (entry) => {
-    if (entry.type === "web-message" && entry.room === room) add(entry.item, entry.item.kind === "owner");
+    if (entry.type === "web-message" && entry.room === room) add(entry.item);
     if (entry.type !== "trace") return;
     if (entry.event === "start" && entry.trace.channelId === room) card(entry.trace);
     if (entry.event === "step" && cards.has(entry.traceId)) cards.get(entry.traceId).line.textContent = stepLine(entry.step).slice(0, 160);
@@ -4950,18 +4975,47 @@ async function chatPanel(room, { placeholder = "Scrivi…", hint = null, isCurre
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
   };
-  const submit = async (preset) => {
+  const deliver = async (clientId, text) => {
+    const sent = outbox.get(clientId);
+    if (!sent) return;
+    sent.el.classList.remove("failed");
+    sent.el.classList.add("pending");
+    sent.state.replaceChildren(tr("invio…"));
+    let item = null;
+    try {
+      item = await api(`/api/rooms/${room}/messages`, { method: "POST", body: { text, clientId } });
+    } catch (error) {
+      if (outbox.get(clientId) !== sent) return;
+      sent.el.classList.remove("pending");
+      sent.el.classList.add("failed");
+      sent.state.replaceChildren(tr("non inviato"), h("button", { type: "button", class: "retry", onclick: () => deliver(clientId, text) }, "Riprova"));
+      if (error.message !== "login richiesto") toast(error.message, true);
+      return;
+    }
+    if (item) add(item, true);
+    if (S.data.requests?.some((request) => request.channelId === room)) guard(loadState()).then(drawRequests);
+  };
+  const submit = (preset) => {
     const text = (preset ?? input.value).trim();
     if (!text) return;
-    send.disabled = true;
-    const item = await guard(api(`/api/rooms/${room}/messages`, { method: "POST", body: { text } }));
-    send.disabled = false;
-    if (!item) return;
-    if (preset === undefined) input.value = "";
-    grow();
-    add(item, true);
-    if (preset === undefined) input.focus();
-    if (S.data.requests?.some((request) => request.channelId === room)) guard(loadState()).then(drawRequests);
+    if (preset === undefined) {
+      input.value = "";
+      grow();
+      input.focus();
+    }
+    const bytes = globalThis.crypto?.getRandomValues ? crypto.getRandomValues(new Uint8Array(12)) : Array.from({ length: 12 }, () => Math.floor(Math.random() * 256));
+    const clientId = `c_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    const user = S.data.currentUser;
+    log.querySelector(".empty")?.remove();
+    log.querySelectorAll(".choices-row").forEach((row) => row.remove());
+    const el = chatMessage({ id: clientId, at: Date.now(), authorId: user?.id || "panel", authorName: user?.name || user?.email || tr("Proprietario"), kind: "owner", content: text });
+    const state = h("span", { class: "send-state" });
+    el.classList.add("pending");
+    el.querySelector(".meta").append(state);
+    outbox.set(clientId, { el, state });
+    log.append(el);
+    follow(true);
+    deliver(clientId, text);
   };
   answer = (choice) => submit(choice);
   form.addEventListener("submit", (event) => {
@@ -4975,7 +5029,7 @@ async function chatPanel(room, { placeholder = "Scrivi…", hint = null, isCurre
       submit();
     }
   });
-  scroll();
+  follow(true);
   return h("section", { class: "chat" },
     hint ? h("div", { class: "banner" }, icon("info"), h("span", {}, hint)) : null,
     log, working, form);

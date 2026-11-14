@@ -2022,11 +2022,25 @@ export class Orchestrator {
   }
 
   /** The owner writing from the panel: same flow as a Discord message from the owner. */
-  async onWebMessage({ room, text, user }) {
+  async onWebMessage({ room, text, user, clientId = null }) {
     if (encryptionRequired(this.store)) throw Object.assign(new Error("La cifratura è obbligatoria: apri una sessione cifrata dal pannello."), { status: 409 });
     const content = String(text || "").trim().slice(0, 3000);
     if (!content) return null;
     const state = this.state(room);
+    // The panel names each message it sends: the same name sent again is the same message, not a second one.
+    const sent = clientId ? (state.webClientIds ||= new Map()) : null;
+    if (sent?.has(clientId)) return { ...(await sent.get(clientId)), clientId };
+    const posting = this.postWebMessage(state, room, content, user, clientId);
+    if (sent) {
+      sent.set(clientId, posting);
+      posting.catch(() => sent.delete(clientId));
+      while (sent.size > 200) sent.delete(sent.keys().next().value);
+    }
+    const item = await posting;
+    return clientId && item ? { ...item, clientId } : item;
+  }
+
+  async postWebMessage(state, room, content, user, clientId) {
     await this.ensureHistory(state);
     const item = {
       id: `web_${randomBytes(8).toString("hex")}`,
@@ -2038,7 +2052,7 @@ export class Orchestrator {
       content,
     };
     await this.ingest(state, item);
-    this.emit({ type: "web-message", room, item });
+    this.emit({ type: "web-message", room, item: clientId ? { ...item, clientId } : item });
     this.schedule(state, 400);
     return item;
   }

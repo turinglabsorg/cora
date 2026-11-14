@@ -950,6 +950,11 @@ details.raw summary::-webkit-details-marker, details.step summary::-webkit-detai
 .msg .meta b { color: var(--text); font: 600 12px/1.4 var(--body); letter-spacing: 0; }
 .msg .meta .why { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--amber); text-decoration: none; text-transform: uppercase; letter-spacing: 0.1em; }
 .msg .meta .why .ico { width: 12px; height: 12px; }
+.msg .meta .send-state { display: inline-flex; align-items: baseline; gap: 8px; color: var(--faint); }
+.msg.pending .bubble { opacity: 0.72; }
+.msg.failed .bubble { border-color: #6e2b20; }
+.msg.failed .meta .send-state { color: #ff9c8b; }
+.msg .meta .retry { padding: 0; border: 0; background: none; color: var(--amber); font: inherit; text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; text-decoration: underline 1px var(--amber-glow); text-underline-offset: 3px; }
 .msg .text { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
 .msg .text.md { white-space: normal; gap: 6px; }
 .msg .text a { color: var(--amber); text-decoration: underline 1px var(--amber-glow); text-underline-offset: 3px; overflow-wrap: anywhere; }
