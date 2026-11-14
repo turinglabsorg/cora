@@ -90,6 +90,15 @@ class Element {
     if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
     this.parent = null;
   }
+  replaceWith(...nodes) {
+    const parent = this.parent;
+    if (!parent) return;
+    const at = parent.children.indexOf(this);
+    const fresh = nodes.map((node) => node instanceof Element ? node : new Element("text", String(node)));
+    for (const node of fresh) { node.parent?.children && node.remove(); node.parent = parent; }
+    parent.children.splice(at, 1, ...fresh);
+    this.parent = null;
+  }
   append(...children) {
     for (const child of children) {
       const node = child instanceof Element ? child : new Element("text", String(child));

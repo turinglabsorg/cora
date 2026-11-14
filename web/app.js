@@ -4914,11 +4914,7 @@ async function chatPanel(room, { placeholder = "Scrivi…", hint = null, isCurre
     outbox.delete(item.clientId);
     if (seen.has(item.id)) { sent.el.remove(); return true; }
     seen.add(item.id);
-    sent.el.setAttribute("data-id", item.id);
-    sent.el.classList.remove("pending", "failed");
-    sent.state.remove();
-    const time = sent.el.querySelector("time");
-    if (time) time.textContent = fmtTime(item.at);
+    sent.el.replaceWith(chatMessage(item, (choice) => answer?.(choice)));
     return true;
   };
   const add = (item, force = false) => {
